@@ -1,5 +1,6 @@
 /**
- * A restore (Undo, Redo, revert, a conversation switch) writes files in Git's form. Bytes on disk that Git counts as
+ * A restore from snapshots without exact bytes (taken before snapshots recorded them; `snapshotExactBytes.test.ts`
+ * covers those that do) writes files in Git's form. Bytes on disk that Git counts as
  * unchanged but would not write back (CRLF under `core.autocrlf=input`, LF under `true`, an `eol`, `crlf` or encoding
  * attribute) are held by no snapshot. For those files Mousse proves each one held or kept right before it removes it,
  * and Git only creates: a save that lands at any point is kept or left as it is, never written over. A repository
@@ -11,7 +12,7 @@ import { build } from 'esbuild'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
-import { exactBytesNotice, moveFilesAsync, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { exactBytesNotice, moveFilesAsync, recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -27,8 +28,10 @@ beforeEach(() => {
   f = gitFoundationFixture()
   cwd = f.repo
   previousPath = process.env.PATH
+  recordExactTrees(false)
 })
 afterEach(() => {
+  recordExactTrees(true)
   process.env.PATH = previousPath
   f.dispose()
 })
@@ -334,7 +337,8 @@ describe('removing converted files and writing them again leaves the folder as G
     const actions = new ThreadActionService(f.thread)
     await actions.runCheckpointedAction(actionOptions(cwd), () => writeFileSync(join(cwd, 'value.txt'), 'agent\r\n'))
     const entry = join(f.root, 'crash.ts'), bundle = join(f.root, 'crash.mjs'), project = process.cwd()
-    writeFileSync(entry, `import { UndoService } from '${project}/src/mms/actions/UndoService'; import { pressed } from '${project}/tests/support/userRequest'; await pressed('Undo', () => new UndoService(${JSON.stringify(f.thread)}).undoLatest('main', ${JSON.stringify(cwd)}));`)
+    // The child takes its snapshots as this file's do: without exact trees.
+    writeFileSync(entry, `import { UndoService } from '${project}/src/mms/actions/UndoService'; import { recordExactTrees } from '${project}/src/mms/actions/snapshots'; import { pressed } from '${project}/tests/support/userRequest'; recordExactTrees(false); await pressed('Undo', () => new UndoService(${JSON.stringify(f.thread)}).undoLatest('main', ${JSON.stringify(cwd)}));`)
     await build({ entryPoints: [entry], outfile: bundle, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     // The process stops as Git is about to write the new versions, after Mousse removed the old ones.
     gitLauncher('*" checkout-index "*', 'kill -KILL "$PPID"; exit 86')

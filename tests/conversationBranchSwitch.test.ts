@@ -38,9 +38,9 @@ const read = (path: string) => readFileSync(join(cwd, path), 'utf8')
 const turn = (id: string, mutate: () => void, start = 0, conversationBranchId = 'main') =>
   actions.runCheckpointedAction({ ...actionOptions(cwd, id), conversationBranchId, presentationMessageStart: start, presentationMessageEnd: start + 2 }, mutate)
 /** HEAD, the branch it is on, every branch and the real index, byte for byte. */
-/** The line a switch gives for a file it takes out of the folder, with the command that brings it back. */
+/** The line a switch gives for a file it takes out of the folder, with the command that brings back its exact bytes (`<ref>^`, see `snapshots.ts`). */
 const leftBehind = (file: string, target: string, left: string, ref: string) =>
-  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: ${restoreFileCommand(ref, file, { shell: 'posix', normalized: true })}`
+  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: ${restoreFileCommand(`${ref}^`, file, { shell: 'posix' })}`
 /** Runs the command a switch's line gives for a file, in a shell, in the folder it names. */
 const runShown = (notice: string | undefined) => {
   const match = /running this in (.+?): (\(set -C && git cat-file .+? \S+\))(?:\.$| \(kept for |; )/.exec(notice ?? '')
@@ -515,7 +515,7 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     const { notice } = await sw(a.id)
     // The newer line came along; the recorded one is A's now.
     expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
-    expect(notice).toMatch(/: \(set -C && git cat-file --filters refs\/mousse\/\S+:value\.txt > \.\/value\.txt\.mousse-[0-9a-f]{8} && rm -f \.\/value\.txt && mv \.\/value\.txt\.mousse-[0-9a-f]{8} \.\/value\.txt\) \(kept for .+\)\.$/)
+    expect(notice).toMatch(/: \(set -C && git cat-file blob 'refs\/mousse\/\S+\^:value\.txt' > \.\/value\.txt\.mousse-[0-9a-f]{8} && rm -f \.\/value\.txt && mv \.\/value\.txt\.mousse-[0-9a-f]{8} \.\/value\.txt\) \(kept for .+\)\.$/)
     write('value.txt', 'overwritten\n')
     runShown(notice)
     expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))

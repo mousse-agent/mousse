@@ -402,7 +402,7 @@ describe('Git mutations through the daemon', () => {
         // The files are what they were, so the action starts and ends on one snapshot of the HEAD it saw.
         expect(action).toMatchObject({ state: 'failed', commits: [] })
         expect(action.endSha).toBe(action.startSha)
-        expect(git(t.path, 'rev-parse', `${action.startSha}^`)).toBe(before)
+        expect(git(t.path, 'rev-parse', `${action.startSha}^^`)).toBe(before)
         const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
         expect(receipt.beforeSha).toBe(receipt.afterSha)
         expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')

@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, snapshotOfTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, plannedExactAsync, snapshotOfTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -18,6 +18,8 @@ interface RevertIntent {
   /** The snapshot of the files before the revert; absent in intents written before snapshots. */
   ours?: string
   expectedTree?: string
+  /** Its exact tree (see `snapshots.ts`), when the revert was exact; absent in intents written before. */
+  expectedExactTree?: string
   /** What the turn did to Git that the revert leaves in place (`gitLeftInPlaceNotice`), so a recovered revert says it too. */
   gitNotice?: string
 }
@@ -59,8 +61,8 @@ export class CodeRevertService {
       // The files as they are now, including edits made since: they are part of the merge, so they stay.
       const ours = await takeSnapshotAsync(workspacePath, { reason: 'before code revert', threadId, operationId })
       const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', target)
-      const restored = await restoreChangeAsync(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: 'at the start of the turn', keep: { owner: this.threadDirectory, action: 'Revert' } }, (expectedTree) => {
-        const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree, ...(gitNotice ? { gitNotice } : {}) }
+      const restored = await restoreChangeAsync(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: 'at the start of the turn', keep: { owner: this.threadDirectory, action: 'Revert' } }, (expectedTree, expectedExactTree) => {
+        const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree, ...(expectedExactTree ? { expectedExactTree } : {}), ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
@@ -125,9 +127,10 @@ export class CodeRevertService {
   private async provenApplied(workspacePath: string, operationId: string, details: RevertIntent, prior?: { beforeSha: string; afterSha: string }): Promise<{ startSha: string; end: Snapshot } | undefined> {
     if (prior) return { startSha: prior.beforeSha, end: { sha: prior.afterSha, tree: await treeOfAsync(workspacePath, prior.afterSha), ...await snapshotOriginAsync(workspacePath, prior.afterSha) } }
     // Only the paths the revert writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
-    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, details.ours!), details.expectedTree!))
+    const exact = await plannedExactAsync(workspacePath, details.ours!, details.expectedExactTree)
+    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, details.ours!), details.expectedTree!, exact))
     // The end is the planned result, not the files now: an edit made since stays an edit made since.
-    if (outcome === 'applied') return { startSha: details.ours!, end: await snapshotOfTreeAsync(workspacePath, details.expectedTree!, { reason: `revert code action ${details.target.id}`, operationId }) }
+    if (outcome === 'applied') return { startSha: details.ours!, end: await snapshotOfTreeAsync(workspacePath, details.expectedTree!, { reason: `revert code action ${details.target.id}`, operationId }, exact?.to) }
     if (outcome === 'not-applied') return undefined
     throw new Error('Code revert recovery found files that match neither the state before nor the state after the revert; resolve the differences by hand.')
   }

@@ -19,12 +19,16 @@ const BATCH = 64
 export interface ConvertedRead { path: string; proof: FrozenEntryProof; held: boolean }
 
 /**
- * Reads each of `paths` that is on disk once and compares it with Git's form of its blob in `blobs`. A path that is gone
- * is left out (nothing to keep); one that is not a plain file, or changes while it is read, is `changed`.
+ * Reads each of `paths` that is on disk once and compares it with Git's form of its blob in `blobs`, or, for a path in
+ * `raw` (whose blob holds the file's exact bytes, see `snapshots.ts`), with the blob itself. A path that is gone is left
+ * out (nothing to keep); one that is not a plain file, or changes while it is read, is `changed`.
  */
-export async function readConvertedAsync(top: string, blobs: ReadonlyMap<string, string>, paths: readonly string[]): Promise<{ read: ConvertedRead[]; changed: string[] }> {
+export async function readConvertedAsync(top: string, blobs: ReadonlyMap<string, string>, paths: readonly string[], raw: ReadonlySet<string> = new Set()): Promise<{ read: ConvertedRead[]; changed: string[] }> {
   // Git's form does not depend on the disk, so it streams while the files are read.
-  const forms = gitsFormsAsync(top, paths.map((path) => ({ path, blob: blobs.get(path)! })))
+  const entries = paths.map((path) => ({ path, blob: blobs.get(path)! }))
+  const converted = entries.filter((entry) => !raw.has(entry.path))
+  const exact = entries.filter((entry) => raw.has(entry.path))
+  const forms = Promise.all([gitsFormsAsync(top, converted), gitsFormsAsync(top, exact, { raw: true })]).then(([a, b]) => new Map([...a, ...b]))
   forms.catch(() => undefined)
   const proofs: FrozenEntryProof[] = []
   const changed: string[] = []
@@ -70,14 +74,15 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
 
 /**
  * The size and SHA-256 of what Git writes at each path from its blob there (`cat-file --batch --filters`, read as it
- * streams, never held whole), by path. A file is held when its bytes on disk have that size and SHA-256.
+ * streams, never held whole), by path. A file is held when its bytes on disk have that size and SHA-256. With `raw`,
+ * the blob's own bytes, never converted (`--filters` left off).
  *
  * Git's header gives the blob's size, not the converted size, so each record starts with a header of ours that begins
  * with a random marker and names the blob and path. A path is answered only when everything checks: the marker appears
  * exactly once per record and nowhere else, and the record's header names its blob and path. Anything else leaves the
  * path out, so its file counts as not held and is kept: never the other way round.
  */
-export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>): Promise<Map<string, { bytes: number; digest: string }>> {
+export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
   const forms = new Map<string, { bytes: number; digest: string }>()
   // Git reads one `<blob> <path>` per line and drops whitespace before the path: those few are kept without asking.
   const asked = entries.filter((entry) => !/[\n\r]/.test(entry.path) && !/^[ \t]/.test(entry.path))
@@ -126,7 +131,7 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
     add(pending.subarray(0, pending.length - keep))
     pending = Buffer.from(pending.subarray(pending.length - keep))
   }
-  await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, '--filters'], input, (chunk) => {
+  await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, ...(options.raw ? [] : ['--filters'])], input, (chunk) => {
     pending = Buffer.concat([pending, chunk])
     scan(false)
   })

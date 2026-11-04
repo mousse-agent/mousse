@@ -286,7 +286,7 @@ describe('content gates', () => {
     const manifest = new WorktreeRetirementService(f.store).load(manifestPath(f))
     expect(manifest).toMatchObject({ resultSha: head, snapshotRef: expect.stringMatching(/\/snapshot$/) })
     expect(git(f.repo, ['rev-parse', manifest.snapshotRef!])).toBe(manifest.snapshotSha)
-    expect(git(f.repo, ['rev-parse', `${manifest.snapshotSha}^`])).toBe(head)
+    expect(git(f.repo, ['rev-parse', `${manifest.snapshotSha}^^`])).toBe(head)
     expect(git(f.repo, ['show', `${manifest.snapshotSha}:sub/deep.txt`])).toBe('deep')
     // Restoring brings back the same files at the same HEAD, uncommitted.
     const restored = await new ThreadWorkspaceManager(f.location).restore(f.repo)

@@ -6,13 +6,15 @@ import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
-import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
+import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
 import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { readConvertedAsync } from './heldBytes'
 import { createOnlyAsync, removeProvenAsync } from './provenDiscard'
 import { keepCopy } from './keptCopies'
 import { restoreCommandsText, restoreFileCommand, restoreKindOf, restoreShell, type RestoreKind, type RestoreShell } from './restoreCommands'
 import { files as disk, runAsync, step, type Steps } from './steps'
+import type { DiscardGit } from './provenDiscard'
+import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /**
@@ -40,6 +42,11 @@ export interface Snapshot {
   operationInProgress?: string
   /** What is in the worktree but not in the snapshot, and why. Reported, never a reason to fail the snapshot. */
   coverageGaps?: CoverageGap[]
+  /**
+   * The tree of the files' exact bytes on disk (`exactTreeSteps`), recorded with the snapshot; absent for a snapshot
+   * taken before snapshots recorded one, and in a hidden store, whose `tree` already holds exact bytes.
+   */
+  exactTree?: string
 }
 
 export interface CoverageGap { path: string; reason: string }
@@ -87,7 +94,7 @@ export interface SnapshotInput {
 
 const SUBJECT = 'mousse snapshot: '
 
-interface LastSnapshot { sha: string; tree: string; head?: string; uncovered?: string }
+interface LastSnapshot { sha: string; tree: string; head?: string; uncovered?: string; exact?: string }
 
 /**
  * What a snapshot did not cover, kept with it (a `Mousse-Uncovered:` line of its commit): its coverage gaps, and the
@@ -284,19 +291,34 @@ function fileSizes(paths: string[]): Steps<Array<number | undefined>> {
   )
 }
 
-function* privateFiles(top: string): Steps<{ directory: string; index: string; last: string }> {
+interface PrivateFiles {
+  directory: string
+  /** The persistent private index of the snapshot's tree. */
+  index: string
+  /** The persistent private index of its exact tree, updated with conversions off (`exactTreeSteps`). */
+  exactIndex: string
+  last: string
+  /** The repository's `info/attributes` (absent for a hidden store, whose own does not convert). */
+  infoAttributes?: string
+}
+
+function* privateFiles(top: string): Steps<PrivateFiles> {
   const store = activeHiddenStore(top)
   if (store) {
     // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
     const directory = join(store.gitDir, 'mousse')
     yield* disk.mkdir(directory)
-    return { directory, index: join(store.gitDir, 'index'), last: join(directory, 'snapshot-last.json') }
+    return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), last: join(directory, 'snapshot-last.json') }
   }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
-  const directory = resolve(top, yield* gitStep(top, ['rev-parse', '--git-path', 'mousse']))
+  const [mousse, info] = (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
+  const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), last: join(directory, 'snapshot-last.json') }
+  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
 }
+
+/** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
+const EXACT_INDEX = 'snapshot-exact-index'
 
 function* headOf(top: string): Steps<string | undefined> {
   // A hidden store has no HEAD, whatever the folder's own repository says.
@@ -417,11 +439,323 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
   }
 }
 
+/**
+ * Exact bytes. The snapshot's tree holds Git's normal form of each file: what `git add` stores after line endings, an
+ * encoding or a filter are applied. Two raw forms of one normal form (CRLF and LF under `core.autocrlf`) are one blob
+ * there, and a restore writes the form Git's settings give now. So each snapshot also records an exact tree: every file
+ * as its bytes are on disk, from a second persistent private index updated with every conversion off (`EXACT_SETTINGS`,
+ * `exactEnv`).
+ *
+ * The exact tree is the tree of its own commit E, whose parent is HEAD (none without a commit), and the snapshot's first
+ * and only parent is E, marked `Mousse-Bytes: exact`: snapshot → E → HEAD. A snapshot is never a merge, so a review's
+ * count of merged commits stays right, a merge-base with HEAD is still HEAD, and Publish still commits the snapshot's
+ * normal tree. A snapshot without the mark (taken before) has no exact tree, and is read as before.
+ *
+ * The exact tree has a path wherever the snapshot's tree has one, except:
+ * - a path under a `filter` attribute (Git LFS, git-crypt): its normal form already round-trips, and its raw bytes
+ *   would put LFS media or decrypted text into `.git/objects`;
+ * - a file over `EXACT_LIMITS.fileBytes`, and a file Git converts even with conversions off (`.git/info/attributes`
+ *   outranks the attribute source, and Git before 2.40 has none): only Git's form of those is kept, named as a gap.
+ * A restore writes those paths in Git's form from the snapshot's tree, as it did before exact trees.
+ *
+ * Where Git converts none of the snapshot's paths (no `core.autocrlf` or `core.eol`, and `check-attr` finds no converting
+ * attribute on any of them, from any `.gitattributes`, tracked or not, or any other attributes file) the two trees are
+ * the same, so the snapshot's tree is recorded as the exact tree and the second index is not run.
+ */
+const EXACT_LINE = 'Mousse-Bytes: exact'
+const EXACT_SUBJECT = `${SUBJECT}exact bytes`
+
+/** One file's size above which a snapshot keeps only Git's form of it (see above). Lowered by tests. */
+export const EXACT_LIMITS = { fileBytes: 50 * 1024 ** 2 }
+
+let exactTreesRecorded = true
+/** For tests: snapshots taken while this is off record no exact tree, as snapshots from before exact trees. */
+export function recordExactTrees(on: boolean): void {
+  exactTreesRecorded = on
+}
+
+/** Every conversion off: no end-of-line conversion, and no attributes but `.git/info/attributes` (see `exactEnv`). */
+const EXACT_SETTINGS = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', `core.attributesFile=${GIT_NULL_DEVICE}`]
+
+/**
+ * The environment for Git with every conversion off: attributes are read from the empty tree instead of the folder's
+ * `.gitattributes` (`GIT_ATTR_SOURCE`, Git 2.40 and later), and never from the system's.
+ */
+function exactEnv(emptyTree: string, index?: string): NodeJS.ProcessEnv {
+  return { ...(index ? { GIT_INDEX_FILE: index } : {}), GIT_ATTR_SOURCE: emptyTree, GIT_ATTR_NOSYSTEM: '1' }
+}
+
+/** The empty tree, written so that `GIT_ATTR_SOURCE` can always read it. Once for each repository in a process. */
+function* emptyTreeSteps(top: string): Steps<string> {
+  const known = emptyTrees.get(top)
+  if (known) return known
+  const tree = yield* gitStep(top, ['hash-object', '-w', '-t', 'tree', '--stdin'], undefined, '')
+  emptyTrees.set(top, tree)
+  return tree
+}
+const emptyTrees = new Map<string, string>()
+
+/** Mousse's own Git in `top` with every conversion off, as the proven write steps run it. */
+function exactRunner(top: string, emptyTree: string): DiscardGit {
+  const run = ownGitRunner(top)
+  return (args, options = {}) => run([...EXACT_SETTINGS, ...args], { ...options, env: { ...exactEnv(emptyTree) as Record<string, string>, ...options.env } })
+}
+
+let gitVersion: [number, number] | undefined
+/** This Git's version, major and minor, asked once per process ([0, 0] when it cannot be read). */
+function* gitVersionSteps(top: string): Steps<[number, number]> {
+  if (gitVersion) return gitVersion
+  const match = (yield* tryGitStep(top, ['version'])).stdout.match(/(\d+)\.(\d+)/)
+  gitVersion = match ? [Number(match[1]), Number(match[2])] : [0, 0]
+  return gitVersion
+}
+const atLeast = ([major, minor]: [number, number], wanted: number): boolean => major > 2 || (major === 2 && minor >= wanted)
+
+/** Whether this Git reads attributes from `GIT_ATTR_SOURCE` (2.40 and later). */
+function* readsAttrSource(top: string): Steps<boolean> {
+  return atLeast(yield* gitVersionSteps(top), 40)
+}
+
+/**
+ * Whether this Git's `update-index` puts every bulk check-in of one run into one pack (2.37 and later). Before, it ends
+ * a pack for each file, so the first exact build would leave thousands of packs; those Gits write loose objects instead.
+ */
+function* bulkCheckinBatches(top: string): Steps<boolean> {
+  return atLeast(yield* gitVersionSteps(top), 37)
+}
+
+interface Conversion {
+  /** Git may write some of the paths with other bytes than it stores. */
+  converts: boolean
+  /** The paths under a `filter` attribute. */
+  filtered: Set<string>
+  /** `.git/info/attributes` is there: it applies even with conversions off. */
+  infoAttributes: boolean
+}
+
+/**
+ * Whether Git converts any of `paths` (see the exact-bytes note): `core.autocrlf` or `core.eol` set, or an attribute
+ * that converts (`text`, `crlf`, `eol`, `filter`, `ident`, `working-tree-encoding`) on one of them, as `check-attr`
+ * finds it: from every `.gitattributes` in the folder, tracked, untracked or ignored, `info/attributes`, and the global
+ * and system files. With `source`, the attributes of that tree instead of the folder's (a worktree about to be written
+ * from a snapshot): `GIT_ATTR_SOURCE` from Git 2.40; before, any `.gitattributes` in the tree counts as converting.
+ */
+function* conversionSteps(top: string, files: PrivateFiles, paths: readonly string[], source?: string): Steps<Conversion> {
+  const config = yield* tryGitStep(top, ['config', '--get-regexp', '^core\\.(autocrlf|eol)$'])
+  let converts = false
+  for (const line of config.ok ? config.stdout.split(/\r?\n/).filter(Boolean) : []) {
+    const space = line.indexOf(' ')
+    const key = (space < 0 ? line : line.slice(0, space)).toLowerCase()
+    // A bare `autocrlf` key reads as true; `core.eol` counts whatever it says.
+    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(space < 0 ? '' : line.slice(space + 1).trim())) converts = true
+  }
+  const infoAttributes = files.infoAttributes ? yield* nonEmpty(files.infoAttributes) : false
+  const modern = yield* readsAttrSource(top)
+  const filtered = new Set<string>()
+  if (paths.length) {
+    const env = source && modern ? { GIT_ATTR_SOURCE: source } : undefined
+    for (const [path, attribute] of yield* convertingAttributes(top, paths, env)) {
+      converts = true
+      if (attribute === 'filter') filtered.add(path)
+    }
+  }
+  if (source && !modern && !converts) converts = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', source], undefined, undefined, LISTING)).some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))
+  return { converts, filtered, infoAttributes }
+}
+
+function* nonEmpty(path: string): Steps<boolean> {
+  try { return (yield* disk.lstat(path)).size > 0 } catch { return false }
+}
+
+/**
+ * Each converting attribute (`CONVERTING_ATTRIBUTES`) set on one of `paths`, as `[path, attribute]`: one `check-attr --all`,
+ * which prints only the attributes a path has, so a folder with no attributes costs no output at all. `args` go before
+ * `check-attr` (`EXACT_SETTINGS`), `env` with it (`GIT_ATTR_SOURCE`, a private index for `--cached`).
+ */
+function* convertingAttributes(top: string, paths: readonly string[], env?: NodeJS.ProcessEnv, args: readonly string[] = [], cached = false): Steps<Array<[string, string]>> {
+  if (!paths.length) return []
+  // `path NUL attribute NUL value NUL` for each attribute set on each path.
+  const fields = (yield* gitStep(top, [...args, 'check-attr', '-z', '--stdin', ...(cached ? ['--cached'] : []), '--all'], env, paths.join('\0') + '\0', LISTING)).split('\0')
+  const found: Array<[string, string]> = []
+  for (let at = 0; at + 2 < fields.length; at += 3) {
+    if (!(CONVERTING_ATTRIBUTES as readonly string[]).includes(fields[at + 1]!) || fields[at + 2] === 'unspecified' || fields[at + 2] === 'unset') continue
+    found.push([fields[at]!, fields[at + 1]!])
+  }
+  return found
+}
+
+const EXACT_TOO_LARGE = (): string => `over ${sizeText(EXACT_LIMITS.fileBytes)}, so only Git's form of it is kept`
+const CONVERTED_BY_INFO = '.git/info/attributes converts it, so only Git\'s form of it is kept'
+const CONVERTED_BY_OLD_GIT = 'Git older than 2.40 converts it, so only Git\'s form of it is kept'
+
+/** One entry of `ls-tree -r -l`: its path, mode, blob and the blob's size. */
+interface SizedEntry { path: string; mode: string; sha: string; size: number }
+
+/**
+ * The exact tree of the files the snapshot's tree `normal` holds (see the note above), and the paths it keeps only in
+ * Git's form, named as gaps. The paths come from `normal`, so the walk, the coverage-gap loop and `followTrackedFiles`
+ * run once for both. Undefined when it cannot be made: the snapshot is then recorded as before, without one.
+ */
+function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[] } | undefined> {
+  if (!exactTreesRecorded) return undefined
+  // `<mode> <type> <object> <size>\t<path>`, the size padded with spaces.
+  const entries: SizedEntry[] = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '-l', '--full-tree', normal], undefined, undefined, LISTING)).map((line) => {
+    const tab = line.indexOf('\t')
+    const [mode, , sha, size] = line.slice(0, tab).split(/ +/) as [string, string, string, string]
+    return { path: line.slice(tab + 1), mode, sha, size: Number(size) }
+  })
+  const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
+  if (!conversion.converts) return { tree: normal, gaps: [] }
+  const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
+  try {
+    return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier)
+  } catch {
+    // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
+    yield* disk.remove(files.exactIndex)
+    yield* disk.remove(`${files.exactIndex}.lock`)
+    try { return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier) } catch { return undefined }
+  }
+}
+
+/** What came before a snapshot: HEAD, and the previous snapshot in this worktree (`snapshot-last.json`). */
+interface Earlier { head: string | undefined; previous: LastSnapshot | undefined; directory: string }
+
+/**
+ * Of `paths`, which the exact index does not have yet, those it must still leave out because a filter applied to them
+ * before: HEAD's or the previous snapshot's attributes give them a `filter` (`GIT_ATTR_SOURCE` from Git 2.40; before,
+ * `check-attr --cached` over a private index of that tree), or the previous snapshot left them out of its exact tree
+ * and Git's form of them has not changed since. A filter line the agent dropped (`git lfs untrack`) then never puts the
+ * decrypted file or LFS media into `.git/objects`: while the file is unchanged, Git's own index still holds its filtered
+ * blob and never reads it again; once it changes, Git's form holds the new bytes anyway.
+ */
+function* filteredBefore(top: string, paths: readonly string[], now: ReadonlyMap<string, string>, earlier: Earlier): Steps<Set<string>> {
+  const left = new Set<string>()
+  if (!paths.length) return left
+  const modern = yield* readsAttrSource(top)
+  for (const source of new Set([earlier.head, earlier.previous?.tree].filter((tree): tree is string => Boolean(tree)))) {
+    if (modern) {
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_ATTR_SOURCE: source })) if (attribute === 'filter') left.add(path)
+      continue
+    }
+    const temporary = join(earlier.directory, `restore-attributes-${randomUUID()}.index`)
+    try {
+      yield* gitStep(top, ['read-tree', source], { GIT_INDEX_FILE: temporary })
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_INDEX_FILE: temporary }, [], true)) if (attribute === 'filter') left.add(path)
+    } finally {
+      yield* disk.remove(temporary)
+    }
+  }
+  const previous = earlier.previous
+  if (previous?.exact && previous.exact !== previous.tree) {
+    const before = yield* entriesAt(top, previous.tree, paths)
+    const exact = yield* entriesAt(top, previous.exact, paths)
+    for (const path of paths) if (before.has(path) && !exact.has(path) && before.get(path) === now.get(path)) left.add(path)
+  }
+  return left
+}
+
+function* exactIndexTree(top: string, index: string, entries: readonly SizedEntry[], conversion: Conversion, earlier: Earlier): Steps<{ tree: string; gaps: CoverageGap[] }> {
+  const empty = yield* emptyTreeSteps(top)
+  const env = exactEnv(empty, index)
+  const links = entries.filter((entry) => entry.mode === '160000')
+  const files = entries.filter((entry) => isFile(entry.mode))
+  const gaps: CoverageGap[] = []
+  // A path under a filter keeps Git's form, unnamed: that form round-trips, and its raw bytes are LFS media or plaintext.
+  const left = new Set(conversion.filtered)
+  // The limit is on the bytes on disk, which a conversion can make many times the stored size (`ident` expands each
+  // `$Id$` twelvefold): every file is measured.
+  const measured = files.filter((entry) => !left.has(entry.path))
+  const sizes = yield* fileSizes(measured.map((entry) => join(top, entry.path)))
+  for (const [at, entry] of measured.entries()) {
+    if ((sizes[at] ?? entry.size) > EXACT_LIMITS.fileBytes) { left.add(entry.path); gaps.push({ path: entry.path, reason: EXACT_TOO_LARGE() }) }
+  }
+  const modern = yield* readsAttrSource(top)
+  const rest = files.map((entry) => entry.path).filter((path) => !left.has(path))
+  if (rest.length && (conversion.infoAttributes || !modern)) {
+    for (const path of new Set((yield* convertingAttributes(top, rest, exactEnv(empty), EXACT_SETTINGS)).map(([path]) => path))) {
+      left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
+    }
+  }
+  // What the exact index has: `mode sha stage\tpath`.
+  const present = new Map((yield* disk.exists(index)) ? nul(yield* gitStep(top, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: index }, undefined, LISTING)).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))] as const) : [])
+  const normal = new Map(entries.map((entry) => [entry.path, `${entry.mode} ${entry.sha}`]))
+  // A path new to the exact index stays out while a filter applied to it before (see `filteredBefore`).
+  for (const path of yield* filteredBefore(top, files.map((entry) => entry.path).filter((path) => !left.has(path) && !present.has(path)), normal, earlier)) left.add(path)
+  const wanted = entries.filter((entry) => entry.mode !== '160000' && !left.has(entry.path)).map((entry) => entry.path)
+  const keep = new Set([...wanted, ...links.map((entry) => entry.path)])
+  // Entries the snapshot's tree no longer has (or keeps only in Git's form) go first, so a path that became a folder can be added.
+  const stale = [...present.keys()].filter((path) => !keep.has(path))
+  if (stale.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0')
+  // A file new to the exact index, or whose mode Git's form changed, starts from Git's form's entry: `update-index --add`
+  // then reads its bytes (the entry has no stat data) but keeps that mode where `core.fileMode` is false, so an
+  // executable script stays executable. Nested repositories are recorded by their commit, as Git's form has them.
+  const seeded = files.filter((entry) => !left.has(entry.path) && present.get(entry.path) !== entry.mode).map((entry) => `${entry.mode} ${entry.sha}\t${entry.path}`)
+  const seed = [...seeded, ...links.map((entry) => `160000 ${entry.sha}\t${entry.path}`)]
+  if (seed.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--index-info'], env, seed.join('\0') + '\0')
+  // A file whose stat data matches its entry is not read again: the stat cache keeps the next snapshot fast. The first
+  // build reads every file, and in a repository that converts most of their exact bytes are new blobs: from Git 2.37
+  // those go into one pack (Git's bulk check-in, for files over `core.bigFileThreshold` that need no conversion) instead
+  // of one loose file each, which on a slow disk takes seconds for 20,000 files. Older Gits write them loose, as later
+  // snapshots write their few new blobs.
+  const bulk = !present.size && (yield* bulkCheckinBatches(top)) ? ['-c', 'core.bigFileThreshold=1'] : []
+  if (wanted.length) yield* gitStep(top, [...EXACT_SETTINGS, ...bulk, 'update-index', '-z', '--add', '--remove', '--stdin'], env, wanted.join('\0') + '\0')
+  return { tree: yield* gitStep(top, [...EXACT_SETTINGS, 'write-tree'], env), gaps }
+}
+
+/** Records `tree` (and `exactTree`, see the exact-bytes note) as a snapshot commit on `head`. */
+function* commitSnapshot(top: string, tree: string, exactTree: string | undefined, head: string | undefined, subject: string, trailers: string[]): Steps<string> {
+  const exact = exactTree ? yield* gitStep(top, ['commit-tree', exactTree, ...(head ? ['-p', head] : []), '-m', EXACT_SUBJECT], MOUSSE_COMMIT_ENV) : undefined
+  const message = [...trailers, ...(exact ? [EXACT_LINE] : [])].filter(Boolean).join('\n')
+  const parent = exact ?? head
+  const sha = yield* gitStep(top, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', subject, ...(message ? ['-m', message] : [])], MOUSSE_COMMIT_ENV)
+  rememberExactTree(sha, exactTree)
+  return sha
+}
+
+/**
+ * The exact tree recorded with snapshot `sha`, or undefined for a snapshot without one (or a commit that is no snapshot).
+ * One read of the snapshot and its first parent; a commit never changes, so the answer for a full SHA is kept.
+ */
+export function* exactTreeOfSteps(cwd: string, sha: string): Steps<string | undefined> {
+  const full = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)
+  if (full && exactTrees.has(sha)) return exactTrees.get(sha)
+  // Each commit as `<tree> NUL <message> SOH`: the snapshot, then the commit it was taken on.
+  const read = yield* tryGitStep(cwd, ['log', '-2', '--first-parent', '--no-show-signature', '--format=%T%x00%B%x01', sha, '--'], undefined, LISTING)
+  if (!read.ok) return undefined
+  const [snapshot, inner] = read.stdout.split('\x01').map((record) => record.replace(/^\n/, '')).map((record) => { const at = record.indexOf('\0'); return { tree: record.slice(0, at), body: record.slice(at + 1) } })
+  const recorded = snapshot && snapshot.body.startsWith(SUBJECT) && snapshot.body.split('\n').includes(EXACT_LINE) && inner?.body.trim() === EXACT_SUBJECT && /^[0-9a-f]{40,64}$/.test(inner.tree) ? inner.tree : undefined
+  if (full) rememberExactTree(sha, recorded)
+  return recorded
+}
+const exactTrees = new Map<string, string | undefined>()
+const EXACT_TREES_KEPT = 4096
+/** Keeps what `exactTreeOfSteps` answers for snapshot `sha`: a commit never changes. */
+function rememberExactTree(sha: string, exactTree: string | undefined): void {
+  if (exactTrees.size >= EXACT_TREES_KEPT) exactTrees.delete(exactTrees.keys().next().value!)
+  exactTrees.set(sha, exactTree)
+}
+
+export function exactTreeOfAsync(cwd: string, sha: string): Promise<string | undefined> {
+  return runAsync(exactTreeOfSteps(cwd, sha))
+}
+
 /** The tree of the worktree's files right now, without writing a commit. */
 export function* worktreeTreeSteps(cwd: string): Steps<string> {
+  return (yield* worktreeTreesSteps(cwd, { exact: false })).tree
+}
+
+/** The tree of the worktree's files right now, and their exact tree (see the exact-bytes note), without writing a commit. */
+export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = {}): Steps<{ tree: string; exactTree?: string }> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
-  const index = (yield* privateFiles(top)).index
-  return (yield* indexTree(top, index, yield* headOf(top))).tree
+  const files = yield* privateFiles(top)
+  const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
+  if (options.exact === false || activeHiddenStore(top)) return { tree }
+  const exact = yield* exactTreeSteps(top, files, tree, yield* headOf(top))
+  return { tree, ...(exact ? { exactTree: exact.tree } : {}) }
+}
+
+export function worktreeTreesAsync(cwd: string): Promise<{ tree: string; exactTree?: string }> {
+  return runAsync(worktreeTreesSteps(cwd))
 }
 
 
@@ -446,21 +780,25 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const hidden = activeHiddenStore(top) !== undefined
   const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
-  const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(coverageGaps.length ? { coverageGaps } : {}) }
+  // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
+  const exact = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
+  // What only Git's form of is kept is named with the rest, but never recorded as not covered: a restore writes it.
+  const named = [...coverageGaps, ...(exact?.gaps ?? [])]
+  const state = { tree, ...(exact ? { exactTree: exact.tree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
   const { ignored, truncated } = yield* ignoredNow(top)
   const uncovered = JSON.stringify({ g: coverageGaps, i: ignored, ...(truncated ? { t: true } : {}) })
   const previous = yield* readLast(files.last)
-  // Reused only when what it left out is the same too: a restore reads that from the snapshot.
-  if (previous && previous.tree === tree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
+  // Reused only when what it left out, and its exact bytes, are the same too: a restore reads both from the snapshot.
+  if (previous && previous.tree === tree && previous.exact === exact?.tree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
     // Only when something was not covered: no record and an empty one mean the same to a restore.
     coverageGaps.length || ignored.length || truncated ? `${UNCOVERED_LINE}${uncovered}` : ''
-  ].filter(Boolean).join('\n')
+  ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
-  const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', subject, ...(trailers ? ['-m', trailers] : [])], MOUSSE_COMMIT_ENV)
-  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered } satisfies LastSnapshot))
+  const sha = yield* commitSnapshot(top, tree, exact?.tree, head, subject, trailers)
+  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exact ? { exact: exact.tree } : {}) } satisfies LastSnapshot))
   return { sha, ...state }
 }
 
@@ -475,7 +813,7 @@ export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Sn
  * interrupted restore planned, once every file it writes is proven to be as planned. Files that appeared since are
  * then edits made after it, not part of it.
  */
-export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput): Steps<Snapshot> {
+export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput, exactTree?: string): Steps<Snapshot> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
   const head = yield* headOf(top)
   const branch = activeHiddenStore(top) ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
@@ -485,15 +823,15 @@ export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotI
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
     ignored.length || truncated ? `${UNCOVERED_LINE}${JSON.stringify({ g: [], i: ignored, ...(truncated ? { t: true } : {}) })}` : ''
-  ].filter(Boolean).join('\n')
+  ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
-  const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', subject, ...(trailers ? ['-m', trailers] : [])], MOUSSE_COMMIT_ENV)
-  return { sha, tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
+  const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
+  return { sha, tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
 }
 
-/** Records `tree` as a snapshot (see `snapshotOfTreeSteps`), without blocking the daemon. */
-export function snapshotOfTreeAsync(cwd: string, tree: string, input: SnapshotInput): Promise<Snapshot> {
-  return runAsync(snapshotOfTreeSteps(cwd, tree, input))
+/** Records `tree` as a snapshot (see `snapshotOfTreeSteps`), with the exact tree a restore planned, without blocking the daemon. */
+export function snapshotOfTreeAsync(cwd: string, tree: string, input: SnapshotInput, exactTree?: string): Promise<Snapshot> {
+  return runAsync(snapshotOfTreeSteps(cwd, tree, input, exactTree))
 }
 
 /** The ref that remembers the thread's files as last published into the primary checkout: the next publish brings in only what came after. */
@@ -501,15 +839,27 @@ export function publishedRef(threadId: string): string {
   return `refs/mousse/published/${threadId}`
 }
 
-/** Whether two revisions (snapshots or commits) hold the same files. Revisions that cannot be read are not the same. */
-export function* sameTreeSteps(cwd: string, a: string, b: string): Steps<boolean> {
+/**
+ * Whether two revisions (snapshots or commits) hold the same files. Revisions that cannot be read are not the same.
+ * When both record exact bytes their exact trees must match too, unless `exact` is false (Publish, which commits Git's
+ * form): a file whose line endings alone changed is then the same.
+ */
+export function* sameTreeSteps(cwd: string, a: string, b: string, options: { exact?: boolean } = {}): Steps<boolean> {
   if (a === b) return true
-  try { return (yield* treeOfSteps(cwd, a)) === (yield* treeOfSteps(cwd, b)) } catch { return false }
+  try {
+    if ((yield* treeOfSteps(cwd, a)) !== (yield* treeOfSteps(cwd, b))) return false
+  } catch {
+    return false
+  }
+  if (options.exact === false) return true
+  const exactA = yield* exactTreeOfSteps(cwd, a)
+  const exactB = exactA ? yield* exactTreeOfSteps(cwd, b) : undefined
+  return !exactA || !exactB || exactA === exactB
 }
 
 
-export function sameTreeAsync(cwd: string, a: string, b: string): Promise<boolean> {
-  return runAsync(sameTreeSteps(cwd, a, b))
+export function sameTreeAsync(cwd: string, a: string, b: string, options: { exact?: boolean } = {}): Promise<boolean> {
+  return runAsync(sameTreeSteps(cwd, a, b, options))
 }
 
 /**
@@ -676,8 +1026,9 @@ export function preservedNotice(preserved: PreservedFiles, windowMs: number, she
 }
 
 /**
- * The line a result carries when a restore kept files exactly as they were on disk before writing them in Git's form.
- * Kept short: until snapshots record exact bytes, every Undo in a repository whose files Git converts can carry it.
+ * The line a result carries when a restore kept files exactly as they were on disk before writing them in Git's form:
+ * bytes no snapshot holds (a restore to a snapshot from before exact trees, a file kept only in Git's form, a save that
+ * landed while the restore ran). Kept short.
  */
 export function exactBytesNotice(kept: ExactBytesKept, shell: RestoreShell = restoreShell()): string {
   const paths = kept.files.map((file) => file.path)
@@ -715,7 +1066,7 @@ export interface RestoreChangeInput extends SnapshotInput {
  * locks and has just taken `ours`. `planned` is told the tree the files are about to become, before they change,
  * so the caller can write it down for recovery.
  */
-export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, planned?: (tree: string) => void): Steps<RestoreResult> {
+export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, planned?: (tree: string, exactTree?: string) => void): Steps<RestoreResult> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
   const merged = yield* mergeTreesSteps(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
@@ -723,8 +1074,9 @@ export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, plan
   const { tree, leftAsIs } = yield* leaveUncovered(top, input, ours, merged.tree)
   // Checked before the intent is recorded: a folder that cannot be kept refuses the restore with nothing pending.
   yield* uncapturedInTheWay(top, ours, tree)
-  planned?.(tree)
-  const moved = yield* moveFilesSteps(top, ours, tree, input.operationId, input.keep)
+  const exact = yield* exactTargetSteps(top, input, ours, tree)
+  planned?.(tree, exact?.to)
+  const moved = yield* moveFilesSteps(top, ours, tree, input.operationId, input.keep, exact)
   const snapshot = yield* takeSnapshotSteps(top, input)
   const left = [...leftAsIs, ...(moved.leftAsIs ?? [])]
   return { snapshot, tree, ...(moved.preserved ? { preserved: moved.preserved } : {}), ...(moved.exact ? { exact: moved.exact } : {}), ...(left.length ? { leftAsIs: left } : {}) }
@@ -732,8 +1084,119 @@ export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, plan
 
 
 /** Brings `theirs` into the worktree (see `restoreChangeSteps`), without blocking the daemon. */
-export function restoreChangeAsync(cwd: string, input: RestoreChangeInput, planned?: (tree: string) => void): Promise<RestoreResult> {
+export function restoreChangeAsync(cwd: string, input: RestoreChangeInput, planned?: (tree: string, exactTree?: string) => void): Promise<RestoreResult> {
   return runAsync(restoreChangeSteps(cwd, input, planned))
+}
+
+/** The exact trees a move goes between (see the exact-bytes note): `from` for the files now, `to` for the result. */
+export interface ExactMove { from: string; to: string }
+
+/** `mode sha` for each path of `tree`. */
+function* treeEntries(top: string, tree: string): Steps<Map<string, string>> {
+  const map = new Map<string, string>()
+  for (const line of nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--full-tree', tree], undefined, undefined, LISTING))) {
+    const tab = line.indexOf('\t')
+    const [mode, , sha] = line.slice(0, tab).split(' ')
+    map.set(line.slice(tab + 1), `${mode} ${sha}`)
+  }
+  return map
+}
+
+/** Paths looked up a batch of pathspecs at a time; past this many, the whole tree is listed once instead. */
+const LOOKUP_LIMIT = 2_000
+
+/** `mode sha` of each of `paths` that `tree` holds as a file, link or nested repository (never a folder). */
+function* entriesAt(top: string, tree: string, paths: Iterable<string>): Steps<Map<string, string>> {
+  const asked = new Set(paths)
+  if (!asked.size) return new Map()
+  if (asked.size > LOOKUP_LIMIT) {
+    const all = yield* treeEntries(top, tree)
+    return new Map([...asked].filter((path) => all.has(path)).map((path) => [path, all.get(path)!]))
+  }
+  const map = new Map<string, string>()
+  const wanted = [...asked]
+  for (let start = 0; start < wanted.length;) {
+    const batch: string[] = []
+    for (let length = 0; start < wanted.length && (!batch.length || length + wanted[start]!.length < 16_000); start++) {
+      batch.push(`:(literal)${wanted[start]!}`)
+      length += wanted[start]!.length + 11
+    }
+    for (const line of nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--full-tree', tree, '--', ...batch], undefined, undefined, LISTING))) {
+      const tab = line.indexOf('\t')
+      const path = line.slice(tab + 1)
+      const [mode, , sha] = line.slice(0, tab).split(' ')
+      if (asked.has(path)) map.set(path, `${mode} ${sha}`)
+    }
+  }
+  return map
+}
+
+/** `{ path: [from, to] }` for each path two trees hold differently, as `mode sha` (absent where a tree has none). */
+function* treeChanges(top: string, from: string, to: string): Steps<Map<string, [string | undefined, string | undefined]>> {
+  const raw = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', from, to], undefined, undefined, LISTING)).split('\0')
+  const changes = new Map<string, [string | undefined, string | undefined]>()
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    const [fromMode, toMode, fromBlob, toBlob] = raw[index]!.slice(1).split(' ') as [string, string, string, string]
+    changes.set(raw[index + 1]!, [fromMode === '000000' ? undefined : `${fromMode} ${fromBlob}`, toMode === '000000' ? undefined : `${toMode} ${toBlob}`])
+  }
+  return changes
+}
+
+/**
+ * The exact tree of a restore's result `target` (Git's form, from the merge), when the files now (`input.ours`) record
+ * exact bytes; otherwise undefined, and the restore compares and writes Git's form as before. A path the merge takes
+ * whole from `theirs` gets `theirs`' exact bytes. A path whose content the merge made, or that `theirs` holds only in
+ * Git's form (a snapshot from before exact trees, a path under a filter), is left out: Git writes it, converting as a
+ * checkout would. A path the merge leaves alone keeps the bytes it has, or gets `theirs`' exact bytes when only those
+ * changed (line endings, say) and nothing changed them since. Exact bytes are only ever blobs taken whole from a
+ * snapshot's exact tree: content the merge made is always written by Git, converted as a checkout would.
+ */
+function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string, target: string): Steps<ExactMove | undefined> {
+  const oursExact = yield* exactTreeOfSteps(top, input.ours)
+  if (!oursExact) return undefined
+  const theirsExact = yield* exactTreeOfSteps(top, input.theirs)
+  const theirs = yield* treeOfSteps(top, input.theirs)
+  // Both sides' exact trees are their Git forms: no path's bytes on disk differed from Git's form. Then no change of
+  // exact bytes alone can be restored, and `theirs`' exact entries are its own.
+  const plain = oursExact === ours && theirsExact === theirs
+  const baseExact = theirsExact && !plain ? yield* exactTreeOfSteps(top, input.base) : undefined
+  const remove: string[] = []
+  const set = new Map<string, string>()
+  // Only the paths that change are looked up, never whole trees.
+  const changed = yield* treeChanges(top, ours, target)
+  const rawOnly = baseExact && theirsExact ? [...(yield* treeChanges(top, baseExact, theirsExact))].filter(([path]) => !changed.has(path)) : []
+  const looked = [...changed.keys(), ...rawOnly.map(([path]) => path)]
+  const theirsNormal = yield* entriesAt(top, theirs, looked)
+  const theirsRaw = theirsExact === theirs ? theirsNormal : theirsExact ? yield* entriesAt(top, theirsExact, changed.keys()) : new Map<string, string>()
+  for (const [path, [, wanted]] of changed) {
+    if (wanted && wanted === theirsNormal.get(path) && theirsRaw.has(path)) set.set(path, theirsRaw.get(path)!)
+    else remove.push(path)
+  }
+  if (rawOnly.length) {
+    const candidates = rawOnly.map(([path]) => path)
+    const oursNormal = yield* entriesAt(top, ours, candidates)
+    const oursRaw = yield* entriesAt(top, oursExact, candidates)
+    for (const [path, [before, after]] of rawOnly) {
+      if (!after || !oursRaw.has(path)) continue
+      // Unchanged by the merge, by `theirs`' normal form, and in its exact bytes since the change was made.
+      if (oursNormal.get(path) === theirsNormal.get(path) && oursRaw.get(path) === before) set.set(path, after)
+    }
+  }
+  if (!remove.length && !set.size) return { from: oursExact, to: oursExact }
+  // Every path the result writes is taken whole, as Git's form, from a side whose exact tree is its Git form: the target
+  // is its own exact tree. A blob the merge made is never that: it is left out, and Git writes it with its conversion.
+  if (oursExact === ours && [...changed].every(([path, [, wanted]]) => !wanted || set.get(path) === wanted) && !rawOnly.some(([path]) => set.has(path))) return { from: ours, to: target }
+  const temporary = join((yield* privateFiles(top)).directory, `restore-exact-${randomUUID()}.index`)
+  const env = { GIT_INDEX_FILE: temporary }
+  try {
+    yield* gitStep(top, ['read-tree', oursExact], env)
+    // Removals first, so a path that becomes a folder can be added.
+    const lines = [...remove.map((path) => `0 ${'0'.repeat(ours.length)}\t${path}`), ...[...set].map(([path, entry]) => `${entry}\t${path}`)]
+    yield* gitStep(top, ['update-index', '-z', '--index-info'], env, lines.join('\0') + '\0')
+    return { from: oursExact, to: yield* gitStep(top, ['write-tree'], env) }
+  } finally {
+    yield* disk.remove(temporary)
+  }
 }
 
 /**
@@ -869,8 +1332,21 @@ async function keptDigest(top: string, ref: string, path: string): Promise<strin
   return createHash('sha256').update(ran.stdoutBytes).digest('hex')
 }
 
-/** One path the move writes or deletes: its mode and blob in `from` and in `to` (mode `000000` where a tree has none). */
-interface Change { fromMode: string; fromBlob: string; toMode: string; toBlob: string }
+/**
+ * One path the move writes or deletes: its mode and blob in `from` and in `to` (mode `000000` where a tree has none). In
+ * an exact move a side's blob is its exact tree's (`fromRaw`, `toRaw`: the bytes on disk) wherever that tree has the
+ * path, and Git's form otherwise; `normalFrom` is then `from`'s own entry (`mode sha`), absent where it has none.
+ */
+interface Change { fromMode: string; fromBlob: string; toMode: string; toBlob: string; fromRaw?: boolean; toRaw?: boolean; normalFrom?: string }
+
+const NO_ENTRY = '000000'
+const isFile = (mode: string): boolean => /^100(?:644|755)$/.test(mode)
+/** A `Change` from two `mode sha` entries, either absent. */
+function changeOf(from: string | undefined, to: string | undefined, zeros: string): Change {
+  const [fromMode, fromBlob] = from ? from.split(' ') as [string, string] : [NO_ENTRY, zeros]
+  const [toMode, toBlob] = to ? to.split(' ') as [string, string] : [NO_ENTRY, zeros]
+  return { fromMode, fromBlob, toMode, toBlob }
+}
 
 /**
  * Rewrites the files that differ between two trees from the first (what the worktree holds, as of the last snapshot)
@@ -884,22 +1360,52 @@ interface Change { fromMode: string; fromBlob: string; toMode: string; toBlob: s
  * `read-tree -m -u`, whose refresh is enough there: their stored form is their raw bytes, so after the refresh any write
  * that changes them changes their size or times (Git refuses), or lands in the second of the refresh, when Git compares
  * the raw bytes again and refuses. What that leaves is a write landing while Git itself writes, after it checked.
+ *
+ * With `exact`, the exact trees of both sides (see the exact-bytes note), the move is exact wherever they have a path:
+ * when they differ from Git's form or Git converts a path it writes, every file it writes or removes goes through
+ * `writeConvertedAsync`, compared and written with conversions off where the exact tree has it, and with Git's
+ * conversions only where a side has Git's form alone. A path whose bytes on disk are already the result's stays.
  */
-export function* moveFilesSteps(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep): Steps<MovedFiles> {
-  if (from === to) return {}
+export function* moveFilesSteps(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep, exact?: ExactMove): Steps<MovedFiles> {
+  if (from === to && (!exact || exact.from === exact.to)) return {}
   const files = yield* privateFiles(top)
-  // Every path the move writes or deletes: `:<mode> <mode> <blob> <blob> <status>`, then the path.
-  const raw = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', from, to], undefined, undefined, LISTING)).split('\0')
+  const zeros = '0'.repeat(from.length)
+  // Every path the move writes or deletes.
   const changes = new Map<string, Change>()
-  for (let index = 0; index + 1 < raw.length; index += 2) {
-    const [fromMode, toMode, fromBlob, toBlob] = raw[index]!.slice(1).split(' ') as [string, string, string, string]
-    changes.set(raw[index + 1]!, { fromMode, fromBlob, toMode, toBlob })
+  const normalChanged = yield* treeChanges(top, from, to)
+  for (const [path, [before, after]] of normalChanged) changes.set(path, changeOf(before, after, zeros))
+  const normalTouched = [...changes.keys()]
+  // Files on either side count for an exact move: a restore that only creates or only removes files writes them too.
+  const convertedEither = yield* convertedPaths(top, normalTouched, normalTouched.filter((path) => isFile(changes.get(path)!.fromMode) || isFile(changes.get(path)!.toMode)))
+  let converted = convertedEither.filter((path) => isFile(changes.get(path)!.fromMode))
+  const exactly = exact && (exact.from !== from || exact.to !== to || convertedEither.length) ? exact : undefined
+  /** Paths whose bytes on disk are already the result's, with `from`'s entry for Git's step (see `writeConvertedAsync`). */
+  const stay = new Map<string, string | undefined>()
+  let rawNew: string[] = []
+  if (exactly) {
+    // Each side's entries come from the two diffs; only a path one of them leaves out is looked up, in one tree each: a
+    // path whose exact bytes did not change has the same entry in both exact trees, and one whose Git form did not, in both trees.
+    const rawChanged = yield* treeChanges(top, exactly.from, exactly.to)
+    const rawUnchanged = yield* entriesAt(top, exactly.from, normalTouched.filter((path) => !rawChanged.has(path)))
+    const normalUnchanged = yield* entriesAt(top, from, [...rawChanged.keys()].filter((path) => !normalChanged.has(path)))
+    const fromNormal = { get: (path: string) => normalChanged.has(path) ? normalChanged.get(path)![0] : normalUnchanged.get(path), has: (path: string) => (normalChanged.has(path) ? normalChanged.get(path)![0] : normalUnchanged.get(path)) !== undefined }
+    const toNormal = { get: (path: string) => normalChanged.has(path) ? normalChanged.get(path)![1] : normalUnchanged.get(path) }
+    const fromRaw = { get: (path: string) => rawChanged.has(path) ? rawChanged.get(path)![0] : rawUnchanged.get(path) }
+    const toRaw = { get: (path: string) => rawChanged.has(path) ? rawChanged.get(path)![1] : rawUnchanged.get(path) }
+    changes.clear()
+    for (const path of new Set([...normalTouched, ...rawChanged.keys()])) {
+      const [rawBefore, rawAfter] = [fromRaw.get(path), toRaw.get(path)]
+      if (rawBefore && rawBefore === rawAfter) { stay.set(path, fromNormal.get(path)); continue }
+      const change = changeOf(rawBefore ?? fromNormal.get(path), rawAfter ?? toNormal.get(path), zeros)
+      changes.set(path, { ...change, fromRaw: Boolean(rawBefore), toRaw: Boolean(rawAfter), ...(fromNormal.has(path) ? { normalFrom: fromNormal.get(path)! } : {}) })
+    }
+    // Every file the move writes or removes is compared and kept first; one in exact bytes is written exactly by Mousse's steps.
+    converted = [...changes].filter(([, change]) => isFile(change.fromMode)).map(([path]) => path)
+    rawNew = [...changes].filter(([, change]) => change.toRaw && !isFile(change.fromMode)).map(([path]) => path)
   }
   const touched = [...changes.keys()]
-  const heldAsFiles = touched.filter((path) => /^100(?:644|755)$/.test(changes.get(path)!.fromMode))
   const inTheWay = yield* uncapturedInTheWay(top, from, to, touched)
   const preserved = inTheWay.length ? yield* preserveFiles(top, inTheWay, files.directory, operationId) : undefined
-  const converted = yield* convertedPaths(top, touched, heldAsFiles)
   const temporary = join(files.directory, `restore-${randomUUID()}.index`)
   const env = { GIT_INDEX_FILE: temporary }
   let written: { exact?: ExactBytesKept; leftAsIs: LeftAsIs[] } = { leftAsIs: [] }
@@ -910,8 +1416,12 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
     // A file saved since with the same bytes (format on save, `touch`) only has new stat data: refreshed, it reads as
     // unchanged, so Git refuses only a file whose bytes changed.
     yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env, LISTING)
-    if (!converted.length) yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
-    else written = yield* asyncOnly(() => writeConvertedAsync({ top, from, to, env, changes, converted, keep, operationId, directory: files.directory, ...(preserved ? { preserved } : {}) }))
+    if (!converted.length && !exactly) yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
+    else {
+      const emptyTree = exactly ? yield* emptyTreeSteps(top) : undefined
+      written = yield* asyncOnly(() => writeConvertedAsync({ top, from, to, env, changes, converted, keep, operationId, directory: files.directory, ...(preserved ? { preserved } : {}),
+        ...(exactly ? { exact: { to: exactly.to, emptyTree: emptyTree!, rawNew, stay } } : {}) }))
+    }
   } finally {
     yield* disk.remove(temporary)
   }
@@ -920,8 +1430,29 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
 
 
 /** Rewrites the files that differ between two trees (see `moveFilesSteps`), without blocking the daemon. */
-export function moveFilesAsync(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep): Promise<MovedFiles> {
-  return runAsync(moveFilesSteps(top, from, to, operationId, keep))
+export function moveFilesAsync(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep, exact?: ExactMove): Promise<MovedFiles> {
+  return runAsync(moveFilesSteps(top, from, to, operationId, keep, exact))
+}
+
+/**
+ * Writes snapshot `snapshot`'s files over a fresh checkout whose files are Git's form of `from` (a worktree started,
+ * restored or rebuilt), exactly when the snapshot records exact bytes: the files now are read once for their own exact
+ * tree, so only what differs is written (see `moveFilesSteps`). Otherwise as `moveFilesAsync`.
+ */
+export async function moveFilesToSnapshotAsync(top: string, from: string, snapshot: string, keep?: RestoreKeep): Promise<MovedFiles> {
+  const to = await treeOfAsync(top, snapshot)
+  const exactTo = await exactTreeOfAsync(top, snapshot)
+  let exact: ExactMove | undefined
+  // The new worktree has no private index yet, and its files are the checkout's: the snapshot's own tree says what converts.
+  const converts = async (): Promise<boolean> => {
+    const paths = (await gitAsync(top, ['ls-tree', '-r', '-z', '--full-tree', to], undefined, undefined, LISTING)).split('\0').filter((line) => /^100(?:644|755) /.test(line)).map((line) => line.slice(line.indexOf('\t') + 1))
+    return (await runAsync(conversionSteps(top, await runAsync(privateFiles(top)), paths, to))).converts
+  }
+  if (exactTo && (exactTo !== to || await converts())) {
+    const now = await worktreeTreesAsync(top)
+    if (now.tree === from && now.exactTree) exact = { from: now.exactTree, to: exactTo }
+  }
+  return moveFilesAsync(top, from, to, undefined, keep, exact)
 }
 
 /** The attributes under which Git writes a file with bytes other than its blob's; `crlf` is `text`'s old name. */
@@ -939,12 +1470,8 @@ function* convertedPaths(top: string, touched: string[], files: string[]): Steps
   // A bare `autocrlf` key reads as true.
   if (autocrlf.ok && !/^(false|no|off|0)$/i.test(autocrlf.stdout.trim())) return files
   if (touched.some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))) return files
-  // For each path, in order, one `path NUL attribute NUL value NUL` per attribute asked.
-  const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERTING_ATTRIBUTES], undefined, files.join('\0') + '\0', LISTING)).split('\0')
-  return files.filter((_, index) => CONVERTING_ATTRIBUTES.some((__, attribute) => {
-    const value = fields[(index * CONVERTING_ATTRIBUTES.length + attribute) * 3 + 2]
-    return value !== undefined && value !== 'unspecified' && value !== 'unset'
-  }))
+  const converting = new Set((yield* convertingAttributes(top, files)).map(([path]) => path))
+  return files.filter((path) => converting.has(path))
 }
 
 /** A step that runs only without blocking the daemon, as every restore does. */
@@ -968,6 +1495,12 @@ interface ConvertedWrite {
   directory: string
   /** What this restore kept first of the files in its way (`preserveFiles`). */
   preserved?: PreservedFiles
+  /**
+   * An exact move (`moveFilesSteps`): `changes` hold exact blobs where `fromRaw`/`toRaw` say so, `to` is the result's
+   * exact tree, `rawNew` the paths it writes exactly where `from` has no file, and `stay` the paths already as the result
+   * has them on disk, with `from`'s entry.
+   */
+  exact?: { to: string; emptyTree: string; rawNew: readonly string[]; stay: ReadonlyMap<string, string | undefined> }
 }
 
 const namedPaths = (paths: readonly string[]): string => paths.slice(0, 5).join(', ') + (paths.length > 5 ? ` and ${paths.length - 5} more` : '')
@@ -992,6 +1525,8 @@ async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: Exa
   const { top, from, to, env, changes, converted } = write
   const action = write.keep?.action ?? 'The restore'
   const blobs = new Map(converted.map((path) => [path, changes.get(path)!.fromBlob]))
+  // Files whose blob is their exact bytes are compared with it as it is, never converted.
+  const raw = new Set(converted.filter((path) => changes.get(path)!.fromRaw))
   // As Git refuses a file whose normal form changed since the snapshot: the merge was worked out from that snapshot.
   const listed = new Set(nul(await gitAsync(top, ['diff-files', '--name-only', '-z'], env, undefined, LISTING)))
   const stale: string[] = []
@@ -1002,7 +1537,7 @@ async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: Exa
   let windowMs: number | undefined
   /** Reads `paths`, keeps what is not held, and returns the proofs whose bytes are held or kept, and the paths that changed. */
   const readAndKeep = async (paths: readonly string[]): Promise<{ proofs: FrozenEntryProof[]; changed: string[] }> => {
-    const { read, changed } = await readConvertedAsync(top, blobs, paths)
+    const { read, changed } = await readConvertedAsync(top, blobs, paths, raw)
     const unheld = read.filter((entry) => !entry.held)
     let copy: { ref: string; digests?: ReadonlyMap<string, string> } | undefined
     if (unheld.length && write.keep) {
@@ -1042,6 +1577,7 @@ async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: Exa
   const fold = (path: string): string => (ignoreCase ? path.toLowerCase() : path)
   const ancestors = (path: string): string[] => path.split('/').slice(0, -1).map((_, depth, parts) => parts.slice(0, depth + 1).join('/'))
   const exactly = new Set(converted)
+  const rawNew = write.exact?.rawNew ?? []
   const mine = new Set(converted.map(fold))
   const aboveMine = new Set(converted.flatMap(ancestors).map(fold))
   const inTheirWay = [...changes.entries()].filter(([path, change]) => change.toMode !== '000000' && !exactly.has(path)
@@ -1051,10 +1587,15 @@ async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: Exa
   const target = join(write.directory, `restore-target-${randomUUID()}.index`)
   try {
     await gitAsync(top, ['read-tree', to], { GIT_INDEX_FILE: target })
-    const lines = [
-      ...inTheirWay.map((path) => `0 ${'0'.repeat(from.length)}\t${path}`),
-      ...converted.map((path) => { const change = changes.get(path)!; return `${change.fromMode} ${change.fromBlob}\t${path}` })
-    ]
+    const none = (path: string): string => `0 ${'0'.repeat(from.length)}\t${path}`
+    // Git's step works on Git's form: in an exact move a path keeps `from`'s own entry there.
+    const ofFrom = (path: string): string => {
+      if (!write.exact) { const change = changes.get(path)!; return `${change.fromMode} ${change.fromBlob}\t${path}` }
+      const entry = write.exact.stay.has(path) ? write.exact.stay.get(path) : changes.get(path)?.normalFrom
+      return entry ? `${entry}\t${path}` : none(path)
+    }
+    // Paths written exactly where `from` has no file are left for step 4, as paths in the way are.
+    const lines = [...new Set([...inTheirWay, ...rawNew])].map(none).concat([...converted, ...(write.exact?.stay.keys() ?? [])].map(ofFrom))
     await gitAsync(top, ['update-index', '-z', '--index-info'], { GIT_INDEX_FILE: target }, lines.join('\0') + '\0')
     const around = await gitAsync(top, ['write-tree'], { GIT_INDEX_FILE: target })
     await gitAsync(top, ['read-tree', '-m', '-u', from, around], env)
@@ -1092,9 +1633,14 @@ async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: Exa
   // Skipped paths, and every folder above one: a path is blocked when it is one, lies under one, or holds one.
   const skippedAbove = new Set([...skipped.keys()].flatMap(ancestors))
   const blocked = (path: string): boolean => skipped.has(path) || skippedAbove.has(path) || ancestors(path).some((above) => skipped.has(above))
-  const toCreate = [...converted.filter((path) => changes.get(path)!.toMode !== '000000'), ...inTheirWay].filter((path) => !blocked(path))
-  const { notWritten } = await createOnlyAsync(top, run, toCreate, to)
-  for (const [path, why] of notWritten) skipped.set(path, why.reason === 'failed' ? `Git could not write it${why.detail ? `: ${why.detail}` : ''}` : CHANGED_WHILE_WRITING)
+  const toCreate = [...new Set([...converted.filter((path) => changes.get(path)!.toMode !== '000000'), ...inTheirWay, ...rawNew])].filter((path) => !blocked(path))
+  // In an exact move, a path the result's exact tree has is written as those bytes, with every conversion off; the rest
+  // in Git's form, converted as a checkout would (never an exact blob: converting it again would change it).
+  const exactWrite = write.exact
+  const rawCreate = exactWrite ? toCreate.filter((path) => changes.get(path)?.toRaw) : []
+  const normalCreate = exactWrite ? toCreate.filter((path) => !changes.get(path)?.toRaw) : toCreate
+  const results = [await createOnlyAsync(top, run, normalCreate, to), ...(exactWrite && rawCreate.length ? [await createOnlyAsync(top, exactRunner(top, exactWrite.emptyTree), rawCreate, exactWrite.to)] : [])]
+  for (const [path, why] of results.flatMap((result) => [...result.notWritten])) skipped.set(path, why.reason === 'failed' ? `Git could not write it${why.detail ? `: ${why.detail}` : ''}` : CHANGED_WHILE_WRITING)
   const leftAsIs = [...skipped].sort(([a], [b]) => a.localeCompare(b)).map(([path, reason]) => ({ path, reason }))
   const files = [...keptAt].map(([path, ref]) => {
     const kind = restoreKindOf(changes.get(path)?.fromMode)
@@ -1125,47 +1671,62 @@ export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' |
   return progress.unmoved.length || progress.other.length ? 'partial' : 'applied'
 }
 
-export function* moveProgressSteps(cwd: string, from: string, to: string): Steps<MoveProgress> {
+export function* moveProgressSteps(cwd: string, from: string, to: string, exact?: ExactMove): Steps<MoveProgress> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
   const progress: MoveProgress = { moved: [], unmoved: [], other: [], emptied: [] }
-  const paths = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
+  const listed = (top: string, a: string, b: string) => gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', a, b], undefined, undefined, LISTING)
+  const paths = [...new Set([...nul(yield* listed(top, from, to)), ...(exact ? nul(yield* listed(top, exact.from, exact.to)) : [])])]
   if (!paths.length) return progress
-  const wanted = new Set(paths)
-  const entries = function* (tree: string): Steps<Map<string, { mode: string; sha: string }>> {
-    const map = new Map<string, { mode: string; sha: string }>()
-    for (const line of (yield* gitStep(top, ['ls-tree', '-r', '-z', '--full-tree', tree], undefined, undefined, LISTING)).split('\0')) {
-      const tab = line.indexOf('\t')
-      if (tab < 0 || !wanted.has(line.slice(tab + 1))) continue
-      const [mode, , sha] = line.slice(0, tab).split(' ')
-      map.set(line.slice(tab + 1), { mode: mode!, sha: sha! })
+  /** Each path of `tree`, and of `exactTree` where it has the path (`raw`: compared with the bytes on disk as they are). */
+  const entries = function* (tree: string, exactTree?: string): Steps<Map<string, { mode: string; sha: string; raw?: boolean }>> {
+    const map = new Map<string, { mode: string; sha: string; raw?: boolean }>()
+    for (const [source, raw] of [[tree, false], ...(exactTree ? [[exactTree, true] as const] : [])] as Array<readonly [string, boolean]>) {
+      for (const [path, entry] of yield* entriesAt(top, source, paths)) {
+        const [mode, sha] = entry.split(' ')
+        map.set(path, { mode: mode!, sha: sha!, ...(raw ? { raw } : {}) })
+      }
     }
     return map
   }
-  const before = yield* entries(from)
-  const after = yield* entries(to)
-  // What is on disk at each path: a file's blob as `git add` would store it (filters applied), a link's target, or nothing.
-  const found = new Map<string, { mode: string; sha: string }>()
+  const before = yield* entries(from, exact?.from)
+  const after = yield* entries(to, exact?.to)
+  // What is on disk at each path: a file's blob as `git add` would store it (filters applied) and, where a side has its
+  // exact bytes, as they are (`raw`); a link's target; or nothing.
+  const found = new Map<string, { mode: string; sha: string; raw?: string }>()
   const files: string[] = []
+  const rawFiles: string[] = []
+  const exactly = (path: string): boolean => Boolean(before.get(path)?.raw || after.get(path)?.raw)
   for (const path of paths) {
     if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
     let stat: Stats
     try { stat = yield* disk.lstat(join(top, path)) } catch { continue }
-    if (stat.isSymbolicLink()) found.set(path, { mode: '120000', sha: yield* gitStep(top, ['hash-object', '--stdin'], undefined, yield* disk.readlink(join(top, path))) })
-    else if (stat.isFile()) {
+    if (stat.isSymbolicLink()) {
+      const sha = yield* gitStep(top, ['hash-object', '--stdin'], undefined, yield* disk.readlink(join(top, path)))
+      found.set(path, { mode: '120000', sha, raw: sha })
+    } else if (stat.isFile()) {
       found.set(path, { mode: stat.mode & 0o111 ? '100755' : '100644', sha: '' })
-      if (path.includes('\n')) found.get(path)!.sha = yield* gitStep(top, ['hash-object', '--', path])
-      else files.push(path)
+      if (path.includes('\n')) {
+        found.get(path)!.sha = yield* gitStep(top, ['hash-object', '--', path])
+        if (exactly(path)) found.get(path)!.raw = yield* gitStep(top, ['hash-object', '--no-filters', '--', path])
+      } else {
+        files.push(path)
+        if (exactly(path)) rawFiles.push(path)
+      }
     }
   }
   if (files.length) {
     const shas = (yield* gitStep(top, ['hash-object', '--stdin-paths'], undefined, files.join('\n') + '\n')).split(/\r?\n/)
     files.forEach((path, index) => { found.get(path)!.sha = shas[index] ?? '' })
   }
+  if (rawFiles.length) {
+    const shas = (yield* gitStep(top, ['hash-object', '--no-filters', '--stdin-paths'], undefined, rawFiles.join('\n') + '\n')).split(/\r?\n/)
+    rawFiles.forEach((path, index) => { found.get(path)!.raw = shas[index] ?? '' })
+  }
   // A disk that keeps no executable bit (Windows, FAT, exFAT, some network drives: Git sets `core.fileMode` false there)
   // reads every file as executable or none, so only the bytes are compared there.
   const fileMode = process.platform !== 'win32' && (yield* tryGitStep(top, ['config', '--bool', 'core.fileMode'])).stdout.trim() !== 'false'
-  const same = (a?: { mode: string; sha: string }, b?: { mode: string; sha: string }): boolean =>
-    !a || !b ? a === b : a.sha === b.sha && (!fileMode || a.mode === b.mode)
+  const same = (a?: { mode: string; sha: string; raw?: string }, b?: { mode: string; sha: string; raw?: boolean }): boolean =>
+    !a || !b ? a === b : (b.raw ? a.raw : a.sha) === b.sha && (!fileMode || a.mode === b.mode)
   for (const path of paths) {
     if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
     const now = found.get(path)
@@ -1180,6 +1741,16 @@ export function* moveProgressSteps(cwd: string, from: string, to: string): Steps
 }
 
 /** How far a move got (see `moveProgressSteps`), without blocking the daemon. */
-export function moveProgressAsync(cwd: string, from: string, to: string): Promise<MoveProgress> {
-  return runAsync(moveProgressSteps(cwd, from, to))
+export function moveProgressAsync(cwd: string, from: string, to: string, exact?: ExactMove): Promise<MoveProgress> {
+  return runAsync(moveProgressSteps(cwd, from, to, exact))
+}
+
+/**
+ * The exact trees an interrupted restore went between, from its intent: the files before it (the snapshot `ours`) and
+ * the exact tree it planned. Undefined when it planned none, or `ours` has none.
+ */
+export async function plannedExactAsync(cwd: string, ours: string, plannedExactTree: string | undefined): Promise<ExactMove | undefined> {
+  if (!plannedExactTree) return undefined
+  const from = await exactTreeOfAsync(cwd, ours)
+  return from ? { from, to: plannedExactTree } : undefined
 }

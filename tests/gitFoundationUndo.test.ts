@@ -109,8 +109,8 @@ describe('Git foundation merge-aware compensation', () => {
       actions.beginTurn(options, f.baseSha)
       const authored = f.commit(workspace, 'agent commit\n')
       const action = await actions.checkpointExistingTurn(options, f.baseSha, 'completed')
-      // The end is a snapshot whose parent is the agent's commit; the commit itself is listed and HEAD is left on it.
-      expect(git(workspace, 'rev-parse', `${action.endSha}^`)).toBe(authored)
+      // The end is a snapshot on the agent's commit (snapshot → its exact bytes → the commit); the commit itself is listed and HEAD is left on it.
+      expect(git(workspace, 'rev-parse', `${action.endSha}^^`)).toBe(authored)
       expect(git(workspace, 'rev-parse', 'HEAD')).toBe(authored)
       expect(action.commits).toEqual([authored])
     } finally { releaseExecutionLeaseHandle(lease) }

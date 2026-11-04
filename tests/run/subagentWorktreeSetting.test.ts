@@ -215,7 +215,7 @@ describe('Give each subagent its own worktree', () => {
     expect(git(projectDir, 'rev-parse', `${result.baseRef}^{commit}`)).toBe(result.baseSha)
     expect(git(projectDir, 'show', `${result.resultRef}:child.txt`)).toBe('the child\'s work')
     // The parent's commit is where the child started, and the parent is still there, unmerged.
-    expect(git(projectDir, 'rev-parse', `${result.baseSha}^`) === state.parentHead || result.baseSha === state.parentHead).toBe(true)
+    expect(git(projectDir, 'rev-parse', `${result.baseSha}^^`) === state.parentHead || result.baseSha === state.parentHead).toBe(true)
     expect(existsSync(join(workspaceOf(d, thread.id)!.worktreePath, 'child.txt'))).toBe(false)
   }, 60_000)
 

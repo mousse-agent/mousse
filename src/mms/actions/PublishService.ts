@@ -181,7 +181,8 @@ export class PublishService {
 
   /** Whether the reviewed revision names other files than the one published. A missing one never differs. */
   private async differs(cwd: string, expected: string | undefined, actual: string | undefined): Promise<boolean> {
-    return Boolean(expected) && (!actual || !await sameTreeAsync(cwd, expected!, actual))
+    // Publish commits Git's form of the files, so a file whose line endings alone changed since the review is the same.
+    return Boolean(expected) && (!actual || !await sameTreeAsync(cwd, expected!, actual, { exact: false }))
   }
 
   /** The one commit in the primary, with the tree the merge produced and the person's own author and committer. */

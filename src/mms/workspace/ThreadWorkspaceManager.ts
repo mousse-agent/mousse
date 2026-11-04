@@ -11,7 +11,7 @@ import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '.
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { movedFilesNotice, moveFilesAsync, snapshotOriginAsync } from '../actions/snapshots'
+import { movedFilesNotice, moveFilesToSnapshotAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
@@ -404,7 +404,7 @@ export class ThreadWorkspaceManager {
       else await git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
-        const moved = await moveFilesAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]), undefined, { owner: this.threadDirectory, action: 'Starting the worktree' })
+        const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
         const notice = movedFilesNotice(moved)
         if (notice) {
           try { await options.onNotice?.({ id: `worktree-start-${randomUUID()}`, text: notice }) } catch (error) { console.warn('worktree start notice could not be delivered', { threadId, error: error instanceof Error ? error.message : String(error) }) }
@@ -546,7 +546,7 @@ export class ThreadWorkspaceManager {
       // A branch that another worktree has checked out cannot be added again; the commit can.
       if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }
       else await add(['--detach', metadata.worktreePath, head])
-      const moved = await moveFilesAsync(metadata.worktreePath, await git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]), undefined, { owner: this.threadDirectory, action: 'Restoring the worktree' })
+      const moved = await moveFilesToSnapshotAsync(metadata.worktreePath, await git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), retained, { owner: this.threadDirectory, action: 'Restoring the worktree' })
       const movedNotice = movedFilesNotice(moved)
       if (movedNotice) {
         try { await onNotice?.({ id: `worktree-restore-${randomUUID()}`, text: movedNotice }) } catch (error) { console.warn('restore notice could not be delivered', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) }) }

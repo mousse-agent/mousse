@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, plannedExactAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -35,6 +35,8 @@ interface UndoIntent {
   ours?: string
   /** The tree the restore turns the files into. */
   expectedTree?: string
+  /** Its exact tree (see `snapshots.ts`), when the restore was exact; absent in intents written before. */
+  expectedExactTree?: string
   /** What the turn did to Git that the restore leaves in place (`gitLeftInPlaceNotice`), so a recovered restore says it too. */
   gitNotice?: string
 }
@@ -120,8 +122,8 @@ export class UndoService {
       const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
       const ours = await takeSnapshotAsync(workspacePath, { reason: `before ${kind}`, threadId, operationId })
       const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, label, turnBehind(all, target))
-      const restored = await restoreChangeAsync(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn', keep: { owner: this.threadDirectory, action: label } }, (expectedTree) => {
-        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree, ...(gitNotice ? { gitNotice } : {}) }
+      const restored = await restoreChangeAsync(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn', keep: { owner: this.threadDirectory, action: label } }, (expectedTree, expectedExactTree) => {
+        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree, ...(expectedExactTree ? { expectedExactTree } : {}), ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha: ours.sha, actionId: target.id }, details: intent })
         target.state = 'undoing'; this.actions.replace(all)
       })
@@ -216,9 +218,10 @@ export class UndoService {
     const known = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
     if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: await treeOfAsync(workspacePath, known.afterSha), ...await snapshotOriginAsync(workspacePath, known.afterSha) } }
     // Only the paths the restore writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
-    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!))
+    const exact = await plannedExactAsync(workspacePath, intent.ours!, intent.expectedExactTree)
+    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!, exact))
     // The end is the planned result, not the files now: an edit made since stays an edit made since.
-    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
+    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }, exact?.to) }
     if (outcome === 'not-applied') return undefined
     throw new Error('Undo recovery found files that match neither the state before nor the state after the restore; resolve the differences by hand.')
   }

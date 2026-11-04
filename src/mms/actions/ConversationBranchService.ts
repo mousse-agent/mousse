@@ -14,7 +14,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
-import { coverageNotice, exactBytesNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, exactBytesNotice, exactTreeOfAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /** The thread's first conversation branch: the one every thread starts on. */
@@ -64,6 +64,8 @@ interface SwitchIntent {
   ours: string
   /** The tree the switch turns the files into. */
   expectedTree: string
+  /** Its exact tree (see `snapshots.ts`), when the switch was exact; absent in intents written before. */
+  expectedExactTree?: string
   /** The selected branch's own code (its ref when the switch began). */
   own: string
   /** The code of the branch being left: what it keeps when the switch does not happen. */
@@ -200,8 +202,8 @@ export class ConversationBranchService {
         staying = { base, current }
         if (left) await gitAsync(workspacePath, ['update-ref', '--no-deref', left.retainedRef, base])
         if (added) atomicWriteJsonSync(this.path, branches)
-        const restored = await restoreChangeAsync(workspacePath, { reason: `switch to conversation branch ${selected.id}`, threadId, operationId, base, ours: current, theirs, restoredTo: `on ${selected.name}`, keep: { owner: this.threadDirectory, action: 'Switching conversation branches' } }, (expectedTree) => {
-          intent = { branchId: selected.id, leaving, ours: current, expectedTree, own: theirs, base, restoreContext: Boolean(restoreContext) }
+        const restored = await restoreChangeAsync(workspacePath, { reason: `switch to conversation branch ${selected.id}`, threadId, operationId, base, ours: current, theirs, restoredTo: `on ${selected.name}`, keep: { owner: this.threadDirectory, action: 'Switching conversation branches' } }, (expectedTree, expectedExactTree) => {
+          intent = { branchId: selected.id, leaving, ours: current, expectedTree, ...(expectedExactTree ? { expectedExactTree } : {}), own: theirs, base, restoreContext: Boolean(restoreContext) }
           this.journal.append({ operationId, operationType: 'conversation-activate', state: 'prepared', expectedPreState: { branchId, leaving, ours: current }, details: intent })
         })
         if ('conflicts' in restored) throw new ConversationSwitchConflictError(restored.conflicts, selected.name, leftName)
@@ -224,7 +226,8 @@ export class ConversationBranchService {
           const message = error instanceof Error ? error.message : String(error)
           const named = [...message.matchAll(/Entry '([^']+)' not uptodate/g)].map((match) => match[1]!)
           const refused = /not uptodate/.test(message)
-          const progress = refused ? undefined : await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours), intent.expectedTree).catch(() => undefined)
+          const planned = intent
+          const progress = refused ? undefined : await plannedExactAsync(workspacePath, planned.ours, planned.expectedExactTree).then(async (exact) => moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, planned.ours), planned.expectedTree, exact)).catch(() => undefined)
           if (!refused && (!progress || moveOutcome(progress) !== 'not-applied')) throw error
           const files = progress?.other.length ? progress.other : named
           this.journal.append({ operationId, operationType: 'conversation-activate', state: 'cancelled', details: { branchId, files, error: message } })
@@ -300,11 +303,17 @@ export class ConversationBranchService {
       kept = ` (kept for ${retentionWindowText(new UndoRetentionService(this.threadDirectory).policy().windowMs)})`
     }
     const one = paths.length === 1
-    // The ref holds a snapshot, Git's normal form of each file, which the command converts back as a checkout would.
     const top = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     // Each file comes back as what the ref has: a link as a link, an executable file with its mode.
-    const modes = new Map((await gitAsync(workspacePath, ['ls-tree', '-z', source, '--', ...literal], undefined, undefined, LISTING)).split('\0').filter(Boolean).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))]))
-    const commands = restoreCommandsText(paths.map((path) => ({ ref: source, path, kind: restoreKindOf(modes.get(path)) })), { normalized: true })
+    const listed = async (tree: string) => new Map((await gitAsync(workspacePath, ['ls-tree', '-z', tree, '--', ...literal], undefined, undefined, LISTING)).split('\0').filter(Boolean).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))]))
+    const modes = await listed(source)
+    // The ref holds a snapshot. Where it records the file's exact bytes (its first parent's tree, see `snapshots.ts`) the
+    // command writes those as they are; otherwise Git's normal form, converted back as a checkout would.
+    const exactTree = await exactTreeOfAsync(workspacePath, source)
+    const exactModes = exactTree ? await listed(exactTree) : new Map<string, string>()
+    const commands = restoreCommandsText(paths.map((path) => exactModes.has(path)
+      ? { ref: `${source}^`, path, kind: restoreKindOf(exactModes.get(path)), normalized: false }
+      : { ref: source, path, kind: restoreKindOf(modes.get(path)), normalized: true }))
     return `${pathsInWords(paths)} ${one ? 'is now as it was' : 'are now as they were'} on ${input.target}. Your ${one ? 'version stays' : 'versions stay'} on ${input.leftName}: switch back to it, or bring ${one ? 'it' : 'them'} back by running this in ${top}: ${commands}${kept}.`
   }
 
@@ -372,7 +381,8 @@ export class ConversationBranchService {
           const branches = this.list()
           const branch = branches.find((item) => item.id === intent.branchId)
           if (!branch || !intent.expectedTree || !intent.ours || !intent.own) throw new Error('Conversation branch recovery does not match the recorded branch.')
-          const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours), intent.expectedTree))
+          const exact = await plannedExactAsync(workspacePath, intent.ours, intent.expectedExactTree)
+          const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours), intent.expectedTree, exact))
           if (outcome === 'partial') throw new Error('Switching conversation branches stopped partway, and the files match neither the state before nor the state after the switch; resolve the differences by hand.')
           if (outcome === 'not-applied') {
             this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'cancelled', details: { branchId: intent.branchId, recoveredBeforeFiles: true } })
@@ -380,7 +390,7 @@ export class ConversationBranchService {
             continue
           }
           // The files are recorded as the switch planned them; anything that appeared since is an edit made since.
-          const snapshot = await snapshotOfTreeAsync(workspacePath, intent.expectedTree, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId })
+          const snapshot = await snapshotOfTreeAsync(workspacePath, intent.expectedTree, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId }, exact?.to)
           await this.settle(workspacePath, branches, branch, snapshot, { branchId: branch.id, snapshotSha: snapshot.sha, own: intent.own, at: new Date().toISOString() })
           this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: branch.id, snapshotSha: snapshot.sha, restoreContext: intent.restoreContext, recovered: true } })
           if (intent.restoreContext) await restoreContext(branch)
