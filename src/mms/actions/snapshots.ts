@@ -100,8 +100,10 @@ interface LastSnapshot { sha: string; tree: string; head?: string; uncovered?: s
  * What a snapshot did not cover, kept with it (a `Mousse-Uncovered:` line of its commit): its coverage gaps, and the
  * ignored files and folders that were there (collapsed to their folder, at most `IGNORED_RECORDED`). A restore reads it
  * so it never deletes or writes over what was there but not recorded. `truncated`: more were ignored than recorded.
+ * `exactGaps`: the files whose exact bytes the snapshot does not hold, only Git's form of them (see the exact-bytes
+ * note), under a key of their own (`x`). They are reported, never left out of a restore: a restore writes Git's form.
  */
-export interface Uncovered { gaps: CoverageGap[]; ignored: string[]; truncated: boolean }
+export interface Uncovered { gaps: CoverageGap[]; ignored: string[]; truncated: boolean; exactGaps: CoverageGap[] }
 
 const UNCOVERED_LINE = 'Mousse-Uncovered: '
 const IGNORED_RECORDED = 2000
@@ -121,8 +123,8 @@ export function* snapshotUncoveredSteps(top: string, sha: string): Steps<Uncover
   const line = commit.stdout.split('\n').find((entry) => entry.startsWith(UNCOVERED_LINE))
   if (!line) return undefined
   try {
-    const value = JSON.parse(line.slice(UNCOVERED_LINE.length)) as { g?: CoverageGap[]; i?: string[]; t?: boolean }
-    return { gaps: Array.isArray(value.g) ? value.g : [], ignored: Array.isArray(value.i) ? value.i : [], truncated: value.t === true }
+    const value = JSON.parse(line.slice(UNCOVERED_LINE.length)) as { g?: CoverageGap[]; i?: string[]; t?: boolean; x?: CoverageGap[] }
+    return { gaps: Array.isArray(value.g) ? value.g : [], ignored: Array.isArray(value.i) ? value.i : [], truncated: value.t === true, exactGaps: Array.isArray(value.x) ? value.x : [] }
   } catch {
     return undefined
   }
@@ -131,6 +133,28 @@ export function* snapshotUncoveredSteps(top: string, sha: string): Steps<Uncover
 
 export function snapshotUncoveredAsync(top: string, sha: string): Promise<Uncovered | undefined> {
   return runAsync(snapshotUncoveredSteps(top, sha))
+}
+
+/** The `Mousse-Uncovered:` value for a snapshot, and whether it says anything: no record and an empty one mean the same. */
+function uncoveredRecord(gaps: CoverageGap[], ignored: string[], truncated: boolean, exactGaps: CoverageGap[]): { value: string; any: boolean } {
+  const value = JSON.stringify({ g: gaps, i: ignored, ...(truncated ? { t: true } : {}), ...(exactGaps.length ? { x: exactGaps } : {}) })
+  return { value, any: Boolean(gaps.length || ignored.length || truncated || exactGaps.length) }
+}
+
+/**
+ * The exact-bytes gaps a snapshot of the planned result of a restore from `ours` carries (`snapshotOfTreeSteps`): the
+ * ones `ours` named for a path the result still has, and its "could not be recorded" gap. The planned exact tree starts
+ * from `ours`' own, so what `ours` held only in Git's form the result holds only in Git's form too.
+ */
+export function* plannedExactGapsSteps(cwd: string, ours: string, tree: string): Steps<CoverageGap[]> {
+  const gaps = (yield* snapshotUncoveredSteps(cwd, ours))?.exactGaps ?? []
+  const paths = gaps.map((gap) => gap.path).filter((path) => path !== '.')
+  const present = paths.length ? yield* entriesAt(cwd, tree, paths) : new Map<string, string>()
+  return gaps.filter((gap) => gap.path === '.' || present.has(gap.path))
+}
+
+export function plannedExactGapsAsync(cwd: string, ours: string, tree: string): Promise<CoverageGap[]> {
+  return runAsync(plannedExactGapsSteps(cwd, ours, tree))
 }
 
 /** The reason `path` was not covered in `record`, or undefined when the record covers it. */
@@ -585,6 +609,7 @@ function* convertingAttributes(top: string, paths: readonly string[], env?: Node
 }
 
 const EXACT_TOO_LARGE = (): string => `over ${sizeText(EXACT_LIMITS.fileBytes)}, so only Git's form of it is kept`
+const EXACT_FAILED = (error: string): string => `exact bytes could not be recorded (${error}), so only Git's form of files it converts is kept`
 const CONVERTED_BY_INFO = '.git/info/attributes converts it, so only Git\'s form of it is kept'
 const CONVERTED_BY_OLD_GIT = 'Git older than 2.40 converts it, so only Git\'s form of it is kept'
 
@@ -594,9 +619,11 @@ interface SizedEntry { path: string; mode: string; sha: string; size: number }
 /**
  * The exact tree of the files the snapshot's tree `normal` holds (see the note above), and the paths it keeps only in
  * Git's form, named as gaps. The paths come from `normal`, so the walk, the coverage-gap loop and `followTrackedFiles`
- * run once for both. Undefined when it cannot be made: the snapshot is then recorded as before, without one.
+ * run once for both. When it cannot be made, even after a retry, it says why (`failed`, Git's first line): the snapshot
+ * is then recorded without one, as snapshots from before exact trees, and the gap is named; the next snapshot tries
+ * again. Undefined only while exact trees are off (tests).
  */
-function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[] } | undefined> {
+function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<ExactResult | undefined> {
   if (!exactTreesRecorded) return undefined
   // `<mode> <type> <object> <size>\t<path>`, the size padded with spaces.
   const entries: SizedEntry[] = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '-l', '--full-tree', normal], undefined, undefined, LISTING)).map((line) => {
@@ -613,8 +640,38 @@ function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head:
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     yield* disk.remove(files.exactIndex)
     yield* disk.remove(`${files.exactIndex}.lock`)
-    try { return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier) } catch { return undefined }
+    try {
+      const made = yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier)
+      exactFailureLogged.delete(top)
+      return made
+    } catch (error) {
+      const failed = firstLine(error)
+      if (!exactFailureLogged.has(top)) {
+        exactFailureLogged.add(top)
+        console.warn('a snapshot could not record exact bytes; only Git\'s form of converted files is kept until a later snapshot can', { worktree: top, error: failed })
+      }
+      return { failed }
+    }
   }
+}
+
+/** An exact tree and what it keeps only in Git's form, or why none could be made. */
+type ExactResult = { tree: string; gaps: CoverageGap[] } | { failed: string }
+
+/** The gaps an exact result names: its own, or one for the whole folder when it could not be made. */
+function exactGapsOf(exact: ExactResult | undefined): CoverageGap[] {
+  if (!exact) return []
+  return 'failed' in exact ? [{ path: '.', reason: EXACT_FAILED(exact.failed) }] : exact.gaps
+}
+
+/** Worktrees whose failed exact build was logged; the next one that succeeds clears it, so a later fault is logged again. */
+const exactFailureLogged = new Set<string>()
+
+/** Git's own first line of `error` ("fatal: ..."), not the command that failed. */
+function firstLine(error: unknown): string {
+  const text = String((error as { stderr?: unknown })?.stderr || (error as Error)?.message || error)
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  return (lines[0]?.startsWith('Command failed:') && lines[1] ? lines[1] : lines[0]) ?? 'unknown error'
 }
 
 /** What came before a snapshot: HEAD, and the previous snapshot in this worktree (`snapshot-last.json`). */
@@ -751,7 +808,7 @@ export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = 
   const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
   if (options.exact === false || activeHiddenStore(top)) return { tree }
   const exact = yield* exactTreeSteps(top, files, tree, yield* headOf(top))
-  return { tree, ...(exact ? { exactTree: exact.tree } : {}) }
+  return { tree, ...(exact && 'tree' in exact ? { exactTree: exact.tree } : {}) }
 }
 
 export function worktreeTreesAsync(cwd: string): Promise<{ tree: string; exactTree?: string }> {
@@ -781,24 +838,27 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
-  const exact = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
-  // What only Git's form of is kept is named with the rest, but never recorded as not covered: a restore writes it.
-  const named = [...coverageGaps, ...(exact?.gaps ?? [])]
-  const state = { tree, ...(exact ? { exactTree: exact.tree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
+  const exactResult = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
+  const exactTree = exactResult && 'tree' in exactResult ? exactResult.tree : undefined
+  // What only Git's form of is kept is named with the rest, and recorded under its own key (`x`), never as not covered:
+  // a restore writes it.
+  const exactGaps = exactGapsOf(exactResult)
+  const named = [...coverageGaps, ...exactGaps]
+  const state = { tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
   const { ignored, truncated } = yield* ignoredNow(top)
-  const uncovered = JSON.stringify({ g: coverageGaps, i: ignored, ...(truncated ? { t: true } : {}) })
+  const record = uncoveredRecord(coverageGaps, ignored, truncated, exactGaps)
+  const uncovered = record.value
   const previous = yield* readLast(files.last)
   // Reused only when what it left out, and its exact bytes, are the same too: a restore reads both from the snapshot.
-  if (previous && previous.tree === tree && previous.exact === exact?.tree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
+  if (previous && previous.tree === tree && previous.exact === exactTree && previous.head === head && previous.uncovered === uncovered && (yield* tryGitStep(top, ['cat-file', '-e', `${previous.sha}^{commit}`])).ok) return { sha: previous.sha, ...state }
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
-    // Only when something was not covered: no record and an empty one mean the same to a restore.
-    coverageGaps.length || ignored.length || truncated ? `${UNCOVERED_LINE}${uncovered}` : ''
+    record.any ? `${UNCOVERED_LINE}${uncovered}` : ''
   ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
-  const sha = yield* commitSnapshot(top, tree, exact?.tree, head, subject, trailers)
-  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exact ? { exact: exact.tree } : {}) } satisfies LastSnapshot))
+  const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
+  yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
   return { sha, ...state }
 }
 
@@ -811,27 +871,40 @@ export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Sn
 /**
  * Records `tree` as a snapshot commit of the worktree, on its HEAD, without reading the files: the result an
  * interrupted restore planned, once every file it writes is proven to be as planned. Files that appeared since are
- * then edits made after it, not part of it.
+ * then edits made after it, not part of it. `exactGaps`: what its exact tree keeps only in Git's form
+ * (`plannedExactGapsSteps`), recorded and named as a snapshot taken of the files would.
  */
-export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput, exactTree?: string): Steps<Snapshot> {
+export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput, exactTree?: string, exactGaps: CoverageGap[] = []): Steps<Snapshot> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
   const head = yield* headOf(top)
   const branch = activeHiddenStore(top) ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
   const { ignored, truncated } = yield* ignoredNow(top)
+  const record = uncoveredRecord([], ignored, truncated, exactGaps)
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
     head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
-    ignored.length || truncated ? `${UNCOVERED_LINE}${JSON.stringify({ g: [], i: ignored, ...(truncated ? { t: true } : {}) })}` : ''
+    record.any ? `${UNCOVERED_LINE}${record.value}` : ''
   ]
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
   const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
-  return { sha, tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
+  return { sha, tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(exactGaps.length ? { coverageGaps: exactGaps } : {}) }
 }
 
 /** Records `tree` as a snapshot (see `snapshotOfTreeSteps`), with the exact tree a restore planned, without blocking the daemon. */
-export function snapshotOfTreeAsync(cwd: string, tree: string, input: SnapshotInput, exactTree?: string): Promise<Snapshot> {
-  return runAsync(snapshotOfTreeSteps(cwd, tree, input, exactTree))
+export function snapshotOfTreeAsync(cwd: string, tree: string, input: SnapshotInput, exactTree?: string, exactGaps: CoverageGap[] = []): Promise<Snapshot> {
+  return runAsync(snapshotOfTreeSteps(cwd, tree, input, exactTree, exactGaps))
+}
+
+/**
+ * Snapshot `sha` as it was recorded, read back from its commit: its tree, exact tree, HEAD and branch, and what it named
+ * as not covered (its gaps and exact-bytes gaps). For a result recorded before a stop, so recovery reports it as the
+ * restore that made it did.
+ */
+export async function recordedSnapshotAsync(cwd: string, sha: string): Promise<Snapshot> {
+  const [tree, exactTree, origin, uncovered] = await Promise.all([treeOfAsync(cwd, sha), exactTreeOfAsync(cwd, sha), snapshotOriginAsync(cwd, sha), snapshotUncoveredAsync(cwd, sha)])
+  const coverageGaps = [...(uncovered?.gaps ?? []), ...(uncovered?.exactGaps ?? [])]
+  return { sha, tree, ...(exactTree ? { exactTree } : {}), ...origin, ...(coverageGaps.length ? { coverageGaps } : {}) }
 }
 
 /** The ref that remembers the thread's files as last published into the primary checkout: the next publish brings in only what came after. */

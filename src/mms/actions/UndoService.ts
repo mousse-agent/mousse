@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, plannedExactAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, recordedSnapshotAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -190,7 +190,7 @@ export class UndoService {
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
           // An intent written before this line was recorded has it built again from the turn.
           const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target))
-          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, gitNotice)
+          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, [gitNotice ?? '', coverageNotice(intent.target.git?.coverageGaps, applied.end.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
           const receipts = new ChangeReceiptService(this.threadDirectory)
           const known = receipts.list().find((item) => item.operationId === record.operationId)
           const receipt = known ? await receipts.replay(workspacePath, known) : await receipts.record(workspacePath, { operationId: record.operationId, kind: intent.kind, actor: { kind: 'user' }, actionId: compensation.id, beforeSha: applied.startSha, afterSha: applied.end.sha, introducedCommits: compensation.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, ...(compensation.git ? { git: compensation.git } : {}) })
@@ -216,12 +216,12 @@ export class UndoService {
    */
   private async provenApplied(workspacePath: string, operationId: string, intent: UndoIntent): Promise<{ startSha: string; end: Snapshot } | undefined> {
     const known = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
-    if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: await treeOfAsync(workspacePath, known.afterSha), ...await snapshotOriginAsync(workspacePath, known.afterSha) } }
+    if (known) return { startSha: known.beforeSha, end: await recordedSnapshotAsync(workspacePath, known.afterSha) }
     // Only the paths the restore writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
     const exact = await plannedExactAsync(workspacePath, intent.ours!, intent.expectedExactTree)
     const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!, exact))
     // The end is the planned result, not the files now: an edit made since stays an edit made since.
-    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }, exact?.to) }
+    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }, exact?.to, await plannedExactGapsAsync(workspacePath, intent.ours!, intent.expectedTree!)) }
     if (outcome === 'not-applied') return undefined
     throw new Error('Undo recovery found files that match neither the state before nor the state after the restore; resolve the differences by hand.')
   }
