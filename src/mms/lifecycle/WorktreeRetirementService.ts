@@ -10,7 +10,7 @@ import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { MOUSSE_COMMIT_ENV, operationInProgressAsync } from '../actions/git'
-import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync } from '../actions/snapshots'
+import { exactTreeOfAsync, moveFilesToSnapshotAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync, worktreeTreesAsync } from '../actions/snapshots'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
@@ -404,7 +404,8 @@ export class WorktreeRetirementService {
     if (input.baseSha && source.baseSha && input.baseSha !== source.baseSha) throw new Error('Workspace base changed before retirement')
     const baseSha = input.baseSha ?? source.baseSha ?? resultSha
     await lifecycleReadAsync(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
-    const { content, auxiliary, sparse } = await this.inspectContent(input.worktreePath, snapshot?.tree)
+    // A snapshot the manifest keeps is compared in its exact bytes when it records them: the rebuild writes those.
+    const { content, auxiliary, sparse } = await this.inspectContent(input.worktreePath, snapshot?.tree, dirty && snapshot!.exactTree ? { exactTree: snapshot!.exactTree } : {})
     const contents = { content, auxiliary, ...(sparse ? { sparse } : {}) }
     const key = hash(input.worktreePath).slice(0, 32)
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${input.taskId}/${key}`
@@ -904,7 +905,7 @@ export class WorktreeRetirementService {
     catch (error) { return { kept: `Kept in the trash at ${trashPath}: files in it could not be read, maybe because they are in use (${(error as Error).message.split(/\r?\n/)[0]})` } }
     const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
     let inspected: Awaited<ReturnType<WorktreeRetirementService['inspectContent']>>
-    try { inspected = await this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined, { collectUncaptured: true }) }
+    try { inspected = await this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined, { collectUncaptured: true, ...(dirty && snapshot!.exactTree ? { exactTree: snapshot!.exactTree } : {}) }) }
     catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
     const contents = { content: inspected.content, auxiliary: inspected.auxiliary, ...(inspected.sparse ? { sparse: inspected.sparse } : {}) }
     // Files the snapshot cannot hold (ignored ones) go into a kept copy, checked against the proof, before Git's own data
@@ -1204,7 +1205,8 @@ export class WorktreeRetirementService {
       if (manifest.auxiliary.some((entry) => entry.path === '.mousse/materialized-inputs.exclude')) await lifecycleGitAsync(manifest.worktreePath, ['config', '--worktree', 'core.excludesFile', join(manifest.worktreePath, '.mousse', 'materialized-inputs.exclude')])
       // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
       // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
-      const moved = manifest.snapshotTree ? await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree, undefined, { owner: this.store.require(manifest.taskId).location, action: 'Rebuilding the worktree' }) : {}
+      // Exactly as the snapshot recorded them on disk when it records exact bytes (`moveFilesToSnapshotAsync`).
+      const moved = manifest.snapshotTree ? await moveFilesToSnapshotAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotSha!, { owner: this.store.require(manifest.taskId).location, action: 'Rebuilding the worktree' }) : {}
       // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
       // and only what the rebuild itself wrote is ever cleared.
       // Only what this rebuild sets aside is reported for it: what clearing an earlier half-built folder kept, and what the
@@ -1224,9 +1226,18 @@ export class WorktreeRetirementService {
     }
     const identity = await this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
     // With kept copies, the files a snapshot holds are no longer all of them: every entry is compared with the proof.
+    // The snapshot's format decides the check: one that records exact bytes is compared in them too; an older one, and an
+    // older manifest's, in Git's form only, as before.
+    const snapshotExact = manifest.snapshotSha && !manifest.keptFiles?.length ? await exactTreeOfAsync(manifest.worktreePath, manifest.snapshotSha) : undefined
+    const filesMatch = async (): Promise<boolean> => {
+      if (!manifest.snapshotTree) return true
+      if (!snapshotExact) return await worktreeTreeAsync(manifest.worktreePath) === manifest.snapshotTree
+      const now = await worktreeTreesAsync(manifest.worktreePath)
+      return now.tree === manifest.snapshotTree && now.exactTree === snapshotExact
+    }
     const matches = manifest.keptFiles?.length
       ? sameContent(await walkOwnedContentAsync(manifest.worktreePath, true), manifest.content)
-      : !(manifest.snapshotTree && await worktreeTreeAsync(manifest.worktreePath) !== manifest.snapshotTree) && JSON.stringify((await this.inspectContent(manifest.worktreePath, manifest.snapshotTree)).content) === JSON.stringify(manifest.content)
+      : await filesMatch() && JSON.stringify((await this.inspectContent(manifest.worktreePath, manifest.snapshotTree, snapshotExact ? { exactTree: snapshotExact } : {})).content) === JSON.stringify(manifest.content)
     if (await lifecycleGitAsync(manifest.worktreePath, ['rev-parse', 'HEAD^{tree}']) !== manifest.treeSha || !matches) throw new Error('Reconstructed workspace does not match retained content')
     await this.verifyPins(manifest)
     delete manifest.trashPath; delete manifest.trashedAt; delete manifest.rebuilding
@@ -1435,7 +1446,7 @@ export class WorktreeRetirementService {
    * With `collectUncaptured`, files neither the snapshot nor the auxiliary payloads hold (ignored files, say) are listed
    * in `uncaptured` instead of refused, for the caller to keep in a copy of their own.
    */
-  async inspectContent(path: string, snapshotTree?: string, options: { collectUncaptured?: boolean } = {}): Promise<Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> & { uncaptured: string[] }> {
+  async inspectContent(path: string, snapshotTree?: string, options: { collectUncaptured?: boolean; exactTree?: string } = {}): Promise<Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> & { uncaptured: string[] }> {
     if (!snapshotTree) {
       if (await lifecycleReadAsync(path, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER)) throw new Error('Dirty, conflicted or untracked content requires retention')
     } else {
@@ -1463,22 +1474,31 @@ export class WorktreeRetirementService {
     if (files.length) {
       const attributes = (await lifecycleGitAsync(path, ['check-attr', '-z', '--stdin', 'filter'], files.map((entry) => entry.path).join('\0') + '\0')).split('\0')
       for (let index = 2; index < attributes.length; index += 3) if (!['unspecified', 'unset'].includes(attributes[index])) throw new Error('External checkout filters require retained auxiliary payloads')
-      const argv = await withoutRepoProgramsAsync(path, ['cat-file', '--batch', '--filters', '-Z'])
-      const ran = await runGitProcess(argv, { cwd: path, env: repoProgramEnv(), input: files.map((entry) => `${tracked.get(entry.path)!.sha} ${entry.path}\0`).join(''), timeout: 30_000, maxBuffer: 600 * 1024 * 1024 })
-      if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
-      const materialized = ran.stdoutBytes
-      let offset = 0
-      for (const entry of files) {
-        const headerEnd = materialized.indexOf(0, offset)
-        const header = materialized.subarray(offset, headerEnd).toString('utf8').split(' ')
-        if (headerEnd < offset || header[0] !== tracked.get(entry.path)!.sha || header[1] !== 'blob') throw new Error('Incomplete materialized-content proof')
-        offset = headerEnd + 1
-        // Git reports the raw object size even with --filters. The expected actual byte count
-        // safely delimits the proof: every digest, terminator, next header and final length must match.
-        if (hash(materialized.subarray(offset, offset + entry.bytes)) !== entry.digest || materialized[offset + entry.bytes] !== 0) throw new Error('Tracked bytes cannot be reconstructed exactly from the retained result')
-        offset += entry.bytes + 1
+      // A file the snapshot holds in exact bytes is compared with them as they are; the others as Git writes them.
+      const exact = new Map<string, string>()
+      if (options.exactTree) for (const line of (await lifecycleReadAsync(path, ['ls-tree', '-r', '-z', options.exactTree], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) exact.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf('\t')).split(' ')[2]!)
+      for (const raw of [false, true]) {
+        const group = files.filter((entry) => exact.has(entry.path) === raw)
+        if (!group.length) continue
+        const blob = (entry: (typeof files)[number]): string => raw ? exact.get(entry.path)! : tracked.get(entry.path)!.sha
+        // Without `--filters` Git reads the whole line as the object's name, so no path follows it there.
+        const argv = await withoutRepoProgramsAsync(path, ['cat-file', '--batch', ...(raw ? [] : ['--filters']), '-Z'])
+        const ran = await runGitProcess(argv, { cwd: path, env: repoProgramEnv(), input: group.map((entry) => (raw ? `${blob(entry)}\0` : `${blob(entry)} ${entry.path}\0`)).join(''), timeout: 30_000, maxBuffer: 600 * 1024 * 1024 })
+        if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+        const materialized = ran.stdoutBytes
+        let offset = 0
+        for (const entry of group) {
+          const headerEnd = materialized.indexOf(0, offset)
+          const header = materialized.subarray(offset, headerEnd).toString('utf8').split(' ')
+          if (headerEnd < offset || header[0] !== blob(entry) || header[1] !== 'blob') throw new Error('Incomplete materialized-content proof')
+          offset = headerEnd + 1
+          // Git reports the raw object size even with --filters. The expected actual byte count
+          // safely delimits the proof: every digest, terminator, next header and final length must match.
+          if (hash(materialized.subarray(offset, offset + entry.bytes)) !== entry.digest || materialized[offset + entry.bytes] !== 0) throw new Error('Tracked bytes cannot be reconstructed exactly from the retained result')
+          offset += entry.bytes + 1
+        }
+        if (offset !== materialized.length) throw new Error('Materialized result has unexpected bytes')
       }
-      if (offset !== materialized.length) throw new Error('Materialized result has unexpected bytes')
     }
     for (const entry of entries) {
       if (entry.kind === 'directory') continue

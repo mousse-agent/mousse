@@ -29,8 +29,8 @@ describe('turn checkpoints and compensating undo', () => {
       threadId: 'thread', turnId: 'turn', conversationBranchId: 'main', workspacePath: repo,
       presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
     }, () => { writeFileSync(join(repo, 'value.txt'), 'changed\n'); writeFileSync(join(repo, 'new.txt'), 'new\n') })
-    // The turn runs between two snapshots, whose parent is the HEAD they were taken on; nothing is committed on the branch.
-    expect(execFileSync('git', ['rev-parse', `${action.startSha}^`], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
+    // The turn runs between two snapshots, each on the HEAD it was taken on (snapshot → its exact bytes → HEAD); nothing is committed on the branch.
+    expect(execFileSync('git', ['rev-parse', `${action.startSha}^^`], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
     expect(action.endSha).not.toBe(action.startSha)
     expect(action.commits).toEqual([])
     expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)

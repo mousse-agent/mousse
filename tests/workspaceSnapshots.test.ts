@@ -61,9 +61,9 @@ describe('turns are recorded as private snapshots', () => {
     // The snapshot has all of it, and its parent is HEAD, so it is reachable from no branch.
     expect(git(cwd, 'show', `${action.endSha}:value.txt`)).toBe('staged\nthen edited')
     expect(git(cwd, 'show', `${action.endSha}:agent.txt`)).toBe('agent')
-    expect(git(cwd, 'rev-parse', `${action.endSha}^`)).toBe(head)
+    expect(git(cwd, 'rev-parse', `${action.endSha}^^`)).toBe(head)
     expect(git(cwd, 'branch', '--contains', action.endSha)).toBe('')
-    expect(git(cwd, 'log', '-1', '--format=%B', action.endSha)).toMatch(/^mousse snapshot: .*\n\nMousse-Thread: task\nMousse-Operation: .*\nMousse-Head: .*\nMousse-Branch: mousse\/thread-task$/)
+    expect(git(cwd, 'log', '-1', '--format=%B', action.endSha)).toMatch(/^mousse snapshot: .*\n\nMousse-Thread: task\nMousse-Operation: .*\nMousse-Head: .*\nMousse-Branch: mousse\/thread-task\nMousse-Bytes: exact$/)
   })
 
   it('pins the latest snapshot under the thread ref and keeps exactly the receipt’s before and after refs', async () => {

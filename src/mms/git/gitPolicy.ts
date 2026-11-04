@@ -302,6 +302,8 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^filter\..+\.(clean|smudge|process)$/, (value) => value === ''],
   [/^filter\..+\.required$/, () => true],
   [/^core\.(quotepath|autocrlf|eol|safecrlf|symlinks)$/, () => true],
+  // A snapshot's first exact index streams its new blobs into one pack instead of thousands of loose files (`snapshots.ts`).
+  [/^core\.bigfilethreshold$/, (value) => value === '1'],
   // Only restrictive values: `always` would open a protocol Git keeps closed by default.
   [/^protocol\.(.+\.)?allow$/, (value) => value === 'never' || value === 'user'],
   [/^credential\.interactive$/, (value) => value === 'false'],
@@ -656,8 +658,8 @@ function ghReads(args: readonly string[]): boolean {
 
 /** Private index files Mousse makes directly in a Git directory (the pending-changes snapshot). */
 const OWNED_INDEX_IN_GIT_DIR = /^mousse-[\w.-]+\.index$/
-/** Private index files Mousse makes in the Git directory's `mousse/` folder (turn snapshots, restore, preserve). */
-const OWNED_INDEX_IN_MOUSSE_DIR = /^(snapshot-index|(restore|preserve)-[\w.-]+\.index)$/
+/** Private index files Mousse makes in the Git directory's `mousse/` folder (turn snapshots and their exact bytes, restore, preserve). */
+const OWNED_INDEX_IN_MOUSSE_DIR = /^(snapshot-index|snapshot-exact-index|(restore|preserve)-[\w.-]+\.index)$/
 
 /**
  * A private index Mousse made: under the Mousse home, or one of its own index files in the Git directory of the

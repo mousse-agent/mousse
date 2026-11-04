@@ -123,11 +123,30 @@ test('trash expiry snapshots the folder, deletes it and its branch, and a restor
   // The branch is gone; its tip is the HEAD the pins keep, and the snapshot holds the files.
   expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
   expect(git(f.repo, ['show', `${retired.snapshotRef}:a.txt`])).toBe('edited in the trash')
-  expect(git(f.repo, ['rev-parse', `${retired.snapshotRef}^`])).toBe(trashed.resultSha)
+  // snapshot → its exact bytes → the HEAD it was taken on (`snapshots.ts`).
+  expect(git(f.repo, ['rev-parse', `${retired.snapshotRef}^^`])).toBe(trashed.resultSha)
   await f.service.reconstruct(f.path)
   expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited in the trash\n')
   expect(readFileSync(join(f.worktree, 'new.txt'), 'utf8')).toBe('new\n')
+})
+
+test('a rebuild writes the snapshot\'s exact bytes: CRLF files Git stores as LF come back as CRLF', async () => {
+  const f = await fixture()
+  git(f.repo, ['config', 'core.autocrlf', 'input'])
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  const edited = 'edited in the trash\r\n', added = 'new\r\nfile\r\n'
+  writeFileSync(join(trashed.trashPath!, 'a.txt'), edited); writeFileSync(join(trashed.trashPath!, 'new.txt'), added)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  // The snapshot holds Git's form; its exact bytes are the tree of its first parent.
+  expect(git(f.repo, ['show', `${retired.snapshotRef}:a.txt`])).toBe('edited in the trash')
+  expect(git(f.repo, ['log', '-1', '--format=%s', `${retired.snapshotRef}^`])).toBe('mousse snapshot: exact bytes')
+  await f.service.reconstruct(f.path)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe(edited)
+  expect(readFileSync(join(f.worktree, 'new.txt'), 'utf8')).toBe(added)
+  expect(JSON.parse(readFileSync(f.path, 'utf8'))).toMatchObject({ state: 'materialized' })
 })
 
 test('trash expiry asks whether the folder is in use before its snapshot, so a write that slips in then is in the snapshot', async () => {

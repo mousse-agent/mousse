@@ -114,15 +114,15 @@ export function restoreStagedCommand(ref: string, shell: RestoreShell = restoreS
 /**
  * One command for each of the first {@link RESTORE_COMMANDS_SHOWN} files, and how many are left for the same command.
  */
-export function restoreCommands<T extends { ref: string; path: string; kind?: RestoreKind }>(files: readonly T[], options: RestoreCommandOptions = {}): { commands: string[]; rest: T[] } {
+export function restoreCommands<T extends { ref: string; path: string; kind?: RestoreKind; normalized?: boolean }>(files: readonly T[], options: RestoreCommandOptions = {}): { commands: string[]; rest: T[] } {
   return {
-    commands: files.slice(0, RESTORE_COMMANDS_SHOWN).map((file) => restoreFileCommand(file.ref, file.path, { ...options, ...(file.kind ? { kind: file.kind } : {}) })),
+    commands: files.slice(0, RESTORE_COMMANDS_SHOWN).map((file) => restoreFileCommand(file.ref, file.path, { ...options, ...(file.kind ? { kind: file.kind } : {}), ...(file.normalized !== undefined ? { normalized: file.normalized } : {}) })),
     rest: files.slice(RESTORE_COMMANDS_SHOWN)
   }
 }
 
 /** The commands for `files` joined for a line of text: `a; b, and the same way for the other 3`. */
-export function restoreCommandsText(files: ReadonlyArray<{ ref: string; path: string; kind?: RestoreKind }>, options: RestoreCommandOptions = {}): string {
+export function restoreCommandsText(files: ReadonlyArray<{ ref: string; path: string; kind?: RestoreKind; normalized?: boolean }>, options: RestoreCommandOptions = {}): string {
   const { commands, rest } = restoreCommands(files, options)
   return commands.join('; ') + (rest.length ? `, and the same way for the other ${rest.length}` : '')
 }

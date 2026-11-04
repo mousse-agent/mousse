@@ -1,0 +1,61 @@
+/**
+ * What recording exact bytes costs a snapshot of 20,000 files, with and without conversions (`core.autocrlf=true`, as
+ * Git for Windows sets it), against snapshots without exact trees. Prints the times; run it on purpose with
+ * `MOUSSE_SNAPSHOT_PERF=1 npx vitest run tests/snapshotExactBytesPerf.test.ts`.
+ */
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+
+const FILES = 20_000
+const path = (index: number) => `packages/module-${String(index % 200).padStart(3, '0')}/src/file-${String(index).padStart(5, '0')}.ts`
+
+let f: ReturnType<typeof gitFoundationFixture>
+beforeAll(() => {
+  f = gitFoundationFixture()
+  // Every file its own blob, so a snapshot that reads them all hashes 20,000 files.
+  for (let index = 0; index < FILES; index++) {
+    const file = join(f.repo, path(index))
+    if (index < 200) mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, `export const value${index} = ${index}\nexport const next${index} = ${index + 1}\n`)
+  }
+  git(f.repo, 'add', '-A')
+  git(f.repo, 'commit', '-qm', 'many files')
+}, 600_000)
+afterAll(() => f.dispose())
+
+async function timed<T>(work: () => Promise<T>): Promise<number> {
+  const start = performance.now()
+  await work()
+  return Math.round(performance.now() - start)
+}
+
+describe.skipIf(!process.env.MOUSSE_SNAPSHOT_PERF)('snapshot time, 20,000 files', () => {
+  const results: string[] = []
+  afterAll(() => { process.stderr.write(`\n${results.join("\n")}\n`) })
+  for (const autocrlf of ['false', 'true']) {
+    for (const exact of [false, true]) {
+      it(`autocrlf=${autocrlf}, exact trees ${exact ? 'on' : 'off'}`, async () => {
+        git(f.repo, 'config', 'core.autocrlf', autocrlf)
+        const worktree = join(f.root, `wt-${autocrlf}-${exact}`)
+        git(f.repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD')
+        recordExactTrees(exact)
+        try {
+          const cold = await timed(() => takeSnapshotAsync(worktree, { reason: 'cold' }))
+          const warm: number[] = []
+          for (let round = 0; round < 3; round++) {
+            writeFileSync(join(worktree, path(round * 7)), `changed ${round}\n`)
+            warm.push(await timed(() => takeSnapshotAsync(worktree, { reason: `warm ${round}` })))
+          }
+          warm.sort((a, b) => a - b)
+          results.push(`autocrlf=${autocrlf} exact=${exact ? 'on ' : 'off'}: first snapshot ${cold} ms, next (one file changed, median of 3) ${warm[1]} ms`)
+          expect(cold).toBeGreaterThan(0)
+        } finally {
+          recordExactTrees(true)
+        }
+      }, 600_000)
+    }
+  }
+})
