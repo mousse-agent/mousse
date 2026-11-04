@@ -5,7 +5,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { build } from 'esbuild'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -407,4 +407,103 @@ describe('snapshots record exact bytes', { timeout: 60_000 }, () => {
     expect(packs()).toBe(before)
     expect(rawBlob(snapshot.exactTree, 'file-7.txt').toString()).toBe('line 7\r\n')
   })
+
+  // Review round 2.
+  for (const mode of ['autocrlf', 'ident'] as const) {
+    it(`content the merge made goes through Git's checkout conversion (${mode}), never written as it is stored`, async () => {
+      const middle = 'context 1\ncontext 2\ncontext 3\ncontext 4\ncontext 5\n'
+      if (mode === 'autocrlf') git(cwd, 'config', 'core.autocrlf', 'true')
+      else commitAttributes('value.txt ident')
+      const suffix = mode === 'ident' ? 'version $Id$\n' : ''
+      writeFileSync(join(cwd, 'value.txt'), `start\n${middle}end\n${suffix}`)
+      await turn(`agent\n${middle}end\n${suffix}`)
+      // The person edits the last line after the turn; Undo merges it with the restored first line.
+      writeFileSync(join(cwd, 'value.txt'), `agent\n${middle}personal\n${suffix}`)
+      await undo()
+      expect(bytes().equals(gitsForm(`start\n${middle}personal\n${suffix}`))).toBe(true)
+      expect(bytes().toString()).toBe(mode === 'autocrlf' ? `start\n${middle}personal\n`.replaceAll('\n', '\r\n') : bytes().toString())
+      if (mode === 'ident') expect(bytes().toString()).toMatch(/version \$Id: [0-9a-f]{40} \$/)
+    })
+  }
+
+  it('the size limit covers ident expansion: a file Git stores small but expands on disk is left out and named', async () => {
+    commitAttributes('value.txt ident')
+    EXACT_LIMITS.fileBytes = 1500
+    // 35 lines of `$Id$` are 175 bytes stored, under an eighth of the limit; expanded on disk they are 1,680 bytes.
+    writeFileSync(join(cwd, 'value.txt'), gitsForm('$Id$\n'.repeat(35)))
+    expect(bytes().length).toBeGreaterThan(1500)
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'size' })
+    expect(snapshot.coverageGaps).toContainEqual({ path: 'value.txt', reason: "over 1 KB, so only Git's form of it is kept" })
+    expect(git(cwd, 'ls-tree', '--name-only', snapshot.exactTree!, '--', 'value.txt')).toBe('')
+  })
+
+  it('under autocrlf=true, a restore that only creates a file writes it as it was: an added LF file after Undo and Redo, a deleted one after Undo', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    writeFileSync(join(cwd, 'other.txt'), 'other\nfile\n'); git(cwd, 'add', 'other.txt'); git(cwd, 'commit', '-qm', 'other')
+    // Written by tools as LF, never checked out by Git.
+    writeFileSync(join(cwd, 'other.txt'), 'other\nfile\n')
+    await turn(() => writeFileSync(join(cwd, 'new.txt'), 'new\nfile\n'))
+    await undo()
+    expect(existsSync(join(cwd, 'new.txt'))).toBe(false)
+    await redo()
+    expect(bytes('new.txt').toString()).toBe('new\nfile\n')
+    await turn(() => rmSync(join(cwd, 'other.txt')), 'value.txt', 'second')
+    await undo()
+    expect(bytes('other.txt').toString()).toBe('other\nfile\n')
+  })
+
+  it('recovery reads a finished create-only restore as finished', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    await turn(() => writeFileSync(join(cwd, 'new.txt'), 'new\nfile\n'))
+    await undo()
+    // The Redo writes the file, then stops before its result is recorded.
+    gitLauncher('*"redo turn"*', 'exit 1')
+    await expect(redo()).rejects.toThrow()
+    process.env.PATH = previousPath
+    expect(bytes('new.txt').toString()).toBe('new\nfile\n')
+    await new UndoService(f.thread).recoverPending(cwd, async () => {})
+    expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => entry.operationType === 'redo').map((entry) => entry.state)).toEqual(['completed'])
+    expect(bytes('new.txt').toString()).toBe('new\nfile\n')
+  })
+
+  it('with core.fileMode=false an executable script keeps its exec bit through Undo, Redo and Undo of its removal', async () => {
+    writeFileSync(join(cwd, 'run.sh'), 'echo a\n'); chmodSync(join(cwd, 'run.sh'), 0o755)
+    git(cwd, 'add', 'run.sh'); git(cwd, 'commit', '-qm', 'script')
+    git(cwd, 'config', 'core.fileMode', 'false'); git(cwd, 'config', 'core.autocrlf', 'true')
+    writeFileSync(join(cwd, 'crlf.txt'), 'unrelated\r\n')
+    const mode = () => statSync(join(cwd, 'run.sh')).mode & 0o777
+    const action = await turn('echo agent\n', 'run.sh')
+    expect(git(cwd, 'ls-tree', (await exactTreeOfAsync(cwd, action.startSha))!, '--', 'run.sh').split(' ')[0]).toBe('100755')
+    await undo()
+    expect([bytes('run.sh').toString(), mode()]).toEqual(['echo a\n', 0o755])
+    await redo()
+    expect([bytes('run.sh').toString(), mode()]).toEqual(['echo agent\n', 0o755])
+    await turn(() => rmSync(join(cwd, 'run.sh')), 'value.txt', 'second')
+    await undo()
+    expect([bytes('run.sh').toString(), mode()]).toEqual(['echo agent\n', 0o755])
+  })
+
+  for (const variant of ['committed', 'ignored'] as const) {
+    it(`a filter line the agent drops never puts the file's plaintext in .git/objects (${variant} .gitattributes)`, async () => {
+      git(cwd, 'config', 'filter.crypt.clean', 'base64'); git(cwd, 'config', 'filter.crypt.smudge', 'base64 -d'); trustRepositoryPrograms(cwd)
+      const plaintext = `secret plaintext ${Date.now()}\n`
+      if (variant === 'ignored') writeFileSync(join(cwd, '.git', 'info', 'exclude'), '.gitattributes\n')
+      writeFileSync(join(cwd, '.gitattributes'), 'secret.txt filter=crypt\n*.txt text\n')
+      writeFileSync(join(cwd, 'secret.txt'), plaintext)
+      git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'secret')
+      // Times in the past, so Git's stat cache trusts the files and never reads them again.
+      const then = new Date(Date.now() - 30_000)
+      for (const path of ['secret.txt', '.gitattributes', 'value.txt']) utimesSync(join(cwd, path), then, then)
+      await takeSnapshotAsync(cwd, { reason: 'first' })
+      expect(stored(plaintext)).toBe(false)
+      // The agent drops the filter line (as `git lfs untrack` does), leaving the decrypted file as it is.
+      await turn(() => writeFileSync(join(cwd, '.gitattributes'), '*.txt text\n'), '.gitattributes')
+      expect(stored(plaintext)).toBe(false)
+      await undo()
+      expect(stored(plaintext)).toBe(false)
+      // An ignored file is no snapshot's, so Undo leaves it as the agent left it; a committed one comes back.
+      expect(bytes('.gitattributes').toString()).toBe(variant === 'committed' ? 'secret.txt filter=crypt\n*.txt text\n' : '*.txt text\n')
+      expect(bytes('secret.txt').toString()).toBe(plaintext)
+    })
+  }
 })

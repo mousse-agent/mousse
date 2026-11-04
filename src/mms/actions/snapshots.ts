@@ -554,12 +554,9 @@ function* conversionSteps(top: string, files: PrivateFiles, paths: readonly stri
   const filtered = new Set<string>()
   if (paths.length) {
     const env = source && modern ? { GIT_ATTR_SOURCE: source } : undefined
-    // For each path, in order, one `path NUL attribute NUL value NUL` per attribute asked.
-    const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERTING_ATTRIBUTES], env, paths.join('\0') + '\0', LISTING)).split('\0')
-    for (let at = 0; at + 2 < fields.length; at += 3) {
-      if (fields[at + 2] === 'unspecified' || fields[at + 2] === 'unset') continue
+    for (const [path, attribute] of yield* convertingAttributes(top, paths, env)) {
       converts = true
-      if (fields[at + 1] === 'filter') filtered.add(fields[at]!)
+      if (attribute === 'filter') filtered.add(path)
     }
   }
   if (source && !modern && !converts) converts = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', source], undefined, undefined, LISTING)).some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))
@@ -570,12 +567,21 @@ function* nonEmpty(path: string): Steps<boolean> {
   try { return (yield* disk.lstat(path)).size > 0 } catch { return false }
 }
 
-/** The paths of a `check-attr -z` listing (`path NUL attribute NUL value NUL` each) with any attribute set to something. */
-function attributeSet(listing: string): Set<string> {
-  const fields = listing.split('\0')
-  const set = new Set<string>()
-  for (let at = 0; at + 2 < fields.length; at += 3) if (fields[at + 2] !== 'unspecified' && fields[at + 2] !== 'unset') set.add(fields[at]!)
-  return set
+/**
+ * Each converting attribute (`CONVERTING_ATTRIBUTES`) set on one of `paths`, as `[path, attribute]`: one `check-attr --all`,
+ * which prints only the attributes a path has, so a folder with no attributes costs no output at all. `args` go before
+ * `check-attr` (`EXACT_SETTINGS`), `env` with it (`GIT_ATTR_SOURCE`, a private index for `--cached`).
+ */
+function* convertingAttributes(top: string, paths: readonly string[], env?: NodeJS.ProcessEnv, args: readonly string[] = [], cached = false): Steps<Array<[string, string]>> {
+  if (!paths.length) return []
+  // `path NUL attribute NUL value NUL` for each attribute set on each path.
+  const fields = (yield* gitStep(top, [...args, 'check-attr', '-z', '--stdin', ...(cached ? ['--cached'] : []), '--all'], env, paths.join('\0') + '\0', LISTING)).split('\0')
+  const found: Array<[string, string]> = []
+  for (let at = 0; at + 2 < fields.length; at += 3) {
+    if (!(CONVERTING_ATTRIBUTES as readonly string[]).includes(fields[at + 1]!) || fields[at + 2] === 'unspecified' || fields[at + 2] === 'unset') continue
+    found.push([fields[at]!, fields[at + 1]!])
+  }
+  return found
 }
 
 const EXACT_TOO_LARGE = (): string => `over ${sizeText(EXACT_LIMITS.fileBytes)}, so only Git's form of it is kept`
@@ -590,7 +596,7 @@ interface SizedEntry { path: string; mode: string; sha: string; size: number }
  * Git's form, named as gaps. The paths come from `normal`, so the walk, the coverage-gap loop and `followTrackedFiles`
  * run once for both. Undefined when it cannot be made: the snapshot is then recorded as before, without one.
  */
-function* exactTreeSteps(top: string, files: PrivateFiles, normal: string): Steps<{ tree: string; gaps: CoverageGap[] } | undefined> {
+function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[] } | undefined> {
   if (!exactTreesRecorded) return undefined
   // `<mode> <type> <object> <size>\t<path>`, the size padded with spaces.
   const entries: SizedEntry[] = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '-l', '--full-tree', normal], undefined, undefined, LISTING)).map((line) => {
@@ -600,17 +606,55 @@ function* exactTreeSteps(top: string, files: PrivateFiles, normal: string): Step
   })
   const conversion = yield* conversionSteps(top, files, entries.filter((entry) => isFile(entry.mode)).map((entry) => entry.path))
   if (!conversion.converts) return { tree: normal, gaps: [] }
+  const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
   try {
-    return yield* exactIndexTree(top, files.exactIndex, entries, conversion)
+    return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier)
   } catch {
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     yield* disk.remove(files.exactIndex)
     yield* disk.remove(`${files.exactIndex}.lock`)
-    try { return yield* exactIndexTree(top, files.exactIndex, entries, conversion) } catch { return undefined }
+    try { return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier) } catch { return undefined }
   }
 }
 
-function* exactIndexTree(top: string, index: string, entries: readonly SizedEntry[], conversion: Conversion): Steps<{ tree: string; gaps: CoverageGap[] }> {
+/** What came before a snapshot: HEAD, and the previous snapshot in this worktree (`snapshot-last.json`). */
+interface Earlier { head: string | undefined; previous: LastSnapshot | undefined; directory: string }
+
+/**
+ * Of `paths`, which the exact index does not have yet, those it must still leave out because a filter applied to them
+ * before: HEAD's or the previous snapshot's attributes give them a `filter` (`GIT_ATTR_SOURCE` from Git 2.40; before,
+ * `check-attr --cached` over a private index of that tree), or the previous snapshot left them out of its exact tree
+ * and Git's form of them has not changed since. A filter line the agent dropped (`git lfs untrack`) then never puts the
+ * decrypted file or LFS media into `.git/objects`: while the file is unchanged, Git's own index still holds its filtered
+ * blob and never reads it again; once it changes, Git's form holds the new bytes anyway.
+ */
+function* filteredBefore(top: string, paths: readonly string[], now: ReadonlyMap<string, string>, earlier: Earlier): Steps<Set<string>> {
+  const left = new Set<string>()
+  if (!paths.length) return left
+  const modern = yield* readsAttrSource(top)
+  for (const source of new Set([earlier.head, earlier.previous?.tree].filter((tree): tree is string => Boolean(tree)))) {
+    if (modern) {
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_ATTR_SOURCE: source })) if (attribute === 'filter') left.add(path)
+      continue
+    }
+    const temporary = join(earlier.directory, `restore-attributes-${randomUUID()}.index`)
+    try {
+      yield* gitStep(top, ['read-tree', source], { GIT_INDEX_FILE: temporary })
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_INDEX_FILE: temporary }, [], true)) if (attribute === 'filter') left.add(path)
+    } finally {
+      yield* disk.remove(temporary)
+    }
+  }
+  const previous = earlier.previous
+  if (previous?.exact && previous.exact !== previous.tree) {
+    const before = yield* entriesAt(top, previous.tree, paths)
+    const exact = yield* entriesAt(top, previous.exact, paths)
+    for (const path of paths) if (before.has(path) && !exact.has(path) && before.get(path) === now.get(path)) left.add(path)
+  }
+  return left
+}
+
+function* exactIndexTree(top: string, index: string, entries: readonly SizedEntry[], conversion: Conversion, earlier: Earlier): Steps<{ tree: string; gaps: CoverageGap[] }> {
   const empty = yield* emptyTreeSteps(top)
   const env = exactEnv(empty, index)
   const links = entries.filter((entry) => entry.mode === '160000')
@@ -618,32 +662,42 @@ function* exactIndexTree(top: string, index: string, entries: readonly SizedEntr
   const gaps: CoverageGap[] = []
   // A path under a filter keeps Git's form, unnamed: that form round-trips, and its raw bytes are LFS media or plaintext.
   const left = new Set(conversion.filtered)
-  // The limit is on the bytes on disk, which a conversion can make up to four times the stored size (UTF-32): only files
-  // stored at over an eighth of it are measured.
-  const large = files.filter((entry) => !left.has(entry.path) && entry.size > EXACT_LIMITS.fileBytes / 8)
-  const sizes = yield* fileSizes(large.map((entry) => join(top, entry.path)))
-  for (const [at, entry] of large.entries()) {
+  // The limit is on the bytes on disk, which a conversion can make many times the stored size (`ident` expands each
+  // `$Id$` twelvefold): every file is measured.
+  const measured = files.filter((entry) => !left.has(entry.path))
+  const sizes = yield* fileSizes(measured.map((entry) => join(top, entry.path)))
+  for (const [at, entry] of measured.entries()) {
     if ((sizes[at] ?? entry.size) > EXACT_LIMITS.fileBytes) { left.add(entry.path); gaps.push({ path: entry.path, reason: EXACT_TOO_LARGE() }) }
   }
   const modern = yield* readsAttrSource(top)
   const rest = files.map((entry) => entry.path).filter((path) => !left.has(path))
   if (rest.length && (conversion.infoAttributes || !modern)) {
-    const listing = yield* gitStep(top, [...EXACT_SETTINGS, 'check-attr', '-z', '--stdin', ...CONVERTING_ATTRIBUTES], exactEnv(empty), rest.join('\0') + '\0', LISTING)
-    for (const path of attributeSet(listing)) { left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT }) }
+    for (const path of new Set((yield* convertingAttributes(top, rest, exactEnv(empty), EXACT_SETTINGS)).map(([path]) => path))) {
+      left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
+    }
   }
+  // What the exact index has: `mode sha stage\tpath`.
+  const present = new Map((yield* disk.exists(index)) ? nul(yield* gitStep(top, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: index }, undefined, LISTING)).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))] as const) : [])
+  const normal = new Map(entries.map((entry) => [entry.path, `${entry.mode} ${entry.sha}`]))
+  // A path new to the exact index stays out while a filter applied to it before (see `filteredBefore`).
+  for (const path of yield* filteredBefore(top, files.map((entry) => entry.path).filter((path) => !left.has(path) && !present.has(path)), normal, earlier)) left.add(path)
   const wanted = entries.filter((entry) => entry.mode !== '160000' && !left.has(entry.path)).map((entry) => entry.path)
   const keep = new Set([...wanted, ...links.map((entry) => entry.path)])
   // Entries the snapshot's tree no longer has (or keeps only in Git's form) go first, so a path that became a folder can be added.
-  const present = (yield* disk.exists(index)) ? nul(yield* gitStep(top, ['ls-files', '-z'], { GIT_INDEX_FILE: index }, undefined, LISTING)) : []
-  const stale = present.filter((path) => !keep.has(path))
+  const stale = [...present.keys()].filter((path) => !keep.has(path))
   if (stale.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0')
-  if (links.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--index-info'], env, links.map((entry) => `160000 ${entry.sha}\t${entry.path}`).join('\0') + '\0')
+  // A file new to the exact index, or whose mode Git's form changed, starts from Git's form's entry: `update-index --add`
+  // then reads its bytes (the entry has no stat data) but keeps that mode where `core.fileMode` is false, so an
+  // executable script stays executable. Nested repositories are recorded by their commit, as Git's form has them.
+  const seeded = files.filter((entry) => !left.has(entry.path) && present.get(entry.path) !== entry.mode).map((entry) => `${entry.mode} ${entry.sha}\t${entry.path}`)
+  const seed = [...seeded, ...links.map((entry) => `160000 ${entry.sha}\t${entry.path}`)]
+  if (seed.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--index-info'], env, seed.join('\0') + '\0')
   // A file whose stat data matches its entry is not read again: the stat cache keeps the next snapshot fast. The first
   // build reads every file, and in a repository that converts most of their exact bytes are new blobs: from Git 2.37
   // those go into one pack (Git's bulk check-in, for files over `core.bigFileThreshold` that need no conversion) instead
   // of one loose file each, which on a slow disk takes seconds for 20,000 files. Older Gits write them loose, as later
   // snapshots write their few new blobs.
-  const bulk = !present.length && (yield* bulkCheckinBatches(top)) ? ['-c', 'core.bigFileThreshold=1'] : []
+  const bulk = !present.size && (yield* bulkCheckinBatches(top)) ? ['-c', 'core.bigFileThreshold=1'] : []
   if (wanted.length) yield* gitStep(top, [...EXACT_SETTINGS, ...bulk, 'update-index', '-z', '--add', '--remove', '--stdin'], env, wanted.join('\0') + '\0')
   return { tree: yield* gitStep(top, [...EXACT_SETTINGS, 'write-tree'], env), gaps }
 }
@@ -653,7 +707,9 @@ function* commitSnapshot(top: string, tree: string, exactTree: string | undefine
   const exact = exactTree ? yield* gitStep(top, ['commit-tree', exactTree, ...(head ? ['-p', head] : []), '-m', EXACT_SUBJECT], MOUSSE_COMMIT_ENV) : undefined
   const message = [...trailers, ...(exact ? [EXACT_LINE] : [])].filter(Boolean).join('\n')
   const parent = exact ?? head
-  return yield* gitStep(top, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', subject, ...(message ? ['-m', message] : [])], MOUSSE_COMMIT_ENV)
+  const sha = yield* gitStep(top, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', subject, ...(message ? ['-m', message] : [])], MOUSSE_COMMIT_ENV)
+  rememberExactTree(sha, exactTree)
+  return sha
 }
 
 /**
@@ -668,14 +724,16 @@ export function* exactTreeOfSteps(cwd: string, sha: string): Steps<string | unde
   if (!read.ok) return undefined
   const [snapshot, inner] = read.stdout.split('\x01').map((record) => record.replace(/^\n/, '')).map((record) => { const at = record.indexOf('\0'); return { tree: record.slice(0, at), body: record.slice(at + 1) } })
   const recorded = snapshot && snapshot.body.startsWith(SUBJECT) && snapshot.body.split('\n').includes(EXACT_LINE) && inner?.body.trim() === EXACT_SUBJECT && /^[0-9a-f]{40,64}$/.test(inner.tree) ? inner.tree : undefined
-  if (full) {
-    if (exactTrees.size >= EXACT_TREES_KEPT) exactTrees.delete(exactTrees.keys().next().value!)
-    exactTrees.set(sha, recorded)
-  }
+  if (full) rememberExactTree(sha, recorded)
   return recorded
 }
 const exactTrees = new Map<string, string | undefined>()
 const EXACT_TREES_KEPT = 4096
+/** Keeps what `exactTreeOfSteps` answers for snapshot `sha`: a commit never changes. */
+function rememberExactTree(sha: string, exactTree: string | undefined): void {
+  if (exactTrees.size >= EXACT_TREES_KEPT) exactTrees.delete(exactTrees.keys().next().value!)
+  exactTrees.set(sha, exactTree)
+}
 
 export function exactTreeOfAsync(cwd: string, sha: string): Promise<string | undefined> {
   return runAsync(exactTreeOfSteps(cwd, sha))
@@ -692,7 +750,7 @@ export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = 
   const files = yield* privateFiles(top)
   const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
   if (options.exact === false || activeHiddenStore(top)) return { tree }
-  const exact = yield* exactTreeSteps(top, files, tree)
+  const exact = yield* exactTreeSteps(top, files, tree, yield* headOf(top))
   return { tree, ...(exact ? { exactTree: exact.tree } : {}) }
 }
 
@@ -723,7 +781,7 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
-  const exact = hidden ? undefined : yield* exactTreeSteps(top, files, tree)
+  const exact = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
   // What only Git's form of is kept is named with the rest, but never recorded as not covered: a restore writes it.
   const named = [...coverageGaps, ...(exact?.gaps ?? [])]
   const state = { tree, ...(exact ? { exactTree: exact.tree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
@@ -1090,17 +1148,18 @@ function* treeChanges(top: string, from: string, to: string): Steps<Map<string, 
  * whole from `theirs` gets `theirs`' exact bytes. A path whose content the merge made, or that `theirs` holds only in
  * Git's form (a snapshot from before exact trees, a path under a filter), is left out: Git writes it, converting as a
  * checkout would. A path the merge leaves alone keeps the bytes it has, or gets `theirs`' exact bytes when only those
- * changed (line endings, say) and nothing changed them since. When the files on both sides were exactly Git's form,
- * the result's Git form is its exact form too, merged content included: it is written as it is, never converted.
+ * changed (line endings, say) and nothing changed them since. Exact bytes are only ever blobs taken whole from a
+ * snapshot's exact tree: content the merge made is always written by Git, converted as a checkout would.
  */
 function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string, target: string): Steps<ExactMove | undefined> {
   const oursExact = yield* exactTreeOfSteps(top, input.ours)
   if (!oursExact) return undefined
   const theirsExact = yield* exactTreeOfSteps(top, input.theirs)
   const theirs = yield* treeOfSteps(top, input.theirs)
-  // Nothing on disk differed from Git's form on either side: the result's Git form is its exact form, as it is.
-  if (oursExact === ours && theirsExact === theirs) return { from: ours, to: target }
-  const baseExact = theirsExact ? yield* exactTreeOfSteps(top, input.base) : undefined
+  // Both sides' exact trees are their Git forms: no path's bytes on disk differed from Git's form. Then no change of
+  // exact bytes alone can be restored, and `theirs`' exact entries are its own.
+  const plain = oursExact === ours && theirsExact === theirs
+  const baseExact = theirsExact && !plain ? yield* exactTreeOfSteps(top, input.base) : undefined
   const remove: string[] = []
   const set = new Map<string, string>()
   // Only the paths that change are looked up, never whole trees.
@@ -1108,7 +1167,7 @@ function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string,
   const rawOnly = baseExact && theirsExact ? [...(yield* treeChanges(top, baseExact, theirsExact))].filter(([path]) => !changed.has(path)) : []
   const looked = [...changed.keys(), ...rawOnly.map(([path]) => path)]
   const theirsNormal = yield* entriesAt(top, theirs, looked)
-  const theirsRaw = theirsExact ? yield* entriesAt(top, theirsExact, changed.keys()) : new Map<string, string>()
+  const theirsRaw = theirsExact === theirs ? theirsNormal : theirsExact ? yield* entriesAt(top, theirsExact, changed.keys()) : new Map<string, string>()
   for (const [path, [, wanted]] of changed) {
     if (wanted && wanted === theirsNormal.get(path) && theirsRaw.has(path)) set.set(path, theirsRaw.get(path)!)
     else remove.push(path)
@@ -1124,6 +1183,9 @@ function* exactTargetSteps(top: string, input: RestoreChangeInput, ours: string,
     }
   }
   if (!remove.length && !set.size) return { from: oursExact, to: oursExact }
+  // Every path the result writes is taken whole, as Git's form, from a side whose exact tree is its Git form: the target
+  // is its own exact tree. A blob the merge made is never that: it is left out, and Git writes it with its conversion.
+  if (oursExact === ours && [...changed].every(([path, [, wanted]]) => !wanted || set.get(path) === wanted) && !rawOnly.some(([path]) => set.has(path))) return { from: ours, to: target }
   const temporary = join((yield* privateFiles(top)).directory, `restore-exact-${randomUUID()}.index`)
   const env = { GIT_INDEX_FILE: temporary }
   try {
@@ -1313,8 +1375,10 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
   const normalChanged = yield* treeChanges(top, from, to)
   for (const [path, [before, after]] of normalChanged) changes.set(path, changeOf(before, after, zeros))
   const normalTouched = [...changes.keys()]
-  let converted = yield* convertedPaths(top, normalTouched, normalTouched.filter((path) => isFile(changes.get(path)!.fromMode)))
-  const exactly = exact && (exact.from !== from || exact.to !== to || converted.length) ? exact : undefined
+  // Files on either side count for an exact move: a restore that only creates or only removes files writes them too.
+  const convertedEither = yield* convertedPaths(top, normalTouched, normalTouched.filter((path) => isFile(changes.get(path)!.fromMode) || isFile(changes.get(path)!.toMode)))
+  let converted = convertedEither.filter((path) => isFile(changes.get(path)!.fromMode))
+  const exactly = exact && (exact.from !== from || exact.to !== to || convertedEither.length) ? exact : undefined
   /** Paths whose bytes on disk are already the result's, with `from`'s entry for Git's step (see `writeConvertedAsync`). */
   const stay = new Map<string, string | undefined>()
   let rawNew: string[] = []
@@ -1406,12 +1470,8 @@ function* convertedPaths(top: string, touched: string[], files: string[]): Steps
   // A bare `autocrlf` key reads as true.
   if (autocrlf.ok && !/^(false|no|off|0)$/i.test(autocrlf.stdout.trim())) return files
   if (touched.some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))) return files
-  // For each path, in order, one `path NUL attribute NUL value NUL` per attribute asked.
-  const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERTING_ATTRIBUTES], undefined, files.join('\0') + '\0', LISTING)).split('\0')
-  return files.filter((_, index) => CONVERTING_ATTRIBUTES.some((__, attribute) => {
-    const value = fields[(index * CONVERTING_ATTRIBUTES.length + attribute) * 3 + 2]
-    return value !== undefined && value !== 'unspecified' && value !== 'unset'
-  }))
+  const converting = new Set((yield* convertingAttributes(top, files)).map(([path]) => path))
+  return files.filter((path) => converting.has(path))
 }
 
 /** A step that runs only without blocking the daemon, as every restore does. */
