@@ -1,6 +1,6 @@
 import { createHash, randomUUID, type Hash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { lstat, open, readFile, readlink, rm, stat, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
+import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { lstat, open, readdir, readFile, readlink, rm, stat, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
@@ -80,6 +80,15 @@ export interface KeepCopyInput {
   includeIgnored?: boolean
   /** With `paths`: paths that are no longer there (a folder that became a file, say), left out of the copy's index. */
   gone?: readonly string[]
+  /**
+   * Repository-relative paths the action puts `target`'s version back at. Git removes whatever is in the way there first,
+   * and the copy keeps that too ({@link obstructionsOf}): a folder standing where `target` has a file, with every file
+   * in it, ignored ones included, and a file or link standing where `target` needs a folder. Without `paths`, every path
+   * a whole-tree discard writes ({@link pendingWrites}); with `paths`, none unless named.
+   */
+  writes?: readonly string[]
+  /** The commit whose versions the action writes at `writes`. HEAD by default. */
+  target?: string
 }
 
 /** A copy cannot be kept, so the action was refused before anything changed. Its message names the files. */
@@ -94,8 +103,8 @@ export class KeepCopyRefusedError extends Error {
 /** A copy would be larger than {@link KEEP_COPY_LIMITS}. */
 export class KeepCopyTooLargeError extends KeepCopyRefusedError {
   override readonly code = 'keep_copy_too_large'
-  constructor(action: string, readonly bytes: number, readonly largest: ReadonlyArray<{ path: string; bytes: number }>) {
-    super(`${action} would remove ${sizeText(bytes)} of files, more than the ${sizeText(KEEP_COPY_LIMITS.bytes)} Mousse keeps a copy of. The largest: ${largest.map((item) => `${item.path} (${sizeText(item.bytes)})`).join(', ')}. Nothing was changed. Move or commit the largest files first, then try again.`, largest.map((item) => item.path))
+  constructor(action: string, readonly bytes: number, readonly largest: ReadonlyArray<{ path: string; bytes: number }>, atLeast = false) {
+    super(`${action} would remove ${atLeast ? 'at least ' : ''}${sizeText(bytes)} of files, more than the ${sizeText(KEEP_COPY_LIMITS.bytes)} Mousse keeps a copy of. The largest: ${largest.map((item) => `${item.path} (${sizeText(item.bytes)})`).join(', ')}. Nothing was changed. Move or commit the largest files first, then try again.`, largest.map((item) => item.path))
     this.name = 'KeepCopyTooLargeError'
   }
 }
@@ -194,11 +203,10 @@ class PackFile {
   }
 
   /**
-   * Adds a large file as a blob, read and compressed in pieces, and returns its object id. A file whose size changes
-   * while it is read is refused: its copy would not be the file.
+   * Adds a large file, open as `file` (which it closes), as a blob, read and compressed in pieces, and returns its object
+   * id. A file whose size changes while it is read is refused: its copy would not be the file.
    */
-  async addLargeFile(absolute: string, path: string): Promise<{ id: string; sha256: string }> {
-    const file = await open(absolute, 'r')
+  async addLargeFile(file: FileHandle, path: string): Promise<{ id: string; sha256: string }> {
     try {
       const size = (await file.stat()).size
       const id: Hash = createHash(this.algorithm).update(`blob ${size}\0`)
@@ -327,21 +335,284 @@ export async function keepExistingCommit(input: { owner: string; top: string; op
 // ---------------------------------------------------------------------------------------------------------
 // Keeping a copy
 
-interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean }
+interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean; dev?: number; ino?: number }
 
-async function entryOf(top: string, path: string): Promise<Entry> {
-  const info = await lstat(join(top, path)).catch(() => undefined)
-  if (!info) return { path, kind: 'gone', bytes: 0 }
-  if (info.isSymbolicLink()) return { path, kind: 'link', bytes: info.size }
-  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0 }
-  if (info.isDirectory()) return { path, kind: existsSync(join(top, path, '.git')) ? 'repository' : 'folder', bytes: 0 }
-  return { path, kind: 'other', bytes: 0 }
+/** What `lstat` finds at each folder above a path, asked once per folder. */
+type Parents = Map<string, Promise<Entry>>
+
+/** How many entries are looked at, or folders asked about, at once. */
+const LOOK_AHEAD = 64
+/** How many times a folder in the way that changes while it is walked is walked again before the action is refused. */
+const WALK_ATTEMPTS = 3
+/** Most characters of paths one Git command line carries (Windows allows 32K for the whole line). */
+const COMMAND_LINE_PATHS = 8000
+
+/** The first folder above `path` that is not a real folder on disk (a file, a link, or nothing), if any. */
+async function blockedParent(top: string, path: string, parents: Parents): Promise<Entry | undefined> {
+  for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) {
+    const parent = path.slice(0, slash)
+    let found = parents.get(parent)
+    if (!found) parents.set(parent, found = lstatEntry(top, parent))
+    const entry = await found
+    if (entry.kind !== 'folder' && entry.kind !== 'repository') return entry
+  }
+  return undefined
 }
 
-async function entriesOf(top: string, paths: readonly string[]): Promise<Entry[]> {
+async function lstatEntry(top: string, path: string): Promise<Entry> {
+  const info = await lstat(join(top, path)).catch(() => undefined)
+  if (!info) return { path, kind: 'gone', bytes: 0 }
+  const id = { dev: info.dev, ino: info.ino }
+  if (info.isSymbolicLink()) return { path, kind: 'link', bytes: info.size, ...id }
+  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0, ...id }
+  if (info.isDirectory()) return { path, kind: await lstat(join(top, path, '.git')).then(() => true, () => false) ? 'repository' : 'folder', bytes: 0, ...id }
+  return { path, kind: 'other', bytes: 0, ...id }
+}
+
+/** The entry at `path`, never read through a link: a path below a link or a file is not there. */
+async function entryOf(top: string, path: string, parents: Parents): Promise<Entry> {
+  if (await blockedParent(top, path, parents)) return { path, kind: 'gone', bytes: 0 }
+  return lstatEntry(top, path)
+}
+
+async function entriesOf(top: string, paths: readonly string[], parents: Parents): Promise<Entry[]> {
   const result: Entry[] = []
-  for (let start = 0; start < paths.length; start += 64) result.push(...await Promise.all(paths.slice(start, start + 64).map((path) => entryOf(top, path))))
+  for (let start = 0; start < paths.length; start += LOOK_AHEAD) result.push(...await Promise.all(paths.slice(start, start + LOOK_AHEAD).map((path) => entryOf(top, path, parents))))
   return result
+}
+
+/** A pathspec that matches `path` itself, whatever characters it has. */
+const literal = (path: string): string => `:(literal)${path}`
+
+/** `listZ` over `paths` as literal pathspecs after `args`, a few thousand characters of them per command. */
+async function listZOver(top: string, args: string[], paths: readonly string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
+  const found: string[] = []
+  for (let start = 0; start < paths.length;) {
+    const batch: string[] = []
+    for (let length = 0; start < paths.length && (!batch.length || length + paths[start]!.length < COMMAND_LINE_PATHS); start++) {
+      batch.push(literal(paths[start]!))
+      length += paths[start]!.length + 11
+    }
+    found.push(...await listZ(top, [...args, '--', ...batch], env))
+  }
+  return found
+}
+
+/** What `ls-tree` says `target` has at each of `paths` (those it has): its mode. */
+async function modesIn(top: string, target: string, paths: readonly string[]): Promise<Map<string, string>> {
+  const modes = new Map<string, string>()
+  for (const line of await listZOver(top, ['ls-tree', '-z', target], paths)) modes.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
+  return modes
+}
+
+/** The bytes the copy holds so far, against {@link KEEP_COPY_LIMITS}: a walk stops as soon as they pass it. */
+interface Budget { counted: Array<{ path: string; bytes: number }>; bytes: number; action: string; /** Working versions counted. */ known: Set<string> }
+
+/** Counts the working version of `entry` once. */
+function count(budget: Budget, entry: Entry): void {
+  if (budget.known.has(entry.path) || !entry.bytes) return
+  budget.known.add(entry.path)
+  budget.counted.push({ path: entry.path, bytes: entry.bytes })
+  budget.bytes += entry.bytes
+}
+
+const changedWhileKept = (path: string): KeepCopyRefusedError =>
+  new KeepCopyRefusedError(`${path} changed while its copy was being kept. Nothing was changed; try again once it has stopped changing.`, [path])
+
+/** An error that means the path went, or stopped being what it was, while it was looked at. */
+const vanished = (error: unknown): boolean => ['ENOENT', 'ENOTDIR', 'EINVAL', 'ELOOP'].includes((error as NodeJS.ErrnoException)?.code ?? '')
+
+/** `info` is the entry first seen: the same device and inode. */
+const sameEntry = (entry: Entry, info: { dev: number; ino: number }): boolean => entry.ino === undefined || (info.ino === entry.ino && info.dev === entry.dev)
+
+/**
+ * Opens a kept file to read, never through a link: the path itself is not followed, and what opens must be the very file
+ * first seen there, so a folder above it that became a link meanwhile is caught too.
+ */
+async function openKept(top: string, entry: Entry): Promise<FileHandle> {
+  const file = await open(join(top, entry.path), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error: unknown) => {
+    throw vanished(error) ? changedWhileKept(entry.path) : error
+  })
+  const info = await file.stat().catch(async (error: unknown) => { await file.close(); throw error })
+  if (!info.isFile() || !sameEntry(entry, info)) {
+    await file.close()
+    throw changedWhileKept(entry.path)
+  }
+  return file
+}
+
+/** A kept link's target, read only while the link is the one first seen there. */
+async function readKeptLink(top: string, entry: Entry): Promise<Buffer> {
+  const absolute = join(top, entry.path)
+  try {
+    const before = await lstat(absolute)
+    const data = await readlink(absolute, { encoding: 'buffer' })
+    const after = await lstat(absolute)
+    if ([before, after].every((info) => info.isSymbolicLink() && sameEntry(entry, info))) return data
+  } catch (error) {
+    if (!vanished(error)) throw error
+  }
+  throw changedWhileKept(entry.path)
+}
+
+function tooLarge(budget: Budget, atLeast: boolean): KeepCopyTooLargeError {
+  const byPath = new Map<string, number>()
+  for (const item of budget.counted) byPath.set(item.path, (byPath.get(item.path) ?? 0) + item.bytes)
+  return new KeepCopyTooLargeError(budget.action, budget.bytes, [...byPath].map(([path, size]) => ({ path, bytes: size })).sort((a, b) => b.bytes - a.bytes).slice(0, NAMED_LARGEST), atLeast)
+}
+
+/** A folder in the way changed while it was walked: it is walked again from the path the action writes. */
+class FolderChanged extends Error {}
+
+/**
+ * Looks once at `path` and, when it is a folder to walk, at everything in it, by `lstat` only. Every folder is checked
+ * before it is listed and again after its entries were looked at: it and each folder above it must still be the real
+ * folder first seen there (same device and inode, not a link). A link is kept as a link and never followed; a file
+ * keeps the device and inode it was seen with, which the read checks again (`openKept`).
+ */
+async function lookAt(top: string, path: string, walk: boolean, write: string, budget: Budget): Promise<Entry[]> {
+  const seen = new Map<string, string>()
+  /** `folder` and every folder above it are the real folders first seen there. */
+  const intact = async (folder: string): Promise<boolean> => {
+    for (let end = folder.indexOf('/'); ; end = folder.indexOf('/', end + 1)) {
+      const at = end === -1 ? folder : folder.slice(0, end)
+      const info = await lstat(join(top, at)).catch(() => undefined)
+      if (!info?.isDirectory()) return false
+      const id = `${info.dev}:${info.ino}`
+      if ((seen.get(at) ?? id) !== id) return false
+      seen.set(at, id)
+      if (end === -1) return true
+    }
+  }
+  const slash = path.lastIndexOf('/')
+  if (slash !== -1 && !await intact(path.slice(0, slash))) {
+    // Something above `path` is not a folder: Git removes the first such file or link to write below it.
+    for (let end = path.indexOf('/'); end !== -1; end = path.indexOf('/', end + 1)) {
+      const entry = await lstatEntry(top, path.slice(0, end))
+      if (entry.kind === 'file' || entry.kind === 'link') { count(budget, entry); return [entry] }
+      if (entry.kind !== 'folder' && entry.kind !== 'repository') return []
+    }
+    throw new FolderChanged()
+  }
+  const self = await lstatEntry(top, path)
+  if (self.kind === 'file' || self.kind === 'link') { count(budget, self); return [self] }
+  if (!walk || (self.kind !== 'folder' && self.kind !== 'repository')) return []
+
+  const entries: Entry[] = []
+  const queue = [path]
+  while (queue.length) {
+    const folder = queue.shift()!
+    if (!await intact(folder)) throw new FolderChanged()
+    if (await lstat(join(top, folder, '.git')).then(() => true, () => false)) {
+      if (!await intact(folder)) throw new FolderChanged()
+      const where = folder === write ? `where Git would put the file ${write} back` : `inside ${write}, where Git would put a file back`
+      throw new KeepCopyRefusedError(`${budget.action} was stopped: ${folder} is a separate Git repository ${where}, and Git would delete it with its history. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
+    }
+    const names = await readdir(join(top, folder)).catch((error: unknown) => { throw vanished(error) ? new FolderChanged() : error })
+    for (let start = 0; start < names.length; start += LOOK_AHEAD) {
+      const found = await Promise.all(names.slice(start, start + LOOK_AHEAD).map((name) => lstatEntry(top, `${folder}/${name}`)))
+      for (const entry of found) {
+        if (entry.kind === 'folder' || entry.kind === 'repository') queue.push(entry.path)
+        else if (entry.kind === 'file' || entry.kind === 'link') {
+          entries.push(entry)
+          count(budget, entry)
+        }
+      }
+      if (budget.bytes > KEEP_COPY_LIMITS.bytes) throw tooLarge(budget, true)
+    }
+    if (!await intact(folder)) throw new FolderChanged()
+  }
+  return entries
+}
+
+/**
+ * What Git removes to write `target`'s versions at `writes`, as entries to keep:
+ * - a file or link standing where `target` has a folder (`docs`, for `docs/a.txt`). A link is kept as a link and never
+ *   followed;
+ * - a folder standing where `target` has a file or link, walked by `lstat` ({@link lookAt}) with every file and link
+ *   in it, ignored ones included, never through a link.
+ * - a file or link at a written path itself, which Git writes over: one no listing names, ignored and no longer in
+ *   the index, included.
+ *
+ * A path where `target` has a submodule is left alone: Git records the submodule's commit there and never removes its
+ * folder. A folder where `target` has nothing is left too, as Git leaves it. A repository of its own in a folder Git
+ * would remove is refused, naming it, because Git would delete its history with it; so is one the index records as a
+ * submodule where `target` has a file, and one it records as a submodule where `target` has a folder, whose files Git
+ * would write over. A folder that keeps changing while it is walked is refused after
+ * {@link WALK_ATTEMPTS} walks. `target` is asked only about the paths something stands in the way of, and about each
+ * blocking file or link once, however many paths lie below it. The walked bytes count toward `budget`.
+ */
+async function obstructionsOf(top: string, writes: readonly string[], target: string, budget: Budget, parents: Parents): Promise<{ entries: Entry[]; parents: Set<string> }> {
+  const blocked = new Set<string>()
+  const folders: string[] = []
+  const entries = new Map<string, Entry>()
+  // Separate repositories that written paths lie inside, with one such path each.
+  const containing = new Map<string, string>()
+  const unique = [...new Set(writes.map((path) => path.replace(/\/+$/, '')).filter(Boolean))]
+  for (let start = 0; start < unique.length; start += LOOK_AHEAD) {
+    await Promise.all(unique.slice(start, start + LOOK_AHEAD).map(async (path) => {
+      const parent = await blockedParent(top, path, parents)
+      if (parent) {
+        if (parent.kind === 'file' || parent.kind === 'link') blocked.add(parent.path)
+        return
+      }
+      for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) {
+        if ((await parents.get(path.slice(0, slash)))?.kind === 'repository') {
+          if (!containing.has(path.slice(0, slash))) containing.set(path.slice(0, slash), path)
+          break
+        }
+      }
+      const entry = await lstatEntry(top, path)
+      if (entry.kind === 'folder' || entry.kind === 'repository') folders.push(path)
+      // A file or link where the action writes is overwritten, so it is kept, though no listing names it: one Git
+      // ignores and the index no longer has (`git rm --cached`, then ignored), say.
+      else if (entry.kind === 'file' || entry.kind === 'link') {
+        entries.set(path, entry)
+        count(budget, entry)
+      }
+    }))
+  }
+  if (containing.size) {
+    // A repository the index stages as a submodule where `target` has a folder: Git writes `target`'s files over its own.
+    const staged = new Map<string, string>()
+    for (const line of await listZOver(top, ['ls-files', '-z', '-s'], [...containing.keys()])) staged.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
+    const inTarget = await modesIn(top, target, [...containing.keys()])
+    for (const [folder, write] of containing) {
+      if (staged.get(folder) !== '160000' || inTarget.get(folder) !== '040000') continue
+      throw new KeepCopyRefusedError(`${budget.action} was stopped: ${folder} is a separate Git repository where Git would put the folder ${folder} back, and Git would write over its files, ${write} among them. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
+    }
+  }
+  if (!blocked.size && !folders.length) return { entries: [...entries.values()], parents: new Set() }
+
+  // A file or link is in the way where `target` has a folder; a folder, where it has a file or link. A submodule's
+  // folder in `target` is Git's to leave alone.
+  const modes = await modesIn(top, target, [...blocked, ...folders])
+  const looks: Array<{ path: string; walk: boolean; parent: boolean }> = [
+    ...[...blocked].filter((path) => modes.get(path) === '040000').map((path) => ({ path, walk: false, parent: true })),
+    ...folders.filter((path) => ['100644', '100755', '120000'].includes(modes.get(path) ?? '')).map((path) => ({ path, walk: true, parent: false }))
+  ]
+  const kept = new Set<string>()
+  for (const look of looks) {
+    let found: Entry[] | undefined
+    for (let attempt = 0; !found; attempt++) {
+      const mark = budget.counted.length
+      try {
+        found = await lookAt(top, look.path, look.walk, look.path, budget)
+      } catch (error) {
+        if (!(error instanceof FolderChanged)) throw error
+        for (const item of budget.counted.splice(mark)) {
+          budget.bytes -= item.bytes
+          budget.known.delete(item.path)
+        }
+        if (attempt + 1 >= WALK_ATTEMPTS) throw new KeepCopyRefusedError(`${look.path} kept changing while its copy was being kept. Nothing was changed; try again once it has stopped changing.`, [look.path])
+      }
+    }
+    for (const entry of found) {
+      entries.set(entry.path, entry)
+      if (look.parent) kept.add(entry.path)
+    }
+  }
+  return { entries: [...entries.values()], parents: kept }
 }
 
 /** Sizes of objects already in the repository, in the order given; a missing one (a submodule's commit) counts nothing. */
@@ -349,6 +620,29 @@ async function objectSizes(top: string, ids: readonly string[]): Promise<number[
   if (!ids.length) return []
   const lines = (await gitBytes(top, ['cat-file', '--batch-check=%(objectsize)'], { input: `${ids.join('\n')}\n`, listing: true })).stdout.split('\n')
   return ids.map((_, index) => Number(lines[index]) || 0)
+}
+
+
+/** Index entries Git is told to assume are unchanged (`update-index --assume-unchanged`), which `reset --hard` still overwrites. */
+async function assumedUnchanged(top: string, env?: NodeJS.ProcessEnv): Promise<string[]> {
+  return (await listZ(top, ['ls-files', '-z', '-v', '--', '.', NOT_MOUSSE], env)).filter((line) => /^[a-z] /.test(line)).map((line) => line.slice(2))
+}
+
+/**
+ * Every path a discard of all pending changes writes `target`'s version at or removes: tracked paths whose staged or
+ * working version differs from `target`, conflicted paths, untracked files that are not ignored, and paths Git assumes
+ * are unchanged (their edits are overwritten too, though Git does not list them). `.mousse/` is left out. Passed as
+ * {@link KeepCopyInput.writes}, so the copy also keeps what stands in their way. `known` passes listings already made.
+ */
+export async function pendingWrites(top: string, target = 'HEAD', known: { untracked?: readonly string[]; assumed?: readonly string[] } = {}): Promise<string[]> {
+  const [staged, working, unmerged, untracked, assumed] = await Promise.all([
+    listZ(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', target, '--', '.', NOT_MOUSSE]),
+    listZ(top, ['diff-index', '-z', '--name-only', '--no-renames', target, '--', '.', NOT_MOUSSE]),
+    listZ(top, ['ls-files', '-z', '--unmerged', '--', '.', NOT_MOUSSE]),
+    known.untracked ?? listZ(top, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.', NOT_MOUSSE]),
+    known.assumed ?? assumedUnchanged(top)
+  ])
+  return [...new Set([...staged, ...working, ...unmerged.map((line) => line.slice(line.indexOf('\t') + 1)), ...untracked.map((path) => path.replace(/\/+$/, '')), ...assumed])]
 }
 
 /**
@@ -387,6 +681,15 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
 
     const selected = input.paths ? new Set(input.paths) : undefined
     const within = (path: string): boolean => !selected || selected.has(path)
+    const target = input.target ?? head
+    // An entry Git is told to assume unchanged is still overwritten by `reset --hard`. The copy of the index stops
+    // assuming, so Git compares those files and lists the edited ones; its times stay the real index's (above).
+    const assumed = selected ? [] : await assumedUnchanged(top, env)
+    if (assumed.length) {
+      await gitAsync(top, ['update-index', '-z', '--no-assume-unchanged', '--stdin'], env, `${assumed.join('\0')}\0`)
+      const times = await stat(realIndex)
+      await utimes(working, times.atime, times.mtime)
+    }
     // A conflict's stages: kept for the paths the action names; every one leaves the copy of the index, which
     // cannot be written as a tree while it has any.
     const unmerged = (await listZ(top, ['ls-files', '-z', '-s', '--unmerged'], env)).map((line) => {
@@ -407,19 +710,26 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
         const path = line.slice(tab + 1)
         return within(path) && mode !== '160000' ? [{ path, sha }] : []
       })
-    const paths = selected ? [...selected] : await workingTreeChanges(top, env, input.includeIgnored === true)
-    const entries = await entriesOf(top, paths)
-    const counted = [
-      ...entries.map((entry) => ({ path: entry.path, bytes: entry.bytes })),
+    const changes = selected ? undefined : await workingTreeChanges(top, env, input.includeIgnored === true)
+    const paths = changes ? changes.paths : [...selected!]
+    // Read from the real index, with the listings above. The untracked files are reused only when no ignored ones are in them.
+    const writes = input.writes ?? (changes && target ? await pendingWrites(top, target, { assumed, ...(input.includeIgnored ? {} : { untracked: changes.untracked }) }) : [])
+    const parents: Parents = new Map()
+    const named = await entriesOf(top, paths, parents)
+    const budget: Budget = { action: input.action, bytes: 0, known: new Set(), counted: [
       ...(await objectSizes(top, stagedIds.map((item) => item.sha))).map((bytes, index) => ({ path: stagedIds[index]!.path, bytes })),
       ...(await objectSizes(top, conflicts.map((item) => item.sha))).map((bytes, index) => ({ path: conflicts[index]!.path, bytes }))
-    ]
-    const bytes = counted.reduce((sum, item) => sum + item.bytes, 0)
-    if (bytes > KEEP_COPY_LIMITS.bytes) {
-      const byPath = new Map<string, number>()
-      for (const item of counted) byPath.set(item.path, (byPath.get(item.path) ?? 0) + item.bytes)
-      throw new KeepCopyTooLargeError(input.action, bytes, [...byPath].map(([path, size]) => ({ path, bytes: size })).sort((a, b) => b.bytes - a.bytes).slice(0, NAMED_LARGEST))
-    }
+    ] }
+    budget.bytes = budget.counted.reduce((sum, item) => sum + item.bytes, 0)
+    for (const entry of named) count(budget, entry)
+    if (budget.bytes > KEEP_COPY_LIMITS.bytes) throw tooLarge(budget, false)
+    // What stands where the action writes: Git removes it, so the copy holds it too, and it counts toward the limit. It
+    // was looked at last, so it replaces what was seen at the same path before.
+    const inTheWay = target && writes.length ? await obstructionsOf(top, writes, target, budget, parents) : { entries: [], parents: new Set<string>() }
+    const byPath = new Map(named.map((entry) => [entry.path, entry]))
+    for (const entry of inTheWay.entries) byPath.set(entry.path, entry)
+    const entries = [...byPath.values()]
+    if (budget.bytes > KEEP_COPY_LIMITS.bytes) throw tooLarge(budget, false)
 
     // The working versions, byte for byte, into the pack.
     pack = await PackFile.create(join(gitDir, `mousse-keep-${randomUUID()}.pack`), algorithm)
@@ -431,8 +741,12 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
       const batch = kept.slice(start, start + READ_AHEAD)
       const small = await Promise.all(batch.map(async (entry) => {
         if (entry.kind === 'file' && entry.bytes > WHOLE_FILE_BYTES) return undefined
-        const absolute = join(top, entry.path)
-        const data = entry.kind === 'link' ? await readlink(absolute, { encoding: 'buffer' }) : await readFile(absolute)
+        let data: Buffer
+        if (entry.kind === 'link') data = await readKeptLink(top, entry)
+        else {
+          const file = await openKept(top, entry)
+          try { data = await file.readFile() } finally { await file.close() }
+        }
         return { data, compressed: await deflate(data, { level: 1 }) }
       }))
       for (const [index, entry] of batch.entries()) {
@@ -443,7 +757,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
           digests.set(entry.path, createHash('sha256').update(piece.data).digest('hex'))
           await pack.add('blob', piece.data.length, piece.compressed)
         } else {
-          const large = await pack.addLargeFile(join(top, entry.path), entry.path)
+          const large = await pack.addLargeFile(await openKept(top, entry), entry.path)
           id = large.id
           digests.set(entry.path, large.sha256)
         }
@@ -456,6 +770,12 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     // holds a kept file. A folder that is a repository of its own stays as the index has it.
     const gone = new Set([...entries.filter((entry) => entry.kind === 'gone' || entry.kind === 'folder').map((entry) => entry.path), ...(input.gone ?? [])])
     for (const entry of kept) for (let slash = entry.path.indexOf('/'); slash !== -1; slash = entry.path.indexOf('/', slash + 1)) gone.add(entry.path.slice(0, slash))
+    // A file or link kept where the index has a folder: the index's entries below it leave the copy's index.
+    if (inTheWay.parents.size) {
+      for (const path of await listZOver(top, ['ls-files', '-z'], [...inTheWay.parents], env)) {
+        if ([...inTheWay.parents].some((parent) => path.startsWith(`${parent}/`))) gone.add(path)
+      }
+    }
     if (gone.size) await gitAsync(top, ['update-index', '-z', '--force-remove', '--stdin'], env, `${[...gone].join('\0')}\0`)
     if (stored.length) {
       try {
@@ -523,11 +843,11 @@ async function currentModes(top: string, env: NodeJS.ProcessEnv): Promise<Map<st
 }
 
 /** The working tree's files that differ from the (private) index or are not in it, as a whole-tree copy keeps them. */
-async function workingTreeChanges(top: string, env: NodeJS.ProcessEnv, includeIgnored: boolean): Promise<string[]> {
+async function workingTreeChanges(top: string, env: NodeJS.ProcessEnv, includeIgnored: boolean): Promise<{ paths: string[]; untracked: string[] }> {
   const changed = await listZ(top, ['diff-files', '-z', '--name-only', '--', '.', NOT_MOUSSE], env)
+  const untracked = await listZ(top, ['ls-files', '-z', '--others', ...(includeIgnored ? [] : ['--exclude-standard']), '--', '.', NOT_MOUSSE], env)
   // A repository of its own inside the folder is listed as `name/`; it is left as it is.
-  const others = (await listZ(top, ['ls-files', '-z', '--others', ...(includeIgnored ? [] : ['--exclude-standard']), '--', '.', NOT_MOUSSE], env)).filter((path) => !path.endsWith('/'))
-  return [...new Set([...changed, ...others])]
+  return { paths: [...new Set([...changed, ...untracked.filter((path) => !path.endsWith('/'))])], untracked }
 }
 
 /**

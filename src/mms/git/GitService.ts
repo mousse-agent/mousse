@@ -906,6 +906,8 @@ export class GitService {
    * working tree), files HEAD does not have are removed, untracked files are deleted.
    * A copy of their staged, working and conflict versions is kept first, owned by
    * `keep.owner`'s journal (`keepCopy`), and returned; nothing is removed unless it was kept.
+   * The copy also holds what Git removes to put a file back: a folder in its place, ignored
+   * files included. A repository of its own in that place refuses the discard, naming it.
    * A copy too large to keep refuses the discard with `keep_copy_too_large`, changing nothing.
    * The caller confirms first.
    */
@@ -937,7 +939,8 @@ export class GitService {
       // Every path the discard writes or removes, as it is now, before any of it changes.
       let kept: KeptCopy
       try {
-        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])] })
+        // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
+        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore] })
       } catch (error) {
         // The refusal names the files (the largest ones, for a copy too large), so the person knows what to move aside.
         if (error instanceof KeepCopyRefusedError) {

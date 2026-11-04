@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { KEEP_COPY_LIMITS, keepCopy, keptCopyNotice, keptCopyRestoreCommand, projectKeptFilesOwner, projectKeptFilesOwners, registerProjectKeptFilesFolder, settleInterruptedKeeps } from '../src/mms/actions/keptCopies'
+import { KEEP_COPY_LIMITS, KeepCopyRefusedError, keepCopy, keptCopyNotice, keptCopyRestoreCommand, projectKeptFilesOwner, projectKeptFilesOwners, registerProjectKeptFilesFolder, settleInterruptedKeeps } from '../src/mms/actions/keptCopies'
 import { retireProjectSnapshots } from '../src/mms/workspace/SnapshotWorkspace'
 import { expirePreservedFiles, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
@@ -14,6 +14,8 @@ import { GitService } from '../src/mms/git/GitService'
 import { userAction } from '../src/mms/git/gitPolicy'
 import type { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { DEFAULT_UNDO_RETENTION_POLICY } from '../src/shared/undoRetention'
+import { discardPendingChangesAsync } from '../src/mms/actions/git'
+import { pressed } from './support/userRequest'
 
 const USER = userAction('button', 'Discard changes')
 const DAY = 24 * 60 * 60 * 1000
@@ -479,5 +481,273 @@ describe('kept copies expire', () => {
     await sweeper.tick()
     expect(preservedRefs(cwd)).toEqual([])
     await sweeper.stop()
+  })
+})
+
+/** Every file and link in the working tree with its bytes (a link's: its target), nested repositories' included, and HEAD. */
+function everything(cwd: string): Record<string, string> {
+  const found: Record<string, string> = { HEAD: git(cwd, 'rev-parse', 'HEAD') }
+  const walk = (dir: string, rel: string): void => {
+    for (const name of readdirSync(dir)) {
+      if (!rel && name === '.git') continue
+      const path = join(dir, name), at = rel ? `${rel}/${name}` : name
+      const info = lstatSync(path)
+      if (info.isSymbolicLink()) found[at] = `link:${readlinkSync(path)}`
+      else if (info.isDirectory()) walk(path, at)
+      else found[at] = createHash('sha256').update(readFileSync(path)).digest('hex')
+    }
+  }
+  walk(cwd, '')
+  return found
+}
+
+/** Pending-changes Discard as the protocol runs it: a whole-tree copy, then Git puts HEAD back. */
+const discardPending = (cwd: string, owner: string) =>
+  pressed('Discard changes', () => discardPendingChangesAsync(cwd, (top) => keepCopy({ top, owner, operationType: 'git-discard', action: 'Discard' })))
+
+describe('the copy also keeps what stands where Discard puts a file back', () => {
+  /** HEAD tracks `base.txt`; it is now an ignored folder holding the only copy of `private.bin` (audit N1/N2, inverted). */
+  function ignoredFolderWhereAFileWas(): { cwd: string; value: Buffer } {
+    const cwd = repo()
+    rmSync(join(cwd, 'base.txt')); mkdirSync(join(cwd, 'base.txt'))
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'base.txt/\n')
+    const value = Buffer.concat([Buffer.from('sole ignored bytes 71b9c18e\n'), randomBytes(32)])
+    writeFileSync(join(cwd, 'base.txt', 'private.bin'), value)
+    return { cwd, value }
+  }
+
+  it('Git panel Discard keeps the ignored files of a folder standing where HEAD has a file', async () => {
+    const { cwd, value } = ignoredFolderWhereAFileWas()
+    const kept = (await new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') }))!
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
+    // The person moves HEAD's file aside and brings the folder's file back with the command the result shows.
+    rmSync(join(cwd, 'base.txt'))
+    expect(restoreWorking(cwd, kept.ref, 'base.txt/private.bin').equals(value)).toBe(true)
+  })
+
+  it('pending-changes Discard keeps them too', async () => {
+    const { cwd, value } = ignoredFolderWhereAFileWas()
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
+    rmSync(join(cwd, 'base.txt'))
+    expect(restoreWorking(cwd, kept.ref, 'base.txt/private.bin').equals(value)).toBe(true)
+  })
+
+  it('keeps an ignored file standing where HEAD has a folder, from either Discard', async () => {
+    for (const how of ['panel', 'pending'] as const) {
+      const cwd = repo()
+      mkdirSync(join(cwd, 'docs')); writeFileSync(join(cwd, 'docs', 'a.txt'), 'a\n'); writeFileSync(join(cwd, 'docs', 'b.txt'), 'b\n')
+      git(cwd, 'add', 'docs'); git(cwd, 'commit', '-qm', 'docs')
+      rmSync(join(cwd, 'docs'), { recursive: true })
+      writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'docs\n')
+      const value = Buffer.from(`only copy of the docs notes ${how} 5be0\n`)
+      writeFileSync(join(cwd, 'docs'), value)
+      const kept = how === 'panel'
+        ? (await new GitService().discard(cwd, USER, ['docs/a.txt'], { owner: temp('mousse-kept-owner-') }))!
+        : await discardPending(cwd, temp('mousse-kept-owner-'))
+      expect(readFileSync(join(cwd, 'docs', 'a.txt'), 'utf8')).toBe('a\n')
+      rmSync(join(cwd, 'docs'), { recursive: true })
+      expect(restoreWorking(cwd, kept.ref, 'docs').equals(value)).toBe(true)
+    }
+  })
+
+  it('keeps a link in the way as a link: never read through it, never walked through', async () => {
+    const cwd = repo()
+    mkdirSync(join(cwd, 'docs')); writeFileSync(join(cwd, 'docs', 'a.txt'), 'a\n')
+    git(cwd, 'add', 'docs'); git(cwd, 'commit', '-qm', 'docs')
+    rmSync(join(cwd, 'docs'), { recursive: true })
+    const outside = temp('mousse-kept-outside-')
+    writeFileSync(join(outside, 'a.txt'), 'outside bytes, not the repository\'s\n')
+    symlinkSync(outside, join(cwd, 'docs'))
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'docs\n')
+    const kept = (await new GitService().discard(cwd, USER, ['docs/a.txt'], { owner: temp('mousse-kept-owner-') }))!
+    expect(git(cwd, 'ls-tree', kept.ref, '--', 'docs')).toMatch(/^120000 blob /)
+    expect(git(cwd, 'cat-file', 'blob', `${kept.ref}:docs`)).toBe(outside)
+    expect(() => git(cwd, 'cat-file', '-e', `${kept.ref}:docs/a.txt`)).toThrow()
+    expect(readFileSync(join(outside, 'a.txt'), 'utf8')).toBe('outside bytes, not the repository\'s\n')
+    expect(readFileSync(join(cwd, 'docs', 'a.txt'), 'utf8')).toBe('a\n')
+  })
+
+  it('refuses, naming it, when a repository of its own stands where HEAD has a file, and changes nothing', async () => {
+    for (const how of ['panel', 'pending', 'inside'] as const) {
+      const cwd = repo()
+      rmSync(join(cwd, 'base.txt')); mkdirSync(join(cwd, 'base.txt'))
+      // `inside`: the repository is a folder down, in a folder of ignored files standing where HEAD has base.txt.
+      const nested = how === 'inside' ? 'base.txt/vendor' : 'base.txt'
+      if (how === 'inside') { writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'base.txt/\n'); writeFileSync(join(cwd, 'base.txt', 'notes.txt'), 'notes\n'); mkdirSync(join(cwd, nested)) }
+      git(join(cwd, nested), 'init', '-q', '-b', 'main')
+      writeFileSync(join(cwd, nested, 'history.txt'), 'nested history\n')
+      git(join(cwd, nested), 'add', '.'); git(join(cwd, nested), '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'nested')
+      const before = everything(cwd)
+      const index = indexDigest(cwd)
+      const work = how === 'pending'
+        ? discardPending(cwd, temp('mousse-kept-owner-'))
+        : new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') })
+      await expect(work).rejects.toThrow(how === 'inside'
+        ? 'Discard was stopped: base.txt/vendor is a separate Git repository inside base.txt, where Git would put a file back, and Git would delete it with its history.'
+        : 'Discard was stopped: base.txt is a separate Git repository where Git would put the file base.txt back, and Git would delete it with its history.')
+      if (how === 'pending') await expect(discardPending(cwd, temp('mousse-kept-owner-'))).rejects.toBeInstanceOf(KeepCopyRefusedError)
+      expect(everything(cwd)).toEqual(before)
+      expect(indexDigest(cwd)).toBe(index)
+      expect(preservedRefs(cwd)).toEqual([])
+    }
+  })
+
+  it('refuses a repository of its own staged as a submodule where HEAD has a file: Git would still delete it', async () => {
+    for (const how of ['panel', 'pending'] as const) {
+      const cwd = repo()
+      rmSync(join(cwd, 'base.txt')); mkdirSync(join(cwd, 'base.txt'))
+      const nested = join(cwd, 'base.txt')
+      git(nested, 'init', '-q', '-b', 'main')
+      writeFileSync(join(nested, 'lib.txt'), 'nested history\n'); git(nested, 'add', '.'); git(nested, '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'nested')
+      writeFileSync(join(nested, 'lib.txt'), 'dirty nested work\n')
+      git(cwd, 'add', 'base.txt')
+      expect(git(cwd, 'ls-files', '-s', 'base.txt')).toMatch(/^160000 /)
+      const before = everything(cwd)
+      const index = indexDigest(cwd)
+      const work = how === 'pending'
+        ? discardPending(cwd, temp('mousse-kept-owner-'))
+        : new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') })
+      await expect(work).rejects.toThrow('base.txt is a separate Git repository where Git would put the file base.txt back')
+      expect(everything(cwd)).toEqual(before)
+      expect(indexDigest(cwd)).toBe(index)
+      expect(preservedRefs(cwd)).toEqual([])
+    }
+  })
+
+  it('a folder swapped for a link to outside the repository after it was first looked at is never read through', async () => {
+    const { cwd } = ignoredFolderWhereAFileWas()
+    const outside = temp('mousse-kept-outside-'), moved = temp('mousse-kept-moved-'), bin = temp('mousse-kept-bin-')
+    const secret = randomBytes(111)
+    writeFileSync(join(outside, 'secret.bin'), secret)
+    const quote = (path: string): string => `'${path.replace(/'/g, `'\\''`)}'`
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    // The first time Mousse asks HEAD about the folder in the way, the folder is swapped for a link to an outside folder.
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n *" ls-tree "*) if [ ! -e ${quote(join(moved, 'fired'))} ]; then /bin/mv ${quote(join(cwd, 'base.txt'))} ${quote(join(moved, 'original'))}; /bin/ln -s ${quote(outside)} ${quote(join(cwd, 'base.txt'))}; /usr/bin/touch ${quote(join(moved, 'fired'))}; fi ;;\nesac\nexec ${quote(real)} "$@"\n`)
+    chmodSync(join(bin, 'git'), 0o755)
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH}`)
+    const kept = (await new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') }))!
+    expect(existsSync(join(moved, 'fired'))).toBe(true)
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
+    // The copy holds the link Git removed, as a link, and nothing read through it.
+    expect(git(cwd, 'ls-tree', kept.ref, '--', 'base.txt')).toMatch(/^120000 blob /)
+    expect(git(cwd, 'cat-file', 'blob', `${kept.ref}:base.txt`)).toBe(outside)
+    expect(kept.digests.has('base.txt/secret.bin')).toBe(false)
+    expect(() => git(cwd, 'cat-file', '-e', blobSha(secret))).toThrow()
+    expect(readFileSync(join(outside, 'secret.bin')).equals(secret)).toBe(true)
+  })
+
+  it('a folder of many files replaced by a link asks Git about the link once, not once per file', async () => {
+    const cwd = repo()
+    // About 1.3 MB of paths: more than one command line holds on macOS, and far more than on Windows.
+    const long = (letter: string): string => letter.repeat(240)
+    for (const a of ['a', 'b']) for (const b of ['c', 'd']) mkdirSync(join(cwd, 'vendor', long(a), long(b)), { recursive: true })
+    for (let index = 0; index < 2600; index++) writeFileSync(join(cwd, 'vendor', long(index % 2 ? 'a' : 'b'), long(index % 4 < 2 ? 'c' : 'd'), `f${index}`), `${index}\n`)
+    git(cwd, 'add', 'vendor'); git(cwd, 'commit', '-qm', 'vendor')
+    rmSync(join(cwd, 'vendor'), { recursive: true })
+    const outside = temp('mousse-kept-outside-')
+    symlinkSync(outside, join(cwd, 'vendor'))
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'vendor\n')
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(git(cwd, 'cat-file', 'blob', `${kept.ref}:vendor`)).toBe(outside)
+    expect(readFileSync(join(cwd, 'vendor', long('a'), long('c'), 'f1'), 'utf8')).toBe('1\n')
+  }, 60_000)
+
+  it('keeps an edit to a file Git is told to assume unchanged, which pending-changes Discard overwrites', async () => {
+    const cwd = repo()
+    git(cwd, 'update-index', '--assume-unchanged', 'base.txt')
+    const value = Buffer.from('assume-unchanged local edit 5d0e\n')
+    writeFileSync(join(cwd, 'base.txt'), value)
+    writeFileSync(join(cwd, 'other.txt'), 'something pending\n')
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
+    expect(restoreWorking(cwd, kept.ref, 'base.txt').equals(value)).toBe(true)
+  })
+
+  it('keeps an ignored file the index no longer has where pending-changes Discard writes HEAD\'s version back', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'config.local'), 'shared default\n'); git(cwd, 'add', 'config.local'); git(cwd, 'commit', '-qm', 'config')
+    // The usual way to stop tracking a settings file: untrack it, ignore it, then edit it.
+    git(cwd, 'rm', '-q', '--cached', 'config.local')
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'config.local\n')
+    const edit = Buffer.concat([Buffer.from('my local secrets\n'), randomBytes(8)])
+    writeFileSync(join(cwd, 'config.local'), edit)
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(readFileSync(join(cwd, 'config.local'), 'utf8')).toBe('shared default\n')
+    expect(restoreWorking(cwd, kept.ref, 'config.local').equals(edit)).toBe(true)
+  })
+
+  it('refuses a repository of its own staged as a submodule where HEAD has a folder: Git would write over its files', async () => {
+    const cwd = repo()
+    mkdirSync(join(cwd, 'lib')); writeFileSync(join(cwd, 'lib', 'x.txt'), 'outer x\n'); git(cwd, 'add', 'lib'); git(cwd, 'commit', '-qm', 'lib')
+    git(cwd, 'rm', '-rq', '--cached', 'lib'); rmSync(join(cwd, 'lib'), { recursive: true }); mkdirSync(join(cwd, 'lib'))
+    const nested = join(cwd, 'lib')
+    git(nested, 'init', '-q', '-b', 'main')
+    writeFileSync(join(nested, 'x.txt'), 'nested committed\n'); git(nested, 'add', '.'); git(nested, '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'n')
+    writeFileSync(join(nested, 'x.txt'), 'nested dirty x 5150\n')
+    git(cwd, 'add', 'lib')
+    expect(git(cwd, 'ls-files', '-s', 'lib')).toMatch(/^160000 /)
+    const before = everything(cwd)
+    const index = indexDigest(cwd)
+    await expect(discardPending(cwd, temp('mousse-kept-owner-'))).rejects.toThrow('Discard was stopped: lib is a separate Git repository where Git would put the folder lib back')
+    expect(everything(cwd)).toEqual(before)
+    expect(indexDigest(cwd)).toBe(index)
+    expect(preservedRefs(cwd)).toEqual([])
+  })
+
+  it('a file that goes while its copy is being kept refuses in plain words, naming it', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'notes.txt'), 'notes\n')
+    symlinkSync('target', join(cwd, 'link'))
+    // Removed after they were looked at and before they are read: the staged file's size is asked first.
+    writeFileSync(join(cwd, 'staged.txt'), 'staged\n'); git(cwd, 'add', 'staged.txt')
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    const bin = temp('mousse-kept-bin-')
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n *" cat-file --batch-check"*) rm -f '${join(cwd, 'notes.txt')}' '${join(cwd, 'link')}' ;;\nesac\nexec '${real}' "$@"\n`)
+    chmodSync(join(bin, 'git'), 0o755)
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH}`)
+    const error = await keepCopy({ owner: temp('mousse-kept-owner-'), top: cwd, operationType: 'git-discard', action: 'Discard' }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(KeepCopyRefusedError)
+    expect((error as Error).message).toMatch(/^(link|notes\.txt) changed while its copy was being kept\. Nothing was changed/)
+  })
+
+  it('leaves an untracked repository of its own alone, as before', async () => {
+    const cwd = repo()
+    mkdirSync(join(cwd, 'other')); git(join(cwd, 'other'), 'init', '-q', '-b', 'main')
+    writeFileSync(join(cwd, 'other', 'kept.txt'), 'nested\n')
+    writeFileSync(join(cwd, 'base.txt'), 'edited\n')
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(readFileSync(join(cwd, 'other', 'kept.txt'), 'utf8')).toBe('nested\n')
+    expect(restoreWorking(cwd, kept.ref, 'base.txt').toString()).toBe('edited\n')
+  })
+
+  it('a dirty submodule does not block the copy, and is neither walked nor changed', async () => {
+    const cwd = repo()
+    const sub = join(cwd, 'sub')
+    mkdirSync(sub); git(sub, 'init', '-q', '-b', 'main')
+    writeFileSync(join(sub, 'lib.txt'), 'lib\n'); git(sub, 'add', '.'); git(sub, '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'lib')
+    git(cwd, 'add', 'sub'); git(cwd, 'commit', '-qm', 'submodule')
+    writeFileSync(join(sub, 'lib.txt'), 'dirty submodule work\n')
+    writeFileSync(join(cwd, 'base.txt'), 'edited\n')
+    const kept = await keepCopy({ owner: temp('mousse-kept-owner-'), top: cwd, operationType: 'git-discard', action: 'Discard' })
+    expect(() => git(cwd, 'cat-file', '-e', `${kept.ref}:sub/lib.txt`)).toThrow()
+    expect(git(cwd, 'ls-tree', kept.ref, '--', 'sub')).toMatch(/^160000 commit /)
+    expect(restoreWorking(cwd, kept.ref, 'base.txt').toString()).toBe('edited\n')
+    expect(readFileSync(join(sub, 'lib.txt'), 'utf8')).toBe('dirty submodule work\n')
+    const panel = (await new GitService().discard(cwd, USER, ['sub', 'base.txt'], { owner: temp('mousse-kept-owner-') }))!
+    expect(panel.ref).toBeTruthy()
+    expect(readFileSync(join(sub, 'lib.txt'), 'utf8')).toBe('dirty submodule work\n')
+  })
+
+  it('counts the files it walks toward the size limit, and refuses before changing anything', async () => {
+    const { cwd } = ignoredFolderWhereAFileWas()
+    writeFileSync(join(cwd, 'base.txt', 'large.bin'), randomBytes(64 * 1024))
+    KEEP_COPY_LIMITS.bytes = 32 * 1024
+    const before = everything(cwd)
+    const error = await new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'keep_copy_too_large', message: expect.stringMatching(/would remove at least .*base\.txt\/large\.bin \(64 KB\)/) })
+    await expect(discardPending(cwd, temp('mousse-kept-owner-'))).rejects.toMatchObject({ code: 'keep_copy_too_large' })
+    expect(everything(cwd)).toEqual(before)
+    expect(preservedRefs(cwd)).toEqual([])
   })
 })
