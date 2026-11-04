@@ -3,7 +3,9 @@ import { spawn, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { runAsync, runSync, step } from '../actions/steps'
 import { getMousseHomeDir } from '../data/paths'
+import { cachedGitFolder } from './gitFolderCache'
 import { isGitDirectory, isGitDirectoryAsync, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 
@@ -123,6 +125,15 @@ interface CheckReads {
   isGitDirectory(path: string): boolean
   /** Git run in `cwd`, `gitDir` named as `GIT_DIR` when set. */
   git(cwd: string, args: readonly string[], gitDir: string | undefined): GitRead
+  /** {@link git} of `rev-parse --absolute-git-dir`, kept between checks while what it rests on is unchanged (`gitFolderCache.ts`). */
+  gitFolder(cwd: string, gitDir: string | undefined, routing: string): GitRead
+}
+
+const GIT_FOLDER_ARGS = ['rev-parse', '--absolute-git-dir'] as const
+
+/** The Git folder of `cwd`, read through the cache (both ways, so the sync and async checks share it). */
+function gitFolderOf(cwd: string, gitDir: string | undefined, routing: string, signal?: AbortSignal) {
+  return cachedGitFolder(cwd, gitDir, routing, step(() => SYNC_READS.git(cwd, GIT_FOLDER_ARGS, gitDir), () => readGitAsync(cwd, GIT_FOLDER_ARGS, gitDir, signal)))
 }
 
 function readGitEnv(gitDir: string | undefined): NodeJS.ProcessEnv {
@@ -139,6 +150,9 @@ const SYNC_READS: CheckReads = {
   git(cwd, args, gitDir) {
     const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: readGitEnv(gitDir) })
     return result.error ? null : { status: result.status, stdout: result.stdout }
+  },
+  gitFolder(cwd, gitDir, routing) {
+    return runSync(gitFolderOf(cwd, gitDir, routing))
   }
 }
 
@@ -191,7 +205,8 @@ function replayReads(answers: Map<string, unknown>, signal: AbortSignal | undefi
   return {
     realpath: (path) => answer(`realpath\0${path}`, () => untilAborted(realpath(path).catch(() => null), signal)),
     isGitDirectory: (path) => answer(`gitdir\0${path}`, () => untilAborted(isGitDirectoryAsync(path), signal)),
-    git: (cwd, args, gitDir) => answer(`git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, () => readGitAsync(cwd, args, gitDir, signal))
+    git: (cwd, args, gitDir) => answer(`git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, () => readGitAsync(cwd, args, gitDir, signal)),
+    gitFolder: (cwd, gitDir, routing) => answer(`gitfolder\0${cwd}\0${gitDir ?? ''}\0${routing}`, () => untilAborted(runAsync(gitFolderOf(cwd, gitDir, routing, signal)), signal))
   }
 }
 
@@ -672,7 +687,7 @@ function isOwnedIndex(file: string, cwd: string, env: NodeJS.ProcessEnv): boolea
   const folder = dirname(file)
   const inGitDir = OWNED_INDEX_IN_GIT_DIR.test(name) ? folder : OWNED_INDEX_IN_MOUSSE_DIR.test(name) && basename(folder) === 'mousse' ? dirname(folder) : null
   if (!inGitDir) return false
-  const gitDir = readGit(cwd, ['rev-parse', '--absolute-git-dir'], env)
+  const gitDir = reads.gitFolder(cwd, env.GIT_DIR ? env.GIT_DIR : ownGitDirectory(cwd), REDIRECT_VARIABLES.map((key) => env[key] ?? '').join('\0'))
   if (!gitDir || gitDir.status !== 0) return reads.isGitDirectory(inGitDir)
   return canonicalGitPath(gitDir.stdout.trim()) === canonicalGitPath(inGitDir)
 }
