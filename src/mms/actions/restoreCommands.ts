@@ -12,11 +12,15 @@ import { createHash } from 'node:crypto'
  * POSIX shells: one subshell, so nothing of it stays in the person's shell, that stops at the first step that fails.
  * 1. No folder above the path is a link (`[ ! -L ./a ]` for each): a command never writes outside the folders it names.
  *    Folders above it that are gone (one the abort removed with the file) are then made again (`mkdir -p`).
- * 2. The bytes go to `<path>.mousse-<8 hex>` first, under `set -C`, which refuses a name already taken. A copy that is
- *    gone, or a folder that cannot be written, stops the command with nothing at the path changed.
- * 3. `rm -f` then removes what stands at the path, a link itself and never what it points to (a folder refuses, which
- *    stops the command), and `mv` puts the bytes there. A kept link comes back as a link with its exact target
- *    (`ln -s --`, the target read with a sentinel so trailing newlines survive), an executable file with `chmod +x`.
+ * 2. A folder at the path, not a link to one, stops the command before it writes anything
+ *    (`{ [ -L ./p ] || [ ! -d ./p ]; }`).
+ * 3. The bytes go to `<path>.mousse-<8 hex>` first, a name fixed by the ref and path. `set -C` makes `exec 3>` create
+ *    it or refuse a name already taken, so a refused run touches no one else's file; Git then writes through that
+ *    descriptor. A copy that is gone, or a folder that cannot be written, stops the command with nothing at the path
+ *    changed. Once the temporary file is this run's, any step that fails removes it, so running the command again works.
+ * 4. `rm -f` then removes what stands at the path, a link itself and never what it points to, and `mv` puts the bytes
+ *    there. A kept link comes back as a link with its exact target (`ln -s --`, the target read with a sentinel so
+ *    trailing newlines survive, and `rm -f` refusing a folder), an executable file with `chmod +x`.
  *
  * Windows: `cmd --% /c git cat-file blob <ref>:<path> > <path>`, one command typed the same into cmd and into
  * PowerShell: PowerShell passes everything after `--%` to cmd as it is, and cmd reads only its `/c`. Windows PowerShell
@@ -87,12 +91,22 @@ function command(ref: string, path: string, options: RestoreCommandOptions, plac
   const source = `git cat-file ${kind} ${word(`${ref}:${path}`)}`
   const parents = placeholder ? [] : parentsOf(path)
   // No folder above is a link; then the ones that are gone (a folder the abort removed) are made again.
-  const checks = [...parents.map((parent) => `[ ! -L ${at(parent)} ]`), ...(parents.length ? [`mkdir -p ${at(parents.at(-1)!)}`] : [])]
+  const noLinkAbove = parents.map((parent) => `[ ! -L ${at(parent)} ]`)
+  const makeParents = parents.length ? [`mkdir -p ${at(parents.at(-1)!)}`] : []
   if (options.kind === 'link') {
-    return `(${[...checks, `t="$(${source} && printf x)"`, `rm -f ${at(path)}`, `ln -s -- "\${t%x}" ${at(path)}`].join(' && ')})`
+    return `(${[...noLinkAbove, ...makeParents, `t="$(${source} && printf x)"`, `rm -f ${at(path)}`, `ln -s -- "\${t%x}" ${at(path)}`].join(' && ')})`
   }
-  const temporary = `${path}.mousse-${placeholder ? 'restore' : createHash('sha256').update(`${ref}:${path}`).digest('hex').slice(0, 8)}`
-  return `(${[...checks, 'set -C', `${source} > ${at(temporary)}`, ...(options.kind === 'executable' ? [`chmod +x ${at(temporary)}`] : []), `rm -f ${at(path)}`, `mv ${at(temporary)} ${at(path)}`].join(' && ')})`
+  const temporary = at(`${path}.mousse-${placeholder ? 'restore' : createHash('sha256').update(`${ref}:${path}`).digest('hex').slice(0, 8)}`)
+  // Once this run has made the temporary file, a step that fails removes it again, so a stopped run leaves nothing.
+  const steps = [`${source} >&3`, ...(options.kind === 'executable' ? [`chmod +x ${temporary}`] : []), `rm -f ${at(path)}`, `mv ${temporary} ${at(path)}`]
+  return `(${[
+    ...noLinkAbove,
+    `{ [ -L ${at(path)} ] || [ ! -d ${at(path)} ]; }`,
+    ...makeParents,
+    'set -C',
+    `exec 3> ${temporary}`,
+    `{ ${steps.join(' && ')} || { rm -f ${temporary}; false; }; }`
+  ].join(' && ')})`
 }
 
 /** The command that brings back one file kept under `ref`, run in the repository's top folder. */

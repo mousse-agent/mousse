@@ -1081,10 +1081,18 @@ test.skipIf(process.platform === 'win32')('a folder swapped for a link just befo
 
 // ---- Review round 3: what a rebuild set aside is said in the thread, with the command that brings it back ----
 
+/** The POSIX command that brings back `path` (a plain name under folders), as a pattern: any kept ref, its own temporary name. */
+function restoreCommandPattern(path: string): string {
+  const at = (rel: string) => `\\./${rel.replaceAll('.', '\\.')}`
+  const parents = path.split('/').slice(0, -1).map((_, index, names) => names.slice(0, index + 1).join('/'))
+  const temporary = `${at(path)}\\.mousse-[0-9a-f]{8}`
+  return `\\(${parents.map((parent) => `\\[ ! -L ${at(parent)} \\] && `).join('')}\\{ \\[ -L ${at(path)} \\] \\|\\| \\[ ! -d ${at(path)} \\]; \\} && mkdir -p ${at(parents.at(-1)!)} && set -C && exec 3> ${temporary} && \\{ git cat-file blob refs/mousse/preserved/\\S+:${path.replaceAll('.', '\\.')} >&3 && rm -f ${at(path)} && mv ${temporary} ${at(path)} \\|\\| \\{ rm -f ${temporary}; false; \\}; \\}\\)`
+}
+
 /** The commands a set-aside notice gives, as it gives them. */
 function noticeCommands(text: string, worktree: string): string[] {
   const start = text.indexOf(`running this in ${worktree}: `) + `running this in ${worktree}: `.length
-  return text.slice(start, text.lastIndexOf(' (kept for ')).split('; ').map((command) => command.replace(/^`|`$/g, ''))
+  return text.slice(start, text.lastIndexOf(' (kept for ')).replace(/^`|`$/g, '').split('`; `')
 }
 
 test.skipIf(process.platform === 'win32')('a rebuild that set files aside says so in plain words, and each command it gives brings a file back byte for byte', async () => {
@@ -1097,7 +1105,7 @@ test.skipIf(process.platform === 'win32')('a rebuild that set files aside says s
   } })
   const notice = f.service.keptAsideNotice(manifest)!
   const window = retentionWindowText(keptCopyWindowMs(join(f.home, 'thread-data', 'task')))
-  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`\\(\\[ ! -L \\./ignored \\] && mkdir -p \\./ignored && set -C && git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > \\./ignored/cache\\.bin\\.mousse-[0-9a-f]{8} && rm -f \\./ignored/cache\\.bin && mv \\./ignored/cache\\.bin\\.mousse-[0-9a-f]{8} \\./ignored/cache\\.bin\\)\`; \`\\(\\[ ! -L \\./ignored \\] && \\[ ! -L \\./ignored/link \\] && mkdir -p \\./ignored/link && set -C && git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > \\./ignored/link/personal\\.txt\\.mousse-[0-9a-f]{8} && rm -f \\./ignored/link/personal\\.txt && mv \\./ignored/link/personal\\.txt\\.mousse-[0-9a-f]{8} \\./ignored/link/personal\\.txt\\)\` \\(kept for ${window}\\)\\.$`))
+  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`${restoreCommandPattern('ignored/cache.bin')}\`; \`${restoreCommandPattern('ignored/link/personal.txt')}\` \\(kept for ${window}\\)\\.$`))
   const [cacheCommand, personalCommand] = noticeCommands(notice.text, f.worktree)
   // The command as given, run where the notice says: the file is back exactly as it was written.
   execFileSync('/bin/sh', ['-c', cacheCommand!], { cwd: f.worktree })

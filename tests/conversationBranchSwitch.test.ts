@@ -43,7 +43,7 @@ const leftBehind = (file: string, target: string, left: string, ref: string) =>
   `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: ${restoreFileCommand(`${ref}^`, file, { shell: 'posix' })}`
 /** Runs the command a switch's line gives for a file, in a shell, in the folder it names. */
 const runShown = (notice: string | undefined) => {
-  const match = /running this in (.+?): (\(set -C && git cat-file .+? \S+\))(?:\.$| \(kept for |; )/.exec(notice ?? '')
+  const match = /running this in (.+?): (\(\{ \[ -L .+? \}\))(?:\.$| \(kept for |; )/.exec(notice ?? '')
   if (!match) throw new Error(`No command in: ${notice}`)
   execFileSync('sh', ['-c', match[2]!], { cwd: match[1]! })
 }
@@ -515,7 +515,7 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     const { notice } = await sw(a.id)
     // The newer line came along; the recorded one is A's now.
     expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
-    expect(notice).toMatch(/: \(set -C && git cat-file blob 'refs\/mousse\/\S+\^:value\.txt' > \.\/value\.txt\.mousse-[0-9a-f]{8} && rm -f \.\/value\.txt && mv \.\/value\.txt\.mousse-[0-9a-f]{8} \.\/value\.txt\) \(kept for .+\)\.$/)
+    expect(notice).toMatch(/: \(\{ \[ -L \.\/value\.txt \] \|\| \[ ! -d \.\/value\.txt \]; \} && set -C && exec 3> (\.\/value\.txt\.mousse-[0-9a-f]{8}) && \{ git cat-file blob 'refs\/mousse\/\S+\^:value\.txt' >&3 && rm -f \.\/value\.txt && mv \1 \.\/value\.txt \|\| \{ rm -f \1; false; \}; \}\) \(kept for .+\)\.$/)
     write('value.txt', 'overwritten\n')
     runShown(notice)
     expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))
