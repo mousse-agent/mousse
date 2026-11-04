@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, recordedSnapshotAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, namedGapsAsync, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, recordedSnapshotAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -66,7 +66,7 @@ export class CodeRevertService {
         this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
-      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', restored.exact ? exactBytesNotice(restored.exact) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', restored.exact ? exactBytesNotice(restored.exact) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, await namedGapsAsync(workspacePath, ours.sha, restored.snapshot.sha, ours.coverageGaps, restored.snapshot.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
     })
   }
 
@@ -114,7 +114,7 @@ export class CodeRevertService {
           continue
         }
         const gitNotice = details.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', details.target)
-        await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt, [gitNotice ?? '', coverageNotice(details.target.git?.coverageGaps, applied.end.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+        await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt, [gitNotice ?? '', coverageNotice(details.target.git?.coverageGaps, await namedGapsAsync(workspacePath, applied.startSha, applied.end.sha, applied.end.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
       }
     }, undefined, heldThreadLease)
   }

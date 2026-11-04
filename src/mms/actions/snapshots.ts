@@ -9,8 +9,8 @@ import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenSto
 import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
 import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { readConvertedAsync } from './heldBytes'
-import { roundTripsAsync, type RoundTrip, type RoundTripAsk } from './filterRoundTrip'
-import { driversOffOf, withScopedGitConfig } from '../git/gitEnv'
+import { ROUND_TRIP_BUDGET, roundTripsAsync, storeCheckedAsync, type RoundTrip, type RoundTripAsk, type Stored } from './filterRoundTrip'
+import { driversOffAsync, driversOffOf, withScopedGitConfig } from '../git/gitEnv'
 import { repoProgramSettings, repoProgramSettingsAsync } from '../git/repoPrograms'
 import { createOnlyAsync, removeProvenAsync } from './provenDiscard'
 import { keepCopy } from './keptCopies'
@@ -60,6 +60,30 @@ export function coverageNotice(...lists: Array<CoverageGap[] | undefined>): stri
   if (!gaps.length) return undefined
   const named = gaps.slice(0, 10).map((gap) => `${gap.path} (${gap.reason})`).join(', ')
   return `Not covered: ${named}${gaps.length > 10 ? ` and ${gaps.length - 10} more` : ''}.`
+}
+
+/** A filtered file's gap that a later snapshot closes by itself: not checked yet, or not stored yet (`filterVerdicts`). */
+const deferredGap = (gap: CoverageGap): boolean => gap.reason.startsWith('not checked yet') || gap.reason.startsWith('not stored yet')
+
+/**
+ * `lists` merged, as an action that took the files from snapshot `from` to `to` names them: a filtered file not checked
+ * or stored yet is named only when the action changed it (Git's form or its exact bytes). One it left alone is never
+ * written, so naming it says nothing about the action; a repository with thousands of filtered files would otherwise
+ * list them all on its first turns.
+ */
+export async function namedGapsAsync(cwd: string, from: string, to: string, ...lists: Array<CoverageGap[] | undefined>): Promise<CoverageGap[]> {
+  const gaps = lists.flatMap((list) => list ?? [])
+  if (!gaps.some(deferredGap)) return gaps
+  const changed = new Set<string>()
+  const pairs: Array<[string | undefined, string | undefined]> = [[from, to], [await exactTreeOfAsync(cwd, from), await exactTreeOfAsync(cwd, to)]]
+  for (const [a, b] of pairs) {
+    if (!a || !b || a === b) continue
+    const listed = await tryGitAsync(cwd, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', a, b], undefined, LISTING)
+    // When the difference cannot be read, every gap is named.
+    if (!listed.ok) return gaps
+    for (const path of nul(listed.stdout)) changed.add(path)
+  }
+  return gaps.filter((gap) => !deferredGap(gap) || changed.has(gap.path))
 }
 const NESTED_WITHOUT_COMMIT = 'nested repository with no commits'
 const UNREADABLE = 'unreadable'
@@ -532,10 +556,18 @@ function* emptyTreeSteps(top: string): Steps<string> {
 }
 const emptyTrees = new Map<string, string>()
 
-/** Mousse's own Git in `top` with every conversion off, as the proven write steps run it. */
+/**
+ * Mousse's own Git in `top` with every conversion off, as the proven write steps run it, and every filter driver emptied
+ * (`driversOffAsync`): exact bytes are written as they are, even under a filter `.git/info/attributes` sets, which the
+ * attribute source does not turn off.
+ */
 function exactRunner(top: string, emptyTree: string): DiscardGit {
   const run = ownGitRunner(top)
-  return (args, options = {}) => run([...EXACT_SETTINGS, ...args], { ...options, env: { ...exactEnv(emptyTree) as Record<string, string>, ...options.env } })
+  let off: Promise<Array<[string, string]>> | undefined
+  return async (args, options = {}) => {
+    off ??= driversOffAsync(top)
+    return withScopedGitConfig(await off, () => run([...EXACT_SETTINGS, ...args], { ...options, env: { ...exactEnv(emptyTree) as Record<string, string>, ...options.env } }))
+  }
 }
 
 let gitVersion: [number, number] | undefined
@@ -625,8 +657,9 @@ const EXACT_TOO_LARGE = (): string => `over ${sizeText(EXACT_LIMITS.fileBytes)},
 const EXACT_FAILED = (error: string): string => `exact bytes could not be recorded (${error}), so only Git's form of files it converts is kept`
 const CONVERTED_BY_INFO = '.git/info/attributes converts it, so only Git\'s form of it is kept'
 const CONVERTED_BY_OLD_GIT = 'Git older than 2.40 converts it, so only Git\'s form of it is kept'
-const NOT_CHECKED = 'not checked yet, so only Git\'s form of it is kept'
-const SMUDGE_FAILED = (filter: string): string => `the ${filter} filter failed to write it, so only Git's form of it is kept`
+/** A filtered file whose Git form is not compared with its bytes yet (`filterVerdicts`); only the turn's own are named. */
+export const NOT_CHECKED = 'not checked yet, so only Git\'s form of it is kept'
+const STORED_LATER = (): string => `not stored yet (a snapshot stores at most ${sizeText(ROUND_TRIP_BUDGET.storeBytes)} of filtered files), so only Git's form of it is kept`
 
 /** One entry of `ls-tree -r -l`: its path, mode, blob and the blob's size. */
 interface SizedEntry { path: string; mode: string; sha: string; size: number }
@@ -750,11 +783,13 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   }
   const modern = yield* readsAttrSource(top)
   const rest = fileEntries.map((entry) => entry.path).filter((path) => !left.has(path))
-  // Paths Git converts even with conversions off: only Git's form of them can be written back, filtered ones too.
+  // Paths Git converts even with conversions off: only Git's form of them can be written back. A filter alone does not
+  // count: its driver is emptied wherever exact bytes are hashed or written back (`exactRunner`), so a lossy file under
+  // a filter `.git/info/attributes` sets (where `nbstripout --install` puts it) is stored and comes back as it was.
   const anyway = new Set<string>()
   const asked = [...rest, ...conversion.filtered]
   if (asked.length && (conversion.infoAttributes || !modern)) {
-    for (const [path] of yield* convertingAttributes(top, asked, exactEnv(empty), EXACT_SETTINGS)) anyway.add(path)
+    for (const [path, attribute] of yield* convertingAttributes(top, asked, exactEnv(empty), EXACT_SETTINGS)) if (attribute !== 'filter' || !conversion.filtered.has(path)) anyway.add(path)
     for (const path of rest) if (anyway.has(path)) { left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT }) }
   }
   // What the exact index has: `mode sha stage\tpath`.
@@ -769,24 +804,17 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   // Each filtered file stays in Git's form when that gives its bytes back, and is recorded exactly when it does not.
   const byPath = new Map(fileEntries.map((entry) => [entry.path, entry]))
   const checked = [...conversion.filtered, ...before.keys()].map((path) => byPath.get(path)).filter((entry): entry is SizedEntry => Boolean(entry))
-  const verdicts = yield* filterVerdicts(top, files, checked, before, config, off, empty)
-  const lossy: SizedEntry[] = []
+  const verdicts = yield* filterVerdicts(top, files, checked, before, config, off, empty, anyway, present)
+  // A lossy file is in the exact tree only as the bytes it was compared as, stored from that very read (`filterVerdicts`).
+  const stored: SizedEntry[] = []
   for (const [path, found] of verdicts) {
     if (found.verdict === 'same') continue
     if (found.verdict === 'lossy' && anyway.has(path)) gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
-    else if (found.verdict === 'lossy' && found.size > EXACT_LIMITS.fileBytes) gaps.push({ path, reason: EXACT_TOO_LARGE() })
-    else if (found.verdict === 'lossy') lossy.push({ ...byPath.get(path)!, sha: found.raw })
-    else gaps.push({ path, reason: found.verdict === 'failed' ? SMUDGE_FAILED(found.filter) : NOT_CHECKED })
+    else if (found.verdict === 'lossy' && found.stored === true) stored.push({ ...byPath.get(path)!, sha: found.raw })
+    else if (found.verdict === 'lossy' && found.stored === 'size') gaps.push({ path, reason: EXACT_TOO_LARGE() })
+    else if (found.verdict === 'lossy' && found.stored === 'budget') gaps.push({ path, reason: STORED_LATER() })
+    else gaps.push({ path, reason: NOT_CHECKED })
   }
-  // A lossy file's bytes are stored as they are on disk (`--no-filters`), once: they must be the bytes it was checked
-  // with, or it changed since and waits for a later snapshot.
-  const unwritten = lossy.filter((entry) => present.get(entry.path)?.sha !== entry.sha)
-  const changed = new Set<string>()
-  if (unwritten.length) {
-    const written = (yield* quiet(gitStep(top, ['hash-object', '-w', '--no-filters', '--stdin-paths'], undefined, unwritten.map((entry) => entry.path).join('\n') + '\n'))).split('\n')
-    for (const [at, entry] of unwritten.entries()) if (written[at] !== entry.sha) { changed.add(entry.path); gaps.push({ path: entry.path, reason: NOT_CHECKED }) }
-  }
-  const stored = lossy.filter((entry) => !changed.has(entry.path))
   const wanted = entries.filter((entry) => entry.mode !== '160000' && !left.has(entry.path)).map((entry) => entry.path)
   const keep = new Set([...wanted, ...stored.map((entry) => entry.path), ...links.map((entry) => entry.path)])
   // Entries the snapshot's tree no longer has (or keeps only in Git's form) go first, so a path that became a folder can be added.
@@ -810,8 +838,8 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   return { tree: yield* quiet(gitStep(top, [...EXACT_SETTINGS, 'write-tree'], env)), gaps }
 }
 
-/** What `filterVerdicts` found for one file: its raw blob id and size, and the filter its attributes name. */
-interface FilterVerdict { verdict: RoundTrip['verdict'] | 'unchecked'; raw: string; size: number; filter: string }
+/** What `filterVerdicts` found for one file: its raw blob id and size, and for a lossy one whether its bytes are stored. */
+interface FilterVerdict { verdict: RoundTrip['verdict'] | 'unchecked'; raw: string; size: number; stored?: Stored }
 
 /**
  * A check `filterVerdicts` keeps for a file, reused while every input of Git's form is as it was: its raw blob id `r`,
@@ -823,17 +851,37 @@ interface VerdictRecord { r: string; n: string; a: string; d: string; v: 'same' 
 const CONVERSION_ATTRIBUTES = ['text', 'crlf', 'eol', 'filter', 'ident', 'working-tree-encoding']
 
 /**
+ * `filter.<name>.required=true` for each driver that may run: its smudge or process is set, as Git reads the config and
+ * the settings Mousse's own commands put back or empty (`programs`, in order, last wins). A failing one then stops Git.
+ */
+function requiredDrivers(config: string, programs: readonly string[]): Array<[string, string]> {
+  const drivers = new Map<string, { smudge?: string; process?: string }>()
+  const set = (key: string, value: string): void => {
+    const match = /^filter\.(.+)\.(smudge|process)$/i.exec(key)
+    if (!match) return
+    const driver = drivers.get(match[1]!) ?? {}
+    driver[match[2]!.toLowerCase() as 'smudge' | 'process'] = value
+    drivers.set(match[1]!, driver)
+  }
+  for (const item of config.split('\0')) { const at = item.indexOf('\n'); if (at > 0) set(item.slice(0, at), item.slice(at + 1)) }
+  for (const setting of programs) { const at = setting.indexOf('='); if (at > 0) set(setting.slice(0, at), setting.slice(at + 1)) }
+  return [...drivers].filter(([, driver]) => driver.smudge || driver.process).map(([name]): [string, string] => [`filter.${name}.required`, 'true'])
+}
+
+/**
  * Whether Git's form of each file in `checked` (under a filter now, or in `before`: see `filteredBefore`) gives its bytes
- * on disk back (`filterRoundTrip.ts`).
+ * on disk back (`filterRoundTrip.ts`), and for a lossy one, whether its bytes are stored: from the very read compared,
+ * or, for one found lossy before, from a read whose blob id is the one checked. One in `noStore` never is. `present`
+ * is what the exact index holds: a lossy file it already has as those bytes is stored.
  *
  * The raw blob id of each comes from a third private index, updated with every conversion off and every filter driver
  * emptied (`--info-only`): no driver runs and no object is written, and its stat cache reads a file again only once it
- * changed. A check is kept in `.git/mousse/` and reused while the raw id, the stored blob, the file's conversion
+ * changed. A check is kept in `.git/mousse/` and reused only while the raw id, the stored blob, the file's conversion
  * attributes and the drivers and settings that apply are all the same; a driver script changed behind the same command is
- * not seen. A file in `before` is checked under the attributes of the tree that gave it its filter; one with none to read
- * reuses the check made while it had its filter, or is not checked.
+ * not seen. A file in `before` is checked under the attributes of the tree that gave it its filter. Where none can be read
+ * (only the previous exact tree shows its filter, or Git is older than 2.40), it is not checked, and no check is reused.
  */
-function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly SizedEntry[], before: ReadonlyMap<string, string | undefined>, config: string, off: ReadonlyArray<readonly [string, string]>, empty: string): Steps<Map<string, FilterVerdict>> {
+function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly SizedEntry[], before: ReadonlyMap<string, string | undefined>, config: string, off: ReadonlyArray<readonly [string, string]>, empty: string, noStore: ReadonlySet<string>, present: ReadonlyMap<string, { mode: string; sha: string }>): Steps<Map<string, FilterVerdict>> {
   const found = new Map<string, FilterVerdict>()
   if (!checked.length) {
     yield* disk.remove(files.filteredIndex)
@@ -842,7 +890,7 @@ function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly Siz
   }
   const env = exactEnv(empty, files.filteredIndex)
   const paths = checked.map((entry) => entry.path)
-  const update = function* (): Steps<Map<string, string>> {
+  const refreshFilteredIndex = function* (): Steps<Map<string, string>> {
     const wanted = new Set(paths)
     const stale = (yield* disk.exists(files.filteredIndex)) ? nul(yield* gitStep(top, ['ls-files', '-z'], { GIT_INDEX_FILE: files.filteredIndex }, undefined, LISTING)).filter((path) => !wanted.has(path)) : []
     if (stale.length) yield* withConfigSteps(off, gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0'))
@@ -851,12 +899,12 @@ function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly Siz
   }
   let raws: Map<string, string>
   try {
-    raws = yield* update()
+    raws = yield* refreshFilteredIndex()
   } catch {
     // The caller holds the mutation locks: a lock file left by a crash is nobody's, and the index is only a cache.
     yield* disk.remove(files.filteredIndex)
     yield* disk.remove(`${files.filteredIndex}.lock`)
-    raws = yield* update()
+    raws = yield* refreshFilteredIndex()
   }
   // What decides Git's form besides the blob: the drivers and settings that apply (the repository's, those Mousse's own
   // commands put back or empty, and a caller's scope), and each file's attributes.
@@ -864,42 +912,50 @@ function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly Siz
   const programs = (yield* step(() => repoProgramSettings(top), () => repoProgramSettingsAsync(top))).filter((value) => /^filter\./i.test(value))
   const drivers = createHash('sha256').update(JSON.stringify([settings, programs])).digest('hex')
   const modern = yield* readsAttrSource(top)
+  const unread = (path: string): boolean => before.has(path) && (!before.get(path) || !modern)
   const attributes = new Map<string, string[]>()
   const sources = new Map<string | undefined, string[]>()
-  for (const path of paths) {
-    const source = before.has(path) ? before.get(path) : undefined
-    if (before.has(path) && (!source || !modern)) continue
-    sources.set(source, [...sources.get(source) ?? [], path])
-  }
+  for (const path of paths) if (!unread(path)) sources.set(before.get(path), [...sources.get(before.get(path)) ?? [], path])
   for (const [source, group] of sources) {
     const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERSION_ATTRIBUTES], source ? { GIT_ATTR_SOURCE: source } : undefined, group.join('\0') + '\0', LISTING)).split('\0')
     for (let at = 0; at + 2 < fields.length; at += 3) attributes.set(fields[at]!, [...attributes.get(fields[at]!) ?? [], `${fields[at + 1]}=${fields[at + 2]}`])
   }
   let recorded: Record<string, VerdictRecord> = {}
   try { recorded = JSON.parse(yield* disk.readText(files.verdicts)) as Record<string, VerdictRecord> } catch { recorded = {} }
-  const filterOf = (path: string): string => (attributes.get(path) ?? []).find((value) => value.startsWith('filter='))?.slice('filter='.length) ?? 'its'
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) recorded = {}
+  const attributesOf = (path: string): string => (attributes.get(path) ?? []).join(';')
   const asks: RoundTripAsk[] = []
+  const lossyBefore: Array<{ path: string; raw: string }> = []
   for (const entry of checked) {
     const raw = raws.get(entry.path)
     const was = Object.hasOwn(recorded, entry.path) ? recorded[entry.path] : undefined
-    const unread = before.has(entry.path) && (!before.get(entry.path) || !modern)
-    const a = (attributes.get(entry.path) ?? []).join(';')
-    if (!raw) found.set(entry.path, { verdict: 'unchecked', raw: '', size: 0, filter: filterOf(entry.path) })
-    else if (was && was.r === raw && was.n === entry.sha && (unread || (was.a === a && was.d === drivers))) found.set(entry.path, { verdict: was.v, raw, size: was.s, filter: filterOf(entry.path) })
-    else if (unread) found.set(entry.path, { verdict: 'unchecked', raw, size: 0, filter: filterOf(entry.path) })
-    else asks.push({ path: entry.path, raw, normal: entry.sha, ...(before.get(entry.path) ? { source: before.get(entry.path)! } : {}) })
+    if (!raw || unread(entry.path)) found.set(entry.path, { verdict: 'unchecked', raw: raw ?? '', size: 0 })
+    else if (was && was.r === raw && was.n === entry.sha && was.a === attributesOf(entry.path) && was.d === drivers) {
+      // Found lossy before: its bytes are stored once the exact index holds them, or are stored again now.
+      const held = was.v === 'lossy' && present.get(entry.path)?.sha === raw
+      found.set(entry.path, { verdict: was.v, raw, size: was.s, ...(held ? { stored: true as const } : {}) })
+      if (was.v === 'lossy' && !held && !noStore.has(entry.path)) lossyBefore.push({ path: entry.path, raw })
+    } else asks.push({ path: entry.path, raw, normal: entry.sha, ...(before.get(entry.path) ? { source: before.get(entry.path)! } : {}), ...(noStore.has(entry.path) ? { store: false } : {}) })
   }
   // Git's form is streamed without blocking; a synchronous run leaves the files to a later snapshot.
-  const answers = asks.length ? yield* step(() => new Map<string, RoundTrip>(), () => roundTripsAsync(top, asks)) : new Map<string, RoundTrip>()
+  const options = { directory: files.directory, limit: EXACT_LIMITS.fileBytes, driversOff: off, required: requiredDrivers(config, programs), storeBudget: { left: ROUND_TRIP_BUDGET.storeBytes } }
+  const none = { answers: new Map<string, RoundTrip>(), again: new Map<string, Stored>() }
+  const { answers, again } = asks.length || lossyBefore.length
+    ? yield* step(() => none, async () => ({ again: await storeCheckedAsync(top, lossyBefore, options), answers: await roundTripsAsync(top, asks, options) }))
+    : none
+  for (const item of lossyBefore) {
+    const stored = again.get(item.path)
+    if (stored) found.set(item.path, { ...found.get(item.path)!, stored })
+    else found.set(item.path, { verdict: 'unchecked', raw: item.raw, size: 0 })
+  }
   const next: Record<string, VerdictRecord> = {}
   for (const entry of checked) {
     const answer = answers.get(entry.path)
     const raw = raws.get(entry.path)!
     if (answer) {
-      found.set(entry.path, { verdict: answer.verdict, raw, size: answer.size, filter: filterOf(entry.path) })
-      // A failed smudge is asked again next time: it may work then.
-      if (answer.verdict !== 'failed') next[entry.path] = { r: raw, n: entry.sha, a: (attributes.get(entry.path) ?? []).join(';'), d: drivers, v: answer.verdict, s: answer.size }
-    } else if (!found.has(entry.path)) found.set(entry.path, { verdict: 'unchecked', raw, size: 0, filter: filterOf(entry.path) })
+      found.set(entry.path, { verdict: answer.verdict, raw, size: answer.size, ...(answer.stored ? { stored: answer.stored } : {}) })
+      next[entry.path] = { r: raw, n: entry.sha, a: attributesOf(entry.path), d: drivers, v: answer.verdict, s: answer.size }
+    } else if (!found.has(entry.path)) found.set(entry.path, { verdict: 'unchecked', raw, size: 0 })
     if (!next[entry.path] && Object.hasOwn(recorded, entry.path)) next[entry.path] = recorded[entry.path]!
   }
   if (JSON.stringify(next) !== JSON.stringify(recorded)) yield* disk.writeText(files.verdicts, JSON.stringify(next))

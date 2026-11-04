@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, recordedSnapshotAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, exactBytesNotice, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, namedGapsAsync, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, recordedSnapshotAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -128,7 +128,7 @@ export class UndoService {
         target.state = 'undoing'; this.actions.replace(all)
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts)
-      const compensation = await this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', restored.exact ? exactBytesNotice(restored.exact) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      const compensation = await this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', restored.exact ? exactBytesNotice(restored.exact) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, await namedGapsAsync(workspacePath, ours.sha, restored.snapshot.sha, ours.coverageGaps, restored.snapshot.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
       const receipt = await receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
         beforeSha: ours.sha, afterSha: restored.snapshot.sha, introducedCommits: [],
         contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: compensation.git })
@@ -190,7 +190,7 @@ export class UndoService {
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
           // An intent written before this line was recorded has it built again from the turn.
           const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target))
-          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, [gitNotice ?? '', coverageNotice(intent.target.git?.coverageGaps, applied.end.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, [gitNotice ?? '', coverageNotice(intent.target.git?.coverageGaps, await namedGapsAsync(workspacePath, applied.startSha, applied.end.sha, applied.end.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
           const receipts = new ChangeReceiptService(this.threadDirectory)
           const known = receipts.list().find((item) => item.operationId === record.operationId)
           const receipt = known ? await receipts.replay(workspacePath, known) : await receipts.record(workspacePath, { operationId: record.operationId, kind: intent.kind, actor: { kind: 'user' }, actionId: compensation.id, beforeSha: applied.startSha, afterSha: applied.end.sha, introducedCommits: compensation.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, ...(compensation.git ? { git: compensation.git } : {}) })

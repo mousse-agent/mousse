@@ -36,6 +36,7 @@ afterEach(() => {
   EXACT_LIMITS.fileBytes = 50 * 1024 ** 2
   ROUND_TRIP_BUDGET.files = 500
   ROUND_TRIP_BUDGET.ms = 2000
+  ROUND_TRIP_BUDGET.storeBytes = 200 * 1024 ** 2
   vi.restoreAllMocks()
   f.dispose()
 })
@@ -645,7 +646,7 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
   }
   const driverLog = (): string[] => existsSync(join(f.root, 'driver.log')) ? readFileSync(join(f.root, 'driver.log'), 'utf8').split('\n').filter(Boolean) : []
   const smudges = (): number => driverLog().filter((line) => line.startsWith('smudge')).length
-  const exactPaths = async (sha: string): Promise<string[]> => git(cwd, 'ls-tree', '-r', '--name-only', (await exactTreeOfAsync(cwd, sha))!).split('\n').filter(Boolean)
+  const exactPaths = async (sha: string): Promise<string[]> => execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', (await exactTreeOfAsync(cwd, sha))!], { cwd, encoding: 'utf8' }).split('\0').filter(Boolean)
   const NOT_CHECKED = "not checked yet, so only Git's form of it is kept"
 
   it('a whitespace-stripping clean filter with a cat smudge: Undo gives back the trailing spaces, byte for byte', async () => {
@@ -724,19 +725,23 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
     expect(paths).not.toContain('a.dat')
   })
 
-  it('a filter .git/info/attributes sets: no driver runs while the bytes are hashed, and a lossy one is named', async () => {
+  it('a lossy filter .git/info/attributes sets (nbstripout --install): no driver runs while hashing, its bytes are stored, and Undo gives them back', async () => {
     const clean = logging('clean.sh', "sed 's/ *$//'")
     const smudge = logging('smudge.sh', 'cat')
-    git(cwd, 'config', 'filter.info.clean', `'${clean}' clean`); git(cwd, 'config', 'filter.info.smudge', `'${smudge}' smudge`)
+    git(cwd, 'config', 'filter.info.clean', `'${clean}' clean`); git(cwd, 'config', 'filter.info.smudge', `'${smudge}' smudge`); git(cwd, 'config', 'filter.info.required', 'true')
     trustRepositoryPrograms(cwd)
     writeFileSync(resolve(cwd, git(cwd, 'rev-parse', '--git-path', 'info/attributes')), '*.txt filter=info\n')
     git(cwd, 'config', 'core.autocrlf', 'input')
-    writeFileSync(join(cwd, 'value.txt'), 'trailing   \n'); writeFileSync(join(cwd, 'other.txt'), 'kept\n')
-    const snapshot = await takeSnapshotAsync(cwd, { reason: 'probe' })
+    const original = Buffer.from('trailing   \n')
+    writeFileSync(join(cwd, 'value.txt'), original); writeFileSync(join(cwd, 'other.txt'), 'kept\n')
+    const action = await turn('agent\n')
     // Git's form runs the clean filter for the snapshot's own tree, and the smudge for the check; nothing on the exact or filtered index.
     expect(driverLog().filter((line) => /snapshot-(exact|filtered)-index/.test(line))).toEqual([])
     expect(driverLog().some((line) => line.startsWith('smudge'))).toBe(true)
-    expect(snapshot.coverageGaps).toEqual([{ path: 'value.txt', reason: ".git/info/attributes converts it, so only Git's form of it is kept" }])
+    expect(action.notCovered).toBeUndefined()
+    expect(rawBlob((await exactTreeOfAsync(cwd, action.startSha))!).equals(original)).toBe(true)
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
   })
 
   it('a second unchanged snapshot runs the smudge 0 times', async () => {
@@ -753,16 +758,62 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
     expect(smudges()).toBe(3)
   })
 
-  it('a failing smudge names the file, and the other files of its batch are still checked', async () => {
-    git(cwd, 'config', 'filter.broken.required', 'true')
-    filter('broken', 'cat', 'false', 'broken.txt')
+  it('a smudge that fails, though not required, is never read as lossy: nothing is stored or kept, the file is named, and it is checked once it works', async () => {
+    const failing = join(f.root, 'smudge-fails')
+    writeFileSync(failing, '')
+    filter('crypt', 'base64', `sh -c 'if test -e "${failing}"; then exit 1; fi; base64 -d'`, 'value.txt')
     git(cwd, 'config', 'filter.strip.clean', "sed 's/ *$//'"); git(cwd, 'config', 'filter.strip.smudge', 'cat')
-    commitAttributes('broken.txt filter=broken\nvalue.txt filter=strip')
+    commitAttributes('value.txt filter=crypt\nother.txt filter=strip')
     trustRepositoryPrograms(cwd)
-    writeFileSync(join(cwd, 'broken.txt'), 'broken\n'); writeFileSync(join(cwd, 'value.txt'), 'spaces  \n')
+    const secret = 'unique secret optional failure abcdef\n'
+    writeFileSync(join(cwd, 'value.txt'), secret); writeFileSync(join(cwd, 'other.txt'), 'spaces  \n')
+    const failed = await takeSnapshotAsync(cwd, { reason: 'while the smudge fails' })
+    expect(failed.coverageGaps).toEqual([{ path: 'value.txt', reason: NOT_CHECKED }])
+    expect(stored(secret)).toBe(false)
+    // The other file of the same batch is still checked, and stored.
+    expect(rawBlob((await exactTreeOfAsync(cwd, failed.sha))!, 'other.txt').toString()).toBe('spaces  \n')
+    expect(Object.keys(JSON.parse(readFileSync(join(cwd, '.git', 'mousse', 'snapshot-filter-verdicts.json'), 'utf8')))).toEqual(['other.txt'])
+    rmSync(failing)
+    const action = await turn(() => writeFileSync(join(cwd, 'other.txt'), 'agent\n'), 'other.txt')
+    expect(await exactPaths(action.startSha)).not.toContain('value.txt')
+    expect(stored(secret)).toBe(false)
+    expect(action.notCovered).toBeUndefined()
+    await undo()
+    expect(bytes().toString()).toBe(secret)
+    expect(bytes('other.txt').toString()).toBe('spaces  \n')
+  })
+
+  it('a save between the check and the store never puts other bytes in an object: only the bytes compared are stored', async () => {
+    filter('crypt', 'base64', `sh -c 'base64 -d | sed "s/ *$//"'`)
+    const original = 'old lossy secret    \n'
+    const replacement = 'new roundtripping secret 88499\n'
+    writeFileSync(join(cwd, 'value.txt'), original)
+    // A save lands right as Git stores the lossy bytes.
+    gitLauncher('*" hash-object -w --no-filters --stdin-paths "*', `printf '${replacement.replace('\n', '\\n')}' > '${join(cwd, 'value.txt')}'`)
     const snapshot = await takeSnapshotAsync(cwd, { reason: 'probe' })
-    expect(snapshot.coverageGaps).toEqual([{ path: 'broken.txt', reason: "the broken filter failed to write it, so only Git's form of it is kept" }])
-    expect(await exactPaths(snapshot.sha)).toContain('value.txt')
+    process.env.PATH = previousPath
+    expect(bytes().toString()).toBe(replacement)
+    expect(stored(replacement)).toBe(false)
+    expect(rawBlob(snapshot.exactTree!).toString()).toBe(original)
+  })
+
+  it('a filter line dropped from an ignored .gitattributes: with no attributes to read, no earlier verdict is reused and the file is named', async () => {
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), '.gitattributes\n')
+    git(cwd, 'config', 'filter.crypt.clean', 'base64'); git(cwd, 'config', 'filter.crypt.smudge', 'base64 -d'); trustRepositoryPrograms(cwd)
+    writeFileSync(join(cwd, '.gitattributes'), 'value.txt filter=crypt\n*.txt text\n')
+    const secret = 'secret before dropped attribute 44100\n'
+    writeFileSync(join(cwd, 'value.txt'), secret)
+    const then = new Date(Date.now() - 30_000)
+    for (const path of ['value.txt', '.gitattributes']) utimesSync(join(cwd, path), then, then)
+    const first = await takeSnapshotAsync(cwd, { reason: 'first' })
+    expect(first.coverageGaps).toBeUndefined()
+    // The line goes, and the driver changes: the old verdict says nothing about the file now.
+    writeFileSync(join(cwd, '.gitattributes'), '*.txt text\n')
+    git(cwd, 'config', 'filter.crypt.smudge', `sh -c 'base64 -d; echo tail'`); trustRepositoryPrograms(cwd)
+    const second = await takeSnapshotAsync(cwd, { reason: 'second' })
+    expect(second.coverageGaps).toEqual([{ path: 'value.txt', reason: NOT_CHECKED }])
+    expect(stored(secret)).toBe(false)
+    expect(bytes().toString()).toBe(secret)
   })
 
   it('past the budget the rest is named not checked yet, and the next snapshots check it', async () => {
@@ -783,5 +834,79 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
     await undo()
     for (const name of names) expect(bytes(name).toString()).toBe(`${name}   \n`)
     expect(action.notCovered).toBeUndefined()
+  })
+
+  it('a slow smudge is stopped at the time budget, and later snapshots check the rest', async () => {
+    filter('slow', "sed 's/ *$//'", `sh -c 'sleep 0.25; cat'`, '*.txt')
+    const names = Array.from({ length: 24 }, (_, at) => `f${at}.txt`)
+    for (const name of names) writeFileSync(join(cwd, name), `${name}   \n`)
+    const started = Date.now()
+    const first = await takeSnapshotAsync(cwd, { reason: 'first' })
+    expect(Date.now() - started).toBeLessThan(4500)
+    expect(first.coverageGaps?.length).toBeGreaterThan(0)
+    for (let round = 0; round < 10 && (await takeSnapshotAsync(cwd, { reason: `round ${round}` })).coverageGaps; round++);
+    const action = await turn(() => { for (const name of names) writeFileSync(join(cwd, name), 'agent\n') })
+    await undo()
+    for (const name of names) expect(bytes(name).toString()).toBe(`${name}   \n`)
+    expect(action.startSha).toBeTruthy()
+  })
+
+  it('Git LFS: a snapshot never makes the smudge fetch, and a pointer naming the file\'s bytes holds them, so no media is stored', async () => {
+    const store = join(f.root, 'lfs-store')
+    mkdirSync(store)
+    const clean = logging('lfs-clean.sh', `t=$(mktemp); cat > "$t"; h=$(shasum -a 256 "$t" | cut -c1-64); s=$(wc -c < "$t" | tr -d ' '); mv "$t" '${store}'/"$h"; printf 'version https://git-lfs.github.com/spec/v1\\noid sha256:%s\\nsize %s\\n' "$h" "$s"`)
+    // With GIT_LFS_SKIP_SMUDGE=1 (or `git lfs install --skip-smudge`) Git LFS gives the pointer back; otherwise it fetches.
+    const smudge = logging('lfs-smudge.sh', `if [ "$GIT_LFS_SKIP_SMUDGE" = 1 ]; then cat; else echo fetch >> '${join(f.root, 'fetch.log')}'; h=$(sed -n 's/^oid sha256://p'); cat '${store}'/"$h"; fi`)
+    git(cwd, 'config', 'filter.lfs.clean', `'${clean}' clean`); git(cwd, 'config', 'filter.lfs.smudge', `'${smudge}' smudge`); git(cwd, 'config', 'filter.lfs.required', 'true')
+    commitAttributes('*.bin filter=lfs -text')
+    trustRepositoryPrograms(cwd)
+    const media = [0, 1, 2].map((at) => Buffer.from(`media ${at} `.repeat(20_000)))
+    media.forEach((data, at) => writeFileSync(join(cwd, `m${at}.bin`), data))
+    const action = await turn(() => writeFileSync(join(cwd, 'm0.bin'), 'agent\n'))
+    expect(existsSync(join(f.root, 'fetch.log'))).toBe(false)
+    expect(action.notCovered).toBeUndefined()
+    expect(media.map((data) => stored(data))).toEqual([false, false, false])
+    expect((await exactPaths(action.startSha)).filter((path) => path.endsWith('.bin'))).toEqual([])
+    await undo()
+    media.forEach((data, at) => expect(bytes(`m${at}.bin`).equals(data)).toBe(true))
+  })
+
+  it('a snapshot stores at most its byte budget of filtered files; the rest is named and stored by the next ones', async () => {
+    ROUND_TRIP_BUDGET.storeBytes = 40
+    filter('strip', "sed 's/ *$//'", 'cat', '*.txt')
+    const names = ['a.txt', 'b.txt', 'value.txt']
+    for (const name of names) writeFileSync(join(cwd, name), `${name} ${'x'.repeat(16)}   \n`)
+    const first = await takeSnapshotAsync(cwd, { reason: 'first' })
+    expect(first.coverageGaps?.map((gap) => gap.path)).toEqual(['b.txt', 'value.txt'])
+    expect(first.coverageGaps?.[0]?.reason).toBe("not stored yet (a snapshot stores at most 40 bytes of filtered files), so only Git's form of it is kept")
+    expect((await takeSnapshotAsync(cwd, { reason: 'second' })).coverageGaps?.map((gap) => gap.path)).toEqual(['value.txt'])
+    expect((await takeSnapshotAsync(cwd, { reason: 'third' })).coverageGaps).toBeUndefined()
+    await turn(() => { for (const name of names) writeFileSync(join(cwd, name), 'agent\n') })
+    await undo()
+    for (const name of names) expect(bytes(name).toString()).toBe(`${name} ${'x'.repeat(16)}   \n`)
+  })
+
+  it('a lossy filtered file whose name starts with a double quote is stored, and the rest of the exact tree stays', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    filter('strip', "sed 's/ *$//'", 'cat', '*.txt')
+    writeFileSync(join(cwd, '"q.txt'), 'quoted   \n'); writeFileSync(join(cwd, 'crlf.md'), 'crlf\r\n')
+    const action = await turn(() => { writeFileSync(join(cwd, '"q.txt'), 'agent\n'); writeFileSync(join(cwd, 'crlf.md'), 'agent\n') })
+    expect(action.notCovered).toBeUndefined()
+    expect(await exactPaths(action.startSha)).toEqual(expect.arrayContaining(['"q.txt', 'crlf.md']))
+    await undo()
+    expect(bytes('"q.txt').toString()).toBe('quoted   \n')
+    expect(bytes('crlf.md').toString()).toBe('crlf\r\n')
+  })
+
+  it('a turn and its Undo name a file not checked yet only when the turn changed it', async () => {
+    ROUND_TRIP_BUDGET.files = 1
+    filter('strip', "sed 's/ *$//'", 'cat', '*.txt')
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) writeFileSync(join(cwd, name), `${name}   \n`)
+    const action = await turn(() => writeFileSync(join(cwd, 'c.txt'), 'agent\n'))
+    expect(action.notCovered).toBe(`Not covered: c.txt (${NOT_CHECKED}, at the start of the turn).`)
+    const undone = await undo()
+    expect(undone.notice ?? '').not.toMatch(/\b[ab]\.txt\b/)
+    // a.txt and b.txt were never touched; c.txt comes back in Git's form, as named.
+    expect([bytes('a.txt').toString(), bytes('b.txt').toString(), bytes('c.txt').toString()]).toEqual(['a.txt   \n', 'b.txt   \n', 'c.txt\n'])
   })
 })

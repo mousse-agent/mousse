@@ -4,7 +4,7 @@
  * `MOUSSE_SNAPSHOT_PERF=1 npx vitest run tests/snapshotExactBytesPerf.test.ts`. A last case puts 2,000 of the files under a
  * filter, half of which loses bytes, and times the snapshots that check them.
  */
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
@@ -91,7 +91,15 @@ describe.skipIf(!process.env.MOUSSE_SNAPSHOT_PERF)('snapshot time, 20,000 files'
     }
     warm.sort((a, b) => a - b)
     const unchanged = await timed(() => takeSnapshotAsync(worktree, { reason: 'unchanged' }))
-    results.push(`autocrlf=input, 2,000 filtered: snapshots until all are checked ${checking.join(', ')} ms, next (one file changed, median of 3) ${warm[1]} ms, unchanged ${unchanged} ms`)
+    // A turn that changes one lossy filtered file, then its Undo, which must give its trailing spaces back.
+    const target = path(201)
+    const original = readFileSync(join(worktree, target))
+    const thread = join(f.root, 'thread-filtered')
+    mkdirSync(thread)
+    await new ThreadActionService(thread).runCheckpointedAction(actionOptions(worktree), () => writeFileSync(join(worktree, target), 'the turn\n'))
+    const undo = await timed(() => pressed('Undo', () => new UndoService(thread).undoLatest('main', worktree)))
+    expect(readFileSync(join(worktree, target)).equals(original)).toBe(true)
+    results.push(`autocrlf=input, 2,000 filtered: snapshots until all are checked ${checking.join(', ')} ms, next (one file changed, median of 3) ${warm[1]} ms, unchanged ${unchanged} ms, Undo of one filtered file ${undo} ms`)
     expect(checking.length).toBeLessThan(6)
   }, 600_000)
 })

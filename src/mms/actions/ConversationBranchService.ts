@@ -14,7 +14,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
-import { coverageNotice, exactBytesNotice, exactTreeOfAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, exactBytesNotice, exactTreeOfAsync, namedGapsAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /** The thread's first conversation branch: the one every thread starts on. */
@@ -212,7 +212,7 @@ export class ConversationBranchService {
           leftBehind.length && left ? await this.leftBehindNotice(workspacePath, { paths: leftBehind, target: selected.name, leftName, leftRef: left.retainedRef, base, current, receiptId: outside.action?.receiptId, operationId }) : '',
           restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '',
           restored.exact ? exactBytesNotice(restored.exact) : '',
-          leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''
+          leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(await namedGapsAsync(workspacePath, current, restored.snapshot.sha, ours.coverageGaps, restored.snapshot.coverageGaps)) ?? ''
         ].filter(Boolean).join(' ') || undefined
         await this.settle(workspacePath, branches, selected, restored.snapshot, { branchId: selected.id, snapshotSha: restored.snapshot.sha, own: theirs, at: new Date().toISOString() })
         return this.complete(operationId, selected, restoreContext, restored.snapshot.sha, notice)
