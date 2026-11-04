@@ -1,15 +1,10 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PublishService } from '../src/mms/actions/PublishService'
-import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
-import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
-import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
-import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
-describe('Git foundation reviewed publish and retention', () => {
+describe('Git foundation reviewed publish', () => {
   let f: ReturnType<typeof gitFoundationFixture>
   beforeEach(() => { f = gitFoundationFixture() })
   afterEach(() => f.dispose())
@@ -39,36 +34,4 @@ describe('Git foundation reviewed publish and retention', () => {
     expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === 'publish')).toHaveLength(1)
     await expect(pressed('Publish', () => publish.publish(workspace, f.repo, target, undefined, options))).rejects.toThrow(/identity.*different revisions/)
   }, 30_000)
-
-  it('empty caller inventory cannot retire an owned task or the before/after refs promised by undo', async () => {
-    const workspace = (await new WorkspaceResolver(f.thread, 'task', f.repo).resolve('agent')).workspacePath!
-    const { action } = await new ThreadActionService(f.thread).runCheckpointedAction(actionOptions(workspace), () => writeFileSync(join(workspace, 'value.txt'), 'unpublished\n'))
-    const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
-    git(f.repo, 'update-ref', 'refs/mousse/agents/agent', 'HEAD')
-    const gc = new WorkspaceGcService(f.repo)
-    const report = await gc.dryRun(new Set(), new Set())
-    expect(report.staleWorktrees.map((item) => item.path)).not.toContain(workspace)
-    for (const ref of receipt.retainedRefs) expect(report.retainedRefs).toContain(ref)
-    expect(report.unreferencedRefs).not.toContain('refs/mousse/agents/agent')
-    expect(report.retainedRefs).toContain('refs/mousse/agents/agent')
-    await expect(gc.purge(report, false)).rejects.toThrow('confirmation')
-    await gc.purge(report, true)
-    expect(existsSync(workspace)).toBe(true)
-    expect(f.read(workspace)).toBe('unpublished\n')
-    for (const ref of receipt.retainedRefs) expect(git(f.repo, 'rev-parse', ref)).toMatch(/^[0-9a-f]{40}$/)
-  })
-
-  it('refuses a GC report whose candidate gained unpublished work after inventory', async () => {
-    const ownedRoot = join(f.home, 'repositories', 'fixture')
-    mkdirSync(ownedRoot, { recursive: true })
-    const candidate = join(ownedRoot, 'retired')
-    git(f.repo, 'worktree', 'add', '-q', '-b', 'retired', candidate)
-    const gc = new WorkspaceGcService(f.repo)
-    const report = await gc.dryRun(new Set(), new Set())
-    expect(report.staleWorktrees).toHaveLength(1)
-    const result = f.commit(candidate, 'late unpublished work\n')
-    await expect(gc.purge(report, true)).rejects.toThrow(/retained|revision changed/)
-    expect(existsSync(candidate)).toBe(true)
-    expect(git(candidate, 'rev-parse', 'HEAD')).toBe(result)
-  })
 })

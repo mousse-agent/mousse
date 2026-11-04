@@ -1225,7 +1225,7 @@ export class StorageCleanupService {
   /**
    * In a run: a worktree a finished dispatch left in place is removed, with its ignored files, only when the confirmed
    * plan named it (`allowed`); otherwise it is reported as kept. Git's own data of it is kept first, as a copy the
-   * dispatch owns. Git still refuses one with untracked or changed files.
+   * dispatch owns. One that still has uncommitted changes stays, and is reported as kept with the files named.
    * A record whose folder is gone is forgotten.
    */
   private async dispatchWorktreeItems(allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
@@ -1246,7 +1246,8 @@ export class StorageCleanupService {
       if (result.success) {
         forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId)
         items.push({ ...base, ...sized,  outcome: 'removed', reason: DELETING_NAME.test(basename(kept.path)) ? 'Cleanup finished, as confirmed; its files are in kept copies or its last commit' : `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })
-      } else items.push({ ...base, bytes: 0, outcome: 'failed', reason: result.error ?? 'The worktree could not be removed' })
+      } else if (result.kept?.code === 'uncommitted_changes') items.push({ ...base, ...sized, outcome: 'kept', reason: `It has uncommitted changes (${result.kept.uncommitted}), so it stays as it is. It can be removed once they are committed or discarded.` })
+      else items.push({ ...base, bytes: 0, outcome: 'failed', reason: result.error ?? 'The worktree could not be removed' })
     }
     return items
   }

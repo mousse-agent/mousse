@@ -83,6 +83,8 @@ export interface DispatchRecord {
   result?: Signed
   error?: string
   cleanupError?: 'worktree_cleanup_failed' | 'quarantine_cleanup_failed'
+  /** Why the worktree's cleanup did not finish, such as "Kept: it has uncommitted changes (a.txt). Nothing in it was changed." */
+  cleanupReason?: string
   /**
    * A worktree cleanup under way, recorded before the worktree's ignored files and Git's own data of it are kept, and
    * again once they are kept and the proof is recorded, before the folder is renamed to `path` and deleted against the

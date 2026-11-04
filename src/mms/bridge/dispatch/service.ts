@@ -450,6 +450,7 @@ export class DispatchService {
     if (record.state === 'uncertain' || record.state === 'running') return
     record.phase = 'cleanup'
     delete record.cleanupError
+    delete record.cleanupReason
     this.save(record)
     if (record.worktree && record.worktreeCleanup) await this.settleWorktreeCleanup(record)
     else if (record.worktree && !record.worktreeKept) await this.cleanupWorktree(record, record.worktree)
@@ -467,6 +468,8 @@ export class DispatchService {
    * its Undo window; the folder is then deleted against a recorded proof (`verifiedCleanup.ts`). Each step is recorded
    * first (`worktreeCleanup`). A worktree whose ignored files cannot be kept stays where it is, as does what is left of
    * one whose cleanup stopped: the record says "Kept, N ignored files" and why, and Storage lists it for deletion.
+   * One with uncommitted changes is left as it is, and nothing runs that could remove it: the record names the files
+   * (`cleanupReason`), and the next start tries the cleanup again.
    * A cleanup a process left part way is finished here too, against its proof.
    */
   private async cleanupWorktree(record: DispatchRecord, worktree: NonNullable<DispatchRecord['worktree']>): Promise<void> {
@@ -493,8 +496,11 @@ export class DispatchService {
     const copy = cleanup.copy ?? (reached?.phase === 'deleting' && reached.ref && reached.sha ? { ref: reached.ref, sha: reached.sha, files: reached.files } : undefined)
     if (copy) record.worktreeCopy = { ref: copy.ref, sha: copy.sha, files: copy.files }
     // What is left of a cleanup that stopped part way is at its `.deleting-` name; Storage lists it there.
-    if (cleanup.kept) this.keepWorktree(record, cleanup.kept.path ? { ...worktree, path: cleanup.kept.path } : worktree, cleanup.kept)
-    else if (!cleanup.success) record.cleanupError = 'worktree_cleanup_failed'
+    if (cleanup.kept && cleanup.kept.code !== 'uncommitted_changes') this.keepWorktree(record, cleanup.kept.path ? { ...worktree, path: cleanup.kept.path } : worktree, cleanup.kept)
+    else if (!cleanup.success) {
+      record.cleanupError = 'worktree_cleanup_failed'
+      record.cleanupReason = cleanup.kept?.reason ?? cleanup.error ?? 'The worktree could not be removed.'
+    }
   }
 
   /**

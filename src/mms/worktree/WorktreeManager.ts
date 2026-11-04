@@ -50,10 +50,11 @@ export interface WorktreeCleanupResult {
   success: boolean
   error?: string
   /**
-   * The worktree was not removed. Its files could not be kept first, or Git has it locked: nothing in it changed. Or
-   * (`cleanup_stopped`) cleanup stopped part way, and what is left of it is at `path`, with every byte it held kept.
+   * The worktree was not removed. It has uncommitted changes (`uncommitted_changes`, with `uncommitted` naming the
+   * files), its files could not be kept first, or Git has it locked: nothing in it changed. Or (`cleanup_stopped`)
+   * cleanup stopped part way, and what is left of it is at `path`, with every byte it held kept.
    */
-  kept?: { ignoredFiles: number; reason: string; code: 'keep_copy_too_large' | 'keep_copy_refused' | 'nested_repository' | 'no_owner' | 'worktree_locked' | 'cleanup_stopped' | 'cleanup_running'; path?: string }
+  kept?: { ignoredFiles: number; reason: string; code: 'uncommitted_changes' | 'keep_copy_too_large' | 'keep_copy_refused' | 'nested_repository' | 'no_owner' | 'worktree_locked' | 'cleanup_stopped' | 'cleanup_running'; path?: string; /** The files with uncommitted changes: the first three, then "and N more". */ uncommitted?: string }
   /**
    * The copy of the files Git cannot write back, kept before the worktree was removed: its ignored and other untracked
    * files and links, and tracked files whose raw bytes are not what Git writes from their blob (CRLF under
@@ -321,7 +322,9 @@ export class WorktreeManager {
   }
 
   /**
-   * Explicit cleanup only: Git refuses dirty worktrees, and cleanup changes no other metadata. A clean worktree is
+   * Explicit cleanup only, and it changes no other metadata. A worktree with uncommitted changes (changed, staged or
+   * untracked files) is kept as it is, and Git is never asked to remove it: the result names the files
+   * (`uncommitted_changes`). Once it is clean, a later cleanup takes the verified path below. A clean worktree is
    * removed as a verified delete (`verifiedCleanup.ts`): what removing it would lose is kept first, as copies owned by
    * `keepIgnored.owner` (its ignored and other untracked files, links, tracked files whose raw bytes Git cannot write
    * back, and Git's own data of it: its settings, HEAD history and own refs, with the commits only they name); then the
@@ -366,23 +369,22 @@ export class WorktreeManager {
       }
       let kept: Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late'> = {}
       if (await exists(worktreePath)) {
-        const { git: cleanupGit, safety } = options.safeCheckout
-          ? await safeWorktreeGit(repository.root)
-          : { git: repository.git, safety: [] }
-        // Read in the worktree with the same overrides as the removal, so no filter or hook runs for the check either.
+        // Read in the worktree with hooks, the file system monitor and every filter driver off, so none runs for the check.
         const { git: inWorktree, safety: worktreeSafety } = options.safeCheckout
           ? await safeWorktreeGit(worktreePath)
           : { git: guardedSimpleGit(worktreePath), safety: [] }
         const inWorktreeGit = (args: string[]) => inWorktree.raw([...worktreeSafety, ...args])
         const ignored = await ignoredFilesOf(inWorktreeGit)
-        if (ignored === 'dirty') {
-          // Git refuses a worktree with untracked or changed files, and changes nothing: no copy is needed for that.
-          await cleanupGit.raw([...safety, 'worktree', 'remove', worktreePath])
-        } else {
-          const outcome = await keepThenDelete({ home: this.installationHome, filters: !options.safeCheckout, worktreePath, branch: worktreeInfo.branch, repositoryRoot: repository.root, ignored, keep: options.keepIgnored, git: inWorktreeGit, ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) })
-          if ('kept' in outcome) return { success: false, error: outcome.kept.reason, kept: outcome.kept }
-          kept = outcome
+        // A dirty check is no proof for a delete: the worktree could be clean a moment later, and Git would then remove
+        // it with its ignored files and its own data, keeping nothing. So it stays, and nothing runs that could remove it.
+        if ('dirty' in ignored) {
+          const uncommitted = namedFiles(ignored.dirty)
+          const reason = `Kept: it has uncommitted changes (${uncommitted}). Nothing in it was changed.`
+          return { success: false, error: reason, kept: { ignoredFiles: 0, code: 'uncommitted_changes', reason, uncommitted } }
         }
+        const outcome = await keepThenDelete({ home: this.installationHome, filters: !options.safeCheckout, worktreePath, branch: worktreeInfo.branch, repositoryRoot: repository.root, ignored, keep: options.keepIgnored, git: inWorktreeGit, ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) })
+        if ('kept' in outcome) return { success: false, error: outcome.kept.reason, kept: outcome.kept }
+        kept = outcome
       }
       if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
       return { success: true, ...kept }
@@ -435,13 +437,28 @@ export class WorktreeManager {
 
 const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
 
+/** Up to three paths by name, then how many more: "a.txt, b.txt, c.txt and 2 more". */
+function namedFiles(paths: string[]): string {
+  const shown = paths.slice(0, 3).join(', ')
+  return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown
+}
+
 /**
- * The ignored files in a worktree, as `git worktree remove` would delete them, or `dirty` when Git would refuse the
- * removal anyway: it checks `git status --porcelain --ignore-submodules=none` and refuses on any line, changing nothing.
- * A repository of its own inside an ignored folder is listed apart: a copy cannot hold it.
+ * The ignored files in a worktree, as removing it would delete them, or the paths with uncommitted changes (`dirty`):
+ * every path `git status --porcelain --ignore-submodules=none` lists, untracked ones included, which is what Git's own
+ * removal checks. A repository of its own inside an ignored folder is listed apart: a copy cannot hold it.
  */
-async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise<'dirty' | { files: string[]; repositories: string[] }> {
-  if ((await git(['status', '--porcelain', '--ignore-submodules=none'])).trim()) return 'dirty'
+async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise<{ dirty: string[] } | { files: string[]; repositories: string[] }> {
+  const status = (await git(['status', '--porcelain', '-z', '--ignore-submodules=none'])).split('\0')
+  const dirty: string[] = []
+  for (let index = 0; index < status.length; index += 1) {
+    const entry = status[index]!
+    if (entry.length < 4) continue
+    dirty.push(entry.slice(3))
+    // A rename or copy, staged or not, is followed by the path it came from.
+    if (/[RC]/.test(entry.slice(0, 2))) index += 1
+  }
+  if (dirty.length) return { dirty }
   const listed = (await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard'])).split('\0').filter(Boolean)
   return { files: listed.filter((path) => !path.endsWith('/')), repositories: listed.filter((path) => path.endsWith('/')) }
 }
