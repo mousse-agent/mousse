@@ -5,15 +5,18 @@
  * transaction, and the outcome names exactly what went. The Undo retention sweep does it, never in its first pass.
  *
  * Every ref here comes from a real writer: an Undo that finds an ignored file in its way (`moveFiles`), switching
- * conversation branches, or `preserveBeforeAbort` recorded the way `ManagedConflictService.abort` records it.
+ * conversation branches, an abort's kept copy (`ManagedConflictService.abort`), or the copy an older version's abort kept.
  */
 import { afterEach, expect, test, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
-import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
-import { abortPreservedNotice } from '../src/mms/actions/snapshots'
+import { keptCopyRestoreCommand } from '../src/mms/actions/keptCopies'
+import { mergeIdentityAsync } from '../src/mms/actions/leftMerge'
+import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
+import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { expirePreservedFiles, PRESERVED_EXPIRY_OPERATION, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
@@ -76,9 +79,9 @@ async function setup(kind: 'folder' | 'worktree') {
     if (!ref) throw new Error(`No kept files in: ${undone.notice}`)
     return { ref, notice: undone.notice! }
   }
-  /** What an abort keeps, recorded as `ManagedConflictService.abort` records it. */
+  /** What an abort of an older version kept, recorded as it recorded it. */
   const keepByAbort = async (operationId: string, threadDirectory = location) => {
-    const { ref } = await preserveBeforeAbortAsync(cwd, operationId)
+    const { ref } = await legacyAbortRefAsync(cwd, operationId)
     new ThreadJournal(threadDirectory).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
     return ref
   }
@@ -102,8 +105,7 @@ test('kept files expire after the Undo window counted from Mousse’s record, wh
   const restore = await f.keepByUndo('secret')
   const abort = (await f.keepByAbort('client-chosen-op'))
   // The notice says how long they are kept; the commits are dated by Mousse's clock, not the environment.
-  expect(restore.notice).toContain(`kept under ${restore.ref} for 30 days: secret. Bring one back before then by running this in ${f.git(f.cwd, 'rev-parse', '--show-toplevel')}: git cat-file blob ${restore.ref}:secret > secret.`)
-  expect(abortPreservedNotice(abort, new UndoRetentionService(f.location).policy().windowMs, f.cwd, 'posix')).toBe(`Every file as it was before the abort is kept under ${abort} for 30 days. Bring one back before then by running this in ${f.cwd}: git cat-file --filters ${abort}:<path> > <path>.`)
+  expect(restore.notice).toContain(`kept under ${restore.ref} for 30 days: secret. Bring one back before then by running this in ${f.git(f.cwd, 'rev-parse', '--show-toplevel')}: ${keptCopyRestoreCommand(restore.ref, 'secret', 'posix')}.`)
   for (const ref of [restore.ref, abort]) expect(Math.abs(Number(f.git(f.cwd, 'log', '-1', '--format=%ct', ref)) * 1000 - start)).toBeLessThan(60_000)
 
   expect(await expirePreservedFiles(f.location, f.cwd)).toEqual({ expiredRefs: [] })
@@ -241,3 +243,33 @@ test('the sweep expires a worktree thread’s kept files in a later pass, never 
   expect(sweeper.outcomes.get('task')).toMatchObject({ expiredPreservedRefs: 1 })
   await sweeper.stop()
 }, 60_000)
+
+for (const [kind, operationType] of [['folder', 'publish'], ['worktree', 'child-integration']] as const) {
+  test(`an Abort of a merge a ${operationType === 'publish' ? 'Publish' : 'subagent'} of an older version left keeps a copy of the thread’s, which expires after the Undo window`, async () => {
+    const start = fakeClock()
+    const f = await setup(kind)
+    const back = f.git(f.cwd, 'branch', '--show-current')
+    f.git(f.cwd, 'switch', '-q', '-c', 'side'); f.write('a.txt', 'side\n'); f.git(f.cwd, 'commit', '-qam', 'side')
+    const theirs = f.git(f.cwd, 'rev-parse', 'HEAD')
+    f.git(f.cwd, 'switch', '-q', back); f.write('a.txt', 'ours\n'); f.git(f.cwd, 'commit', '-qam', 'ours')
+    const before = f.git(f.cwd, 'rev-parse', 'HEAD')
+    expect(() => f.git(f.cwd, 'merge', '-q', '--no-edit', 'side')).toThrow()
+    const base = operationType === 'publish' ? { prePublishSha: before, sourceSha: theirs } : { preMergeSha: before, workerHeadSha: theirs }
+    new ThreadJournal(f.location).append({ operationId: 'old', operationType, state: 'cancelled', details: { ...base, mergeInProgress: f.cwd, mergeIdentity: await mergeIdentityAsync(f.cwd) } })
+    const resolution = 'resolved by hand\r\n'
+    f.write('a.txt', resolution)
+
+    const { preservedRef: ref, kept } = await pressed('Abort', () => new ManagedConflictService(f.location).abort(f.cwd, 'old'))
+    expect(readFileSync(join(f.cwd, 'a.txt'), 'utf8')).toBe('ours\n')
+    expect(threadPreservedIndex(f.location).owns(ref)).toBe(true)
+    execFileSync('sh', ['-c', keptCopyRestoreCommand(ref, 'a.txt', 'posix')], { cwd: kept.top })
+    expect(readFileSync(join(f.cwd, 'a.txt')).equals(Buffer.from(resolution))).toBe(true)
+
+    await f.walkClock(start, start + 29 * DAY)
+    expect(await expirePreservedFiles(f.location, f.cwd)).toEqual({ expiredRefs: [] })
+    expect(f.preserved()).toEqual([ref])
+    await f.walkClock(start + 29 * DAY, start + 31 * DAY)
+    expect(await expirePreservedFiles(f.location, f.cwd)).toEqual({ expiredRefs: [ref] })
+    expect(f.preserved()).toEqual([])
+  }, 60_000)
+}

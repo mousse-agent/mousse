@@ -1,7 +1,7 @@
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { lstat, open, readdir, readFile, readlink, rm, stat, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rm, stat, symlink, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -12,7 +12,7 @@ import { gitRunError, type GitProcess } from '../git/runGitProcess'
 import { KEEP_COPY_OPERATIONS, PRESERVED_REFS, type KeepCopyOperation } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, retentionWindowText } from '../../shared/undoRetention'
 import { gitAsync, gitEnv, guardedAsync, LISTING, mousseCommitEnvNow, NOT_MOUSSE, runGitProcess, tryGitAsync } from './git'
-import { restoreCommandsText, restoreCommandTemplate, restoreFileCommand, restoreShell, restoreStagedCommand, type RestoreShell } from './restoreCommands'
+import { restoreCommandsText, restoreCommandTemplate, restoreFileCommand, restoreKindOf, restoreShell, restoreStagedCommand, type RestoreKind, type RestoreShell } from './restoreCommands'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
@@ -65,6 +65,14 @@ export interface KeptCopy {
   windowMs: number
   /** The SHA-256 of each working version kept (a link's: of its target), as read when it was kept. */
   digests: ReadonlyMap<string, string>
+  /** What each working version kept is: a file, an executable file or a link, so its restore command makes it again. */
+  kinds: ReadonlyMap<string, RestoreKind>
+  /** Kept paths the index had a conflict at: their versions are under `^3`, and `^2` has none. */
+  conflicted: ReadonlySet<string>
+  /** Kept paths whose staged version differs from HEAD, which `^2` holds. */
+  staged: ReadonlySet<string>
+  /** Each kept file's permission bits as they were (`0600`, say), which the tree's mode does not carry. */
+  permissions: ReadonlyMap<string, number>
 }
 
 export interface KeepCopyInput {
@@ -132,7 +140,7 @@ async function gitBytes(top: string, args: string[], options: { env?: NodeJS.Pro
 }
 
 /** The NUL-separated fields Git printed with `-z`, exactly as named (a leading space is part of a path). */
-async function listZ(top: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
+export async function listZ(top: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
   return (await gitBytes(top, args, { ...(env ? { env } : {}), listing: true })).stdout.split('\0').filter(Boolean)
 }
 
@@ -336,7 +344,7 @@ export async function keepExistingCommit(input: { owner: string; top: string; op
 // ---------------------------------------------------------------------------------------------------------
 // Keeping a copy
 
-interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean; dev?: number; ino?: number }
+interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean; dev?: number; ino?: number; /** A file's permission bits. */ permissions?: number }
 
 /** What `lstat` finds at each folder above a path, asked once per folder. */
 type Parents = Map<string, Promise<Entry>>
@@ -365,7 +373,7 @@ async function lstatEntry(top: string, path: string): Promise<Entry> {
   if (!info) return { path, kind: 'gone', bytes: 0 }
   const id = { dev: info.dev, ino: info.ino }
   if (info.isSymbolicLink()) return { path, kind: 'link', bytes: info.size, ...id }
-  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0, ...id }
+  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0, permissions: info.mode & 0o7777, ...id }
   if (info.isDirectory()) return { path, kind: await lstat(join(top, path, '.git')).then(() => true, () => false) ? 'repository' : 'folder', bytes: 0, ...id }
   return { path, kind: 'other', bytes: 0, ...id }
 }
@@ -386,7 +394,7 @@ async function entriesOf(top: string, paths: readonly string[], parents: Parents
 const literal = (path: string): string => `:(literal)${path}`
 
 /** `listZ` over `paths` as literal pathspecs after `args`, a few thousand characters of them per command. */
-async function listZOver(top: string, args: string[], paths: readonly string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
+export async function listZOver(top: string, args: string[], paths: readonly string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
   const found: string[] = []
   for (let start = 0; start < paths.length;) {
     const batch: string[] = []
@@ -815,12 +823,63 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     for (const object of folded) await unlink(join(objects, object.id.slice(0, 2), object.id.slice(2))).catch(() => undefined)
 
     const { operationId, ref } = await recordKept(input.owner, top, input.operationType, sha)
-    return { operationId, ref, sha, top, stagedTree, workingTree, ...(conflictTree ? { conflictTree } : {}), windowMs: keptCopyWindowMs(input.owner), digests }
+    const kinds = new Map(stored.map((line) => [line.slice(line.indexOf('\t') + 1), restoreKindOf(line.slice(0, line.indexOf(' ')))]))
+    return {
+      operationId, ref, sha, top, stagedTree, workingTree, ...(conflictTree ? { conflictTree } : {}), windowMs: keptCopyWindowMs(input.owner), digests,
+      kinds, conflicted: new Set(conflicts.map((entry) => entry.path)), staged: new Set(stagedIds.map((item) => item.path)),
+      permissions: new Map(kept.flatMap((entry) => entry.permissions === undefined ? [] : [[entry.path, entry.permissions] as const]))
+    }
   } finally {
     await pack?.discard()
     await rm(working, { force: true })
     await rm(stages, { force: true })
   }
+}
+
+/**
+ * Writes the working versions the copy `sha` holds at `paths` back into the folder, each only where nothing stands now:
+ * a file is created, never written over, and a folder above it is made only where none is, never through a link. Used
+ * when an action removed kept files and then could not finish, so the folder is as it was. Returns the paths left as
+ * they are, because something now stands there; their bytes stay in the copy. A file gets back the permission bits it had
+ * (`permissions`, from the copy), else those its mode in the copy says.
+ */
+export async function writeBackKeptFiles(top: string, sha: string, paths: readonly string[], permissions: ReadonlyMap<string, number> = new Map()): Promise<string[]> {
+  if (!paths.length) return []
+  const rows = (await listZOver(top, ['ls-tree', '-z', '-r', sha], paths)).map((line) => {
+    const tab = line.indexOf('\t')
+    const [mode, , id] = line.slice(0, tab).split(' ') as [string, string, string]
+    return { mode, id, path: line.slice(tab + 1) }
+  }).filter((row) => row.mode !== '160000')
+  const out = rows.length ? (await gitBytes(top, ['cat-file', '--batch'], { input: `${rows.map((row) => row.id).join('\n')}\n`, listing: true })).stdoutBytes : Buffer.alloc(0)
+  const left: string[] = paths.filter((path) => !rows.some((row) => row.path === path))
+  let position = 0
+  for (const row of rows) {
+    const end = out.indexOf(0x0a, position)
+    const size = Number(out.subarray(position, end).toString('latin1').split(' ')[2])
+    const data = out.subarray(end + 1, end + 1 + size)
+    position = end + 1 + size + 1
+    const absolute = join(top, row.path)
+    try {
+      // Every folder above is a real folder, or is made; a link or a file there leaves the path as it is.
+      for (let slash = row.path.indexOf('/'); slash !== -1; slash = row.path.indexOf('/', slash + 1)) {
+        const folder = join(top, row.path.slice(0, slash))
+        const info = await lstat(folder).catch(() => undefined)
+        if (!info) await mkdir(folder)
+        else if (!info.isDirectory() || info.isSymbolicLink()) throw Object.assign(new Error('in the way'), { code: 'EEXIST' })
+      }
+      if (row.mode === '120000') await symlink(data.toString(), absolute)
+      else {
+        const mode = permissions.get(row.path) ?? (row.mode === '100755' ? 0o755 : 0o644)
+        await writeFile(absolute, data, { flag: 'wx', mode })
+        // The process's umask narrows what `writeFile` makes; the file gets exactly the bits it had.
+        await chmod(absolute, mode)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      left.push(row.path)
+    }
+  }
+  return left
 }
 
 /** `diff-index -z --raw` fields: each change is a `:modes ids status` field, then its path. Deletions store nothing. */
@@ -892,18 +951,63 @@ export function keptCopyWindowMs(owner: string): number {
 const windows = new Map<string, { stamp: string; windowMs: number }>()
 
 /** The command that writes a kept file back exactly as it was on disk, run in the repository's top folder (`restoreCommands.ts`). */
-export function keptCopyRestoreCommand(ref: string, path?: string, shell: RestoreShell = restoreShell()): string {
-  return path === undefined ? restoreCommandTemplate(ref, { shell }) : restoreFileCommand(ref, path, { shell })
+export function keptCopyRestoreCommand(ref: string, path?: string, shell: RestoreShell = restoreShell(), kind?: RestoreKind): string {
+  return path === undefined ? restoreCommandTemplate(ref, { shell }) : restoreFileCommand(ref, path, { shell, ...(kind ? { kind } : {}) })
+}
+
+type NoticeCopy = Pick<KeptCopy, 'ref' | 'windowMs' | 'top' | 'digests'> & Partial<Pick<KeptCopy, 'kinds' | 'conflicted' | 'staged'>>
+
+/** `a.txt`, `a.txt and b.txt`, or `a.txt, b.txt and 3 more`. */
+function namedPaths(paths: readonly string[]): string {
+  if (paths.length <= 2) return paths.join(' and ')
+  return `${paths.slice(0, 2).join(', ')} and ${paths.length - 2} more`
+}
+
+/**
+ * A command for each of the first files the copy holds, conflicted ones first, then where their staged versions and
+ * conflict stages are. The staged command is offered only for paths `^2` holds a staged version of; a conflicted path
+ * has none there (restoring it from `^2` would stage its deletion), so its three versions under `^3` are named instead.
+ */
+function keptFilesText(kept: NoticeCopy, shell: RestoreShell, only?: readonly string[]): string {
+  const conflicted = kept.conflicted ?? new Set<string>()
+  const paths = (only ?? [...kept.digests.keys()]).slice().sort((a, b) => Number(conflicted.has(b)) - Number(conflicted.has(a)) || (a < b ? -1 : a > b ? 1 : 0))
+  const commands = paths.length
+    ? restoreCommandsText(paths.map((path) => ({ ref: kept.ref, path, ...(kept.kinds?.get(path) ? { kind: kept.kinds.get(path)! } : {}) })), { shell })
+    : restoreCommandTemplate(kept.ref, { shell })
+  const staged = [...(kept.staged ?? [])].filter((path) => !conflicted.has(path) && (!only || only.includes(path))).sort()
+  const stages = [...conflicted].filter((path) => !only || only.includes(path)).sort()
+  const notes = [
+    ...(staged.length ? [`the staged version of ${namedPaths(staged)}: ${restoreStagedCommand(kept.ref, shell)}`] : []),
+    ...(stages.length ? [`${namedPaths(stages)} ${stages.length === 1 ? 'had a conflict: its' : 'had conflicts: their'} versions are kept as ${kept.ref}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>`] : [])
+  ]
+  return `${commands}${notes.length ? ` (${notes.join('; ')})` : ''}`
 }
 
 /**
  * What a result says about a copy: where it is, for how long, and how to bring a file back exactly as it was, with a
  * command for each of the first files it holds.
  */
-export function keptCopyNotice(kept: Pick<KeptCopy, 'ref' | 'windowMs' | 'top' | 'digests'>, shell: RestoreShell = restoreShell()): string {
-  const files = [...kept.digests.keys()].sort().map((path) => ({ ref: kept.ref, path }))
-  const commands = files.length ? restoreCommandsText(files, { shell }) : restoreCommandTemplate(kept.ref, { shell })
-  return `A copy is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${commands} (its staged version: ${restoreStagedCommand(kept.ref, shell)}).`
+export function keptCopyNotice(kept: NoticeCopy, shell: RestoreShell = restoreShell()): string {
+  return `A copy is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${keptFilesText(kept, shell)}.`
+}
+
+const ABORTED: Record<string, string> = { merge: 'Merge', rebase: 'Rebase', 'cherry-pick': 'Cherry-pick', revert: 'Revert' }
+
+/**
+ * What an Abort's result says: that it is done, how long the edits it wrote over are kept, and how to bring a file back
+ * exactly as it was, conflicted files first. Without files, the copy only keeps where the abort stopped (a rebase's new
+ * commits, say).
+ */
+export function abortKeptNotice(kind: string, kept: NoticeCopy, shell: RestoreShell = restoreShell()): string {
+  const done = `${ABORTED[kind] ?? 'Operation'} aborted.`
+  const window = retentionWindowText(kept.windowMs)
+  if (!kept.digests.size) return `${done} Where it stopped is kept for ${window} as ${kept.ref}.`
+  return `${done} Your edits are kept for ${window} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${keptFilesText(kept, shell)}.`
+}
+
+/** How a copy is named when an action stopped part way: where `paths` are kept, and the commands that bring them back. */
+export function keptPathsText(kept: NoticeCopy, paths: readonly string[], shell: RestoreShell = restoreShell()): string {
+  return `What ${namedPaths([...paths].sort())} held is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${keptFilesText(kept, shell, paths)}.`
 }
 
 // ---------------------------------------------------------------------------------------------------------

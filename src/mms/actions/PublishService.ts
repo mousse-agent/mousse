@@ -295,18 +295,4 @@ export class PublishService {
     this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, tip, ...(mergeInProgress ? { mergeInProgress, mergeIdentity: await mergeIdentityAsync(mergeInProgress), sourceSha: expected.sourceSha } : {}), reason: `The publish did not land: ${reason}.` } })
     return { operationId, state: 'cancelled', ...(mergeInProgress ? { mergeInProgress } : {}) }
   }
-
-  async abortConflict(primaryCheckout: string, operationId: string): Promise<void> {
-    return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-abort', async () => {
-      const record = this.journal.latestByOperation().get(operationId)
-      const leftMerge = record?.state === 'cancelled' && typeof (record.details as { mergeInProgress?: unknown } | undefined)?.mergeInProgress === 'string'
-      if (!record || record.operationType !== 'publish' || (record.state !== 'recovery_required' && !leftMerge)) {
-        throw new Error('No matching publish conflict is active.')
-      }
-      // Only a publish made before snapshots left a merge in progress.
-      const result = await tryGitAsync(primaryCheckout, ['merge', '--abort'])
-      if (!result.ok) throw new Error(result.stderr || 'Unable to abort publish merge')
-      this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true } })
-    })
-  }
 }

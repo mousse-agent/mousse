@@ -5,10 +5,11 @@
  * switched back to, and a switch that stopped partway is proven from the files or cancelled, never replayed.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { restoreFileCommand } from '../src/mms/actions/restoreCommands'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { restoreChangeAsync, takeSnapshotAsync } from '../src/mms/actions/snapshots'
@@ -39,10 +40,10 @@ const turn = (id: string, mutate: () => void, start = 0, conversationBranchId = 
 /** HEAD, the branch it is on, every branch and the real index, byte for byte. */
 /** The line a switch gives for a file it takes out of the folder, with the command that brings it back. */
 const leftBehind = (file: string, target: string, left: string, ref: string) =>
-  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: git cat-file --filters ${ref}:${file} > ${file}`
+  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: ${restoreFileCommand(ref, file, { shell: 'posix', normalized: true })}`
 /** Runs the command a switch's line gives for a file, in a shell, in the folder it names. */
 const runShown = (notice: string | undefined) => {
-  const match = /running this in (.+?): (git cat-file \S+ \S+ > \S+?)(?:\.$| \(kept for |; )/.exec(notice ?? '')
+  const match = /running this in (.+?): (\(set -C && git cat-file .+? \S+\))(?:\.$| \(kept for |; )/.exec(notice ?? '')
   if (!match) throw new Error(`No command in: ${notice}`)
   execFileSync('sh', ['-c', match[2]!], { cwd: match[1]! })
 }
@@ -514,10 +515,31 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     const { notice } = await sw(a.id)
     // The newer line came along; the recorded one is A's now.
     expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
-    expect(notice).toMatch(/: git cat-file --filters refs\/mousse\/\S+:value\.txt > value\.txt \(kept for .+\)\.$/)
+    expect(notice).toMatch(/: \(set -C && git cat-file --filters refs\/mousse\/\S+:value\.txt > \.\/value\.txt\.mousse-[0-9a-f]{8} && rm -f \.\/value\.txt && mv \.\/value\.txt\.mousse-[0-9a-f]{8} \.\/value\.txt\) \(kept for .+\)\.$/)
     write('value.txt', 'overwritten\n')
     runShown(notice)
     expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))
+  })
+})
+
+describe.skipIf(process.platform === 'win32')('what a switch notice\'s command makes again', { timeout: 60_000 }, () => {
+  const sw = (id: string) => pressed('Switch conversation branch', () => service.activate(cwd, id))
+  it('an executable file comes back executable, as the branch has it', async () => {
+    const original = '#!/bin/sh\necho one\nunchanged a\nunchanged b\nunchanged c\necho end\n'
+    const recorded = '#!/bin/sh\necho RECORDED\nunchanged a\nunchanged b\nunchanged c\necho end\n'
+    const before = '#!/bin/sh\necho RECORDED\nunchanged a\nunchanged b\nunchanged c\necho LATEST\n'
+    const { action } = await turn('first', () => { write('tool.sh', original); chmodSync(join(cwd, 'tool.sh'), 0o755) })
+    write('tool.sh', recorded)
+    await turn('second', () => write('agent.txt', 'second\n'), 2)
+    const a = await service.fork(cwd, 'main', action.id, 'A')
+    write('tool.sh', before)
+    const { notice } = await sw(a.id)
+    expect(notice).toContain('chmod +x ./tool.sh.mousse-')
+    write('tool.sh', 'overwritten\n'); chmodSync(join(cwd, 'tool.sh'), 0o644)
+    const command = /running this in (.+?): (\(.+?\))(?: \(kept for |\.$)/.exec(notice!)!
+    execFileSync('sh', ['-c', command[2]!], { cwd: command[1]! })
+    expect(read('tool.sh')).toBe(before)
+    expect(statSync(join(cwd, 'tool.sh')).mode & 0o111).not.toBe(0)
   })
 })
 

@@ -99,8 +99,8 @@ export const PRESERVED_REFS = 'refs/mousse/preserved/'
 /** The thread journal's operation type for an expiry of those files (`expirePreservedFiles`). */
 export const PRESERVED_EXPIRY_OPERATION = 'preserved-files-expired'
 
-/** Journal operation types of a copy kept before an action removed files (`keepCopy`): Discard, and worktree cleanup. */
-export const KEEP_COPY_OPERATIONS = ['git-discard', 'worktree-cleanup'] as const
+/** Journal operation types of a copy kept before an action removed files (`keepCopy`): Discard, worktree cleanup, and Abort. */
+export const KEEP_COPY_OPERATIONS = ['git-discard', 'worktree-cleanup', 'git-abort'] as const
 export type KeepCopyOperation = (typeof KEEP_COPY_OPERATIONS)[number]
 
 /**

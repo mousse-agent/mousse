@@ -238,10 +238,13 @@ export async function pullGit(key: string, scope: GitScope, options: GitPullOpti
   }
 }
 
-/** Abort the merge or rebase that is waiting on the user. */
-export async function abortGitInProgress(key: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<void> {
+/**
+ * Abort the merge or rebase that is waiting on the user. Returns what the daemon says about the copy it kept first of
+ * what the abort wrote over.
+ */
+export async function abortGitInProgress(key: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<string | undefined> {
   try {
-    await window.mousse.git.abortInProgress(scope, kind)
+    return (await window.mousse.git.abortInProgress(scope, kind)).kept?.notice
   } finally {
     await refreshAfterMutation(key, scope)
   }

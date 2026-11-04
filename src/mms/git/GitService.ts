@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
+import { abortKeepingCopy, AbortStoppedPartWayError, type AbortKind } from '../actions/abortKeepingCopy'
 import { keepCopy, KeepCopyRefusedError, modesIn, type KeptCopy } from '../actions/keptCopies'
 import { discardProvenAsync, IndexLockedError, stagedEntryDigests, stagedModes, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from '../actions/provenDiscard'
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
@@ -375,6 +376,16 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
  */
 /** Commits whose authors are read when drafting a pull request; Mousse's own are left out of these. */
 const DRAFT_COMMITS_SCANNED = 2000
+
+/**
+ * A copy that could not be kept, as the person reads it: the refusal names the files (the largest ones, for a copy too
+ * large), so the person knows what to move aside. Any other error is returned as it is.
+ */
+function keepRefusal(error: unknown): unknown {
+  if (!(error instanceof KeepCopyRefusedError)) return error
+  const fixed = gitErrors.create(error.code === 'keep_copy_too_large' ? 'keep_copy_too_large' : 'keep_copy_refused')
+  return new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
+}
 
 /** Whether `path` is there, as `existsSync` answers, without blocking. */
 function pathExists(path: string): Promise<boolean> {
@@ -966,12 +977,7 @@ export class GitService {
         // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
         kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
       } catch (error) {
-        // The refusal names the files (the largest ones, for a copy too large), so the person knows what to move aside.
-        if (error instanceof KeepCopyRefusedError) {
-          const fixed = gitErrors.create(error.code === 'keep_copy_too_large' ? 'keep_copy_too_large' : 'keep_copy_refused')
-          throw new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
-        }
-        throw error
+        throw keepRefusal(error)
       }
       try {
         const { left } = await discardProvenAsync({
@@ -1221,15 +1227,32 @@ export class GitService {
     return writes
   }
 
-  /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
-  abortInProgress(cwd: string, userRequested: UserAction, kind: 'merge' | 'rebase'): Promise<void> {
-    return this.asUser(userRequested, () => this.abortInProgressNow(cwd, kind))
+  /**
+   * Gives up a merge, rebase, cherry-pick or revert that stopped. Only ever called by an explicit user action. What Git's
+   * abort writes over is kept first as a copy of `keep.owner`'s, which is returned (`abortKeepingCopy`): a hand
+   * resolution, staged versions, conflict stages, and ignored files where Git writes. A copy that cannot be kept refuses
+   * the abort, naming the files, and changes nothing.
+   */
+  abortInProgress(cwd: string, userRequested: UserAction, kind: AbortKind, keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return this.asUser(userRequested, () => this.abortInProgressNow(cwd, kind, keep))
   }
 
-  private async abortInProgressNow(cwd: string, kind: 'merge' | 'rebase'): Promise<void> {
-    await this.serialized(cwd, async () => {
-      const run = await this.runGit(cwd, [kind, '--abort'], { userAction: true })
-      if (!run.ok) throw failure('git_failed', run)
+  private async abortInProgressNow(cwd: string, kind: AbortKind, keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return await this.serialized(cwd, async () => {
+      const top = await this.toplevel(cwd)
+      try {
+        return await abortKeepingCopy({ owner: keep.owner, top, kind, action: 'Abort', abort: async (beforeStart) => {
+          const run = await this.runGit(top, [kind, '--abort'], { userAction: true, beforeStart })
+          if (!run.ok) throw failure('git_failed', run)
+        } })
+      } catch (error) {
+        // Git stopped after it wrote: its own error, with where the copy is and how to bring those files back.
+        if (error instanceof AbortStoppedPartWayError && error.gitError instanceof AppError) {
+          const cause = error.gitError
+          throw new AppError({ code: cause.code, message: `${cause.message.trim()} ${error.detail}`, errorInfo: cause.errorInfo, details: { ref: error.kept.ref, paths: error.paths } }, error)
+        }
+        throw keepRefusal(error)
+      }
     })
   }
 

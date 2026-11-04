@@ -7,7 +7,7 @@ import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { gitEnv, gitStep, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
-import { restoreCommandsText, restoreCommandTemplate, restoreShell, type RestoreShell } from './restoreCommands'
+import { restoreCommandsText, restoreKindOf, restoreShell, type RestoreKind, type RestoreShell } from './restoreCommands'
 import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -629,7 +629,13 @@ export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo
  * Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`
  * as their bytes on disk. `paths` are relative to `top`, the repository's top folder.
  */
-export interface PreservedFiles { ref: string; paths: string[]; top: string }
+export interface PreservedFiles {
+  ref: string
+  paths: string[]
+  top: string
+  /** Each kept path that is not a plain file: a link or an executable file, so its command makes it again as it was. */
+  kinds?: Record<string, RestoreKind>
+}
 
 /** A path a restore left as it is because it was not covered on one side, and why. */
 export interface LeftAsIs { path: string; reason: string }
@@ -650,17 +656,8 @@ export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined
  */
 export function preservedNotice(preserved: PreservedFiles, windowMs: number, shell: RestoreShell = restoreShell()): string {
   const named = preserved.paths.slice(0, 10).join(', ') + (preserved.paths.length > 10 ? ` and ${preserved.paths.length - 10} more` : '')
-  const commands = restoreCommandsText(preserved.paths.map((path) => ({ ref: preserved.ref, path })), { shell })
+  const commands = restoreCommandsText(preserved.paths.map((path) => ({ ref: preserved.ref, path, ...(preserved.kinds?.[path] ? { kind: preserved.kinds[path] } : {}) })), { shell })
   return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then by running this in ${preserved.top}: ${commands}.`
-}
-
-/**
- * The line an abort's reply carries: every file as it was before the abort is kept under `ref` for the thread's Undo
- * window. The ref holds a snapshot's tree, Git's normal form of each file, so the command converts it back as a checkout
- * would; run in `top`, the repository's top folder.
- */
-export function abortPreservedNotice(ref: string, windowMs: number, top: string, shell: RestoreShell = restoreShell()): string {
-  return `Every file as it was before the abort is kept under ${ref} for ${retentionWindowText(windowMs)}. Bring one back before then by running this in ${top}: ${restoreCommandTemplate(ref, { normalized: true, shell })}.`
 }
 
 export interface RestoreChangeInput extends SnapshotInput {
@@ -803,11 +800,13 @@ function* preserveFiles(top: string, paths: string[], directory: string, operati
   try {
     yield* gitStep(top, ['read-tree', '--empty'], env)
     const entries: string[] = []
+    const kinds: Record<string, RestoreKind> = {}
     for (const path of paths) {
       const absolute = join(top, path)
       const link = (yield* disk.lstat(absolute)).isSymbolicLink()
       const sha = link ? yield* gitStep(top, ['hash-object', '-w', '--stdin'], undefined, yield* disk.readlink(absolute)) : yield* gitStep(top, ['hash-object', '-w', '--no-filters', '--', path])
       const mode = link ? '120000' : ((yield* disk.lstat(absolute)).mode & 0o111) ? '100755' : '100644'
+      if (mode !== '100644') kinds[path] = restoreKindOf(mode)
       entries.push(`${mode} ${sha}\t${path}`)
     }
     yield* gitStep(top, ['update-index', '--index-info'], env, entries.join('\n') + '\n')
@@ -816,7 +815,7 @@ function* preserveFiles(top: string, paths: string[], directory: string, operati
     const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], mousseCommitEnvNow())
     const ref = `refs/mousse/preserved/${operationId ?? randomUUID()}-${sha.slice(0, 12)}`
     yield* gitStep(top, ['update-ref', '--no-deref', ref, sha])
-    return { ref, paths, top }
+    return { ref, paths, top, ...(Object.keys(kinds).length ? { kinds } : {}) }
   } finally {
     yield* disk.remove(temporary)
   }

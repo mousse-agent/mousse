@@ -61,6 +61,8 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024
 export interface GitReadOptions {
   /** Bytes of output Git may print before the run is stopped and fails; 1 MiB when not given (or 256 MiB with input). */
   maxBuffer?: number
+  /** Runs synchronously right before Git starts; what it throws is thrown instead, and Git never starts. */
+  beforeStart?: () => void
 }
 
 /** For a read whose output grows with the repository (see `LISTING_MAX_BUFFER`). */
@@ -99,6 +101,16 @@ export async function gitAsync(cwd: string, args: string[], env?: NodeJS.Process
   throw error
 }
 
+/**
+ * The NUL-separated fields of a `-z` listing, exactly as Git wrote them, run synchronously: for a check that must happen
+ * with nothing awaited before what it guards (Abort's last check right before Git starts). Throws when Git fails.
+ */
+export function listZSync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string[] {
+  const result = spawnSync('git', guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: LISTING_MAX_BUFFER })
+  if (result.error || result.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}${result.stderr ? `\n${result.stderr.trim()}` : ''}`)
+  return result.stdout.split('\0').filter(Boolean)
+}
+
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): { ok: boolean; stdout: string; stderr: string } {
   let safe: string[]
   try {
@@ -124,7 +136,7 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
+  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER, ...(options?.beforeStart ? { beforeStart: options.beforeStart } : {}) })
   const stderr = result.stderr.trim()
   // As in `tryGit`: output cut off at the limit is a failure.
   const ok = !result.error && result.status === 0
@@ -167,7 +179,7 @@ const OPERATION_OF: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], PendingChan
   MERGE_HEAD: 'merge', REVERT_HEAD: 'revert', CHERRY_PICK_HEAD: 'cherry-pick', REBASE_HEAD: 'rebase', 'rebase-merge': 'rebase', 'rebase-apply': 'rebase'
 }
 /** Mousse's own files in a checkout; never part of the user's pending changes. */
-const MOUSSE_DIRECTORY = '.mousse'
+export const MOUSSE_DIRECTORY = '.mousse'
 export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 export interface PendingChanges {

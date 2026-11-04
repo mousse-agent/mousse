@@ -27,7 +27,7 @@ import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { adminDigest, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
 import { keepCopy, keptCopyWindowMs } from '../actions/keptCopies'
-import { restoreCommands, restoreShell, type RestoreShell } from '../actions/restoreCommands'
+import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
@@ -251,7 +251,8 @@ export interface WorktreeReconstructionManifest {
    * Files that appeared in the new checkout while it was being rebuilt, in the way of what the proof holds: each was kept
    * in a kept copy (`ref`, owned by the thread's journal) before the rebuild cleared it.
    */
-  keptAside?: Array<{ ref: string; paths: string[] }>
+  /** `kinds`: each kept path that is not a plain file (a link, an executable), so its command makes it again as it was. */
+  keptAside?: Array<{ ref: string; paths: string[]; kinds?: Record<string, RestoreKind> }>
   /**
    * Set right before a rebuild makes the worktree, and cleared only once it is complete and checked. While it is set,
    * what is at the worktree's path is never taken for the worktree: the next use keeps whatever in it differs from the
@@ -297,13 +298,19 @@ async function newestChange(root: string): Promise<number> {
 export interface RetirementInput { taskId: string; worktreePath: string; branch: string; sourcePath: string; repositoryId?: string; baseSha?: string; resultSha?: string }
 export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; taskLease?: ThreadLeaseHandle; cleanupTaskId?: string; cleanupToken?: string; cleanupGeneration?: number }
 
+/** The kinds of `paths` in a kept copy that are not plain files, for a `keptAside` entry. */
+function keptKinds(copy: { kinds: ReadonlyMap<string, RestoreKind> }, paths: readonly string[]): { kinds?: Record<string, RestoreKind> } {
+  const kinds = Object.fromEntries(paths.flatMap((path) => { const kind = copy.kinds.get(path); return kind && kind !== 'file' ? [[path, kind]] : [] }))
+  return Object.keys(kinds).length ? { kinds } : {}
+}
+
 /**
  * What a rebuild of the worktree set aside (`keptAside`), in plain words for the thread, with the exact command that
  * brings each file back (`restoreCommands.ts`) and how long it is kept; undefined when it set nothing aside. `windowMs`
  * is the owner's Undo window (`keptCopyWindowMs`).
  */
 export function keptAsideNotice(manifest: Pick<WorktreeReconstructionManifest, 'keptAside' | 'worktreePath'>, windowMs: number, shell: RestoreShell = restoreShell()): { id: string; text: string } | undefined {
-  const files = (manifest.keptAside ?? []).flatMap((entry) => entry.paths.map((path) => ({ ref: entry.ref, path })))
+  const files = (manifest.keptAside ?? []).flatMap((entry) => entry.paths.map((path) => ({ ref: entry.ref, path, ...(entry.kinds?.[path] ? { kind: entry.kinds[path] } : {}) })))
   if (!files.length) return undefined
   const one = files.length === 1
   const { commands, rest } = restoreCommands(files, { shell })
@@ -877,7 +884,7 @@ export class WorktreeRetirementService {
       let copy: Awaited<ReturnType<typeof keepCopy>>
       try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top: manifest.worktreePath, operationType: 'worktree-cleanup', action: 'Rebuilding the worktree', paths: rels }) }
       catch (error) { throw new Error(`Files appeared in the worktree while it was rebuilt, in the way of its own files, and no copy of them could be kept (${(error as Error).message.split(/\r?\n/)[0]}); nothing of them was deleted: ${rels.join(', ')}`) }
-      manifest.keptAside = [...(manifest.keptAside ?? []), { ref: copy.ref, paths: rels }]
+      manifest.keptAside = [...(manifest.keptAside ?? []), { ref: copy.ref, paths: rels, ...keptKinds(copy, rels) }]
       return copy.digests
     }
     return new Rebuild(manifest.worktreePath, await caseInsensitiveAt(manifest.worktreePath), fromCheckout, keep)
@@ -1237,9 +1244,9 @@ export class WorktreeRetirementService {
    * whose bytes differ from the proof. Then Git removes the worktree, its registration with it. Everything else in it was
    * written from the pins, which keep it. A registration left without a folder is removed.
    */
-  private async clearHalfBuilt(manifestPath: string, manifest: WorktreeReconstructionManifest): Promise<Array<{ ref: string; paths: string[] }>> {
+  private async clearHalfBuilt(manifestPath: string, manifest: WorktreeReconstructionManifest): Promise<NonNullable<WorktreeReconstructionManifest['keptAside']>> {
     const path = manifest.worktreePath
-    const kept: Array<{ ref: string; paths: string[] }> = []
+    const kept: NonNullable<WorktreeReconstructionManifest['keptAside']> = []
     if (await exists(path)) {
       const problem = await this.halfBuiltProblem(manifest)
       if (problem) throw new Error(`What an earlier rebuild left at ${path} is not this repository's worktree (${problem}); it is kept as it is`)
@@ -1248,7 +1255,7 @@ export class WorktreeRetirementService {
         let copy: Awaited<ReturnType<typeof keepCopy>>
         try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top: path, operationType: 'worktree-cleanup', action: 'Rebuilding the worktree', paths: changed }) }
         catch (error) { throw new Error(`Files were written into the worktree while an earlier rebuild made it, and no copy of them could be kept (${(error as Error).message.split(/\r?\n/)[0]}); nothing was deleted: ${changed.join(', ')}`) }
-        kept.push({ ref: copy.ref, paths: changed })
+        kept.push({ ref: copy.ref, paths: changed, ...keptKinds(copy, changed) })
         manifest.keptAside = [...(manifest.keptAside ?? []), ...kept]
         atomicWriteJsonSync(manifestPath, manifest)
       }

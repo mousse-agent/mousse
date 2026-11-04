@@ -9,7 +9,7 @@ import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
-import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
+import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
@@ -57,7 +57,7 @@ test('a purge releases the files the thread’s aborts kept, asks first while th
   const keep = async (operationId: string, at: number) => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(at)
     try {
-      const ref = (await preserveBeforeAbortAsync(f.worktree, operationId)).ref
+      const ref = (await legacyAbortRefAsync(f.worktree, operationId)).ref
       new ThreadJournal(f.location).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
       return ref
     } finally { vi.useRealTimers() }
@@ -65,7 +65,7 @@ test('a purge releases the files the thread’s aborts kept, asks first while th
   const old = (await keep('old-abort', Date.now() - 40 * 24 * 60 * 60 * 1000))
   const young = (await keep('young-abort', Date.now()))
   // Another thread's abort, whose id starts with this thread's: never this thread's.
-  const theirs = (await preserveBeforeAbortAsync(f.worktree, 'old-abort-other')).ref
+  const theirs = (await legacyAbortRefAsync(f.worktree, 'old-abort-other')).ref
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
   const preview = await f.coordinator.cleanup.preview('task'); expect(preview.blockers).toEqual([])
   const kept = preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/'))
@@ -315,7 +315,7 @@ test('a broken thread that names this thread’s worktree through an alias keeps
   const alias = join(f.root, 'profile-alias'); symlinkSync(f.home, alias, process.platform === 'win32' ? 'junction' : 'dir')
   writeFileSync(join(broken.location, 'agents.json'), JSON.stringify([{ id: 'helper', worktreePath: join(alias, relative(f.home, f.worktree)), branch: 'mousse/agent/helper', status: 'ready' }]))
   writeFileSync(join(f.worktree, 'output.txt'), 'untracked output\n')
-  const kept = (await preserveBeforeAbortAsync(f.worktree, 'abort-1')).ref
+  const kept = (await legacyAbortRefAsync(f.worktree, 'abort-1')).ref
   new ThreadJournal(f.location).append({ operationId: 'abort-1', operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: kept } })
   const keptSha = git(f.repo, ['rev-parse', kept!])
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })

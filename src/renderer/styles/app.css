@@ -4368,6 +4368,9 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-secondary);
+  /* An abort's line holds the kept copy's ref and restore commands, which are copied by hand. */
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .git-sync-line:empty {

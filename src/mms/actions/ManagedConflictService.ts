@@ -1,18 +1,21 @@
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
+import { abortKeepingCopy } from './abortKeepingCopy'
 import { gitAsync, requireCleanAsync, tryGitAsync } from './git'
-import { leftMergeRefusalAsync, preserveBeforeAbortAsync } from './leftMerge'
+import type { KeptCopy } from './keptCopies'
+import { leftMergeRefusalAsync } from './leftMerge'
 
 /** Abort only the Git sequencer belonging to the selected durable operation. */
 export class ManagedConflictService {
   constructor(private readonly threadDirectory: string) {}
 
   /**
-   * Aborts the operation's merge or revert. Every file is kept first under the returned `refs/mousse/preserved/` ref,
-   * by its path in the repository's top folder (`top`).
+   * Aborts the operation's merge or revert. What the abort writes over is kept first as one of the thread's copies
+   * (`abortKeepingCopy`, operation `git-abort`), which expires after the thread's Undo window; the copy is returned, with
+   * its ref as `preservedRef` and the repository's top folder its paths are relative to (`top`).
    */
-  async abort(workspacePath: string, operationId: string): Promise<{ preservedRef: string; top: string }> {
+  async abort(workspacePath: string, operationId: string): Promise<{ preservedRef: string; top: string; kind: 'merge' | 'revert'; kept: KeptCopy }> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'operation-abort', async () => {
       const journal = new ThreadJournal(this.threadDirectory)
       const record = journal.latestByOperation().get(operationId)
@@ -39,9 +42,13 @@ export class ManagedConflictService {
       const expected = merge ? details.workerHeadSha ?? sourceSha : details.currentCommit
       if (!expected || marker.stdout !== expected) throw new Error('Git sequencer belongs to another operation.')
       // An abort rewrites conflicted files, edits in them included: they are kept first, so nothing is lost.
-      const { ref: preservedRef, top } = await preserveBeforeAbortAsync(workspacePath, operationId)
-      const result = await tryGitAsync(workspacePath, [merge ? 'merge' : 'revert', '--abort'])
-      if (!result.ok) throw new Error(result.stderr || 'Unable to abort the operation conflict.')
+      const kind = merge ? 'merge' : 'revert'
+      const kept = await abortKeepingCopy({ owner: this.threadDirectory, top: await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']), kind, action: 'Abort', abort: async (beforeStart) => {
+        const result = await tryGitAsync(workspacePath, [kind, '--abort'], undefined, { beforeStart })
+        if (!result.ok) throw new Error(result.stderr || 'Unable to abort the operation conflict.')
+      } })
+      if (!kept) throw new Error('The matching Git sequencer is no longer active.')
+      const { ref: preservedRef, top } = kept
       // The merge is gone; what else the folder holds is someone's work and stays as it is.
       if (!leftMerge) await requireCleanAsync(workspacePath, 'Thread workspace after abort')
       if (['undo', 'redo'].includes(record.operationType)) {
@@ -50,7 +57,7 @@ export class ManagedConflictService {
         if (target?.state === 'undo_conflict') { target.state = 'completed'; actions.replace(all) }
       }
       journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { conflictAborted: true, beforeSha: before, preservedRef } })
-      return { preservedRef, top }
+      return { preservedRef, top, kind, kept }
     })
   }
 }

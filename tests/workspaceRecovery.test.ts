@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +12,8 @@ import { threadPlacement } from '../src/mms/workspace/threadPlacement'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
+import { abortKeptNotice, keptCopyRestoreCommand } from '../src/mms/actions/keptCopies'
+import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { tryGit } from '../src/mms/actions/git'
 import { mergeIdentityAsync } from '../src/mms/actions/leftMerge'
 import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
@@ -179,19 +182,24 @@ describe('what a thread is waiting on', () => {
     expect(await status()).toBeUndefined()
   })
 
-  it('keeps every file, edits in conflicted ones included, before aborting the recorded merge', async () => {
+  it('keeps what the abort writes over, edits in conflicted files included, as a copy of the thread’s, before aborting the recorded merge', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
     await leftIntegration(f.thread, cwd)
     // Editing a conflicted file and adding a new one does not make it another merge, but Abort must not lose them.
-    writeFileSync(join(cwd, 'value.txt'), 'half resolved\n')
+    writeFileSync(join(cwd, 'value.txt'), 'half resolved\r\n')
     writeFileSync(join(cwd, 'notes.txt'), 'notes\n')
     expect(await status()).toMatchObject({ kind: 'merge', operationId: 'old' })
-    const { preservedRef } = await new ManagedConflictService(f.thread).abort(cwd, 'old')
-    expect(preservedRef).toMatch(/^refs\/mousse\/preserved\/old-abort-[0-9a-f]{12}$/)
+    const { preservedRef, kept } = await new ManagedConflictService(f.thread).abort(cwd, 'old')
+    expect(preservedRef).toMatch(/^refs\/mousse\/preserved\/[0-9a-f-]{36}-[0-9a-f]{12}$/)
+    expect(threadPreservedIndex(f.thread).owns(preservedRef)).toBe(true)
+    expect([...new ThreadJournal(f.thread).latestByOperation().values()].find((entry) => entry.operationType === 'git-abort')).toMatchObject({ state: 'completed', details: { ref: preservedRef } })
     expect(mergeHead(cwd).ok).toBe(false)
-    expect(git(cwd, 'show', `${preservedRef}:value.txt`)).toBe('half resolved')
-    expect(git(cwd, 'show', `${preservedRef}:notes.txt`)).toBe('notes')
+    // The edit comes back byte for byte with the command the notice shows; the new file was never touched.
+    expect(abortKeptNotice('merge', kept, 'posix')).toContain(`${keptCopyRestoreCommand(preservedRef, 'value.txt', 'posix')}`)
+    execFileSync('sh', ['-c', keptCopyRestoreCommand(preservedRef, 'value.txt', 'posix')], { cwd: kept.top })
+    expect(readFileSync(join(cwd, 'value.txt')).equals(Buffer.from('half resolved\r\n'))).toBe(true)
+    expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('notes\n')
     expect(new ThreadJournal(f.thread).latestByOperation().get('old')).toMatchObject({ details: { conflictAborted: true, preservedRef } })
   })
 
@@ -277,10 +285,18 @@ describe('through the daemon', () => {
     try {
       const { before } = (await leftPublishMerge(d.directory))
       expect(await d.recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old-publish' })
-      const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string }
-      expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-publish-abort-/), notice: expect.stringMatching(/^Every file as it was before the abort is kept under refs\/mousse\/preserved\/old-publish-abort-\S+ for 30 days\. Bring one back before then/) })
-      expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
+      // The person resolved part of the old Publish's merge by hand before giving it up.
+      writeFileSync(join(f.repo, 'value.txt'), 'resolved by hand\n')
+      const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string; notice: string }
+      const top = git(f.repo, 'rev-parse', '--show-toplevel')
+      expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/[0-9a-f-]{36}-[0-9a-f]{12}$/), notice: expect.any(String) })
+      expect(aborted.notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${aborted.preservedRef}. To bring a file back exactly as it was, run in ${top}: ${keptCopyRestoreCommand(aborted.preservedRef, 'value.txt', 'posix')} (value.txt had a conflict: its versions are kept as ${aborted.preservedRef}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
+      // The thread's own copy, which expires after its Undo window.
+      expect(threadPreservedIndex(d.directory).owns(aborted.preservedRef)).toBe(true)
       expect(mergeHead(f.repo).ok).toBe(false)
+      execFileSync('sh', ['-c', keptCopyRestoreCommand(aborted.preservedRef, 'value.txt', 'posix')], { cwd: top })
+      expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('resolved by hand\n')
+      git(f.repo, 'checkout', '--', 'value.txt')
       expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)
       expect(await d.recovery()).toBeUndefined()
       // A second press has nothing to abort, and says so in words.
@@ -443,11 +459,12 @@ describe('through the daemon', () => {
         expect(new ThreadJournal(directory).latestByOperation().get(interrupted.id)?.state).toBe('completed')
         expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('three\n')
 
-        // A merge an older version left in the project folder: Abort keeps every file first, then aborts it, as the person asked.
+        // A merge an older version left in the project folder: Abort keeps what it writes over first, then aborts it, as the person asked.
         const { before } = await leftIntegration(directory, f.repo)
         expect(await recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old' })
         const aborted = await call('operations.abort', { operationId: 'old' }) as { ok: boolean; preservedRef: string }
-        expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/), notice: expect.stringContaining('for 30 days') })
+        expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/[0-9a-f-]{36}-[0-9a-f]{12}$/), notice: expect.stringContaining('kept for 30 days') })
+        expect(threadPreservedIndex(directory).owns(aborted.preservedRef)).toBe(true)
         expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
         expect(mergeHead(f.repo).ok).toBe(false)
         expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)

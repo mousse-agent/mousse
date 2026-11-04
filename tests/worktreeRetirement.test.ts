@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, chmodSync, openSync, closeSync, writeSync, ftruncateSync, constants as fsConstants } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -1078,13 +1078,17 @@ test.skipIf(process.platform === 'win32')('a rebuild that set files aside says s
   } })
   const notice = f.service.keptAsideNotice(manifest)!
   const window = retentionWindowText(keptCopyWindowMs(join(f.home, 'thread-data', 'task')))
-  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > ignored/cache\\.bin\`; \`git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > ignored/link/personal\\.txt\` \\(kept for ${window}\\)\\.$`))
+  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`\\(\\[ ! -L \\./ignored \\] && mkdir -p \\./ignored && set -C && git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > \\./ignored/cache\\.bin\\.mousse-[0-9a-f]{8} && rm -f \\./ignored/cache\\.bin && mv \\./ignored/cache\\.bin\\.mousse-[0-9a-f]{8} \\./ignored/cache\\.bin\\)\`; \`\\(\\[ ! -L \\./ignored \\] && \\[ ! -L \\./ignored/link \\] && mkdir -p \\./ignored/link && set -C && git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > \\./ignored/link/personal\\.txt\\.mousse-[0-9a-f]{8} && rm -f \\./ignored/link/personal\\.txt && mv \\./ignored/link/personal\\.txt\\.mousse-[0-9a-f]{8} \\./ignored/link/personal\\.txt\\)\` \\(kept for ${window}\\)\\.$`))
   const [cacheCommand, personalCommand] = noticeCommands(notice.text, f.worktree)
   // The command as given, run where the notice says: the file is back exactly as it was written.
   execFileSync('/bin/sh', ['-c', cacheCommand!], { cwd: f.worktree })
   expect(readFileSync(join(f.worktree, 'ignored', 'cache.bin'))).toEqual(cache)
   // Its path holds the rebuilt link now, so the person picks where it goes: the bytes the command writes are the ones set aside.
-  expect(execFileSync('/bin/sh', ['-c', personalCommand!.slice(0, personalCommand!.indexOf(' > '))], { cwd: f.worktree })).toEqual(personal)
+  expect(execFileSync('/bin/sh', ['-c', /git cat-file blob \S+/.exec(personalCommand!)![0]], { cwd: f.worktree })).toEqual(personal)
+  // The whole command refuses to write through that link, which is a folder above the path.
+  const linked = readlinkSync(join(f.worktree, 'ignored', 'link'))
+  expect(spawnSync('/bin/sh', ['-c', personalCommand!], { cwd: f.worktree }).status).not.toBe(0)
+  expect(readlinkSync(join(f.worktree, 'ignored', 'link'))).toBe(linked)
 })
 
 test('a rebuild that set nothing aside says nothing', async () => {

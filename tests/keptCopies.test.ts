@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { RestoreKind } from '../src/mms/actions/restoreCommands'
 import { KEEP_COPY_LIMITS, KeepCopyRefusedError, keepCopy, keptCopyNotice, keptCopyRestoreCommand, projectKeptFilesOwner, projectKeptFilesOwners, registerProjectKeptFilesFolder, settleInterruptedKeeps } from '../src/mms/actions/keptCopies'
 import { retireProjectSnapshots } from '../src/mms/workspace/SnapshotWorkspace'
 import { expirePreservedFiles, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
@@ -49,9 +50,9 @@ function repo(): string {
  * Brings the working version of `path` back from the copy with the command the result shows, run by a shell in the
  * repository's top folder as a person would, and reads the file's bytes.
  */
-function restoreWorking(cwd: string, ref: string, path: string): Buffer {
+function restoreWorking(cwd: string, ref: string, path: string, kind?: RestoreKind): Buffer {
   mkdirSync(dirname(join(cwd, path)), { recursive: true })
-  execFileSync('sh', ['-c', keptCopyRestoreCommand(ref, path, 'posix')], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+  execFileSync('sh', ['-c', keptCopyRestoreCommand(ref, path, 'posix', kind)], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   return readFileSync(join(cwd, path))
 }
 
@@ -104,7 +105,7 @@ describe('Discard keeps a copy first', () => {
     expect(readFileSync(join(cwd, 'tool.sh'), 'utf8')).toBe('#!/bin/sh\necho one\n')
     expect(git(cwd, 'ls-tree', kept!.ref, '--', 'tool.sh')).toMatch(/^100755 blob /)
     expect(restoreWorking(cwd, kept!.ref, 'assets/blob.bin').equals(binary)).toBe(true)
-    expect(restoreWorking(cwd, kept!.ref, 'tool.sh').toString()).toBe('#!/bin/sh\necho two\n')
+    expect(restoreWorking(cwd, kept!.ref, 'tool.sh', kept!.kinds.get('tool.sh')).toString()).toBe('#!/bin/sh\necho two\n')
     expect(statSync(join(cwd, 'tool.sh')).mode & 0o111).not.toBe(0)
   })
 
@@ -335,7 +336,7 @@ describe('keepCopy', () => {
     expect(git(cwd, 'show', `${kept.ref}^2:base.txt`)).toBe('staged')
     expect(git(cwd, 'show', `${kept.ref}:loose.txt`)).toBe('loose')
     expect(git(cwd, 'rev-parse', `${kept.ref}^1`)).toBe(before.head)
-    expect(keptCopyNotice(kept, 'posix')).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: git cat-file blob ${kept.ref}:base.txt > base.txt; git cat-file blob ${kept.ref}:loose.txt > loose.txt (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
+    expect(keptCopyNotice(kept, 'posix')).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: ${keptCopyRestoreCommand(kept.ref, 'base.txt', 'posix')}; ${keptCopyRestoreCommand(kept.ref, 'loose.txt', 'posix')} (the staged version of base.txt: git restore --source=${kept.ref}^2 --staged -- <path>).`)
   })
 
   it('keeps ignored files too when asked, for a cleanup that removes them', async () => {

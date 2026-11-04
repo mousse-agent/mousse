@@ -24,10 +24,13 @@ export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
  * Runs `git argv` without blocking and reports it as `spawnSync` would: output past `maxBuffer` (on either stream)
  * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
  * `inputFile` streams a file to Git's input instead of `input` (a pack for `index-pack --stdin`), however large.
+ * `beforeStart` runs synchronously right before Git starts, with nothing awaited in between; what it throws rejects the
+ * run, and Git never starts.
  */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number }): Promise<GitProcess> {
+export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number; beforeStart?: () => void }): Promise<GitProcess> {
   const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
   return new Promise((settle) => {
+    options.beforeStart?.()
     const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     const err: Buffer[] = []

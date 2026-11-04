@@ -513,7 +513,7 @@ const api = {
      */
     cancelOperation: (operationId: string, threadId?: string, projectId?: string): Promise<{ cancelled: boolean }> =>
       storageInvoke('git:cancelOperation', operationId, threadId, projectId),
-    abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
+    abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult<{ kept?: GitKeptCopy }>> =>
       storageInvoke('git:abortInProgress', scope, kind),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
       storageInvoke('git:createBranch', scope, name, options),
