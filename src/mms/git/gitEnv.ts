@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
+import { LISTING_MAX_BUFFER } from './runGitProcess'
 
 /**
  * Environment for Git that runs without the user asking for it (the bridge's bundle
@@ -90,11 +91,45 @@ export function mousseGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 const scopedConfig = new AsyncLocalStorage<ReadonlyArray<readonly [string, string]>>()
 /**
  * Runs `work` with `entries` added to the settings of every Git process Mousse starts within it, after its own. Only
- * settings that switch something off belong here, such as emptied filter drivers for a checkout no driver may run in
- * (`verifiedCleanup.ts`).
+ * settings that switch something off belong here, such as emptied filter drivers ({@link withDrivers}). They also come
+ * last among the `-c` settings of Mousse's own commands (`repoPrograms.ts`), so a value the central check puts back
+ * cannot switch it on again.
  */
 export function withScopedGitConfig<T>(entries: ReadonlyArray<readonly [string, string]>, work: () => T): T {
   return scopedConfig.run([...(scopedConfig.getStore() ?? []), ...entries], work)
+}
+
+/** The settings {@link withScopedGitConfig} adds where it is called from, in order; none outside one. */
+export function scopedGitConfig(): ReadonlyArray<readonly [string, string]> {
+  return scopedConfig.getStore() ?? []
+}
+
+/**
+ * Every filter driver Git's config at `folder` names, in any scope, emptied and not required: the settings under which
+ * no clean, smudge or process driver runs, and Git compares and reads a file under one as its raw bytes. Reading the
+ * config runs no program.
+ */
+export async function driversOffAsync(folder: string): Promise<Array<[string, string]>> {
+  // Imported here: the lifecycle Git runner reads this module.
+  const { lifecycleReadAsync } = await import('../lifecycle/lifecycleGit')
+  const listing = await lifecycleReadAsync(folder, ['config', '--null', '--list'], undefined, LISTING_MAX_BUFFER).catch(() => '')
+  const names = new Set<string>()
+  for (const item of listing.split('\0')) {
+    const match = /^filter\.(.+)\.(?:smudge|clean|process|required)$/i.exec(item.split('\n')[0]!)
+    if (match) names.add(match[1]!)
+  }
+  return [...names].flatMap((name): Array<[string, string]> => [[`filter.${name}.smudge`, ''], [`filter.${name}.clean`, ''], [`filter.${name}.process`, ''], [`filter.${name}.required`, 'false']])
+}
+
+/**
+ * Runs `work` so that no filter driver runs in any Git command Mousse starts within it ({@link driversOffAsync} for the
+ * checkout at `folder`), unless `filters` allows them. What needs a file's exact bytes runs this way: a kept copy always
+ * (`keptCopies.ts`), and everything in a checkout no driver may run in, such as a dispatch's (`verifiedCleanup.ts`).
+ * Git's form of a file, which an agent's restore writes and its proofs compare with, runs outside it.
+ */
+export async function withDrivers<T>(filters: boolean, folder: string, work: () => Promise<T>): Promise<T> {
+  if (filters) return work()
+  return withScopedGitConfig(await driversOffAsync(folder), work)
 }
 
 /**
