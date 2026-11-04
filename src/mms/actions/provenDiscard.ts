@@ -190,7 +190,8 @@ function assertStillProven(proof: FrozenEntryProof, unlinked: ReadonlyMap<string
  * Removes what stands at each discarded path, as far as the kept copy holds it (`digests`, the SHA-256 of each working
  * version as `keepCopy` read it). `restore` are paths HEAD's version goes back at: a file or link above one, in the way
  * of its folder, goes too. `remove` are paths nothing goes back at. `cleared` are the paths emptied; `left` the ones not
- * discarded, naming what changed. `beforeUnlink` is a test seam: it runs right before each entry's last check.
+ * discarded, naming what changed; `removed` every file and link that went. `beforeUnlink` is a test seam: it runs right
+ * before each entry's last check.
  */
 export async function removeProvenAsync(input: {
   top: string
@@ -198,7 +199,7 @@ export async function removeProvenAsync(input: {
   remove: readonly string[]
   digests: ReadonlyMap<string, string>
   beforeUnlink?: (path: string) => void
-}): Promise<{ cleared: string[]; left: LeftAsItIs[] }> {
+}): Promise<{ cleared: string[]; left: LeftAsItIs[]; removed: string[] }> {
   const top = resolve(input.top)
   const writes = new Set(input.restore)
   const paths = [...new Set([...input.restore, ...input.remove])]
@@ -263,7 +264,7 @@ export async function removeProvenAsync(input: {
   }
   // Like `git clean -d` and `git rm`: a folder a removed path leaves empty goes too.
   await removeEmptiedFolders(top, cleared.filter((path) => !writes.has(path)))
-  return { cleared, left }
+  return { cleared, left, removed: [...victims.values()].flatMap((victim) => victim?.removed ?? []) }
 }
 
 /** Removes the folders above `paths` that are now empty, deepest first; a folder with anything in it stays. */

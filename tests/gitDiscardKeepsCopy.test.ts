@@ -58,7 +58,7 @@ describe('Git panel Discard keeps a copy', () => {
     const kept = result.kept!
     expect(preserved(f.repo)).toEqual([kept.ref])
     const top = git(f.repo, 'rev-parse', '--show-toplevel')
-    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: git cat-file blob ${kept.ref}:scratch.bin > scratch.bin; git cat-file blob ${kept.ref}:value.txt > value.txt (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
+    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: rm -f ./scratch.bin && git cat-file blob ${kept.ref}:scratch.bin > ./scratch.bin; rm -f ./value.txt && git cat-file blob ${kept.ref}:value.txt > ./value.txt (the staged version of value.txt: git restore --source=${kept.ref}^2 --staged -- <path>).`)
     // Owned by the project's data folder, where the sweep looks.
     const owner = projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, project.id)
     expect(threadPreservedIndex(owner).owns(kept.ref)).toBe(true)

@@ -61,6 +61,8 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024
 export interface GitReadOptions {
   /** Bytes of output Git may print before the run is stopped and fails; 1 MiB when not given (or 256 MiB with input). */
   maxBuffer?: number
+  /** Runs synchronously right before Git starts; what it throws is thrown instead, and Git never starts. */
+  beforeStart?: () => void
 }
 
 /** For a read whose output grows with the repository (see `LISTING_MAX_BUFFER`). */
@@ -124,7 +126,7 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
+  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER, ...(options?.beforeStart ? { beforeStart: options.beforeStart } : {}) })
   const stderr = result.stderr.trim()
   // As in `tryGit`: output cut off at the limit is a failure.
   const ok = !result.error && result.status === 0

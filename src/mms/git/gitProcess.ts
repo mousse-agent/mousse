@@ -47,6 +47,8 @@ export interface GitRunOptions {
   stdoutBytes?: number
   /** Written to Git's standard input, which is then closed; without it Git reads nothing. */
   input?: string
+  /** Runs synchronously right before Git starts, with nothing awaited in between; what it throws rejects the run. */
+  beforeStart?: () => void
 }
 
 /**
@@ -156,6 +158,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       resolvePromise({ ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' })
       return
     }
+    options.beforeStart?.()
     const child = spawn('git', args, {
       cwd,
       env: mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env }),

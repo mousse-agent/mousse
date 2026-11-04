@@ -103,28 +103,32 @@ function expectRestored(top: string, commands: Record<string, string>, expected:
 }
 
 describe('the command shown', () => {
-  it('is cat-file into the file through cmd on Windows and straight into it elsewhere, quoting what needs it', () => {
+  it('replaces what stands at the path, through cmd on Windows and straight into it elsewhere, quoting what needs it', () => {
     const ref = 'refs/mousse/preserved/op-0123456789ab'
-    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`git cat-file blob ${ref}:src/a.txt > src/a.txt`)
-    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:src/a.txt > src/a.txt`)
-    expect(restoreFileCommand(ref, "it's 100%.txt", { shell: 'posix' })).toBe(`git cat-file blob '${ref}:it'\\''s 100%.txt' > 'it'\\''s 100%.txt'`)
-    expect(restoreFileCommand(ref, 'a b %PATH%.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob "${ref}:a b "%"PATH"%".txt" > "a b "%"PATH"%".txt"`)
-    expect(restoreFileCommand(ref, 'a.txt', { shell: 'posix', normalized: true })).toBe(`git cat-file --filters ${ref}:a.txt > a.txt`)
-    expect(restoreCommandTemplate(ref, { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:<path> > <path>`)
+    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`rm -f ./src/a.txt && git cat-file blob ${ref}:src/a.txt > ./src/a.txt`)
+    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:src/a.txt > src/a.txt.mousse-restore && move /y "src\\a.txt.mousse-restore" "src\\a.txt" >nul`)
+    expect(restoreFileCommand(ref, "it's 100%.txt", { shell: 'posix' })).toBe(`rm -f ./'it'\\''s 100%.txt' && git cat-file blob '${ref}:it'\\''s 100%.txt' > ./'it'\\''s 100%.txt'`)
+    expect(restoreFileCommand(ref, 'a b %PATH%.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob "${ref}:a b "%"PATH"%".txt" > "a b "%"PATH"%".txt.mousse-restore" && move /y "a b "%"PATH"%".txt.mousse-restore" "a b "%"PATH"%".txt" >nul`)
+    expect(restoreFileCommand(ref, 'a.txt', { shell: 'posix', normalized: true })).toBe(`rm -f ./a.txt && git cat-file --filters ${ref}:a.txt > ./a.txt`)
+    expect(restoreFileCommand(ref, 'bin/run', { shell: 'posix', kind: 'executable' })).toBe(`rm -f ./bin/run && git cat-file blob ${ref}:bin/run > ./bin/run && chmod +x ./bin/run`)
+    expect(restoreFileCommand(ref, 'link', { shell: 'posix', kind: 'link' })).toBe(`rm -f ./link && ln -s "$(git cat-file blob ${ref}:link)" ./link`)
+    expect(restoreFileCommand(ref, 'link', { shell: 'windows', kind: 'link' })).toBe(`git cat-file blob ${ref}:link (link was a link; this prints where it pointed)`)
+    expect(restoreCommandTemplate(ref, { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:<path> > <path>.mousse-restore && move /y <path>.mousse-restore <path> >nul`)
+    expect(restoreCommandTemplate(ref, { shell: 'posix' })).toBe(`rm -f ./<path> && git cat-file blob ${ref}:<path> > ./<path>`)
     expect(restoreStagedCommand(ref, 'windows')).toBe(`git restore "--source=${ref}^2" --staged -- <path>`)
     expect(restoreStagedCommand(ref, 'posix')).toBe(`git restore --source=${ref}^2 --staged -- <path>`)
   })
 })
 
 describe('each notice\'s commands give back the exact bytes in the shells of this system', { timeout: 120_000 }, () => {
-  it('Discard\'s kept copy: one command per file, five shown, and the staged version', async () => {
+  it('Discard\'s kept copy: one command per file, five shown, and no staged command for files with nothing staged', async () => {
     const top = repo()
     writeAll(top, CONTENTS)
     const kept = await keepCopy({ owner: owner(), top, operationType: 'git-discard', action: 'Discard', paths: Object.keys(CONTENTS) })
     const notice = keptCopyNotice(kept)
     const paths = Object.keys(CONTENTS).sort()
     const commands = Object.fromEntries(paths.map((path) => [path, restoreFileCommand(kept.ref, path)]))
-    expect(notice).toContain(`run in ${top}: ${paths.slice(0, 5).map((path) => commands[path]).join('; ')}, and the same way for the other ${paths.length - 5} (its staged version: ${restoreStagedCommand(kept.ref)}).`)
+    expect(notice).toContain(`run in ${top}: ${paths.slice(0, 5).map((path) => commands[path]).join('; ')}, and the same way for the other ${paths.length - 5}.`)
     // The rest are told to do the same; each command, filled in as the notice would, brings its file back.
     expectRestored(top, commands, CONTENTS)
   })

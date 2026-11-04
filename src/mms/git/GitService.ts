@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
-import { abortKeepingCopy, type AbortKind } from '../actions/abortKeepingCopy'
+import { abortKeepingCopy, AbortStoppedPartWayError, type AbortKind } from '../actions/abortKeepingCopy'
 import { keepCopy, KeepCopyRefusedError, modesIn, type KeptCopy } from '../actions/keptCopies'
 import { discardProvenAsync, IndexLockedError, stagedEntryDigests, stagedModes, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from '../actions/provenDiscard'
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
@@ -377,7 +377,6 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
 /** Commits whose authors are read when drafting a pull request; Mousse's own are left out of these. */
 const DRAFT_COMMITS_SCANNED = 2000
 
-/** Whether `path` is there, as `existsSync` answers, without blocking. */
 /**
  * A copy that could not be kept, as the person reads it: the refusal names the files (the largest ones, for a copy too
  * large), so the person knows what to move aside. Any other error is returned as it is.
@@ -388,6 +387,7 @@ function keepRefusal(error: unknown): unknown {
   return new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
 }
 
+/** Whether `path` is there, as `existsSync` answers, without blocking. */
 function pathExists(path: string): Promise<boolean> {
   return access(path).then(() => true, () => false)
 }
@@ -1241,11 +1241,16 @@ export class GitService {
     return await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       try {
-        return await abortKeepingCopy({ owner: keep.owner, top, kind, action: 'Abort', abort: async () => {
-          const run = await this.runGit(top, [kind, '--abort'], { userAction: true })
+        return await abortKeepingCopy({ owner: keep.owner, top, kind, action: 'Abort', abort: async (beforeStart) => {
+          const run = await this.runGit(top, [kind, '--abort'], { userAction: true, beforeStart })
           if (!run.ok) throw failure('git_failed', run)
         } })
       } catch (error) {
+        // Git stopped after it wrote: its own error, with where the copy is and how to bring those files back.
+        if (error instanceof AbortStoppedPartWayError && error.gitError instanceof AppError) {
+          const cause = error.gitError
+          throw new AppError({ code: cause.code, message: `${cause.message.trim()} ${error.detail}`, errorInfo: cause.errorInfo, details: { ref: error.kept.ref, paths: error.paths } }, error)
+        }
         throw keepRefusal(error)
       }
     })

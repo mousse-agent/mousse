@@ -39,10 +39,10 @@ const turn = (id: string, mutate: () => void, start = 0, conversationBranchId = 
 /** HEAD, the branch it is on, every branch and the real index, byte for byte. */
 /** The line a switch gives for a file it takes out of the folder, with the command that brings it back. */
 const leftBehind = (file: string, target: string, left: string, ref: string) =>
-  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: git cat-file --filters ${ref}:${file} > ${file}`
+  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: rm -f ./${file} && git cat-file --filters ${ref}:${file} > ./${file}`
 /** Runs the command a switch's line gives for a file, in a shell, in the folder it names. */
 const runShown = (notice: string | undefined) => {
-  const match = /running this in (.+?): (git cat-file \S+ \S+ > \S+?)(?:\.$| \(kept for |; )/.exec(notice ?? '')
+  const match = /running this in (.+?): (rm -f \S+ && git cat-file \S+ \S+ > \S+?)(?:\.$| \(kept for |; )/.exec(notice ?? '')
   if (!match) throw new Error(`No command in: ${notice}`)
   execFileSync('sh', ['-c', match[2]!], { cwd: match[1]! })
 }
@@ -514,7 +514,7 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     const { notice } = await sw(a.id)
     // The newer line came along; the recorded one is A's now.
     expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
-    expect(notice).toMatch(/: git cat-file --filters refs\/mousse\/\S+:value\.txt > value\.txt \(kept for .+\)\.$/)
+    expect(notice).toMatch(/: rm -f \.\/value\.txt && git cat-file --filters refs\/mousse\/\S+:value\.txt > \.\/value\.txt \(kept for .+\)\.$/)
     write('value.txt', 'overwritten\n')
     runShown(notice)
     expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))

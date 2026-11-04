@@ -1078,7 +1078,7 @@ test.skipIf(process.platform === 'win32')('a rebuild that set files aside says s
   } })
   const notice = f.service.keptAsideNotice(manifest)!
   const window = retentionWindowText(keptCopyWindowMs(join(f.home, 'thread-data', 'task')))
-  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > ignored/cache\\.bin\`; \`git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > ignored/link/personal\\.txt\` \\(kept for ${window}\\)\\.$`))
+  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`rm -f \\./ignored/cache\\.bin && git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > \\./ignored/cache\\.bin\`; \`rm -f \\./ignored/link/personal\\.txt && git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > \\./ignored/link/personal\\.txt\` \\(kept for ${window}\\)\\.$`))
   const [cacheCommand, personalCommand] = noticeCommands(notice.text, f.worktree)
   // The command as given, run where the notice says: the file is back exactly as it was written.
   execFileSync('/bin/sh', ['-c', cacheCommand!], { cwd: f.worktree })

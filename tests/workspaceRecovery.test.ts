@@ -196,7 +196,7 @@ describe('what a thread is waiting on', () => {
     expect([...new ThreadJournal(f.thread).latestByOperation().values()].find((entry) => entry.operationType === 'git-abort')).toMatchObject({ state: 'completed', details: { ref: preservedRef } })
     expect(mergeHead(cwd).ok).toBe(false)
     // The edit comes back byte for byte with the command the notice shows; the new file was never touched.
-    expect(abortKeptNotice('merge', kept, 'posix')).toContain(`git cat-file blob ${preservedRef}:value.txt > value.txt`)
+    expect(abortKeptNotice('merge', kept, 'posix')).toContain(`rm -f ./value.txt && git cat-file blob ${preservedRef}:value.txt > ./value.txt`)
     execFileSync('sh', ['-c', keptCopyRestoreCommand(preservedRef, 'value.txt', 'posix')], { cwd: kept.top })
     expect(readFileSync(join(cwd, 'value.txt')).equals(Buffer.from('half resolved\r\n'))).toBe(true)
     expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('notes\n')
@@ -290,7 +290,7 @@ describe('through the daemon', () => {
       const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string; notice: string }
       const top = git(f.repo, 'rev-parse', '--show-toplevel')
       expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/[0-9a-f-]{36}-[0-9a-f]{12}$/), notice: expect.any(String) })
-      expect(aborted.notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${aborted.preservedRef}. To bring a file back exactly as it was, run in ${top}: git cat-file blob ${aborted.preservedRef}:value.txt > value.txt (its staged version: git restore --source=${aborted.preservedRef}^2 --staged -- <path>).`)
+      expect(aborted.notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${aborted.preservedRef}. To bring a file back exactly as it was, run in ${top}: rm -f ./value.txt && git cat-file blob ${aborted.preservedRef}:value.txt > ./value.txt (value.txt had a conflict: its versions are kept as ${aborted.preservedRef}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
       // The thread's own copy, which expires after its Undo window.
       expect(threadPreservedIndex(d.directory).owns(aborted.preservedRef)).toBe(true)
       expect(mergeHead(f.repo).ok).toBe(false)

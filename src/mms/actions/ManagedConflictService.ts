@@ -43,8 +43,8 @@ export class ManagedConflictService {
       if (!expected || marker.stdout !== expected) throw new Error('Git sequencer belongs to another operation.')
       // An abort rewrites conflicted files, edits in them included: they are kept first, so nothing is lost.
       const kind = merge ? 'merge' : 'revert'
-      const kept = await abortKeepingCopy({ owner: this.threadDirectory, top: await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']), kind, action: 'Abort', abort: async () => {
-        const result = await tryGitAsync(workspacePath, [kind, '--abort'])
+      const kept = await abortKeepingCopy({ owner: this.threadDirectory, top: await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']), kind, action: 'Abort', abort: async (beforeStart) => {
+        const result = await tryGitAsync(workspacePath, [kind, '--abort'], undefined, { beforeStart })
         if (!result.ok) throw new Error(result.stderr || 'Unable to abort the operation conflict.')
       } })
       if (!kept) throw new Error('The matching Git sequencer is no longer active.')

@@ -2,15 +2,22 @@
  * The commands a notice shows to bring a kept or preserved file back, run in the repository's top folder.
  *
  * Each writes Git's bytes straight into the file through the shell, so nothing between Git and the disk changes them:
- * - `git cat-file blob <ref>:<path> > <path>` for a ref that holds the bytes as they were on disk (a kept copy, or files
- *   a restore preserved). `git restore` would run them through line-ending conversion and filters a second time.
- * - `git cat-file --filters <ref>:<path> > <path>` for a ref that holds Git's normal form of the file (a snapshot), which
- *   Git converts back the way a checkout would.
+ * - `git cat-file blob <ref>:<path>` for a ref that holds the bytes as they were on disk (a kept copy, or files a restore
+ *   preserved). `git restore` would run them through line-ending conversion and filters a second time.
+ * - `git cat-file --filters <ref>:<path>` for a ref that holds Git's normal form of the file (a snapshot), which Git
+ *   converts back as a checkout would.
  *
- * Windows PowerShell 5.1's `>` re-encodes a native command's output as UTF-16, so on Windows the redirection is cmd's:
- * `cmd --% /c git cat-file blob "<ref>:<path>" > "<path>"`. The same line works typed into cmd and into PowerShell:
- * PowerShell passes everything after `--%` to cmd as it is, and cmd reads only its `/c`. (`cmd /c "…"` cannot quote a
- * path with spaces so that both shells read it.) Elsewhere the command is for a POSIX shell, with paths in single quotes.
+ * Whatever stands at the path is replaced, never written through: a link there (to another file, or out of the
+ * repository) would otherwise take the bytes.
+ * - POSIX shells: `rm -f ./<path> && git cat-file blob <ref>:<path> > ./<path>`. `rm` removes a link itself, never what
+ *   it points to, and refuses a folder, which stops the command. A kept link comes back as a link
+ *   (`ln -s "$(git cat-file blob …)" ./<path>`), an executable file with `chmod +x`.
+ * - Windows: the bytes go to `<path>.mousse-restore`, which `move /y` then renames over the path. A rename replaces a
+ *   link itself; `del` would empty the folder a folder link points to. Windows PowerShell 5.1's `>` re-encodes a native
+ *   command's output as UTF-16, so the line is cmd's: `cmd --% /c …`, which works typed into cmd and into PowerShell
+ *   (PowerShell passes everything after `--%` to cmd as it is, and cmd reads only its `/c`). A kept link is not made
+ *   again there (that needs rights a person may not have): the command prints where it pointed.
+ * Paths are quoted for each shell: single quotes for POSIX shells; double quotes, with `%` left outside them, for cmd.
  */
 
 export type RestoreShell = 'posix' | 'windows'
@@ -24,6 +31,15 @@ export interface RestoreCommandOptions {
   /** The ref holds Git's normal form, which is converted back as a checkout would (`--filters`). */
   normalized?: boolean
   shell?: RestoreShell
+  /** What the kept entry is: a file (the default), an executable file, or a link. */
+  kind?: RestoreKind
+}
+
+export type RestoreKind = 'file' | 'executable' | 'link'
+
+/** The kind a tree entry's mode stands for. */
+export function restoreKindOf(mode: string | undefined): RestoreKind {
+  return mode === '120000' ? 'link' : mode === '100755' ? 'executable' : 'file'
 }
 
 /** How many files a notice gives a command for; the rest are told to use the same command. */
@@ -48,10 +64,18 @@ function command(ref: string, path: string, options: RestoreCommandOptions, plac
   const kind = options.normalized ? '--filters' : 'blob'
   if (shell === 'windows') {
     const word = placeholder ? (value: string) => value : windowsWord
-    return `cmd --% /c git cat-file ${kind} ${word(`${ref}:${path}`)} > ${word(path)}`
+    const source = `git cat-file ${kind} ${word(`${ref}:${path}`)}`
+    if (options.kind === 'link') return `${source} (${path} was a link; this prints where it pointed)`
+    // cmd's own commands read `/` as the start of a switch, so the rename names the path with backslashes.
+    const temporary = `${path}.mousse-restore`
+    const local = (value: string): string => word(placeholder ? value : value.replaceAll('/', '\\'))
+    return `cmd --% /c ${source} > ${word(temporary)} && move /y ${local(temporary)} ${local(path)} >nul`
   }
-  const word = placeholder ? (value: string) => value : posixWord
-  return `git cat-file ${kind} ${word(`${ref}:${path}`)} > ${word(path)}`
+  const word = placeholder ? (value: string) => `./${value}` : (value: string) => `./${posixWord(value)}`
+  const source = `git cat-file ${kind} ${placeholder ? `${ref}:${path}` : posixWord(`${ref}:${path}`)}`
+  const target = word(path)
+  if (options.kind === 'link') return `rm -f ${target} && ln -s "$(${source})" ${target}`
+  return `rm -f ${target} && ${source} > ${target}${options.kind === 'executable' ? ` && chmod +x ${target}` : ''}`
 }
 
 /** The command that brings back one file kept under `ref`, run in the repository's top folder. */
@@ -73,15 +97,15 @@ export function restoreStagedCommand(ref: string, shell: RestoreShell = restoreS
 /**
  * One command for each of the first {@link RESTORE_COMMANDS_SHOWN} files, and how many are left for the same command.
  */
-export function restoreCommands<T extends { ref: string; path: string }>(files: readonly T[], options: RestoreCommandOptions = {}): { commands: string[]; rest: T[] } {
+export function restoreCommands<T extends { ref: string; path: string; kind?: RestoreKind }>(files: readonly T[], options: RestoreCommandOptions = {}): { commands: string[]; rest: T[] } {
   return {
-    commands: files.slice(0, RESTORE_COMMANDS_SHOWN).map((file) => restoreFileCommand(file.ref, file.path, options)),
+    commands: files.slice(0, RESTORE_COMMANDS_SHOWN).map((file) => restoreFileCommand(file.ref, file.path, { ...options, ...(file.kind ? { kind: file.kind } : {}) })),
     rest: files.slice(RESTORE_COMMANDS_SHOWN)
   }
 }
 
 /** The commands for `files` joined for a line of text: `a; b, and the same way for the other 3`. */
-export function restoreCommandsText(files: ReadonlyArray<{ ref: string; path: string }>, options: RestoreCommandOptions = {}): string {
+export function restoreCommandsText(files: ReadonlyArray<{ ref: string; path: string; kind?: RestoreKind }>, options: RestoreCommandOptions = {}): string {
   const { commands, rest } = restoreCommands(files, options)
   return commands.join('; ') + (rest.length ? `, and the same way for the other ${rest.length}` : '')
 }
