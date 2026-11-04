@@ -45,6 +45,8 @@ export interface GitRunOptions {
   onLine?: (line: GitLine) => void
   /** Bytes of stdout kept (its end, past this); 1 MiB when not given. */
   stdoutBytes?: number
+  /** Written to Git's standard input, which is then closed; without it Git reads nothing. */
+  input?: string
 }
 
 /**
@@ -157,11 +159,16 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
     const child = spawn('git', args, {
       cwd,
       env: mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env }),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       windowsHide: true,
       // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.
       detached: process.platform !== 'win32'
     })
+    if (child.stdin) {
+      // A process that exits before reading all of its input closes the pipe; its exit status is the answer.
+      child.stdin.on('error', () => undefined)
+      child.stdin.end(options.input)
+    }
     const stdout = new TailBuffer(options.stdoutBytes ?? RETAINED_BYTES)
     const stderr = new TailBuffer(RETAINED_BYTES)
     const onLine = options.onLine
@@ -244,12 +251,12 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       }, options.silenceMs)
     }
 
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       stdout.push(chunk)
       splitters[0]?.write(chunk)
       arm()
     })
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       stderr.push(chunk)
       splitters[1]?.write(chunk)
       arm()

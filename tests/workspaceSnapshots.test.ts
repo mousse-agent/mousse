@@ -863,7 +863,7 @@ describe('discard', () => {
     write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
     write('settings.local', 'staged only\n'); git(cwd, 'add', '-f', 'settings.local')
     write('value.txt', 'edited\n')
-    const { ref: backupRef } = await discardPendingChangesAsync(cwd, (top) => keepCopy({ owner: f.thread, top, operationType: 'git-discard', action: 'Discard' }))
+    const { ref: backupRef } = await discardPendingChangesAsync(cwd, (top, scope) => keepCopy({ owner: f.thread, top, operationType: 'git-discard', action: 'Discard', ...scope }))
     // A staged-only file is kept with its staged version too.
     expect(git(cwd, 'show', `${backupRef}^2:settings.local`)).toBe('staged only')
     expect(git(cwd, 'show', `${backupRef}:settings.local`)).toBe('staged only')

@@ -42,7 +42,7 @@ import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
-import type { GitOperationHandle } from '../git/GitService'
+import type { DiscardedCopy, GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
@@ -112,6 +112,7 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService, FIRST_BRANCH_ID } from '../actions/ConversationBranchService'
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
+import { leftAsItIsText } from '../actions/provenDiscard'
 import { getMousseHomeDir } from '../data/paths'
 import { keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
@@ -2958,9 +2959,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           try { await keepExistingCommit({ owner: operation.threadDirectory, top: workspace.worktreePath, operationType: 'git-discard', sha: before }) }
           catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be kept first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
         }
-        const kept = await discardPendingChangesAsync(workspace.worktreePath, (top) => keepCopy({ owner: operation.threadDirectory, top, operationType: 'git-discard', action: 'Discard' }))
+        const kept = await discardPendingChangesAsync(workspace.worktreePath, (top, scope) => keepCopy({ owner: operation.threadDirectory, top, operationType: 'git-discard', action: 'Discard', ...scope }))
           .catch((error: unknown) => { throw error instanceof KeepCopyRefusedError ? new DomainRpcError(error.code, error.message, { paths: error.paths }) : error })
-        return { backupRef: kept.ref, snapshotSha: before, notice: keptCopyNotice(kept) }
+        const left = leftAsItIsText(kept.left)
+        return { backupRef: kept.ref, snapshotSha: before, notice: keptCopyNotice(kept), ...(left ? { left } : {}) }
       })
     }
     case 'actions.list': {
@@ -3578,12 +3580,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = recordedThreadTarget(ctx, p, target)
       const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
       const discard = () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths, { owner })
-      let kept: KeptCopy | undefined
+      let kept: DiscardedCopy | undefined
       if (thread) {
         const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
         kept = await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, discard)
       } else kept = await discard()
-      return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: keptCopyNotice(kept) } } : {})
+      const left = kept ? leftAsItIsText(kept.left) : undefined
+      return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: keptCopyNotice(kept), ...(left ? { left } : {}) } } : {})
     }
     case 'git.fetch': {
       const p = isObject(params) ? params : {}

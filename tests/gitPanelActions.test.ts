@@ -105,6 +105,14 @@ describe('row actions', () => {
     expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done', notice })
   })
 
+  it('passes on the line naming files the discard left as they are', async () => {
+    const { git } = install({}, vi.fn(() => true))
+    const notice = 'A copy is kept under refs/mousse/preserved/x-0123456789ab for 30 days.'
+    const left = 'a.ts changed after you pressed Discard, so it was left as it is.'
+    git.discard.mockResolvedValueOnce({ status: repoStatus(), kept: { ref: 'refs/mousse/preserved/x-0123456789ab', windowMs: 1, notice, left } })
+    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done', notice, left })
+  })
+
   it('does nothing when the discard is declined: no daemon call, no refresh', async () => {
     const { git, confirm } = install({}, vi.fn(() => false))
     await refreshGitStatus(PATH, { scope: GIT_SCOPE })

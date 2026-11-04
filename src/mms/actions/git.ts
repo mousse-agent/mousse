@@ -13,6 +13,7 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
+import { createOnlyAsync, removeProvenAsync, stagedEntryDigests, stagedModes, stagedSince, type LeftAsItIs } from './provenDiscard'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -300,21 +301,111 @@ export function mergeTreesAsync(top: string, base: string, ours: string, theirs:
   return runAsync(mergeTreesSteps(top, base, ours, theirs))
 }
 
+/** What {@link discardPendingChangesAsync} asks its `keep` to keep a copy of: `keepCopy`'s `paths` and `writes`. */
+export interface DiscardScope {
+  /** Every path the discard removes or writes HEAD's version back at. */
+  paths: string[]
+  /** The paths HEAD's version is written back at; what stands in their way is kept too. */
+  writes: string[]
+}
+
+/** The NUL-separated fields of a Git listing, exactly as named (a leading space is part of a path). */
+async function listZAsync(top: string, args: string[]): Promise<string[]> {
+  const ran = await tryGitRawAsync(top, args, undefined, LISTING)
+  if (!ran.ok) throw new Error(`Command failed: git ${args.join(' ')}\n${ran.stderr.trim()}`)
+  return ran.stdout.split('\0').filter(Boolean)
+}
+
+/** The mode HEAD has at each of `paths` it has, asked a few thousand characters of literal paths at a time. */
+async function headModesAsync(top: string, paths: readonly string[]): Promise<Map<string, string>> {
+  const modes = new Map<string, string>()
+  for (let start = 0; start < paths.length;) {
+    const batch: string[] = []
+    for (let length = 0; start < paths.length && (!batch.length || length + paths[start]!.length < 16_000); start++) {
+      batch.push(`:(literal)${paths[start]!}`)
+      length += paths[start]!.length + 11
+    }
+    for (const line of await listZAsync(top, ['ls-tree', '-z', 'HEAD', '--', ...batch])) modes.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
+  }
+  return modes
+}
+
 /**
  * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after `keep` has kept a copy
- * of them (`keepCopy` over the whole working tree: staged, working and conflict versions, and what stands where a file
- * goes back, ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The caller holds the mutation locks and has the user's
- * confirmation.
+ * of them (`keepCopy` over `scope`: staged, working and conflict versions, and what stands where a file goes back,
+ * ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The
+ * caller holds the mutation locks and has the user's confirmation.
+ *
+ * Mousse removes only what the copy proves it holds, and Git only creates (`provenDiscard`). A path where something
+ * changed after the copy was read, or was saved again after it was emptied, is left as it is, with its staged version,
+ * and named in `left`; then the unfinished operation stays too, so its conflict is not lost. Otherwise the whole index
+ * goes back to HEAD at the end (`git reset`, which leaves the files alone), ending the operation.
+ * `beforeUnlink` is a test seam: it runs right before each removed entry's last check.
  */
-export async function discardPendingChangesAsync<T>(cwd: string, keep: (top: string) => Promise<T>): Promise<T> {
+export async function discardPendingChangesAsync<T extends { digests: ReadonlyMap<string, string> }>(
+  cwd: string,
+  keep: (top: string, scope: DiscardScope) => Promise<T>,
+  options: { beforeUnlink?: (path: string) => void } = {}
+): Promise<T & { left: LeftAsItIs[] }> {
   const pending = await runAsync(inspectPendingChangesSteps(cwd))
   if (pending.operation === 'rebase') throw pendingChangesErrorFor('Workspace', {}, pending)
-  const kept = await keep(pending.top)
-  await gitAsync(pending.top, ['reset', '--hard', '-q', 'HEAD'])
-  await gitAsync(pending.top, ['clean', '-f', '-d', '-q', '--', '.', NOT_MOUSSE])
-  const left = await runAsync(inspectPendingChangesSteps(pending.top))
-  if (ownPaths(left.files).length || left.operation) throw pendingChangesErrorFor('Workspace', {}, left)
-  return kept
+  const top = pending.top
+  const head = (await tryGitAsync(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout || undefined
+  const [indexBefore, others, staged, working, unmerged, flagged] = await Promise.all([
+    listZAsync(top, ['ls-files', '-s', '-z']),
+    listZAsync(top, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.', NOT_MOUSSE]),
+    head ? listZAsync(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', head, '--', '.', NOT_MOUSSE]) : Promise.resolve([]),
+    head ? listZAsync(top, ['diff-index', '-z', '--name-only', '--no-renames', head, '--', '.', NOT_MOUSSE]) : Promise.resolve([]),
+    listZAsync(top, ['ls-files', '-z', '--unmerged', '--', '.', NOT_MOUSSE]),
+    listZAsync(top, ['ls-files', '-z', '-v', '--', '.', NOT_MOUSSE])
+  ])
+  // A repository of its own inside is listed as `name/`; like `git clean -d`, it stays.
+  const untracked = others.filter((path) => !path.endsWith('/'))
+  // Without a commit every staged path goes; otherwise what differs from HEAD, conflicts, and the paths Git is told to
+  // assume unchanged (their edits are overwritten too, though Git does not list them).
+  const tracked = [...new Set(head
+    ? [...staged, ...working, ...unmerged.map((line) => line.slice(line.indexOf('\t') + 1)), ...flagged.filter((line) => /^[a-z] /.test(line)).map((line) => line.slice(2))]
+    : stagedModes(indexBefore).keys())].filter((path) => path !== '.mousse' && !path.startsWith('.mousse/'))
+  const headModes = head ? await headModesAsync(top, tracked) : new Map<string, string>()
+  const indexModes = stagedModes(indexBefore)
+  // A submodule changes in the index only: its folder is never walked, removed or written. One staged where HEAD has a
+  // file is in the way of that file, and the copy refuses it.
+  const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
+  const restore = tracked.filter((path) => headModes.has(path) && !submodule(path))
+  const remove = [...tracked.filter((path) => !headModes.has(path) && !submodule(path)), ...untracked]
+  const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
+
+  const emptied = await removeProvenAsync({ top, restore, remove, digests: kept.digests, ...(options.beforeUnlink ? { beforeUnlink: options.beforeUnlink } : {}) })
+  const left = [...emptied.left]
+  const skipped = new Set(left.map((item) => item.path))
+  // An entry someone staged meanwhile, anywhere in the index, is not reset.
+  const before = stagedEntryDigests(indexBefore)
+  const now = stagedEntryDigests(await listZAsync(top, ['ls-files', '-s', '-z']))
+  const restaged = new Set(stagedSince(before, now, [...new Set([...before.keys(), ...now.keys()])]))
+  for (const path of tracked) if (restaged.has(path) && !skipped.has(path)) left.push({ path, changed: path })
+  if (!left.length && !restaged.size) {
+    // The whole index goes back to HEAD, which also ends the merge, revert or cherry-pick; the files are not touched.
+    if (head) await gitAsync(top, ['reset', '-q'])
+    else await gitAsync(top, ['read-tree', '--empty'])
+  } else {
+    // Only the emptied paths' entries; one left as it is keeps its staged version (and its conflict, with the operation).
+    const reset = tracked.filter((path) => !skipped.has(path) && !restaged.has(path))
+    const list = `${reset.join('\0')}\0`
+    if (reset.length && head) await gitAsync(top, ['reset', '-q', head, '--pathspec-from-file=-', '--pathspec-file-nul'], { GIT_LITERAL_PATHSPECS: '1' }, list)
+    else if (reset.length) await gitAsync(top, ['rm', '--cached', '-r', '-f', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { GIT_LITERAL_PATHSPECS: '1' }, list)
+  }
+  // Git writes HEAD's versions only where nothing is.
+  const write = restore.filter((path) => !skipped.has(path) && !restaged.has(path))
+  const notWritten = await createOnlyAsync(top, write, async (args, input) => {
+    const ran = await tryGitRawAsync(top, args, input)
+    return { status: ran.status, stderr: ran.stderr }
+  }, new Set(left.map((item) => item.changed)))
+  for (const path of notWritten) left.push({ path, changed: path })
+  if (!left.length) {
+    const after = await runAsync(inspectPendingChangesSteps(top))
+    if (ownPaths(after.files).length || after.operation) throw pendingChangesErrorFor('Workspace', {}, after)
+  }
+  return { ...kept, left }
 }
 
 export function* commitParentsSteps(cwd: string, sha: string): Steps<string[]> {

@@ -503,7 +503,7 @@ function everything(cwd: string): Record<string, string> {
 
 /** Pending-changes Discard as the protocol runs it: a whole-tree copy, then Git puts HEAD back. */
 const discardPending = (cwd: string, owner: string) =>
-  pressed('Discard changes', () => discardPendingChangesAsync(cwd, (top) => keepCopy({ top, owner, operationType: 'git-discard', action: 'Discard' })))
+  pressed('Discard changes', () => discardPendingChangesAsync(cwd, (top, scope) => keepCopy({ top, owner, operationType: 'git-discard', action: 'Discard', ...scope })))
 
 describe('the copy also keeps what stands where Discard puts a file back', () => {
   /** HEAD tracks `base.txt`; it is now an ignored folder holding the only copy of `private.bin` (audit N1/N2, inverted). */

@@ -399,7 +399,7 @@ async function listZOver(top: string, args: string[], paths: readonly string[], 
 }
 
 /** What `ls-tree` says `target` has at each of `paths` (those it has): its mode. */
-async function modesIn(top: string, target: string, paths: readonly string[]): Promise<Map<string, string>> {
+export async function modesIn(top: string, target: string, paths: readonly string[]): Promise<Map<string, string>> {
   const modes = new Map<string, string>()
   for (const line of await listZOver(top, ['ls-tree', '-z', target], paths)) modes.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
   return modes

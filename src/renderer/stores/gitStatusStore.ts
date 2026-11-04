@@ -10,6 +10,7 @@ import type {
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
+  GitKeptCopy,
   GitPullOptions,
   GitPullResult,
   GitScope,
@@ -206,11 +207,11 @@ export async function unstageGitPaths(key: string, paths: readonly string[] | 'a
 
 /**
  * Throw away the changes to these paths; untracked files are deleted. The caller confirms first.
- * Returns what the daemon says about the copy it kept first.
+ * Returns what the daemon says about the copy it kept first, and about paths it left as they are.
  */
-export async function discardGitPaths(key: string, paths: readonly string[], scope: GitScope): Promise<string | undefined> {
+export async function discardGitPaths(key: string, paths: readonly string[], scope: GitScope): Promise<GitKeptCopy | undefined> {
   try {
-    return (await window.mousse.git.discard(scope, [...paths])).kept?.notice
+    return (await window.mousse.git.discard(scope, [...paths])).kept
   } finally {
     await refreshAfterMutation(key, scope)
   }

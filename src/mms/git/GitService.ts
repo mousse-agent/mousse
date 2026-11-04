@@ -1,13 +1,14 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve, sep } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
-import { keepCopy, KeepCopyRefusedError, type KeptCopy } from '../actions/keptCopies'
+import { keepCopy, KeepCopyRefusedError, modesIn, type KeptCopy } from '../actions/keptCopies'
+import { createOnlyAsync, removeProvenAsync, stagedEntryDigests, stagedModes, stagedSince, type LeftAsItIs } from '../actions/provenDiscard'
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
@@ -424,6 +425,9 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
   })
 }
 
+/** What a Discard kept, and the paths it left as they are because they changed after the person pressed Discard. */
+export type DiscardedCopy = KeptCopy & { left: LeftAsItIs[] }
+
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
@@ -438,6 +442,8 @@ export class GitService {
     commitSilenceMs?: number
     /** Overrides how live output is batched and capped; for tests. */
     liveOutput?: { intervalMs?: number; maxLines?: number }
+    /** Test seam: runs right before each entry a Discard removes gets its last check. */
+    beforeDiscardUnlink?: (path: string) => void
   } = {}) {}
 
   /** Every Git command here runs no program the repository configures (`repoPrograms`). */
@@ -455,7 +461,7 @@ export class GitService {
     let guarded: string[]
     try {
       // Every change here is one the user asked for: the mutation that runs it passed their request in.
-      guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal })
+      guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal, ...(run.input !== undefined ? { stdin: run.input } : {}) })
     } catch (error) {
       // Cancelled during the check before it: the answer `runGit` gives a run cancelled before it starts.
       if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' }
@@ -909,13 +915,16 @@ export class GitService {
    * The copy also holds what Git removes to put a file back: a folder in its place, ignored
    * files included. A repository of its own in that place refuses the discard, naming it.
    * A copy too large to keep refuses the discard with `keep_copy_too_large`, changing nothing.
-   * The caller confirms first.
+   *
+   * Mousse removes only what the copy proves it holds, and Git only creates (`provenDiscard`): a path where
+   * something changed after the copy was read, or was saved again after it was emptied, is left as it is, with its
+   * staged version, and named in `left`. The caller confirms first.
    */
-  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
     return this.asUser(userRequested, () => this.discardNow(cwd, paths, keep))
   }
 
-  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
     return await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const selected = selectEntries(await this.statusEntries(top), paths)
@@ -936,11 +945,20 @@ export class GitService {
         else restore.add(entry.path)
         if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
       }
+      const tracked = [...new Set([...restore, ...remove])]
+      // What the index holds for them now, to tell afterwards whether someone staged something meanwhile.
+      const indexBefore = await this.indexEntries(top)
+      const stagedBefore = stagedEntryDigests(indexBefore)
+      // A submodule is changed in the index only: its folder is never walked, removed or written. One staged where HEAD
+      // has a file is in the way of that file, and the copy refuses it.
+      const headModes = unborn ? new Map<string, string>() : await modesIn(top, 'HEAD', [...restore])
+      const indexModes = stagedModes(indexBefore)
+      const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
       // Every path the discard writes or removes, as it is now, before any of it changes.
       let kept: KeptCopy
       try {
         // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
-        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore] })
+        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
       } catch (error) {
         // The refusal names the files (the largest ones, for a copy too large), so the person knows what to move aside.
         if (error instanceof KeepCopyRefusedError) {
@@ -949,31 +967,38 @@ export class GitService {
         }
         throw error
       }
-      // Untracked files go first: a tracked file that a folder of untracked files replaced can then come back in its place.
-      await this.removeUntracked(top, untracked)
-      await this.withPathspecFile(top, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
-      await this.withPathspecFile(top, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
-      return kept
+      // Untracked files and files in the way go first, each only as far as the copy holds it, deepest first.
+      const emptied = await removeProvenAsync({
+        top,
+        restore: [...restore].filter((path) => !submodule(path)),
+        remove: [...remove, ...untracked].filter((path) => !submodule(path)),
+        digests: kept.digests,
+        ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
+      })
+      const left = [...emptied.left]
+      const skipped = new Set(left.map((item) => item.path))
+      // Only the index entries of emptied paths go back to HEAD, and only those nobody staged anew meanwhile: a path
+      // left as it is keeps its staged version.
+      const restaged = new Set(stagedSince(stagedBefore, stagedEntryDigests(await this.indexEntries(top)), tracked.filter((path) => !skipped.has(path))))
+      for (const path of restaged) left.push({ path, changed: path })
+      const reset = tracked.filter((path) => !skipped.has(path) && !restaged.has(path))
+      await this.withPathspecFile(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q'] : ['reset', '-q', 'HEAD'], reset)
+      // Then Git writes HEAD's versions, only into paths that are empty.
+      const write = [...restore].filter((path) => !skipped.has(path) && !restaged.has(path) && !submodule(path))
+      const notWritten = await createOnlyAsync(top, write, async (args, input) => {
+        const run = await this.runGit(top, args, { userAction: true, ...(input !== undefined ? { input } : {}) })
+        return { status: run.code, stderr: run.output }
+      }, new Set(left.map((item) => item.changed)))
+      for (const path of notWritten) left.push({ path, changed: path })
+      return { ...kept, left }
     })
   }
 
-  /**
-   * `git clean` takes no pathspec file, so untracked paths are removed directly, each confined
-   * to the repository. Like `git clean -d`, a nested Git repository is left alone: it shows up
-   * as one untracked directory, and removing it would delete its history.
-   */
-  private async removeUntracked(top: string, paths: readonly string[]): Promise<void> {
-    const root = resolve(top)
-    for (const path of paths) {
-      const target = resolve(root, path)
-      if (target === root || !target.startsWith(root + sep)) throw gitErrors.create('git_path_outside')
-      if (existsSync(join(target, '.git'))) continue
-      await rm(target, { recursive: true, force: true })
-      // Like `git clean -d`, leave no empty directory behind.
-      for (let dir = dirname(target); dir !== root && dir.startsWith(root + sep); dir = dirname(dir)) {
-        if (!await rmdir(dir).then(() => true, () => false)) break
-      }
-    }
+  /** The index's entries (`ls-files -s -z`), read without writing the index. */
+  private async indexEntries(top: string): Promise<string[]> {
+    const run = await this.runGit(top, ['ls-files', '-s', '-z'])
+    if (!run.ok) throw failure('git_failed', run)
+    return run.stdout.split('\0').filter(Boolean)
   }
 
   fetch(cwd: string, userRequested: UserAction, options: GitOperationRequest = {}): Promise<GitFetchResult> {
