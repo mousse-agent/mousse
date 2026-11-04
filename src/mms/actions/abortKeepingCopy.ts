@@ -249,6 +249,8 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
       const rewound = await rewinds(top, input.kind)
       return {
         target, writes, index, alongside: await autostashWrites(top, input.kind),
+        // `reset --merge` writes a flagged entry's file all the same; a rebase's `reset --hard` leaves a skip-worktree one.
+        flagsAtStart: input.kind === 'rebase' ? 'compare' : 'ignore',
         // What Git writes now, read again: a path staged since the copy, or (a rebase's `reset --hard` writes every changed
         // file) a file changed since, that the copy does not cover, is kept again first.
         grown: (listed) => {

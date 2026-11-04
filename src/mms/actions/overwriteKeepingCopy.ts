@@ -54,6 +54,12 @@ export interface OverwriteRound {
   grown?: (listed: ReadonlySet<string>) => string | undefined
   /** The index at `writes` ({@link indexAt}), when the caller has just read it; read here otherwise. */
   index?: IndexAt
+  /**
+   * Whether a flag (`assume-unchanged`, `skip-worktree`) set or cleared once files are removed counts, right before Git
+   * starts, as a change: `compare` (the default) where it makes Git leave a path as it is (a rebase's `reset --hard`, a
+   * fast-forward); `ignore` where Git writes a flagged entry's file all the same (`reset --merge`), as plain Git would.
+   */
+  flagsAtStart?: 'compare' | 'ignore'
 }
 
 export interface OverwriteKeepingCopyInput {
@@ -82,10 +88,11 @@ export interface OverwriteKeepingCopyInput {
 }
 
 /**
- * What was written over: the copy, when one was kept, and the paths proven held (Git's form of their index entry), whether
- * left in place or kept because another path Git writes is below or above them.
+ * What was written over: the copy, when one was kept; the paths proven held (Git's form of their index entry), whether
+ * left in place or kept because another path Git writes is below or above them; and the paths Mousse emptied for Git to
+ * write `target`'s version at.
  */
-export interface Overwritten { kept?: KeptCopy; held: string[] }
+export interface Overwritten { kept?: KeptCopy; held: string[]; emptied: string[] }
 
 /** Something stood at a path Git writes, or a file left in place changed, right before Git was to start. */
 class ChangedBeforeGit extends Error {
@@ -128,7 +135,8 @@ function within(paths: readonly string[]): (path: string) => boolean {
 /** `ls-files -s -v` lines (`tag mode blob stage<TAB>path`), filtered. A lowercase tag is assume-unchanged, `S` skip-worktree. */
 function parseIndex(lines: readonly string[], keep: (path: string) => boolean): IndexAt {
   const found: IndexAt = { modes: new Map(), blobs: new Map(), unmerged: new Set(), flagged: new Set(), entries: new Map() }
-  for (const line of lines) {
+  // Listings in batches can name one entry twice (a folder in one batch, a path below it in the next): each counts once.
+  for (const line of new Set(lines)) {
     const tab = line.indexOf('\t')
     const path = line.slice(tab + 1)
     if (!keep(path)) continue
@@ -161,9 +169,13 @@ function indexEntriesSync(top: string, paths: readonly string[]): Map<string, st
   return parseIndex(lines, within(paths)).entries
 }
 
-/** The first path whose index entry differs between two readings, or undefined. */
-function changedEntry(before: ReadonlyMap<string, string>, now: ReadonlyMap<string, string>): string | undefined {
-  for (const [path, entry] of before) if (now.get(path) !== entry) return path
+/**
+ * The first path whose index entry differs between two readings, or undefined. With `flags: 'ignore'`, a flag set or
+ * cleared alone is not a difference.
+ */
+function changedEntry(before: ReadonlyMap<string, string>, now: ReadonlyMap<string, string>, flags: 'compare' | 'ignore' = 'compare'): string | undefined {
+  const plain = (entry: string | undefined): string | undefined => flags === 'compare' || entry === undefined ? entry : entry.split(',').map((stage) => stage.slice(stage.indexOf(' ') + 1)).join(',')
+  for (const [path, entry] of before) if (plain(now.get(path)) !== plain(entry)) return path
   for (const path of now.keys()) if (!before.has(path)) return path
   return undefined
 }
@@ -311,7 +323,7 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
       const grown = plan.grown?.(listed)
       if (grown !== undefined) throw new ChangedBeforeGit(grown)
       // A version staged or a flag set since the index was read: Git might leave an emptied path empty, or a file in place.
-      const restagedNow = changedEntry(index.entries, indexEntriesSync(top, writes))
+      const restagedNow = changedEntry(index.entries, indexEntriesSync(top, writes), plan.flagsAtStart)
       if (restagedNow !== undefined) throw new ChangedBeforeGit(restagedNow)
       for (const { path, proof } of stays) {
         if (!proof) { if (standsAt(top, path, true)) throw new ChangedBeforeGit(path); continue }
@@ -328,7 +340,7 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
       if (left.length) throw input.stoppedPartWay(error, kept!, left)
       throw error
     }
-    return { ...(kept ? { kept } : {}), held: [...heldAll.keys()] }
+    return { ...(kept ? { kept } : {}), held: [...heldAll.keys()], emptied: restore }
   }
   throw new KeepCopyRefusedError(`${input.action} was stopped: ${namedFew(changed)} kept changing while ${changed.length === 1 ? 'its' : 'their'} copy was being kept. Nothing was changed; try again once ${changed.length === 1 ? 'it has' : 'they have'} stopped changing.`, changed)
 }

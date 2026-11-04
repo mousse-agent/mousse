@@ -5,10 +5,9 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { currentUserRequest, withoutUserRequest, withUserRequest, type UserAction } from '../git/gitPolicy'
-import { git, gitAsync, LISTING, mergeTreesAsync, ownGitRunner, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
+import { git, gitAsync, LISTING, mergeTreesAsync, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
 import { convertedPathsAsync, publishedRef, sameTreeAsync, takeSnapshotAsync } from './snapshots'
-import { KeepCopyRefusedError, keptPathsText, listZOver, modesIn, writeBackKeptFiles, type KeptCopy } from './keptCopies'
-import { createOnlyAsync } from './provenDiscard'
+import { KeepCopyRefusedError, keptPathsText, listZOver, writeBackKeptFiles, writeCommitFilesCreateOnly, type KeptCopy } from './keptCopies'
 import type { RestoreKind } from './restoreCommands'
 import { indexAt, namedFew, overwriteKeepingCopy, untrackedInTheWay } from './overwriteKeepingCopy'
 import { ChangeReceiptService } from './ChangeReceiptService'
@@ -222,8 +221,8 @@ export class PublishService {
       const paths = writeSet.map((item) => item.path)
       const converted = await convertedPathsAsync(top, paths)
       if (converted.length) {
-        const written = writeSet.filter((item) => !item.status.startsWith('D')).map((item) => item.path)
-        const done = await this.fastForwardKeepingCopy({ top, primaryCheckout, threadWorkspace, operationId, intent, paths, written, asked })
+        const added = writeSet.filter((item) => item.status.startsWith('A')).map((item) => item.path)
+        const done = await this.fastForwardKeepingCopy({ top, primaryCheckout, threadWorkspace, operationId, intent, paths, added, asked })
         return this.completePublish(primaryCheckout, operationId, prePublishSha, source, publishSha, done.copy, done.notWritten)
       }
       // The branch, the index and the files move together or not at all; a fast-forward refuses before touching anything
@@ -264,7 +263,7 @@ export class PublishService {
    * fast-forward does. Before any path is emptied the copy is recorded (`holding`), so recovery can put the files back.
    * When Git fails, every removed file is put back and the publish is cancelled. Returns what was kept, if anything.
    */
-  private async fastForwardKeepingCopy(input: { top: string; primaryCheckout: string; threadWorkspace: string; operationId: string; intent: PublishIntent; paths: string[]; written: string[]; asked: <T>(work: () => T) => T }): Promise<{ copy?: PublishCopy; notWritten: string[] }> {
+  private async fastForwardKeepingCopy(input: { top: string; primaryCheckout: string; threadWorkspace: string; operationId: string; intent: PublishIntent; paths: string[]; added: string[]; asked: <T>(work: () => T) => T }): Promise<{ copy?: PublishCopy; notWritten: string[] }> {
     const { top, primaryCheckout, operationId, intent, paths } = input
     const cancel = (details: Record<string, unknown>): void => { this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { prePublishSha: intent.prePublishSha, targetBranch: intent.targetBranch, ...details } }) }
     const notTracked = (untracked: readonly string[]): KeepCopyRefusedError => {
@@ -283,7 +282,8 @@ export class PublishService {
         owner: this.threadDirectory, top, operationType: 'publish-keep', action: 'Publish', held: 'left',
         round: async () => {
           const index = await indexAt(top, paths)
-          const untracked = await untrackedInTheWay(top, intent.publishSha, paths, index.modes)
+          // Only a path the publish adds can have no index entry where Git writes a file (the checkout was clean).
+          const untracked = await untrackedInTheWay(top, intent.publishSha, input.added, index.modes)
           if (untracked.length) throw notTracked(untracked)
           return { target: intent.publishSha, writes: paths, index }
         },
@@ -318,16 +318,7 @@ export class PublishService {
       throw new Error(`Publish could not update ${primaryCheckout}: ${error.stderr || 'Git refused the update'}. ${left ? 'Some of its files may have been updated; check git status there.' : 'Nothing was changed.'}`, { cause: error })
     }
     const copy = done?.kept ? copyOf(done.kept, new Set(done.held)) : undefined
-    // Git leaves a path as it is when the index already has the new version there (staged meanwhile): a file Mousse
-    // removed would stay missing. Every path the publish writes must be there; a missing one is created from the publish
-    // commit, only where nothing stands, with Git's conversions.
-    const present = await Promise.all(input.written.map((path) => lstat(join(top, ...path.split('/'))).then(() => true, () => false)))
-    const missing = input.written.filter((_, at) => !present[at])
-    if (!missing.length) return { ...(copy ? { copy } : {}), notWritten: [] }
-    const modes = await modesIn(top, intent.publishSha, missing)
-    const create = missing.filter((path) => modes.has(path) && modes.get(path) !== '160000')
-    const made = await input.asked(() => createOnlyAsync(top, ownGitRunner(top), create, intent.publishSha))
-    const notWritten = [...made.notWritten].filter(([, why]) => why.reason === 'failed').map(([path]) => path).sort()
+    const notWritten = await fillEmptied(top, done?.emptied ?? [], intent.publishSha)
     return { ...(copy ? { copy } : {}), notWritten }
   }
 
@@ -415,7 +406,11 @@ export class PublishService {
     // A publish interrupted before snapshots was a merge commit that has the reviewed commit as a parent.
     const mergedBefore = !expected.publishSha && Boolean(tip) && tip !== expected.prePublishSha && await contains(expected.sourceSha)
     const landed = receipt?.afterSha && await contains(receipt.afterSha) ? receipt.afterSha : expected.publishSha && await contains(expected.publishSha) ? expected.publishSha : mergedBefore ? tip : undefined
-    if (landed) return { operationId, state: 'completed', result: await this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed, holding) }
+    if (landed) {
+      // The fast-forward ran: a path it left empty that Mousse had emptied is filled in now, or named.
+      const notWritten = holding && landed === expected.publishSha ? await fillEmptied(holding.top, holding.emptied, landed) : []
+      return { operationId, state: 'completed', result: await this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed, holding, notWritten) }
+    }
     if (!tip) {
       // The checkout reads, and the branch is gone: the publish can never land there, so it is closed and later ones go on.
       const readable = await exists(primaryCheckout) && (await tryGitAsync(primaryCheckout, ['rev-parse', '--git-dir'])).ok
@@ -465,6 +460,30 @@ function keptResult(kept: PublishCopy | undefined, notWritten: readonly string[]
     ...(notWritten.length ? { notWritten: [...notWritten] } : {}),
     ...(sentences.length ? { notice: sentences.join(' ') } : {})
   }
+}
+
+/**
+ * After the fast-forward to `commit`: every path Mousse emptied for it that the commit has must be on disk. Git leaves a
+ * path as it is when the index already has the new version (staged meanwhile), so a removed file would stay missing. A
+ * missing one is created from the commit, only where nothing stands, with Git's conversions
+ * ({@link writeCommitFilesCreateOnly}: Git only reads, so recovery may do it too); one whose entry is now
+ * skip-worktree or assume-unchanged is never touched, nor one HEAD no longer has as the commit does (changed since).
+ * Returns the paths still missing, which the result names. Paths Mousse did not empty (a sparse checkout's) are Git's.
+ */
+async function fillEmptied(top: string, emptied: readonly string[], commit: string): Promise<string[]> {
+  if (!emptied.length) return []
+  const absent = async (paths: readonly string[]): Promise<string[]> => {
+    const there = await Promise.all(paths.map((path) => lstat(join(top, ...path.split('/'))).then(() => true, () => false)))
+    return paths.filter((_, at) => !there[at])
+  }
+  const missing = await absent(emptied)
+  if (!missing.length) return []
+  const entries = async (treeish: string): Promise<Map<string, string>> => new Map((await listZOver(top, ['ls-tree', '-z', treeish], missing)).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf('\t'))]))
+  const [published, head, index] = await Promise.all([entries(commit), entries('HEAD'), indexAt(top, missing)])
+  const ours = missing.filter((path) => published.has(path) && published.get(path) === head.get(path) && !published.get(path)!.startsWith('160000'))
+  const create = ours.filter((path) => !index.flagged.has(path))
+  if (create.length) await writeCommitFilesCreateOnly(top, commit, create)
+  return (await absent(ours)).sort()
 }
 
 /**

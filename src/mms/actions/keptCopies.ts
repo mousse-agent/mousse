@@ -906,6 +906,40 @@ export async function writeBackKeptFiles(top: string, sha: string, paths: readon
   return left
 }
 
+/**
+ * Writes `commit`'s version of each of `paths` where nothing stands, as Git's checkout would write it: a file's bytes are
+ * Git's form of its blob (line endings, an encoding and filters applied, `cat-file --filters`), an executable gets
+ * Git's executable mode, a link is made as a link. Never written over, never through a link: a folder above is made only
+ * where none is. Only reads run in Git, so it needs no request of the person's (a recovery runs it). Returns the paths
+ * left as they are: something stands there, the commit has no file there, or Git could not give its form.
+ */
+export async function writeCommitFilesCreateOnly(top: string, commit: string, paths: readonly string[]): Promise<string[]> {
+  if (!paths.length) return []
+  const rows = (await listZOver(top, ['ls-tree', '-z', commit], paths)).map((line) => {
+    const tab = line.indexOf('\t')
+    const [mode, , id] = line.slice(0, tab).split(' ') as [string, string, string]
+    return { mode, id, path: line.slice(tab + 1) }
+  }).filter((row) => ['100644', '100755', '120000'].includes(row.mode))
+  const left: string[] = paths.filter((path) => !rows.some((row) => row.path === path))
+  for (const row of rows) {
+    const absolute = join(top, ...row.path.split('/'))
+    try {
+      for (let slash = row.path.indexOf('/'); slash !== -1; slash = row.path.indexOf('/', slash + 1)) {
+        const folder = join(top, ...row.path.slice(0, slash).split('/'))
+        const info = await lstat(folder).catch(() => undefined)
+        if (!info) await mkdir(folder)
+        else if (!info.isDirectory() || info.isSymbolicLink()) throw Object.assign(new Error('in the way'), { code: 'EEXIST' })
+      }
+      if (row.mode === '120000') await symlink((await gitBytes(top, ['cat-file', 'blob', row.id])).stdoutBytes.toString(), absolute)
+      else await writeFile(absolute, (await gitBytes(top, ['cat-file', '--filters', `--path=${row.path}`, row.id])).stdoutBytes, { flag: 'wx', mode: row.mode === '100755' ? 0o777 : 0o666 })
+    } catch {
+      // Something stands there now, or Git could not give its form (a failing filter): the caller names it.
+      left.push(row.path)
+    }
+  }
+  return left
+}
+
 /** `diff-index -z --raw` fields: each change is a `:modes ids status` field, then its path. Deletions store nothing. */
 function stagedChanges(fields: readonly string[]): Array<{ path: string; sha: string }> {
   const changes: Array<{ path: string; sha: string }> = []

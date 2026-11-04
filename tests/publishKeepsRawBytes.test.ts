@@ -79,17 +79,27 @@ function restoreFromNotice(notice: string, ref: string, top: string, path: strin
   execFileSync(shell, ['-c', command], { cwd: top })
 }
 
-/** Runs a publish in a child process that is killed (SIGKILL) when Git is asked for `when`, a `case` pattern. */
-async function publishCrashingAt(f: { owner: string; workspace: string; cwd: string }, when: string, operationId: string): Promise<void> {
-  const bin = launcher(when, 'kill -9 $PPID; exit 1')
+/**
+ * Runs a publish in a child process that is killed (SIGKILL) when Git is asked for `when`, a `case` pattern; or, with
+ * `phase` `before`/`after`, that exits around its `change-publish` `git_applied` record, with `script` run for `when`.
+ */
+async function publishCrashingAt(f: { owner: string; workspace: string; cwd: string }, when: string, operationId: string, crash: { phase: 'git' | 'before' | 'after'; script?: string } = { phase: 'git' }): Promise<void> {
+  const bin = launcher(when, crash.script ?? 'kill -9 $PPID; exit 1')
   const configPath = join(root, `crash-${count}.json`)
-  writeFileSync(configPath, JSON.stringify({ kind: 'publish', phase: 'git', thread: f.owner, repo: f.cwd, source: f.workspace, target: 'main', options: { operationId } }))
+  writeFileSync(configPath, JSON.stringify({ kind: 'publish', phase: crash.phase, thread: f.owner, repo: f.cwd, source: f.workspace, target: 'main', options: { operationId } }))
   const runner = join(root, `publish-crash-${count}.mjs`)
   await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
   const home = join(root, `home-${count}`)
   mkdirSync(home)
   const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: home, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 30_000 })
-  expect(child.signal, child.stderr).toBe('SIGKILL')
+  if (crash.phase === 'git' || crash.script?.includes('kill -9')) expect(child.signal, child.stderr).toBe('SIGKILL')
+  else expect(child.status, child.stderr).toBe(86)
+}
+
+/** A shell command that stages the blob of `bytes` at `path` in `cwd`'s index, as restoring a revision into the index only would. */
+function stageBlob(cwd: string, path: string, bytes: string): string {
+  const id = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd, input: bytes, encoding: 'utf8' }).trim()
+  return `'${realGit}' -C '${cwd}' update-index --cacheinfo 100644,${id},${path}`
 }
 
 /** The copy a publish recorded holding before it emptied any path. */
@@ -435,4 +445,114 @@ describe('Publish over files Git converts: shapes, the index and recovery', () =
       checkKinds(f.cwd, f.script)
     }
   }, 60_000)
+})
+
+describe('Publish over files Git converts: sparse checkouts, long paths and files Git skipped', () => {
+  it('a cone-mode sparse checkout keeps the files outside its cone absent and flagged, as plain Git does', async () => {
+    const f = fixture({ 'core.autocrlf': 'true' }, (cwd) => {
+      mkdirSync(join(cwd, 'app')); writeFileSync(join(cwd, 'app', 'a.txt'), 'a\r\n')
+      mkdirSync(join(cwd, 'lib')); writeFileSync(join(cwd, 'lib', 's.txt'), 's\r\n')
+    })
+    git(f.cwd, 'sparse-checkout', 'set', '--cone', 'app')
+    expect(existsSync(join(f.cwd, 'lib', 's.txt'))).toBe(false)
+    expect(readFileSync(join(f.workspace, 'lib', 's.txt'), 'utf8')).toBe('s\r\n')
+    writeFileSync(join(f.workspace, 'lib', 's.txt'), 's changed\r\n')
+    writeFileSync(join(f.workspace, 'lib', 'new.txt'), 'new\r\n')
+    writeFileSync(join(f.workspace, 'app', 'a.txt'), 'a changed\r\n')
+
+    const result = await publish(f, 'publish-sparse')
+    expect(result.state).toBe('completed')
+    expect(readFileSync(join(f.cwd, 'app', 'a.txt'), 'utf8')).toBe('a changed\r\n')
+    expect(existsSync(join(f.cwd, 'lib', 's.txt'))).toBe(false)
+    expect(existsSync(join(f.cwd, 'lib', 'new.txt'))).toBe(false)
+    expect(git(f.cwd, 'ls-files', '-t', 'lib').split('\n').sort()).toEqual(['S lib/new.txt', 'S lib/s.txt'])
+    expect(git(f.cwd, 'status', '--porcelain')).toBe('')
+    expect(result.notWritten).toBeUndefined()
+  })
+
+  it('paths long enough to split the index listing into batches publish without a false change', async () => {
+    const names = Array.from({ length: 37 }, (_, at) => `a${String(at).padStart(3, '0')}${'x'.repeat(196)}`), folder = 'z'.repeat(190)
+    const f = fixture({ 'core.autocrlf': 'input' }, (cwd) => {
+      for (const name of names) writeFileSync(join(cwd, name), 'base\n')
+      mkdirSync(join(cwd, folder)); writeFileSync(join(cwd, folder, 'v'), 'child\n')
+    })
+    for (const name of names) writeFileSync(join(f.workspace, name), 'published\n')
+    rmSync(join(f.workspace, folder), { recursive: true }); writeFileSync(join(f.workspace, folder), 'now a file\n')
+
+    const result = await publish(f, 'publish-long-paths')
+    expect(result.state).toBe('completed')
+    for (const name of names) expect(readFileSync(join(f.cwd, name), 'utf8')).toBe('published\n')
+    expect(readFileSync(join(f.cwd, folder), 'utf8')).toBe('now a file\n')
+    expect(git(f.cwd, 'status', '--porcelain')).toBe('')
+    // The folder's file was in Git's form: still in the commit the publish moved from, and in the copy that removed it.
+    expect(blob(f.cwd, preserved(f.cwd)[0]!, `${folder}/v`).equals(blob(f.cwd, f.pre, `${folder}/v`))).toBe(true)
+  })
+
+  it('a stop after Git skipped a removed file (its new version staged): recovery writes it, and the copy restores the old bytes', async () => {
+    const f = fixture()
+    const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+    writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+    // The published version is staged as the fast-forward starts; Mousse stops right after Git succeeds.
+    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; kill -9 $PPID; exit 1` })
+    expect(existsSync(join(f.cwd, 'base.txt'))).toBe(false)
+    const head = git(f.cwd, 'rev-parse', 'HEAD'), index = readFileSync(join(f.cwd, '.git', 'index'))
+
+    const [settled] = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
+    expect(settled).toMatchObject({ state: 'completed' })
+    const result = (settled as { result: PublishResult }).result
+    expect(result.notWritten).toBeUndefined()
+    expect(readFileSync(join(f.cwd, 'base.txt')).equals(Buffer.from('published\n'))).toBe(true)
+    expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(readFileSync(join(f.cwd, '.git', 'index')).equals(index)).toBe(true)
+    restoreFromNotice(result.notice!, result.kept!.ref, f.cwd, 'base.txt')
+    expect(readFileSync(join(f.cwd, 'base.txt')).equals(original)).toBe(true)
+    expect(await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)).toEqual([])
+  }, 60_000)
+
+  it('a skipped file recovery cannot write is named in notWritten, with the command that restores its old bytes', async () => {
+    const f = fixture()
+    const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+    writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-skipped-failing', { phase: 'git', script: `${stageBlob(f.cwd, 'base.txt', 'published\n')}; '${realGit}' "$@"; kill -9 $PPID; exit 1` })
+    // Git cannot write the file during recovery either.
+    const failing = launcher(`*" cat-file --filters "*`, 'exit 1')
+    const [settled] = await withPath(failing, () => new PublishService(f.owner).recoverPending(f.workspace, f.cwd))
+    const result = (settled as { result: PublishResult }).result
+    expect(result).toMatchObject({ state: 'completed', notWritten: ['base.txt'] })
+    expect(existsSync(join(f.cwd, 'base.txt'))).toBe(false)
+    expect(result.notice).toContain('base.txt could not be written by the publish')
+    restoreFromNotice(result.notice!, result.kept!.ref, f.cwd, 'base.txt')
+    expect(readFileSync(join(f.cwd, 'base.txt')).equals(original)).toBe(true)
+  }, 60_000)
+
+  for (const phase of ['before', 'after'] as const) {
+    it(`a stop ${phase} the publish's receipt is applied, when writing a skipped file had failed: recovery writes it`, async () => {
+      const f = fixture()
+      const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+      writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+      const stage = stageBlob(f.cwd, 'base.txt', 'published\n')
+      await publishCrashingAt(f, '*', `publish-receipt-${phase}`, { phase, script: `case " $* " in *" merge --ff-only "*) ${stage} ;; *" cat-file --filters "* | *" checkout-index "*) exit 1 ;; esac` })
+      expect(existsSync(join(f.cwd, 'base.txt'))).toBe(false)
+
+      const [settled] = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
+      const result = (settled as { result: PublishResult }).result
+      expect(result.state).toBe('completed')
+      expect(readFileSync(join(f.cwd, 'base.txt')).equals(Buffer.from('published\n'))).toBe(true)
+      expect(blob(f.cwd, result.kept!.ref, 'base.txt').equals(original)).toBe(true)
+    }, 60_000)
+  }
+
+  it('a skipped file whose folder is replaced by a later save is named in notWritten; the save stays exact', async () => {
+    const f = fixture({ 'core.autocrlf': 'input' }, (cwd) => { mkdirSync(join(cwd, 'dir')); writeFileSync(join(cwd, 'dir', 'value'), 'old\n') })
+    cleanRaw(f.cwd, 'dir/value', 'old\r\n')
+    writeFileSync(join(f.workspace, 'dir', 'value'), 'published\n')
+    const save = Buffer.from('later parent save\r\n')
+    const bin = launcher('*', `case " $* " in *" merge --ff-only "*) ${stageBlob(f.cwd, 'dir/value', 'published\n')} ;; *" ls-tree "*) if [ ! -e '${f.cwd}/dir/value' ] && [ -d '${f.cwd}/dir' ]; then rmdir '${f.cwd}/dir'; printf 'later parent save\\r\\n' > '${f.cwd}/dir'; fi ;; esac`)
+
+    const result = await withPath(bin, () => publish(f, 'publish-blocked-parent'))
+    expect(result.state).toBe('completed')
+    expect(readFileSync(join(f.cwd, 'dir')).equals(save)).toBe(true)
+    expect(result.notWritten).toEqual(['dir/value'])
+    expect(result.notice).toContain('dir/value could not be written by the publish')
+  })
 })
