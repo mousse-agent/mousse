@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { gitDirectoryEnv, gitDirectoryEnvAsync, mousseGitEnv } from './gitEnv'
+import { gitDirectoryEnv, gitDirectoryEnvAsync, mousseGitEnv, scopedGitConfig } from './gitEnv'
 import { assertGitAllowed, assertGitAllowedAsync, untilAborted, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from './hiddenStore'
@@ -516,7 +516,10 @@ async function programsForAsync(cwd: string, signal?: AbortSignal, ceiling?: str
 function settingsFrom(programs: RepoPrograms, write: boolean | undefined): string[] {
   const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
   const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${write ? 'true' : 'false'}`)
-  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
+  // Settings a caller's scope switches off (`withScopedGitConfig`) come last, so a user's value put back above, or a
+  // required emptied filter, cannot switch them on again. A key `-c` cannot spell is left to the environment's entry.
+  const scoped = scopedGitConfig().filter(([key]) => !/[=\n\r\0]/.test(key)).map(([key, value]) => `${key}=${value}`)
+  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required, ...scoped]
 }
 
 /**

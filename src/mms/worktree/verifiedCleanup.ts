@@ -8,7 +8,7 @@ import { gitsFormsAsync } from '../actions/heldBytes'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs, KEEP_COPY_LIMITS, KeepCopyRefusedError, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
 import { threadPreservedIndex } from '../actions/preservedFiles'
 import { convertedPathsAsync } from '../actions/snapshots'
-import { withScopedGitConfig } from '../git/gitEnv'
+import { withDrivers } from '../git/gitEnv'
 import { withGitAccess } from '../git/gitPolicy'
 import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { lifecycleReadAsync } from '../lifecycle/lifecycleGit'
@@ -265,9 +265,9 @@ const regular = (mode: string | undefined): boolean => mode === '100644' || mode
  * The tracked files and links of the proof whose bytes a blob holds: its own bytes (the id Git gives them equals the
  * index's blob, whatever Git is told to assume), or what Git writes from it (`heldByForm`, read only for files Git
  * converts: line endings, an encoding, a filter). A dispatch's file under a filter driver is compared only with its blob,
- * since asking for Git's form would run the driver.
+ * since asking for Git's form would run the driver; one that differs is copied as its raw bytes.
  */
-async function heldByBlobsAsync(top: string, proof: readonly ContentEntry[], tracked: Map<string, { mode: string; blob: string }>, filters: boolean): Promise<{ held: Set<string>; heldByForm: string[]; filtered: Set<string> }> {
+async function heldByBlobsAsync(top: string, proof: readonly ContentEntry[], tracked: Map<string, { mode: string; blob: string }>, filters: boolean): Promise<{ held: Set<string>; heldByForm: string[] }> {
   const held = new Set<string>()
   const others: ContentEntry[] = []
   for (const entry of proof) {
@@ -288,7 +288,7 @@ async function heldByBlobsAsync(top: string, proof: readonly ContentEntry[], tra
     const form = forms.get(entry.path)
     if (form && form.bytes === entry.bytes && form.digest === entry.digest) { held.add(entry.path); heldByForm.push(entry.path) }
   }
-  return { held, heldByForm, filtered: filters ? new Set() : filtered }
+  return { held, heldByForm }
 }
 
 /** The proof as read, and which of its files and links a blob holds; what is left needs a copy. */
@@ -319,10 +319,8 @@ async function readFilesAsync(input: CleanupInput, kept: (code: Kept['code'], re
     return kept('keep_copy_refused', `cleanup could not read every file in it (${firstLine(error)}).`)
   }
   for (const entry of proof) if (entry.kind !== 'directory' && deleted?.has(entry.path)) entry.confirmed = true
-  const { held, heldByForm, filtered } = await heldByBlobsAsync(top, proof, tracked, input.filters)
-  // Copying one would have Git read the index again, which can run the driver: the worktree stays, and the file is named.
-  const unheldFiltered = [...filtered].filter((path) => !held.has(path))
-  if (unheldFiltered.length) return kept('keep_copy_refused', `${named(unheldFiltered)} ${unheldFiltered.length === 1 ? 'is' : 'are'} written by a filter driver and ${unheldFiltered.length === 1 ? 'differs' : 'differ'} from what Git stores; cleanup cannot keep a copy without running the driver.`)
+  // A file no blob holds is copied as its raw bytes, a dispatch's file under a filter driver too: the copy runs no driver.
+  const { held, heldByForm } = await heldByBlobsAsync(top, proof, tracked, input.filters)
   return { proof, heldByForm, paths: proof.filter((entry) => entry.kind !== 'directory' && !held.has(entry.path) && !deleted?.has(entry.path)).map((entry) => entry.path) }
 }
 
@@ -365,25 +363,6 @@ async function captureFilesAsync(input: CleanupInput, kept: (code: Kept['code'],
     if (!changing.length) return { proof, copy, files: paths.length, heldByForm }
   }
   return kept('keep_copy_refused', `${named(changing)} kept changing while cleanup copied it.`)
-}
-
-/**
- * Every filter driver Git's config at `folder` names (any scope), emptied and not required: the settings under which no
- * driver runs. A dispatch's cleanup, first pass and recovery alike, runs every Git command with them, as its checkout did.
- */
-async function driversOffAsync(folder: string): Promise<Array<[string, string]>> {
-  const listing = await lifecycleReadAsync(folder, ['config', '--null', '--list'], undefined, LISTING_MAX_BUFFER).catch(() => '')
-  const names = new Set<string>()
-  for (const item of listing.split('\0')) {
-    const match = /^filter\.(.+)\.(?:smudge|clean|process|required)$/i.exec(item.split('\n')[0]!)
-    if (match) names.add(match[1]!)
-  }
-  return [...names].flatMap((name): Array<[string, string]> => [[`filter.${name}.smudge`, ''], [`filter.${name}.clean`, ''], [`filter.${name}.process`, ''], [`filter.${name}.required`, 'false']])
-}
-/** Runs `work` so that no filter driver runs in any Git command it starts, unless `filters` allows them (an agent's checkout). */
-async function withDrivers<T>(filters: boolean, folder: string, work: () => Promise<T>): Promise<T> {
-  if (filters) return work()
-  return withScopedGitConfig(await driversOffAsync(folder), work)
 }
 
 /** The locks of the owner of the copies and of the repository, for what runs Git. */

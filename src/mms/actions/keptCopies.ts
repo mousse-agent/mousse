@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rm, stat, symlink, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
@@ -6,12 +7,13 @@ import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
-import { privateIndexEnv } from '../git/gitEnv'
+import { privateIndexEnv, withDrivers } from '../git/gitEnv'
 import { filterRefusal } from '../git/repoPrograms'
 import { gitRunError, type GitProcess } from '../git/runGitProcess'
 import { KEEP_COPY_OPERATIONS, PRESERVED_REFS, type KeepCopyOperation } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, retentionWindowText } from '../../shared/undoRetention'
 import { gitAsync, gitEnv, guardedAsync, LISTING, mousseCommitEnvNow, NOT_MOUSSE, runGitProcess, tryGitAsync } from './git'
+import { readConvertedAsync } from './heldBytes'
 import { restoreCommandsText, restoreCommandTemplate, restoreFileCommand, restoreKindOf, restoreShell, restoreStagedCommand, type RestoreKind, type RestoreShell } from './restoreCommands'
 import { UndoRetentionService } from './UndoRetentionService'
 
@@ -35,6 +37,10 @@ import { UndoRetentionService } from './UndoRetentionService'
  * index, HEAD and branches are never touched. The working versions are read by Mousse and written, with the trees and
  * commits Git makes for the copy, into one pack that `git index-pack` adds to the repository: however many files the
  * copy holds, it leaves no loose objects behind.
+ *
+ * No clean, smudge or process filter driver runs while a copy is kept (`withDrivers` in `gitEnv.ts`). Git reads a
+ * racily clean file again whenever it writes an index, which ran the clean driver of a file under one; a driver is a
+ * program the copy has no reason to run, and its output is not the bytes the copy is meant to hold.
  */
 export type { KeepCopyOperation }
 export { KEEP_COPY_OPERATIONS }
@@ -98,6 +104,14 @@ export interface KeepCopyInput {
   writes?: readonly string[]
   /** The commit whose versions the action writes at `writes`. HEAD by default. */
   target?: string
+  /**
+   * Without `paths`: whether the checkout runs its filter drivers (an agent's, the person's), true by default. Git then
+   * lists a racily clean file under a driver as changed, since no driver runs while the copy is kept; one whose bytes are
+   * Git's form of its blob, which asking for runs the smudge as a restore does (`heldBytes.ts`), is left out, so Git LFS
+   * media or git-crypt plaintext never goes into the copy for it. False for a dispatch's or an untrusted checkout: every
+   * file listed is copied as its raw bytes, and a copy over {@link KEEP_COPY_LIMITS} is refused, naming the largest.
+   */
+  filters?: boolean
 }
 
 /** A copy cannot be kept, so the action was refused before anything changed. Its message names the files. */
@@ -663,6 +677,13 @@ export async function pendingWrites(top: string, target = 'HEAD', known: { untra
  * intent is recorded in the owner's journal, the ref is created, and the outcome is recorded.
  */
 export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
+  // Where the caller is: Git's form of a filtered file is asked for there ({@link heldFilteredAsync}).
+  const caller = AsyncLocalStorage.snapshot()
+  return withDrivers(false, resolve(input.top), () => keepCopyWithoutDrivers(input, caller))
+}
+
+/** {@link keepCopy}, run so that no filter driver runs. `caller` runs work where the caller is. */
+async function keepCopyWithoutDrivers(input: KeepCopyInput, caller: <R>(work: () => R) => R): Promise<KeptCopy> {
   const top = resolve(input.top)
   await settleInterruptedKeeps(input.owner, top)
   const gitDir = await gitAsync(top, ['rev-parse', '--absolute-git-dir'])
@@ -720,9 +741,12 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
         return within(path) && mode !== '160000' ? [{ path, sha }] : []
       })
     const changes = selected ? undefined : await workingTreeChanges(top, env, input.includeIgnored === true)
-    const paths = changes ? changes.paths : [...selected!]
     // Read from the real index, with the listings above. The untracked files are reused only when no ignored ones are in them.
-    const writes = input.writes ?? (changes && target ? await pendingWrites(top, target, { assumed, ...(input.includeIgnored ? {} : { untracked: changes.untracked }) }) : [])
+    const listedWrites = input.writes ?? (changes && target ? await pendingWrites(top, target, { assumed, ...(input.includeIgnored ? {} : { untracked: changes.untracked }) }) : [])
+    // A whole-tree copy lists files under a filter driver that only look changed because none runs (see `filters`).
+    const held = changes && input.filters !== false ? await heldFilteredAsync(top, env, [...changes.paths, ...(input.writes ? [] : listedWrites)], caller) : new Set<string>()
+    const paths = changes ? changes.paths.filter((path) => !held.has(path)) : [...selected!]
+    const writes = input.writes ?? listedWrites.filter((path) => !held.has(path))
     const parents: Parents = new Map()
     const named = await entriesOf(top, paths, parents)
     const budget: Budget = { action: input.action, bytes: 0, known: new Set(), counted: [
@@ -900,6 +924,34 @@ async function currentModes(top: string, env: NodeJS.ProcessEnv): Promise<Map<st
     modes.set(line.slice(tab + 1), line.slice(0, line.indexOf(' ')))
   }
   return modes
+}
+
+/**
+ * The tracked files among `paths` that are under a filter driver and whose bytes are Git's form of their blob in the
+ * (private) index: held by it, as a restore holds them (`readConvertedAsync`). Git's form is asked for where the caller
+ * is (`caller`), which runs the smudge in a checkout that runs its drivers; every other command here runs none.
+ */
+async function heldFilteredAsync(top: string, env: NodeJS.ProcessEnv, paths: readonly string[], caller: <R>(work: () => R) => R): Promise<Set<string>> {
+  const unique = [...new Set(paths)]
+  if (!unique.length) return new Set()
+  const blobs = new Map<string, string>()
+  for (const line of await listZOver(top, ['ls-files', '-z', '-s'], unique, env)) {
+    const tab = line.indexOf('\t')
+    const [mode, blob, stage] = line.slice(0, tab).split(' ') as [string, string, string]
+    if (stage === '0' && (mode === '100644' || mode === '100755')) blobs.set(line.slice(tab + 1), blob)
+  }
+  const tracked = unique.filter((path) => blobs.has(path))
+  if (!tracked.length) return new Set()
+  // `check-attr` only reads attributes: path, attribute, value for each.
+  const fields = (await gitBytes(top, ['check-attr', '-z', '--stdin', 'filter'], { env, input: `${tracked.join('\0')}\0`, listing: true })).stdout.split('\0')
+  const filtered: string[] = []
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    if (fields[index + 2] !== 'unspecified' && fields[index + 2] !== 'unset') filtered.push(fields[index]!)
+  }
+  if (!filtered.length) return new Set()
+  // A driver that fails holds nothing: every file is then copied.
+  const { read } = await caller(() => readConvertedAsync(top, blobs, filtered)).catch(() => ({ read: [] }))
+  return new Set(read.filter((entry) => entry.held).map((entry) => entry.path))
 }
 
 /** The working tree's files that differ from the (private) index or are not in it, as a whole-tree copy keeps them. */
