@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
  *
  * POSIX shells: one subshell, so nothing of it stays in the person's shell, that stops at the first step that fails.
  * 1. No folder above the path is a link (`[ ! -L ./a ]` for each): a command never writes outside the folders it names.
+ *    Folders above it that are gone (one the abort removed with the file) are then made again (`mkdir -p`).
  * 2. The bytes go to `<path>.mousse-<8 hex>` first, under `set -C`, which refuses a name already taken. A copy that is
  *    gone, or a folder that cannot be written, stops the command with nothing at the path changed.
  * 3. `rm -f` then removes what stands at the path, a link itself and never what it points to (a folder refuses, which
@@ -84,7 +85,9 @@ function command(ref: string, path: string, options: RestoreCommandOptions, plac
   const word = placeholder ? (value: string) => value : posixWord
   const at = (rel: string): string => `./${word(rel)}`
   const source = `git cat-file ${kind} ${word(`${ref}:${path}`)}`
-  const checks = placeholder ? [] : parentsOf(path).map((parent) => `[ ! -L ${at(parent)} ]`)
+  const parents = placeholder ? [] : parentsOf(path)
+  // No folder above is a link; then the ones that are gone (a folder the abort removed) are made again.
+  const checks = [...parents.map((parent) => `[ ! -L ${at(parent)} ]`), ...(parents.length ? [`mkdir -p ${at(parents.at(-1)!)}`] : [])]
   if (options.kind === 'link') {
     return `(${[...checks, `t="$(${source} && printf x)"`, `rm -f ${at(path)}`, `ln -s -- "\${t%x}" ${at(path)}`].join(' && ')})`
   }

@@ -107,13 +107,13 @@ describe('the command shown', () => {
   it('replaces what stands at the path through a temporary file on POSIX shells, and is one cmd line on Windows, quoting what needs it', () => {
     const ref = 'refs/mousse/preserved/op-0123456789ab'
     const tag = (path: string): string => createHash('sha256').update(`${ref}:${path}`).digest('hex').slice(0, 8)
-    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`([ ! -L ./src ] && set -C && git cat-file blob ${ref}:src/a.txt > ./src/a.txt.mousse-${tag('src/a.txt')} && rm -f ./src/a.txt && mv ./src/a.txt.mousse-${tag('src/a.txt')} ./src/a.txt)`)
+    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`([ ! -L ./src ] && mkdir -p ./src && set -C && git cat-file blob ${ref}:src/a.txt > ./src/a.txt.mousse-${tag('src/a.txt')} && rm -f ./src/a.txt && mv ./src/a.txt.mousse-${tag('src/a.txt')} ./src/a.txt)`)
     expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:src/a.txt > src/a.txt`)
     expect(restoreFileCommand(ref, "it's 100%.txt", { shell: 'posix' })).toBe(`(set -C && git cat-file blob '${ref}:it'\\''s 100%.txt' > ./'it'\\''s 100%.txt.mousse-${tag("it's 100%.txt")}' && rm -f ./'it'\\''s 100%.txt' && mv ./'it'\\''s 100%.txt.mousse-${tag("it's 100%.txt")}' ./'it'\\''s 100%.txt')`)
     expect(restoreFileCommand(ref, 'a b %PATH%.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob "${ref}:a b "%"PATH"%".txt" > "a b "%"PATH"%".txt"`)
     expect(restoreFileCommand(ref, 'a.txt', { shell: 'posix', normalized: true })).toBe(`(set -C && git cat-file --filters ${ref}:a.txt > ./a.txt.mousse-${tag('a.txt')} && rm -f ./a.txt && mv ./a.txt.mousse-${tag('a.txt')} ./a.txt)`)
-    expect(restoreFileCommand(ref, 'bin/run', { shell: 'posix', kind: 'executable' })).toBe(`([ ! -L ./bin ] && set -C && git cat-file blob ${ref}:bin/run > ./bin/run.mousse-${tag('bin/run')} && chmod +x ./bin/run.mousse-${tag('bin/run')} && rm -f ./bin/run && mv ./bin/run.mousse-${tag('bin/run')} ./bin/run)`)
-    expect(restoreFileCommand(ref, 'a/b/link', { shell: 'posix', kind: 'link' })).toBe(`([ ! -L ./a ] && [ ! -L ./a/b ] && t="$(git cat-file blob ${ref}:a/b/link && printf x)" && rm -f ./a/b/link && ln -s -- "\${t%x}" ./a/b/link)`)
+    expect(restoreFileCommand(ref, 'bin/run', { shell: 'posix', kind: 'executable' })).toBe(`([ ! -L ./bin ] && mkdir -p ./bin && set -C && git cat-file blob ${ref}:bin/run > ./bin/run.mousse-${tag('bin/run')} && chmod +x ./bin/run.mousse-${tag('bin/run')} && rm -f ./bin/run && mv ./bin/run.mousse-${tag('bin/run')} ./bin/run)`)
+    expect(restoreFileCommand(ref, 'a/b/link', { shell: 'posix', kind: 'link' })).toBe(`([ ! -L ./a ] && [ ! -L ./a/b ] && mkdir -p ./a/b && t="$(git cat-file blob ${ref}:a/b/link && printf x)" && rm -f ./a/b/link && ln -s -- "\${t%x}" ./a/b/link)`)
     expect(restoreFileCommand(ref, 'link', { shell: 'windows', kind: 'link' })).toBe(`git cat-file blob ${ref}:link (link was a link; this prints where it pointed)`)
     expect(restoreCommandTemplate(ref, { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:<path> > <path>`)
     expect(restoreCommandTemplate(ref, { shell: 'posix' })).toBe(`(set -C && git cat-file blob ${ref}:<path> > ./<path>.mousse-restore && rm -f ./<path> && mv ./<path>.mousse-restore ./<path>)`)
@@ -149,6 +149,20 @@ describe.skipIf(WINDOWS)('what a POSIX command changes, and only that', () => {
     }
     expect(readlinkSync(join(top, 'kept', 'link'))).toBe('../base.txt')
     expect(statSync(join(top, 'kept', 'run.sh')).mode & 0o111).not.toBe(0)
+  })
+
+  it('makes again the folders above the path that are gone, and brings the file and a link back there byte for byte', async () => {
+    const top = repo()
+    const value = Buffer.from('in a folder the abort removed\r\n')
+    writeAll(top, { 'new/dir/file.txt': value })
+    symlinkSync('file.txt', join(top, 'new', 'dir', 'link'))
+    const kept = await keepCopy({ owner: owner(), top, operationType: 'git-abort', action: 'Abort', paths: ['new/dir/file.txt', 'new/dir/link'] })
+    rmSync(join(top, 'new'), { recursive: true })
+    expect(run(restoreFileCommand(kept.ref, 'new/dir/file.txt', { shell: 'posix' }), top).status).toBe(0)
+    expect(readFileSync(join(top, 'new', 'dir', 'file.txt')).equals(value)).toBe(true)
+    rmSync(join(top, 'new'), { recursive: true })
+    expect(run(restoreFileCommand(kept.ref, 'new/dir/link', { shell: 'posix', kind: 'link' }), top).status).toBe(0)
+    expect(readlinkSync(join(top, 'new', 'dir', 'link'))).toBe('file.txt')
   })
 
   it('refuses a folder above the path that is a link, leaving what it points to as it is', async () => {
