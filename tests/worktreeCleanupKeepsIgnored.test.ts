@@ -128,13 +128,13 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     expect(preservedRefs(cwd)).toEqual([])
   })
 
-  it('leaves a worktree with untracked files to Git, which refuses it, and keeps no copy', async () => {
+  it('keeps a worktree with untracked files as it is, naming them, and keeps no copy', async () => {
     const { cwd, owner, manager } = setup()
     const info = await manager.createWorktree('audit-agent-dirty', cwd)
     writeFileSync(join(info.path, 'draft.txt'), 'untracked\n')
     mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'out.txt'), 'ignored\n')
     const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner } })
-    expect(result.success).toBe(false)
+    expect(result).toMatchObject({ success: false, kept: { code: 'uncommitted_changes', uncommitted: 'draft.txt' } })
     expect(readFileSync(join(info.path, 'draft.txt'), 'utf8')).toBe('untracked\n')
     expect(readFileSync(join(info.path, 'ignored', 'out.txt'), 'utf8')).toBe('ignored\n')
     expect(preservedRefs(cwd)).toEqual([])

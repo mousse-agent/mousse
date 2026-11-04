@@ -15,7 +15,6 @@ import { spawnSync } from 'node:child_process'
 import { buildSubagentResultReport, formatSubagentResultReport } from '../src/mms/agents/subagentResultReport'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
 import { discardPendingChangesAsync } from '../src/mms/actions/git'
 import { keepCopy } from '../src/mms/actions/keptCopies'
 import { acquireWorkspaceMutationLease, provisionOwnedAgentWorkspace, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
@@ -1135,28 +1134,5 @@ describe('rebuilding a worktree from its snapshot', () => {
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(git(cwd, 'branch', '--show-current')).toBe('')
     expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
-  })
-})
-
-describe('workspace GC', () => {
-  it('never deletes a snapshot pin, whatever it is called, and keeps the pins of retirement and publish', async () => {
-    const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
-    const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
-    // Pins in places GC does not know: a snapshot is work that exists nowhere else.
-    git(f.repo, 'update-ref', 'refs/mousse/somewhere-new/snapshot', action.endSha)
-    git(f.repo, 'update-ref', 'refs/mousse/lifecycle/profile/task/key/base', f.baseSha)
-    git(f.repo, 'update-ref', 'refs/mousse/lifecycle/profile/task/key/snapshot', action.endSha)
-    git(f.repo, 'update-ref', publishedRef('task'), action.endSha)
-    // A ref that is nothing but an old commit of the primary's own branch is still a candidate.
-    git(f.repo, 'update-ref', 'refs/mousse/scratch/old', f.baseSha)
-    const gc = new WorkspaceGcService(f.repo)
-    const report = await gc.dryRun(new Set(), new Set())
-    const pins = ['refs/mousse/threads/task/main', ...receipt.retainedRefs, 'refs/mousse/somewhere-new/snapshot', 'refs/mousse/lifecycle/profile/task/key/base', 'refs/mousse/lifecycle/profile/task/key/snapshot', publishedRef('task')]
-    for (const ref of pins) expect(report.retainedRefs).toContain(ref)
-    expect(report.unreferencedRefs).toEqual(['refs/mousse/scratch/old'])
-    await gc.purge(report, true)
-    for (const ref of pins) expect(git(f.repo, 'rev-parse', ref)).toMatch(/^[0-9a-f]{40}$/)
-    expect(() => git(f.repo, 'rev-parse', '--verify', '-q', 'refs/mousse/scratch/old')).toThrow()
-    expect(f.read(cwd, 'agent.txt')).toBe('agent\n')
   })
 })

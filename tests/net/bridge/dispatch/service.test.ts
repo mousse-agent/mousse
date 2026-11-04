@@ -42,6 +42,7 @@ import { StorageSweepClock } from '../../../../src/mms/lifecycle/sweepClock'
 import { STORAGE_POLICY_DEFAULTS } from '../../../../src/shared/storage'
 import type { DispatchRecord } from '../../../../src/mms/bridge/dispatch/types'
 import { WorktreeManager } from '../../../../src/mms/worktree/WorktreeManager'
+import { installGitRemoveGuard } from '../../../fixtures/gitRemoveGuard'
 
 const roots: string[] = [],
   databases: NetDatabase[] = [],
@@ -649,7 +650,8 @@ it('persists cleanup refusal for a dirty owned worktree and retries cleanup with
   expect(f.service.query(f.execution, f.context)).toMatchObject({
     state: 'completed',
     phase: 'cleanup',
-    cleanupError: 'worktree_cleanup_failed'
+    cleanupError: 'worktree_cleanup_failed',
+    cleanupReason: 'Kept: it has uncommitted changes (owner-extra.txt). Nothing in it was changed.'
   })
   expect(await readFile(extra, 'utf8')).toBe('retain this owner edit')
   await rm(extra)
@@ -1042,6 +1044,82 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     // A later start does not try again: the record is settled.
     await f.service.recover()
     expect(existsSync(record.worktree!.path)).toBe(true)
+  })
+
+  it('a worktree with uncommitted changes stays untouched with no Git removal run, the record names the files, and the next start removes it through the verified delete once it is clean', async () => {
+    const files = outputs()
+    const f = await completedDispatch(files)
+    const worktree = f.service.query(f.execution, f.context)!.worktree!.path
+    const draft = Buffer.from('draft left by hand 6d02\r\n')
+    await writeFile(join(worktree, 'draft.txt'), draft)
+    const guard = installGitRemoveGuard()
+    try {
+      f.commit()
+      await f.service.drainCleanup()
+      const record = f.service.query(f.execution, f.context)!
+      expect(record).toMatchObject({ state: 'completed', phase: 'cleanup', cleanupError: 'worktree_cleanup_failed', cleanupReason: 'Kept: it has uncommitted changes (draft.txt). Nothing in it was changed.' })
+      expect(record.worktreeKept).toBeUndefined()
+      expect(guard.removes()).toEqual([])
+      expect(readFileSync(join(worktree, 'draft.txt')).equals(draft)).toBe(true)
+      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(join(worktree, path)).equals(bytes)).toBe(true)
+      expect(await preservedRefs(f.repo)).toEqual([])
+      expect(listKeptWorktrees(f.profile)).toEqual([])
+
+      await rm(join(worktree, 'draft.txt'))
+      await f.service.recover()
+      const after = f.service.query(f.execution, f.context)!
+      expect(after).toMatchObject({ state: 'completed', phase: 'complete', worktreeCopy: { files: 2 } })
+      expect(after.cleanupError).toBeUndefined()
+      expect(after.cleanupReason).toBeUndefined()
+      expect(existsSync(worktree)).toBe(false)
+      // Git only unregistered the folder, after Mousse's verified delete had removed it.
+      expect(guard.removes().map((call) => call.path)).toEqual([worktree])
+      guard.assertNoRemoveOfExisting()
+      for (const [path, bytes] of Object.entries(files)) expect(restore(f.repo, after.worktreeCopy!.ref, path).equals(bytes)).toBe(true)
+      expect(await adminRefs(f.repo)).toHaveLength(1)
+      expect(f.effects()).toBe(1)
+    } finally {
+      guard.restore()
+    }
+  })
+
+  it('Storage keeps a dispatch\'s left worktree that has uncommitted changes, names them, and runs no Git removal; once clean it removes it', async () => {
+    const files = outputs()
+    const f = await completedDispatch(files)
+    const limit = KEEP_COPY_LIMITS.bytes
+    KEEP_COPY_LIMITS.bytes = 1024
+    try {
+      f.commit()
+      await f.service.drainCleanup()
+    } finally {
+      KEEP_COPY_LIMITS.bytes = limit
+    }
+    const record = f.service.query(f.execution, f.context)!
+    expect(record.worktreeKept).toMatchObject({ ignoredFiles: 2 })
+    const worktree = record.worktree!.path
+    await writeFile(join(worktree, 'draft.txt'), 'draft\n')
+    const guard = installGitRemoveGuard()
+    try {
+      const cleanup = storage(f)
+      const { token } = await cleanup.planWithToken()
+      const refused = await cleanup.run('manual', { plan: token })
+      expect(refused.items.filter((item) => item.rule === 'dispatch-worktree')).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'It has uncommitted changes (draft.txt), so it stays as it is. It can be removed once they are committed or discarded.' })])
+      expect(guard.removes()).toEqual([])
+      expect(readFileSync(join(worktree, 'draft.txt'), 'utf8')).toBe('draft\n')
+      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(join(worktree, path)).equals(bytes)).toBe(true)
+      expect(listKeptWorktrees(f.profile)).toHaveLength(1)
+
+      await rm(join(worktree, 'draft.txt'))
+      const again = await cleanup.planWithToken()
+      const confirmed = await cleanup.run('manual', { plan: again.token })
+      expect(confirmed.items.filter((item) => item.rule === 'dispatch-worktree')).toEqual([expect.objectContaining({ outcome: 'removed', label: record.id })])
+      expect(existsSync(worktree)).toBe(false)
+      expect(guard.removes().map((call) => call.path)).toEqual([worktree])
+      guard.assertNoRemoveOfExisting()
+      await cleanup.stop()
+    } finally {
+      guard.restore()
+    }
   })
 
   it('with no ignored files, removes the worktree after keeping only Git\'s own data of it', async () => {

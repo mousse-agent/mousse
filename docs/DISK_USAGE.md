@@ -12,8 +12,9 @@ source, dependencies, user projects, conversations, recoverable agent branches, 
 runtime data.
 
 `tmp/` is user/developer-owned and has no automatic retention policy. Remove its contents
-manually only after verifying they are no longer needed. Runtime worktree cleanup remains
-reference-aware and refuses dirty worktrees; see `WorkspaceGcService`.
+manually only after verifying they are no longer needed. Runtime worktree cleanup keeps a
+worktree with uncommitted changes as it is, and removes a clean one only after keeping a copy of
+what Git cannot write back; see `src/mms/worktree/verifiedCleanup.ts`.
 
 Run `npm run disk:report` for a read-only category report. Symbolic links are not followed,
 so a shared worktree dependency tree is counted once instead of once per agent.

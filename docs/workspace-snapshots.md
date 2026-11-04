@@ -187,7 +187,6 @@ Storage cleanup, trashed threads and permanent deletion retire worktrees through
 - Cleanup no longer reads `workspace.json` `headSha` as HEAD. A worktree counts as merged when its commits are in the default branch, or when the thread's last publish put exactly the files of HEAD into the primary (`refs/mousse/published/<threadId>`'s tree).
 - Permanent deletion asks for confirmation before a retired snapshot is dropped (`discardRequired`), as it does for unpublished commits. It reads the branch from the owner's record, not from the worktree's HEAD.
 - The inventory does not compare the worktree's branch with the owner's, claims the `snapshot` pin, `refs/mousse/published/<threadId>` and the subagent result pins, and does not count a workflow agent whose result was pinned and reported as waiting for integration.
-- `WorkspaceGcService` never offers a ref for deletion when it points at a snapshot, whatever namespace holds it, and protects `refs/mousse/lifecycle/` and `refs/mousse/published/`.
 
 ## Conversation forks
 
