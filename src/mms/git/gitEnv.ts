@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, statSync } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -82,7 +83,18 @@ export function withGitConfigEnv(env: NodeJS.ProcessEnv, entries: ReadonlyArray<
  * {@link MOUSSE_GIT_CONFIG} is added.
  */
 export function mousseGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return withGitConfigEnv(stripInheritedGitEnv(env))
+  const extra = scopedConfig.getStore()
+  return withGitConfigEnv(stripInheritedGitEnv(env), extra?.length ? [...MOUSSE_GIT_CONFIG, ...extra] : MOUSSE_GIT_CONFIG)
+}
+
+const scopedConfig = new AsyncLocalStorage<ReadonlyArray<readonly [string, string]>>()
+/**
+ * Runs `work` with `entries` added to the settings of every Git process Mousse starts within it, after its own. Only
+ * settings that switch something off belong here, such as emptied filter drivers for a checkout no driver may run in
+ * (`verifiedCleanup.ts`).
+ */
+export function withScopedGitConfig<T>(entries: ReadonlyArray<readonly [string, string]>, work: () => T): T {
+  return scopedConfig.run([...(scopedConfig.getStore() ?? []), ...entries], work)
 }
 
 /**

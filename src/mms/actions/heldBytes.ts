@@ -82,7 +82,7 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
  * exactly once per record and nowhere else, and the record's header names its blob and path. Anything else leaves the
  * path out, so its file counts as not held and is kept: never the other way round.
  */
-export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>): Promise<Map<string, { bytes: number; digest: string }>> {
+export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
   const forms = new Map<string, { bytes: number; digest: string }>()
   // Git reads one `<blob> <path>` per line and drops whitespace before the path: those few are kept without asking.
   const asked = entries.filter((entry) => !/[\n\r]/.test(entry.path) && !/^[ \t]/.test(entry.path))
@@ -131,7 +131,7 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
     add(pending.subarray(0, pending.length - keep))
     pending = Buffer.from(pending.subarray(pending.length - keep))
   }
-  await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, '--filters'], input, (chunk) => {
+  await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, ...(options.raw ? [] : ['--filters'])], input, (chunk) => {
     pending = Buffer.concat([pending, chunk])
     scan(false)
   })

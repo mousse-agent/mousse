@@ -10,6 +10,7 @@ import { resolveRepositoryIdentityAsync } from '../src/mms/git/RepositoryIdentit
 import { StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 import { cleanupRecordFor, cleanupRecordsFolder, tryLockCleanup, type CleanupRecord } from '../src/mms/worktree/verifiedCleanup'
+import { utimesSync, openSync, writeSync, closeSync } from 'node:fs'
 import { ownedHome } from './support/fixtureGit'
 
 const roots: string[] = []
@@ -45,10 +46,11 @@ function setup() {
 }
 
 /** Starts a cleanup and ends it at its first removal, as a process ending there would: the folder is renamed and recorded. */
-async function crashed(f: ReturnType<typeof setup>, agent: string) {
-  const info = await f.manager.createWorktree(agent, f.cwd)
+async function crashed(f: ReturnType<typeof setup>, agent: string, options: { deleteIgnored?: boolean; prepare?: (worktree: string) => void } = {}) {
+  const info = await f.manager.createWorktree(agent, f.cwd, undefined, undefined, { safeCheckout: true })
   mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'out.bin'), 'agent output\n')
-  const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner }, beforeRemove: () => { throw new Error('The process ended') } })
+  options.prepare?.(info.path)
+  const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner, ...(options.deleteIgnored ? { deleteIgnored: true } : {}) }, beforeRemove: () => { throw new Error('The process ended') } })
   expect(result).toMatchObject({ success: false, error: 'The process ended' })
   const deleting = join(dirname(info.path), deletingIn(dirname(info.path))[0]!)
   const record = (await cleanupRecordFor(f.home, deleting))!
@@ -74,7 +76,7 @@ describe('the record of a cleanup under way', () => {
 
     const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner } })
 
-    expect(result).toMatchObject({ success: false, kept: { code: 'cleanup_stopped', reason: expect.stringMatching(/secret\.bin, which no kept copy or commit holds/) } })
+    expect(result).toMatchObject({ success: false, kept: { code: 'cleanup_stopped', reason: expect.stringMatching(/secret\.bin, which no kept copy, commit or confirmed delete holds/) } })
     expect(readFileSync(join(deleting, 'secret.bin')).equals(bytes)).toBe(true)
     expect(readFileSync(join(deleting, 'base.txt'), 'utf8')).toBe('base\n')
   })
@@ -210,5 +212,103 @@ describe('what Storage says of a cleanup that stopped', () => {
     const reason = await (storage as unknown as { dispatchWorktreeReason(kept: { path: string }): Promise<string> }).dispatchWorktreeReason({ path: left })
     expect(reason).not.toMatch(/every file it held is kept/)
     expect(reason).toMatch(/1 file written into it since, which is only in the folder \(late\.bin\)/)
+  })
+})
+
+/** What `lstat` says of a file, as a proof records it. */
+const signatureOf = (path: string): string => { const stat = lstatSync(path, { bigint: true }); return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':') }
+
+describe('a resume trusts what is on disk, not the record alone', () => {
+  it('a record that pairs new bytes on disk with the blob of the old ones refuses, names the file, and the new bytes stay', async () => {
+    const f = setup()
+    const { info, deleting, recordPath } = await crashed(f, 'proof-old-blob')
+    const edited = Buffer.from('new bytes no copy holds 51c2\n')
+    writeFileSync(join(deleting, 'ignored', 'out.bin'), edited)
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as CleanupRecord
+    const entry = record.proof.find((item) => item.path === 'ignored/out.bin')!
+    // The digest and signature of the new bytes, with the id of the old ones, which the copy holds.
+    Object.assign(entry, { digest: digestOf(edited), bytes: edited.length, signature: signatureOf(join(deleting, 'ignored', 'out.bin')), coarse: false })
+    writeFileSync(recordPath, JSON.stringify(record))
+    const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner } })
+    expect(result).toMatchObject({ success: false, kept: { code: 'cleanup_stopped', reason: expect.stringMatching(/ignored\/out\.bin, which no kept copy, commit or confirmed delete holds/) } })
+    expect(readFileSync(join(deleting, 'ignored', 'out.bin')).equals(edited)).toBe(true)
+    expect(() => git(f.cwd, 'cat-file', '-e', blobOf(edited))).toThrow()
+  })
+
+  it('a record that adds a file Git does not ignore as a confirmed delete with no digest refuses, names it, and the file stays', async () => {
+    const f = setup()
+    const { info, deleting, recordPath } = await crashed(f, 'proof-not-ignored', { deleteIgnored: true })
+    const bytes = Buffer.from('not ignored, never confirmed 7a1d\n')
+    writeFileSync(join(deleting, 'notes.md'), bytes)
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as CleanupRecord
+    expect(record.deleteIgnored).toBe(true)
+    record.proof.push({ path: 'notes.md', kind: 'file', digest: '', bytes: bytes.length, mode: lstatSync(join(deleting, 'notes.md')).mode, signature: signatureOf(join(deleting, 'notes.md')), coarse: false, confirmed: true })
+    writeFileSync(recordPath, JSON.stringify(record))
+    const result = await f.manager.cleanupValidatedAgentWorktree({ path: deleting, branch: info.branch, repositoryRoot: f.cwd }, { safeCheckout: true })
+    expect(result).toMatchObject({ success: false, kept: { code: 'cleanup_stopped', reason: expect.stringMatching(/notes\.md, which no kept copy, commit or confirmed delete holds/) } })
+    expect(readFileSync(join(deleting, 'notes.md')).equals(bytes)).toBe(true)
+  })
+
+  it('a save after a crash into a file the proof lists is kept as a late copy, and the cleanup finishes', async () => {
+    const f = setup()
+    const { info, deleting } = await crashed(f, 'proof-saved-after')
+    const saved = Buffer.from('saved into a listed file after the crash e09b\n')
+    writeFileSync(join(deleting, 'ignored', 'out.bin'), saved)
+    const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner } })
+    expect(result.success).toBe(true)
+    expect(existsSync(deleting)).toBe(false)
+    expect(restored(f.cwd, result.copy!.ref, 'ignored/out.bin').toString()).toBe('agent output\n')
+    expect(result.late!.some((copy) => restored(f.cwd, copy.ref, 'ignored/out.bin').equals(saved))).toBe(true)
+  })
+
+  it('a confirmed delete of ignored files, a link among them, resumes and finishes', async () => {
+    const f = setup()
+    const { info, deleting } = await crashed(f, 'proof-confirmed-link', { deleteIgnored: true, prepare: (worktree) => symlinkSync('out.bin', join(worktree, 'ignored', 'alias')) })
+    expect(lstatSync(join(deleting, 'ignored', 'alias')).isSymbolicLink()).toBe(true)
+    const result = await f.manager.cleanupValidatedAgentWorktree({ path: deleting, branch: info.branch, repositoryRoot: f.cwd }, { safeCheckout: true })
+    expect(result).toMatchObject({ success: true })
+    expect(existsSync(deleting)).toBe(false)
+    expect(registered(f.cwd, info.path)).toBe(false)
+  })
+
+  it('a dispatch\'s recovery runs no filter driver, even after a .gitattributes written into what was left names one', async () => {
+    const f = setup()
+    const marker = join(f.root, 'driver-ran'), driver = join(f.root, 'driver.sh'), config = join(f.root, 'gitconfig')
+    writeFileSync(driver, `#!/bin/sh\nprintf ran >> '${marker}'\ncat\n`, { mode: 0o755 })
+    writeFileSync(config, `[filter "probe"]\n\tclean = ${driver}\n\tsmudge = ${driver}\n\trequired = true\n`)
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config)
+    // Under core.autocrlf=true a dispatch's checkout writes CRLF: the file is held by Git's form, which a resume reads.
+    writeFileSync(join(f.cwd, 'notes.txt'), 'line one\nline two\n'); git(f.cwd, 'add', 'notes.txt'); git(f.cwd, 'commit', '-qm', 'notes')
+    git(f.cwd, 'config', 'core.autocrlf', 'true')
+    const { info, deleting, record } = await crashed(f, 'proof-recovery-driver')
+    expect(readFileSync(join(deleting, 'notes.txt'), 'utf8')).toBe('line one\r\nline two\r\n')
+    expect(record.heldByForm).toContain('notes.txt')
+    const attributes = Buffer.from('* filter=probe\n')
+    writeFileSync(join(deleting, '.gitattributes'), attributes)
+    const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner } })
+    expect(existsSync(marker)).toBe(false)
+    expect(result.success).toBe(true)
+    expect(existsSync(deleting)).toBe(false)
+    expect(result.late!.some((copy) => restored(f.cwd, copy.ref, '.gitattributes').equals(attributes))).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('a same-size edit with its times put back, right before the rename, is kept in a copy', async () => {
+    const f = setup()
+    const info = await f.manager.createWorktree('proof-times-back', f.cwd)
+    mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'one.bin'), 'one 1f\n')
+    for (const path of ['base.txt', 'ignored/one.bin']) utimesSync(join(info.path, path), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+    const edits = { 'base.txt': Buffer.from('BASE\n'), 'ignored/one.bin': Buffer.from('one 9z\n') }
+    const result = await f.manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner: f.owner, record: (step) => {
+      if (step.phase !== 'deleting') return
+      for (const [path, bytes] of Object.entries(edits)) {
+        const target = join(info.path, path), before = lstatSync(target, { bigint: true })
+        const fd = openSync(target, 'r+'); writeSync(fd, bytes, 0, bytes.length, 0); closeSync(fd)
+        utimesSync(target, Number(before.atimeNs) / 1e9, Number(before.mtimeNs) / 1e9)
+      }
+    } } })
+    expect(result.success).toBe(true)
+    const copies = [result.copy?.ref, ...(result.late ?? []).map((copy) => copy.ref)].filter((ref): ref is string => Boolean(ref))
+    for (const [path, bytes] of Object.entries(edits)) expect(copies.some((ref) => { try { return restored(f.cwd, ref, path).equals(bytes) } catch { return false } }), path).toBe(true)
   })
 })

@@ -29,7 +29,7 @@ const exists = (path: string): Promise<boolean> => access(path).then(() => true,
  * relative and use `/`. A walk asked for them also records the id Git gives the bytes (`blob`), and what `lstat` said of
  * a file or link while its bytes were read (`signature`, `coarse`: see {@link WalkOptions.signatures}).
  */
-export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number; blob?: string; signature?: string; coarse?: boolean }
+export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number; blob?: string; signature?: string; coarse?: boolean; /** A caller's mark: an entry the person confirmed deleting, which no copy holds. */ confirmed?: true }
 
 /** Whether two paths name the same place; on Windows, case aside. */
 export function samePath(a: string, b: string): boolean { return (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)) }
@@ -291,9 +291,14 @@ export interface WalkOptions {
   signatures?: boolean
   /**
    * Which files to read (by path relative to the root); the others get no digest (`''`) and only their `signature`, for
-   * a caller whose copy reads them anyway and supplies their digest. A file whose times are too coarse is read anyway.
+   * a caller whose copy reads them anyway and supplies their digest.
    */
   read?: (path: string) => boolean
+  /**
+   * Runs once every entry is listed, from `lstat`, and before any file is read; what it throws ends the walk with nothing
+   * read. For a caller that checks sizes against a limit first.
+   */
+  beforeReading?: (entries: readonly ContentEntry[]) => void
 }
 
 /**
@@ -350,15 +355,17 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
   const rootStat = await lstat(root)
   const entries: ContentEntry[] = []
   let bytes = 0
-  // Files are read a few at a time while the walk goes on; each fills in its own entry, so the order stays the walk's.
+  // Files are read once every entry is listed (`beforeReading`), a few at a time; each fills in its own entry, so the
+  // order stays the walk's.
+  const pending: Array<[ContentEntry, string]> = []
   const reading = new Set<Promise<void>>()
   let failed: unknown
   const read = async (entry: ContentEntry, path: string): Promise<void> => {
     if (!options.signatures) { Object.assign(entry, await fileHashesAsync(path, entry.bytes, options.objectFormat)); return }
     const before = await lstat(path, { bigint: true })
-    if (options.read && !options.read(entry.path) && !coarseTimes(before)) {
+    if (options.read && !options.read(entry.path)) {
       if (Number(before.size) !== entry.bytes) throw new Error('Owned content changed while it was read')
-      Object.assign(entry, { signature: statSignature(before), coarse: false })
+      Object.assign(entry, { signature: statSignature(before), coarse: coarseTimes(before) })
       return
     }
     const hashes = await fileHashesAsync(path, Number(before.size), options.objectFormat)
@@ -405,9 +412,11 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
     if (stat.size > limits.fileBytes || bytes > limits.bytes) throw new Error('Owned content exceeds bounded byte limits')
     const entry: ContentEntry = { path: rel, kind: 'file', digest: '', bytes: stat.size, mode: stat.mode }
     entries.push(entry)
-    if (options.digests !== false) await schedule(entry, path)
+    if (options.digests !== false) pending.push([entry, path])
   }
-  try { await walk(root, rootStat, 0) }
+  await walk(root, rootStat, 0)
+  options.beforeReading?.(entries)
+  try { for (const [entry, path] of pending) await schedule(entry, path) }
   finally { await Promise.all(reading) }
   if (failed) throw failed
   return entries

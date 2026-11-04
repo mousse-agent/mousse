@@ -8,6 +8,7 @@ import { gitsFormsAsync } from '../actions/heldBytes'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs, KEEP_COPY_LIMITS, KeepCopyRefusedError, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
 import { threadPreservedIndex } from '../actions/preservedFiles'
 import { convertedPathsAsync } from '../actions/snapshots'
+import { withScopedGitConfig } from '../git/gitEnv'
 import { withGitAccess } from '../git/gitPolicy'
 import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { lifecycleReadAsync } from '../lifecycle/lifecycleGit'
@@ -85,8 +86,8 @@ export interface CleanupRecord {
   /** Ignored files it held, for what the person reads. */
   ignoredFiles: number
   /**
-   * The person confirmed deleting its ignored files: they are in no copy, and the proof records them by what `lstat`
-   * said of them (an empty digest). Any write to one changes that, and it is kept like any other late write.
+   * The person confirmed deleting its ignored files: they are in no copy. The proof records each with its digest and the
+   * mark `confirmed`; a resume lets one go only while Git still finds its path ignored and its bytes are still those.
    */
   deleteIgnored: boolean
   startedAt: string
@@ -302,21 +303,22 @@ async function readFilesAsync(input: CleanupInput, kept: (code: Kept['code'], re
   const { worktreePath: top } = input
   const deleted = input.keep.deleteIgnored ? new Set(input.ignored) : undefined
   const tracked = await trackedFiles(input.git)
-  // Only tracked files are read here, for the id Git gives their bytes. Every other file is read once, by its copy, which
-  // supplies its digest; one the person confirmed deleting is not read at all. Both are proven meanwhile by `lstat`.
+  // Read here: tracked files, for the id Git gives their bytes, and those the person confirmed deleting, for the digest a
+  // resume holds them to. Every other file is read once, by its copy, which supplies its digest; meanwhile `lstat` proves
+  // it. Every entry is listed first, and what needs a copy is checked against its limit from `lstat`, before any read.
   let proof: ContentEntry[]
-  try { proof = await walkOwnedContentAsync(top, true, { ...CLEANUP_WALK, objectFormat, read: (path) => tracked.has(path) }) }
-  catch (error) {
+  try {
+    proof = await walkOwnedContentAsync(top, true, { ...CLEANUP_WALK, objectFormat, read: (path) => tracked.has(path) || deleted?.has(path) === true, beforeReading: (entries) => {
+      const untracked = entries.filter((entry) => entry.kind !== 'directory' && !tracked.has(entry.path) && !deleted?.has(entry.path))
+      const total = untracked.reduce((sum, entry) => sum + entry.bytes, 0)
+      if (total > KEEP_COPY_LIMITS.bytes) throw new KeepCopyTooLargeError('Worktree cleanup', total, [...untracked].sort((a, b) => b.bytes - a.bytes).slice(0, 5).map((entry) => ({ path: entry.path, bytes: entry.bytes })))
+    } })
+  } catch (error) {
+    if (error instanceof KeepCopyTooLargeError) return kept('keep_copy_too_large', error.message.replace(/ Nothing was changed\..*$/s, ''))
     if (/changed while it was read/.test((error as Error).message)) return 'changing'
     return kept('keep_copy_refused', `cleanup could not read every file in it (${firstLine(error)}).`)
   }
-  // What needs a copy, by `lstat`, before any of it is read: everything Git does not track.
-  const untracked = proof.filter((entry) => entry.kind !== 'directory' && !tracked.has(entry.path) && !deleted?.has(entry.path))
-  const total = untracked.reduce((sum, entry) => sum + entry.bytes, 0)
-  if (total > KEEP_COPY_LIMITS.bytes) {
-    const error = new KeepCopyTooLargeError('Worktree cleanup', total, [...untracked].sort((a, b) => b.bytes - a.bytes).slice(0, 5).map((entry) => ({ path: entry.path, bytes: entry.bytes })))
-    return kept('keep_copy_too_large', error.message.replace(/ Nothing was changed\..*$/s, ''))
-  }
+  for (const entry of proof) if (entry.kind !== 'directory' && deleted?.has(entry.path)) entry.confirmed = true
   const { held, heldByForm, filtered } = await heldByBlobsAsync(top, proof, tracked, input.filters)
   // Copying one would have Git read the index again, which can run the driver: the worktree stays, and the file is named.
   const unheldFiltered = [...filtered].filter((path) => !held.has(path))
@@ -365,6 +367,25 @@ async function captureFilesAsync(input: CleanupInput, kept: (code: Kept['code'],
   return kept('keep_copy_refused', `${named(changing)} kept changing while cleanup copied it.`)
 }
 
+/**
+ * Every filter driver Git's config at `folder` names (any scope), emptied and not required: the settings under which no
+ * driver runs. A dispatch's cleanup, first pass and recovery alike, runs every Git command with them, as its checkout did.
+ */
+async function driversOffAsync(folder: string): Promise<Array<[string, string]>> {
+  const listing = await lifecycleReadAsync(folder, ['config', '--null', '--list'], undefined, LISTING_MAX_BUFFER).catch(() => '')
+  const names = new Set<string>()
+  for (const item of listing.split('\0')) {
+    const match = /^filter\.(.+)\.(?:smudge|clean|process|required)$/i.exec(item.split('\n')[0]!)
+    if (match) names.add(match[1]!)
+  }
+  return [...names].flatMap((name): Array<[string, string]> => [[`filter.${name}.smudge`, ''], [`filter.${name}.clean`, ''], [`filter.${name}.process`, ''], [`filter.${name}.required`, 'false']])
+}
+/** Runs `work` so that no filter driver runs in any Git command it starts, unless `filters` allows them (an agent's checkout). */
+async function withDrivers<T>(filters: boolean, folder: string, work: () => Promise<T>): Promise<T> {
+  if (filters) return work()
+  return withScopedGitConfig(await driversOffAsync(folder), work)
+}
+
 /** The locks of the owner of the copies and of the repository, for what runs Git. */
 function lockedFor(record: Pick<CleanupRecord, 'owner' | 'repositoryRoot'>): <T>(work: () => Promise<T>) => Promise<T> {
   return (work) => withGitMutationLocks(record.owner, record.repositoryRoot, 'worktree-cleanup', work)
@@ -380,7 +401,7 @@ async function canonical(path: string): Promise<string> {
  * repository's locks are held for the capture and the rename, and taken again only for what runs Git afterwards.
  */
 export async function verifiedCleanupAsync(input: CleanupInput): Promise<Removed | { kept: Kept }> {
-  return withGitAccess('worktree.cleanup', 'owned', async () => {
+  return withGitAccess('worktree.cleanup', 'owned', () => withDrivers(input.filters, input.worktreePath, async () => {
     const locked = lockedFor({ owner: input.keep.owner, repositoryRoot: input.repositoryRoot })
     // The files are read before the locks are taken: reading needs none, and other Git work in the repository goes on.
     const ignoredFiles = input.keep.deleteIgnored ? 0 : input.ignored.length
@@ -399,7 +420,7 @@ export async function verifiedCleanupAsync(input: CleanupInput): Promise<Removed
       await rm(recordPathOf(input.home, started.record.id), { force: true })
       return { kept: { ignoredFiles: started.record.ignoredFiles, code: 'cleanup_stopped', reason: `Kept: it went back to ${input.worktreePath} while cleanup was deleting it.` } }
     } finally { started.release() }
-  })
+  }))
 }
 
 async function captureAndRenameAsync(input: CleanupInput, kept: (code: Kept['code'], reason: string) => { kept: Kept }, objectFormat: 'sha1' | 'sha256', first: ReadFiles | 'changing'): Promise<{ record: CleanupRecord; release: () => void } | { kept: Kept }> {
@@ -473,7 +494,9 @@ export async function resumeCleanupAsync(input: { home: string; id: string; owne
     const record = await loadCleanupRecord(input.home, input.id)
     if (!record) return 'gone'
     if (input.owner !== undefined && !samePath(input.owner, record.owner)) return { kept: { ignoredFiles: record.ignoredFiles, code: 'cleanup_stopped', reason: `Kept: its cleanup was recorded for another owner of its copies; nothing in ${record.deletingPath} was touched.`, path: record.deletingPath } }
-    const finished = await withGitAccess('worktree.cleanup', 'owned', () => finishCleanupAsync(input.home, record, input.beforeRemove, true))
+    // Recovery runs Git as the first pass did: for a dispatch's checkout, with every filter driver off.
+    const at = (await lstat(join(record.deletingPath, '.git')).catch(() => undefined))?.isFile() && await sameFolderAsync(record) ? record.deletingPath : record.repositoryRoot
+    const finished = await withGitAccess('worktree.cleanup', 'owned', () => withDrivers(record.filters, at, () => finishCleanupAsync(input.home, record, input.beforeRemove, true)))
     if (finished === 'restart') await rm(recordPathOf(input.home, record.id), { force: true })
     return finished
   } finally { release() }
@@ -510,42 +533,69 @@ async function registeredAsAsync(record: CleanupRecord): Promise<string | undefi
 }
 
 /**
- * Every file and link the proof lists, shown to be held: the id Git gives its bytes is the blob at its path in a kept
- * copy of this cleanup (present under the ref it recorded, and the owner's) or in the HEAD it recorded; or, for a file
- * held by Git's form, what Git writes from that HEAD blob has its SHA-256. Returns the paths that are not.
+ * The proof a resume deletes against, made again from what is on disk, never from the record alone. Every file and link
+ * in the folder is read again (between two `lstat`s that agree), and enters the proof only when its bytes are held now:
+ * - the id Git gives them is the blob at its path in one of this cleanup's own kept copies (present under the ref it
+ *   recorded, and the owner's) or in the HEAD it recorded;
+ * - or, for a file the record holds by Git's form, Git writes exactly those bytes from that HEAD blob;
+ * - or the person confirmed deleting it: the record marks it `confirmed` with these very bytes, and Git finds its path
+ *   ignored now.
+ * An entry the record claims but that is not held refuses the resume, named, and the folder stays: its bytes are the
+ * ones the record names, it is marked confirmed, or it has no digest. Anything else (changed or written since the
+ * record) stays out of the proof, so the delete keeps it as a late write before it goes.
  */
-async function unheldAsync(record: CleanupRecord): Promise<string[] | string> {
+async function reproveAsync(record: CleanupRecord): Promise<string | undefined> {
   const index = threadPreservedIndex(record.owner)
   for (const copy of [...(record.copy ? [record.copy] : []), ...record.late, ...record.admin]) {
     const sha = await lifecycleReadAsync(record.commonDir, ['rev-parse', '--verify', '-q', `${copy.ref}^{commit}`]).catch(() => '')
     if (sha !== copy.sha || !index.owns(copy.ref)) return `its copy ${copy.ref} is no longer the owner's`
   }
+  const treeOf = async (commit: string, paths: readonly string[] = []): Promise<Map<string, string>> => {
+    const found = new Map<string, string>()
+    for (const line of (await lifecycleReadAsync(record.commonDir, ['ls-tree', '-r', '-z', '--full-tree', commit, ...(paths.length ? ['--', ...paths] : [])], undefined, LISTING_MAX_BUFFER)).split('\0')) {
+      const tab = line.indexOf('\t')
+      if (tab >= 0) found.set(line.slice(tab + 1), line.slice(0, tab).split(' ')[2]!)
+    }
+    return found
+  }
   const blobs = new Map<string, Set<string>>()
-  const add = async (commit: string): Promise<void> => {
-    for (const line of (await lifecycleReadAsync(record.commonDir, ['ls-tree', '-r', '-z', '--full-tree', commit], undefined, LISTING_MAX_BUFFER)).split('\0')) {
-      const tab = line.indexOf('\t')
-      if (tab < 0) continue
-      const path = line.slice(tab + 1), blob = line.slice(0, tab).split(' ')[2]!
-      blobs.set(path, (blobs.get(path) ?? new Set()).add(blob))
-    }
+  for (const commit of [...(record.copy ? [record.copy.sha] : []), ...record.late.map((copy) => copy.sha), ...(record.head ? [record.head] : [])]) {
+    for (const [path, blob] of await treeOf(commit)) blobs.set(path, (blobs.get(path) ?? new Set()).add(blob))
   }
-  for (const copy of [...(record.copy ? [record.copy] : []), ...record.late]) await add(copy.sha)
-  if (record.head) await add(record.head)
-  // Ignored files the person confirmed deleting are in no copy; the proof holds them by `lstat` alone.
-  const unheld = record.proof.filter((entry) => entry.kind !== 'directory' && !(record.deleteIgnored && entry.kind === 'file' && entry.digest === '' && entry.signature !== undefined) && !(entry.blob && blobs.get(entry.path)?.has(entry.blob)))
+  let current: ContentEntry[]
+  try { current = await walkOwnedContentAsync(record.deletingPath, true, { ...CLEANUP_WALK, objectFormat: record.objectFormat }) }
+  catch (error) { return `what is left of it could not be read again (${firstLine(error)})` }
+  const recorded = new Map(record.proof.map((entry) => [entry.path, entry]))
+  const byBlob = (entry: ContentEntry): boolean => Boolean(entry.blob && blobs.get(entry.path)?.has(entry.blob))
+  const files = current.filter((entry) => entry.kind !== 'directory')
+  // Git's form of the recorded HEAD blob, for the files the record holds that way.
   const byForm = new Set(record.heldByForm)
-  const form = unheld.filter((entry) => byForm.has(entry.path) && entry.kind === 'file')
-  if (form.length && record.head) {
-    const heads = new Map<string, string>()
-    for (const line of (await lifecycleReadAsync(record.commonDir, ['ls-tree', '-r', '-z', '--full-tree', record.head, '--', ...form.map((entry) => entry.path)], undefined, LISTING_MAX_BUFFER)).split('\0')) {
-      const tab = line.indexOf('\t')
-      if (tab >= 0) heads.set(line.slice(tab + 1), line.slice(0, tab).split(' ')[2]!)
-    }
-    const asked = form.filter((entry) => heads.has(entry.path))
-    const forms = asked.length ? await gitsFormsAsync(record.deletingPath, asked.map((entry) => ({ path: entry.path, blob: heads.get(entry.path)! }))).catch(() => new Map<string, { bytes: number; digest: string }>()) : new Map()
-    return unheld.filter((entry) => { const found = forms.get(entry.path); return !(byForm.has(entry.path) && found && found.bytes === entry.bytes && found.digest === entry.digest) }).map((entry) => entry.path)
+  const formed = files.filter((entry) => entry.kind === 'file' && byForm.has(entry.path) && !byBlob(entry))
+  const heads = formed.length && record.head ? await treeOf(record.head, formed.map((entry) => entry.path)) : new Map<string, string>()
+  const asked = formed.filter((entry) => heads.has(entry.path))
+  const forms = asked.length ? await gitsFormsAsync(record.deletingPath, asked.map((entry) => ({ path: entry.path, blob: heads.get(entry.path)! }))).catch(() => new Map<string, { bytes: number; digest: string }>()) : new Map<string, { bytes: number; digest: string }>()
+  // Confirmed ignored files, only at paths Git finds ignored now.
+  const confirmed = record.deleteIgnored ? files.filter((entry) => { const was = recorded.get(entry.path); return was?.confirmed === true && was.kind === entry.kind && was.digest === entry.digest }) : []
+  const ignored = new Set<string>()
+  if (confirmed.length) {
+    const listed = await lifecycleReadAsync(record.deletingPath, ['check-ignore', '-z', '--stdin'], confirmed.map((entry) => entry.path).join('\0') + '\0', LISTING_MAX_BUFFER).catch(() => '')
+    for (const path of listed.split('\0')) if (path) ignored.add(path)
   }
-  return unheld.map((entry) => entry.path)
+  const proof: ContentEntry[] = []
+  const unheld: string[] = []
+  for (const entry of current) {
+    if (entry.kind === 'directory') { proof.push(entry); continue }
+    const form = forms.get(entry.path)
+    if (byBlob(entry) || form && form.bytes === entry.bytes && form.digest === entry.digest) { proof.push(entry); continue }
+    if (ignored.has(entry.path)) { proof.push({ ...entry, confirmed: true }); continue }
+    // The record claims what it cannot back: these very bytes, a confirmed delete Git does not find ignored now, or an
+    // entry with no digest, which no record has. A recorded entry with other bytes was written to since: a late write.
+    const was = recorded.get(entry.path)
+    if (was && (was.digest === entry.digest || was.digest === '' || was.confirmed)) unheld.push(entry.path)
+  }
+  if (unheld.length) return `its record lists ${named(unheld)}, which no kept copy, commit or confirmed delete holds`
+  record.proof = proof
+  return undefined
 }
 
 /** What is in the renamed folder now that no proof entry describes: written there and held only by the folder. */
@@ -588,9 +638,8 @@ async function finishCleanupAsync(home: string, record: CleanupRecord, beforeRem
     if (unregistered) return stop(`Cleanup stopped: ${unregistered}`, true)
     // `.git` back first, when it went: Git's form of a file is read in the folder.
     await restoreGitFile(record)
-    const unheld = await unheldAsync(record)
-    if (typeof unheld === 'string') return stop(`Cleanup stopped: ${unheld}`, true)
-    if (unheld.length) return stop(`Cleanup stopped: its record lists ${named(unheld)}, which no kept copy or commit holds`, true)
+    const refused = await reproveAsync(record)
+    if (refused) return stop(`Cleanup stopped: ${refused}`, true)
   }
   delete record.stopped
   for (let round = 1; round <= CLEANUP_ROUNDS; round++) {
