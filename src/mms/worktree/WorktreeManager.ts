@@ -7,11 +7,9 @@ import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
-import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { withGitAccess } from '../git/gitPolicy'
 import { samePath } from '../lifecycle/verifiedDelete'
 import { agentWorktreeBases, chosenFolderPlace, defaultAgentWorktreeBase, isAgentWorktreePlace, placeAgentWorktreeBase } from './worktreeLayout'
-import { cleanupRecordPath, DELETING_NAME, findCleanupRecord, loadCleanupRecord, resumeCleanupAsync, verifiedCleanupAsync, type CleanupRecord } from './verifiedCleanup'
+import { cleanupRecordFor, DELETING_NAME, findCleanupRecord, resumeCleanupAsync, verifiedCleanupAsync } from './verifiedCleanup'
 
 
 /** `existsSync` without blocking the daemon. */
@@ -55,7 +53,7 @@ export interface WorktreeCleanupResult {
    * The worktree was not removed. Its files could not be kept first, or Git has it locked: nothing in it changed. Or
    * (`cleanup_stopped`) cleanup stopped part way, and what is left of it is at `path`, with every byte it held kept.
    */
-  kept?: { ignoredFiles: number; reason: string; code: 'keep_copy_too_large' | 'keep_copy_refused' | 'nested_repository' | 'no_owner' | 'worktree_locked' | 'cleanup_stopped'; path?: string }
+  kept?: { ignoredFiles: number; reason: string; code: 'keep_copy_too_large' | 'keep_copy_refused' | 'nested_repository' | 'no_owner' | 'worktree_locked' | 'cleanup_stopped' | 'cleanup_running'; path?: string }
   /**
    * The copy of the files Git cannot write back, kept before the worktree was removed: its ignored and other untracked
    * files and links, and tracked files whose raw bytes are not what Git writes from their blob (CRLF under
@@ -345,7 +343,9 @@ export class WorktreeManager {
       const agentId = worktreeInfo.branch.match(/^mousse\/agent\/(.+)$/)?.[1]
       const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
       const renamed = DELETING_NAME.test(basename(worktreeInfo.path))
-      const recorded = renamed ? await loadCleanupRecord(cleanupRecordPath(resolve(worktreeInfo.path))) : undefined
+      const recorded = renamed ? await cleanupRecordFor(this.installationHome, resolve(worktreeInfo.path)) : undefined
+      // What is left of a cleanup whose record is gone was finished by another run, or is no cleanup's: never touched here.
+      if (renamed && !recorded) return { success: false, error: `No cleanup is recorded for ${worktreeInfo.path}; it is left as it is.`, kept: { ignoredFiles: 0, code: 'cleanup_running', reason: `Kept: no cleanup is recorded for ${worktreeInfo.path}.` } }
       const worktreePath = renamed ? recorded?.worktreePath : worktreeInfo.path
       // The worktree's own path first: that reads which worktree folders were chosen, which the renamed path's check uses.
       const valid = worktreePath !== undefined
@@ -354,10 +354,11 @@ export class WorktreeManager {
       if (!valid) {
         return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
       }
-      const pending = recorded ? { path: cleanupRecordPath(resolve(worktreeInfo.path)), record: recorded } : await findCleanupRecord(worktreePath)
+      const pending = recorded ?? await findCleanupRecord(this.installationHome, worktreePath)
       if (pending) {
-        const resumed = await this.resumeCleanup(pending, options.beforeRemove)
-        if (resumed !== 'restart') {
+        const resumed = await resumeCleanupAsync({ home: this.installationHome, id: pending.id, ...(options.keepIgnored ? { owner: options.keepIgnored.owner } : {}), ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) })
+        if (resumed === 'gone' && renamed) return { success: false, error: `Another cleanup finished ${worktreeInfo.path}.`, kept: { ignoredFiles: 0, code: 'cleanup_running', reason: `Kept: another cleanup finished ${worktreeInfo.path}.` } }
+        if (resumed !== 'restart' && resumed !== 'gone') {
           if ('kept' in resumed) return { success: false, error: resumed.kept.reason, kept: resumed.kept }
           if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
           return { success: true, ...resumed }
@@ -378,7 +379,7 @@ export class WorktreeManager {
           // Git refuses a worktree with untracked or changed files, and changes nothing: no copy is needed for that.
           await cleanupGit.raw([...safety, 'worktree', 'remove', worktreePath])
         } else {
-          const outcome = await keepThenDelete({ worktreePath, branch: worktreeInfo.branch, repositoryRoot: repository.root, ignored, keep: options.keepIgnored, git: inWorktreeGit, ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) })
+          const outcome = await keepThenDelete({ home: this.installationHome, filters: !options.safeCheckout, worktreePath, branch: worktreeInfo.branch, repositoryRoot: repository.root, ignored, keep: options.keepIgnored, git: inWorktreeGit, ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) })
           if ('kept' in outcome) return { success: false, error: outcome.kept.reason, kept: outcome.kept }
           kept = outcome
         }
@@ -388,11 +389,6 @@ export class WorktreeManager {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
-  }
-
-  /** Finishes a recorded cleanup under the locks of the owner of its copies and of the repository. */
-  private resumeCleanup(pending: { path: string; record: CleanupRecord }, beforeRemove?: (path: string) => void): ReturnType<typeof resumeCleanupAsync> {
-    return withGitAccess('worktree.cleanup', 'owned', () => withGitMutationLocks(pending.record.owner, pending.record.repositoryRoot, 'worktree-cleanup', () => resumeCleanupAsync(pending, beforeRemove)))
   }
 
   /**
@@ -451,11 +447,13 @@ async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise
 }
 
 /**
- * Keeps what removing the worktree would lose, then deletes it against the proof (`verifiedCleanupAsync`), all under the
- * owner's and the repository's locks, so the copies' expiry never runs in between. A repository of its own inside, or
- * no owner for the copies, leaves the worktree as it is.
+ * Keeps what removing the worktree would lose, then deletes it against the proof (`verifiedCleanupAsync`, which holds the
+ * owner's and the repository's locks while it keeps, so the copies' expiry never runs in between). A repository of its
+ * own inside, or no owner for the copies, leaves the worktree as it is.
  */
 async function keepThenDelete(input: {
+  home: string
+  filters: boolean
   worktreePath: string
   branch: string
   repositoryRoot: string
@@ -473,10 +471,10 @@ async function keepThenDelete(input: {
   if (!keep) {
     return { kept: { ignoredFiles, code: 'no_owner', reason: ignoredFiles ? `${holds}: nothing owns a copy of them.` : `${holds}: nothing owns a copy of Git's own data of it (its settings and HEAD history).` } }
   }
-  return withGitAccess('worktree.cleanup', 'owned', () => withGitMutationLocks(keep.owner, input.worktreePath, 'worktree-cleanup', () => verifiedCleanupAsync({
-    worktreePath: input.worktreePath, branch: input.branch, repositoryRoot: input.repositoryRoot, keep, git: input.git, ignored: ignored.files,
+  return verifiedCleanupAsync({
+    home: input.home, filters: input.filters, worktreePath: input.worktreePath, branch: input.branch, repositoryRoot: input.repositoryRoot, keep, git: input.git, ignored: ignored.files,
     ...(input.beforeRemove ? { beforeRemove: input.beforeRemove } : {})
-  })))
+  })
 }
 
 /**

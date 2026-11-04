@@ -24,8 +24,12 @@ const hash = (value: string | Buffer): string => createHash('sha256').update(val
 /** `existsSync`, without blocking. */
 const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 
-/** One entry of a folder, as a proof records it: a file's or link's SHA-256 (`digest`), its size and its mode. Paths are relative and use `/`. */
-export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number }
+/**
+ * One entry of a folder, as a proof records it: a file's or link's SHA-256 (`digest`), its size and its mode. Paths are
+ * relative and use `/`. A walk asked for them also records the id Git gives the bytes (`blob`), and what `lstat` said of
+ * a file or link while its bytes were read (`signature`, `coarse`: see {@link WalkOptions.signatures}).
+ */
+export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number; blob?: string; signature?: string; coarse?: boolean }
 
 /** Whether two paths name the same place; on Windows, case aside. */
 export function samePath(a: string, b: string): boolean { return (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)) }
@@ -277,6 +281,58 @@ export interface WalkOptions {
    * its bytes: removing one of its names loses none, and a write through any name still changes its `lstat`.
    */
   otherLinks?: boolean
+  /** Also record the id Git gives each file's or link's bytes (`blob`), in this object format. */
+  objectFormat?: 'sha1' | 'sha256'
+  /**
+   * Also record what `lstat` says of each file and link (`signature`): read before and after its bytes, which must agree,
+   * so the digest is of the bytes the signature describes. A delete can then remove an entry whose `lstat` still says
+   * exactly that without reading it again, unless its times are too coarse to show a write (`coarse`).
+   */
+  signatures?: boolean
+  /**
+   * Which files to read (by path relative to the root); the others get no digest (`''`) and only their `signature`, for
+   * a caller whose copy reads them anyway and supplies their digest. A file whose times are too coarse is read anyway.
+   */
+  read?: (path: string) => boolean
+}
+
+/**
+ * Whether an entry is the one the proof records: by its bytes ({@link sameEntry}), or, for a proof entry recorded without
+ * them, by what `lstat` says of it, which any write changes.
+ */
+export function sameProven(entry: ContentEntry, proof: ContentEntry | undefined): boolean {
+  if (sameEntry(entry, proof)) return true
+  return Boolean(proof && proof.digest === '' && proof.kind === 'file' && entry.kind === 'file' && proof.signature !== undefined && !proof.coarse && entry.signature === proof.signature)
+}
+
+/** Files whose bytes one walk reads at the same time. */
+const READ_AHEAD = 64
+
+/**
+ * Reads a file once, in pieces, so a large file is never held in memory whole: its SHA-256 and, when `objectFormat` is
+ * given, the id Git gives the same bytes.
+ */
+async function fileHashesAsync(path: string, size: number, objectFormat?: 'sha1' | 'sha256'): Promise<{ digest: string; blob?: string }> {
+  const digest = createHash('sha256')
+  const blob = objectFormat ? createHash(objectFormat).update(`blob ${size}\0`) : undefined
+  const file = await open(path, 'r')
+  try {
+    const chunk = Buffer.alloc(Math.max(1, Math.min(size, 1024 * 1024)))
+    for (let position = 0; ;) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, position)
+      if (bytesRead === 0) break
+      digest.update(chunk.subarray(0, bytesRead)); blob?.update(chunk.subarray(0, bytesRead))
+      position += bytesRead
+    }
+  } finally {
+    await file.close()
+  }
+  return { digest: digest.digest('hex'), ...(blob ? { blob: blob.digest('hex') } : {}) }
+}
+
+/** The id Git gives `bytes` as a blob. */
+function blobIdOf(bytes: Buffer, objectFormat: 'sha1' | 'sha256'): string {
+  return createHash(objectFormat).update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
 }
 
 /**
@@ -294,11 +350,43 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
   const rootStat = await lstat(root)
   const entries: ContentEntry[] = []
   let bytes = 0
+  // Files are read a few at a time while the walk goes on; each fills in its own entry, so the order stays the walk's.
+  const reading = new Set<Promise<void>>()
+  let failed: unknown
+  const read = async (entry: ContentEntry, path: string): Promise<void> => {
+    if (!options.signatures) { Object.assign(entry, await fileHashesAsync(path, entry.bytes, options.objectFormat)); return }
+    const before = await lstat(path, { bigint: true })
+    if (options.read && !options.read(entry.path) && !coarseTimes(before)) {
+      if (Number(before.size) !== entry.bytes) throw new Error('Owned content changed while it was read')
+      Object.assign(entry, { signature: statSignature(before), coarse: false })
+      return
+    }
+    const hashes = await fileHashesAsync(path, Number(before.size), options.objectFormat)
+    const after = await lstat(path, { bigint: true })
+    if (statSignature(after) !== statSignature(before) || Number(before.size) !== entry.bytes) throw new Error('Owned content changed while it was read')
+    Object.assign(entry, hashes, { signature: statSignature(before), coarse: coarseTimes(before) })
+  }
+  const schedule = async (entry: ContentEntry, path: string): Promise<void> => {
+    while (reading.size >= READ_AHEAD) await Promise.race(reading)
+    if (failed) throw failed
+    const task: Promise<void> = read(entry, path).catch((error: unknown) => { failed ??= error }).finally(() => reading.delete(task))
+    reading.add(task)
+  }
   const walk = async (path: string, stat: Stats, depth: number): Promise<void> => {
     if (depth > 64 || entries.length >= limits.entries) throw new Error('Owned content exceeds bounded inventory limits')
     if (stat.dev !== rootStat.dev) throw new Error('Owned content crosses a filesystem boundary')
     const rel = relative(root, path).split('\\').join('/')
-    if (stat.isSymbolicLink()) { entries.push({ path: rel, kind: 'link', digest: hash(await readlink(path)), bytes: stat.size, mode: stat.mode }); return }
+    if (stat.isSymbolicLink()) {
+      const target = Buffer.from(await readlink(path, { encoding: 'buffer' }))
+      const entry: ContentEntry = { path: rel, kind: 'link', digest: hash(target.toString('utf8')), bytes: stat.size, mode: stat.mode, ...(options.objectFormat ? { blob: blobIdOf(target, options.objectFormat) } : {}) }
+      if (options.signatures) {
+        const now = await lstat(path, { bigint: true })
+        if (Number(now.size) !== stat.size) throw new Error('Owned content changed while it was read')
+        Object.assign(entry, { signature: statSignature(now), coarse: coarseTimes(now) })
+      }
+      entries.push(entry)
+      return
+    }
     if (stat.isDirectory()) {
       entries.push({ path: rel, kind: 'directory', digest: '', bytes: 0, mode: stat.mode })
       options.folders?.set(resolve(path), identityOf(stat))
@@ -313,10 +401,15 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
     }
     if (!stat.isFile() || stat.nlink > 1 && !options.otherLinks) throw new Error('Special or multiply linked content requires explicit retention')
     bytes += stat.size
+    // Counted from `lstat` before anything is read.
     if (stat.size > limits.fileBytes || bytes > limits.bytes) throw new Error('Owned content exceeds bounded byte limits')
-    entries.push({ path: rel, kind: 'file', digest: options.digests === false ? '' : hash(await readFile(path)), bytes: stat.size, mode: stat.mode })
+    const entry: ContentEntry = { path: rel, kind: 'file', digest: '', bytes: stat.size, mode: stat.mode }
+    entries.push(entry)
+    if (options.digests !== false) await schedule(entry, path)
   }
-  await walk(root, rootStat, 0)
+  try { await walk(root, rootStat, 0) }
+  finally { await Promise.all(reading) }
+  if (failed) throw failed
   return entries
 }
 
@@ -351,6 +444,11 @@ function keptAt(root: string, place: DeletePlace): string {
 function deletedFrom(place: DeletePlace): string {
   return place === 'cleanup' ? 'the worktree cleanup removed' : 'the worktree deleted from the trash'
 }
+
+/** Entries removed between two turns of the event loop, so a large delete never holds up the daemon for long. */
+const YIELD_EVERY = 256
+/** Entries of one folder removed after one check of the folders above them. */
+const QUICK_GROUP = 64
 
 /** The caller's hold of the repository was lost while a folder was being deleted: nothing more is removed. */
 class LeaseLost extends Error {}
@@ -469,9 +567,19 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
   }
   const heldNow = (): Promise<() => void> => steps.held().catch(() => lost)
   let removing = root
+  let removed = 0
+  const order = [...current].reverse()
+  /** A file or link proven while `lstat` said exactly what it says now, which can go without being read again. */
+  const quick = (entry: ContentEntry | undefined): boolean => {
+    const proven = entry && entry.kind !== 'directory' ? proof.get(entry.path) : undefined
+    return Boolean(proven && proven.signature !== undefined && !proven.coarse)
+  }
   try {
-    for (const entry of [...current].reverse()) {
+    for (let index = 0; index < order.length; index++) {
+      const entry = order[index]!
       if (!entry.path) continue
+      // The daemon goes on with other work now and then; never between an entry's last check and its removal.
+      if (++removed % YIELD_EVERY === 0) await new Promise((resume) => setImmediate(resume))
       const path = join(root, entry.path)
       removing = path
       if (entry.kind === 'directory') {
@@ -481,8 +589,36 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
         try { rmdirSync(path) } catch (error) { if (!gone(error)) throw error }
         continue
       }
+      if (quick(entry)) {
+        // Its bytes were read while `lstat` said exactly this, and any write since changes it: not read again. The
+        // entries after it in the same folder that are proven the same way go with it: the folders down to theirs are
+        // checked once, and from that check to the last unlink nothing is awaited. Each entry's own `lstat` (its device
+        // and inode among it) and its folder's identity are checked right before its unlink.
+        const folder = dirname(path)
+        let last = index
+        while (last + 1 < order.length && last + 1 - index < QUICK_GROUP && quick(order[last + 1]) && dirname(join(root, order[last + 1]!.path)) === folder) last++
+        input.beforeRemove?.(path)
+        const held = await heldNow()
+        check(held, folder)
+        const folderIdentity = folders.get(resolve(folder))
+        for (let at = index; at <= last; at++) {
+          const item = order[at]!, itemPath = join(root, item.path)
+          removing = itemPath
+          if (at > index) input.beforeRemove?.(itemPath)
+          try {
+            const parent = lstatSync(folder)
+            if (parent.isSymbolicLink() || identityOf(parent) !== folderIdentity) throw new FolderChanged()
+            if (statSignature(lstatSync(itemPath, { bigint: true })) !== proof.get(item.path)!.signature) throw new Error('Frozen content changed before mutation')
+            unlinkSync(itemPath)
+          } catch (error) { if (!gone(error)) throw error }
+        }
+        removed += last - index
+        index = last
+        continue
+      }
+      const proven = proof.get(entry.path)!
       let frozen: FrozenEntryProof
-      try { frozen = await proveFrozenContentEntryAsync(root, proof.get(entry.path)!, { otherLinks: input.walk?.otherLinks }) } catch (error) { if (gone(error)) continue; throw error }
+      try { frozen = await proveFrozenContentEntryAsync(root, proven, { otherLinks: input.walk?.otherLinks }) } catch (error) { if (gone(error)) continue; throw error }
       input.beforeRemove?.(path)
       const held = await heldNow()
       // From here to the unlink nothing is awaited.
@@ -538,7 +674,10 @@ async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: strin
   try { current = (await walkOwnedContentAsync(root, true, input.walk)).map((entry) => beforeMadeWritable(entry, input.madeWritable)) }
   catch (error) { return stop(`${keptAt(root, place)}: ${(error as Error).message}`) }
   const proof = new Map(input.proof.map((entry) => [entry.path, entry]))
-  const late = current.filter((entry) => !sameEntry(entry, proof.get(entry.path)))
+  const late = current.filter((entry) => !sameProven(entry, proof.get(entry.path)))
+  // An entry with the same bytes whose `lstat` changed (saved again as it was, or touched): it is proven anew as it is.
+  const touched = current.filter((entry) => entry.signature !== undefined && sameEntry(entry, proof.get(entry.path)) && entry.signature !== proof.get(entry.path)!.signature)
+  for (const entry of touched) proof.set(entry.path, entry)
   const fold = await caseInsensitiveAt(root) ? (path: string): string => path.toLowerCase() : (path: string): string => path
   const spellings = new Map<string, string[]>()
   for (const path of proof.keys()) spellings.set(fold(path), [...(spellings.get(fold(path)) ?? []), path])
