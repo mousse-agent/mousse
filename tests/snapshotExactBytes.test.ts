@@ -8,10 +8,10 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { build } from 'esbuild'
 import { join, resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { PublishService } from '../src/mms/actions/PublishService'
-import { EXACT_LIMITS, exactTreeOfAsync, moveFilesToSnapshotAsync, recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { EXACT_LIMITS, exactTreeOfAsync, moveFilesToSnapshotAsync, recordExactTrees, snapshotUncoveredAsync, takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -33,6 +33,7 @@ afterEach(() => {
   process.env.PATH = previousPath
   recordExactTrees(true)
   EXACT_LIMITS.fileBytes = 50 * 1024 ** 2
+  vi.restoreAllMocks()
   f.dispose()
 })
 
@@ -70,6 +71,16 @@ function gitLauncher(pattern: string, script: string): void {
   chmodSync(join(bin, 'git'), 0o755)
   process.env.PATH = `${bin}:${previousPath}`
 }
+
+/** A `git` first on PATH whose updates of the exact index fail as a write error does, while every other command works. */
+function exactIndexFails(): void {
+  const bin = join(f.root, 'exact-fails')
+  mkdirSync(bin, { recursive: true })
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase "$GIT_INDEX_FILE:$*" in\n  *snapshot-exact-index*update-index*) printf 'fatal: simulated write error\\n' >&2; exit 128 ;;\nesac\nexec '${real}' "$@"\n`, { mode: 0o755 })
+  process.env.PATH = `${bin}:${previousPath}`
+}
+const EXACT_FAILED = "exact bytes could not be recorded (fatal: simulated write error), so only Git's form of files it converts is kept"
 
 describe('snapshots record exact bytes', { timeout: 60_000 }, () => {
   it('Undo under autocrlf=input brings back the CRLF file the agent overwrote, byte for byte (N5)', async () => {
@@ -158,8 +169,8 @@ describe('snapshots record exact bytes', { timeout: 60_000 }, () => {
     writeFileSync(join(cwd, 'big.txt'), 'a line longer than the limit\r\n')
     const snapshot = await takeSnapshotAsync(cwd, { reason: 'probe' })
     expect(snapshot.coverageGaps).toEqual([{ path: 'big.txt', reason: "over 16 bytes, so only Git's form of it is kept" }])
-    // Never recorded as not covered: a restore still writes it.
-    expect(git(cwd, 'log', '-1', '--format=%B', snapshot.sha)).not.toContain('Mousse-Uncovered')
+    // Recorded under its own key, never as not covered: a restore still writes it.
+    expect(await snapshotUncoveredAsync(cwd, snapshot.sha)).toEqual({ gaps: [], ignored: [], truncated: false, exactGaps: [{ path: 'big.txt', reason: "over 16 bytes, so only Git's form of it is kept" }] })
     const action = await turn('replaced by a line also over it\r\n', 'big.txt')
     expect(action.notCovered).toBe("Not covered: big.txt (over 16 bytes, so only Git's form of it is kept).")
     const undone = await undo()
@@ -506,4 +517,112 @@ describe('snapshots record exact bytes', { timeout: 60_000 }, () => {
       expect(bytes('secret.txt').toString()).toBe(plaintext)
     })
   }
+})
+
+describe('every exact-bytes gap is recorded and reported', { timeout: 60_000 }, () => {
+  it('an exact index that cannot be written names the gap, and Undo gives Git\'s form back (R3-C)', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    const original = Buffer.from('unique raw before IO failure 9944\r\n')
+    writeFileSync(join(cwd, 'value.txt'), original)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    exactIndexFails()
+    const action = await turn('agent\n')
+    process.env.PATH = previousPath
+    expect(action.notCovered).toBe(`Not covered: . (${EXACT_FAILED}).`)
+    expect(await exactTreeOfAsync(cwd, action.startSha)).toBeUndefined()
+    // Recorded on the snapshot commits under `x`, never as left out: a restore still writes every file.
+    for (const sha of [action.startSha, action.endSha]) expect(await snapshotUncoveredAsync(cwd, sha)).toEqual({ gaps: [], ignored: [], truncated: false, exactGaps: [{ path: '.', reason: EXACT_FAILED }] })
+    // Logged once for the worktree, though both snapshots met it.
+    expect(warn.mock.calls.filter(([message]) => String(message).includes('could not record exact bytes'))).toHaveLength(1)
+    const undone = await undo()
+    expect(bytes().equals(Buffer.from('unique raw before IO failure 9944\n'))).toBe(true)
+    expect(undone.notice).toContain(`Not covered: . (${EXACT_FAILED}).`)
+  })
+
+  it('a repository that converts nothing names nothing under the same fault', async () => {
+    exactIndexFails()
+    const action = await turn('agent\r\n')
+    process.env.PATH = previousPath
+    expect(action.notCovered).toBeUndefined()
+    expect(await exactTreeOfAsync(cwd, action.startSha)).toBe(git(cwd, 'rev-parse', `${action.startSha}^{tree}`))
+    await undo()
+    expect(bytes().toString()).toBe('base\n')
+  })
+
+  it('a failure only at the start of the turn is named as the start\'s, and never stops the restore', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    writeFileSync(join(cwd, 'value.txt'), 'before the turn\r\n')
+    writeFileSync(join(cwd, 'other.txt'), 'other before\n')
+    exactIndexFails()
+    const action = await turn(() => { process.env.PATH = previousPath; writeFileSync(join(cwd, 'value.txt'), 'agent\r\n'); writeFileSync(join(cwd, 'other.txt'), 'agent other\n') })
+    expect(await exactTreeOfAsync(cwd, action.startSha)).toBeUndefined()
+    expect(await exactTreeOfAsync(cwd, action.endSha)).toBeDefined()
+    expect(action.notCovered).toBe(`Not covered: . (${EXACT_FAILED}, at the start of the turn).`)
+    await undo()
+    // Every file comes back: the start's Git form where it had no exact bytes, nothing left as the agent wrote it.
+    expect(bytes().equals(Buffer.from('before the turn\n'))).toBe(true)
+    expect(bytes('other.txt').equals(Buffer.from('other before\n'))).toBe(true)
+    await redo()
+    expect(bytes().equals(Buffer.from('agent\r\n'))).toBe(true)
+  })
+
+  it('the next snapshot without the fault records exact bytes again, and Undo gives the CRLF file back byte for byte', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    const original = Buffer.from('kept through a passing fault\r\n')
+    writeFileSync(join(cwd, 'value.txt'), original)
+    exactIndexFails()
+    const failed = await takeSnapshotAsync(cwd, { reason: 'during the fault' })
+    process.env.PATH = previousPath
+    expect(failed.exactTree).toBeUndefined()
+    expect(failed.coverageGaps).toEqual([{ path: '.', reason: EXACT_FAILED }])
+    const action = await turn('agent\n')
+    expect(action.startSha).not.toBe(failed.sha)
+    expect(action.notCovered).toBeUndefined()
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
+  })
+
+  it('a start file over the size limit is named for the turn, and other files still come back exactly', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    EXACT_LIMITS.fileBytes = 16
+    const big = Buffer.from('a line longer than the limit\r\n')
+    const original = Buffer.from('ok\r\n')
+    writeFileSync(join(cwd, 'big.txt'), big); writeFileSync(join(cwd, 'value.txt'), original)
+    // The agent shrinks the big file under the limit, so only the start names it.
+    const action = await turn(() => { writeFileSync(join(cwd, 'big.txt'), 'small\n'); writeFileSync(join(cwd, 'value.txt'), 'agent\n') })
+    expect(action.notCovered).toBe("Not covered: big.txt (over 16 bytes, so only Git's form of it is kept, at the start of the turn).")
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
+    expect(bytes('big.txt').equals(Buffer.from('a line longer than the limit\n'))).toBe(true)
+  })
+
+  it('exact gaps survive a restart and a recovered Undo, stay informational, and a recovered Undo names them', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    EXACT_LIMITS.fileBytes = 16
+    const big = Buffer.from('a line longer than the limit\r\n')
+    const original = Buffer.from('ok\r\n')
+    writeFileSync(join(cwd, 'big.txt'), big); writeFileSync(join(cwd, 'value.txt'), original)
+    const action = await turn('agent\n')
+    const named = { path: 'big.txt', reason: "over 16 bytes, so only Git's form of it is kept" }
+    expect((await snapshotUncoveredAsync(cwd, action.startSha))?.exactGaps).toEqual([named])
+    // The Undo writes the files, then stops before its result is recorded; a new service recovers it.
+    gitLauncher('*"undo turn"*', 'exit 1')
+    await expect(undo()).rejects.toThrow()
+    process.env.PATH = previousPath
+    expect(bytes().equals(original)).toBe(true)
+    await new UndoService(f.thread).recoverPending(cwd, async () => {})
+    const compensation = new ThreadActionService(f.thread).list().at(-1)!
+    expect(compensation.git?.coverageGaps).toContainEqual(named)
+    expect(compensation.notice).toContain("Not covered: big.txt (over 16 bytes, so only Git's form of it is kept)")
+    const recorded = (await snapshotUncoveredAsync(cwd, compensation.endSha))!
+    expect(recorded.exactGaps).toEqual([named])
+    expect(recorded.gaps).toEqual([])
+    // Informational: the big file was never touched, and Redo then Undo still move the other file exactly.
+    expect(bytes('big.txt').equals(big)).toBe(true)
+    await redo()
+    expect(bytes().toString()).toBe('agent\n')
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
+    expect(bytes('big.txt').equals(big)).toBe(true)
+  })
 })

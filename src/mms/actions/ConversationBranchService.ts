@@ -14,7 +14,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
-import { coverageNotice, exactBytesNotice, exactTreeOfAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, exactBytesNotice, exactTreeOfAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /** The thread's first conversation branch: the one every thread starts on. */
@@ -390,7 +390,7 @@ export class ConversationBranchService {
             continue
           }
           // The files are recorded as the switch planned them; anything that appeared since is an edit made since.
-          const snapshot = await snapshotOfTreeAsync(workspacePath, intent.expectedTree, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId }, exact?.to)
+          const snapshot = await snapshotOfTreeAsync(workspacePath, intent.expectedTree, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId }, exact?.to, await plannedExactGapsAsync(workspacePath, intent.ours, intent.expectedTree))
           await this.settle(workspacePath, branches, branch, snapshot, { branchId: branch.id, snapshotSha: snapshot.sha, own: intent.own, at: new Date().toISOString() })
           this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: branch.id, snapshotSha: snapshot.sha, restoreContext: intent.restoreContext, recovered: true } })
           if (intent.restoreContext) await restoreContext(branch)

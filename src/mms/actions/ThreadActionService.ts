@@ -436,8 +436,10 @@ export class ThreadActionService {
       rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     }
     // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
-    // by the turn. The turn's gaps are both sides', the start's named as such where the end covered them.
-    const startGaps = (await snapshotUncoveredAsync(workspacePath, action.startSha))?.gaps ?? []
+    // by the turn, and a file whose exact bytes the start could not hold comes back from it in Git's form only. The
+    // turn's gaps are both sides', the start's named as such where the end covered them.
+    const startRecord = await snapshotUncoveredAsync(workspacePath, action.startSha)
+    const startGaps = [...(startRecord?.gaps ?? []), ...(startRecord?.exactGaps ?? [])]
     if (startGaps.length) {
       const endPaths = new Set((snapshot.coverageGaps ?? []).map((gap) => gap.path))
       const fromStart = startGaps.filter((gap) => !endPaths.has(gap.path)).map((gap) => ({ path: gap.path, reason: `${gap.reason}, at the start of the turn` }))
