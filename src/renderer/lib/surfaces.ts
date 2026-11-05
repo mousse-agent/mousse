@@ -27,6 +27,9 @@ export interface SurfaceTabItem {
   closable: boolean
 }
 
+/** A terminal title the app gave it, rather than a quick action's name. Older builds stored "Terminal N". */
+const DEFAULT_TERMINAL_TITLE = /^Terminal( \d+)?$/
+
 export function surfaceTabItems(input: {
   opened: readonly MainView[]
   terminals: ProjectTerminalTab[]
@@ -36,11 +39,16 @@ export function surfaceTabItems(input: {
   const items: SurfaceTabItem[] = []
   for (const kind of input.opened) {
     if (kind === 'terminal') {
+      // Numbered by position from the second: "Terminal", "Terminal 2", ...
+      let plain = 0
       input.terminals.forEach((tab) => {
+        const named = tab.title && !DEFAULT_TERMINAL_TITLE.test(tab.title)
+        const label = named ? tab.title : plain === 0 ? 'Terminal' : `Terminal ${plain + 1}`
+        if (!named) plain += 1
         items.push({
           key: `terminal:${tab.id}`,
           view: 'terminal',
-          label: tab.title || 'Terminal',
+          label,
           resourceId: tab.id,
           closable: true
         })
