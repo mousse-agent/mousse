@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { WORKTREE_CONFIG_NOTICE, type PullRequestListItem, type ResolvedPullRequestSummary } from '../../shared/pullRequests'
 import { openThreadFromPullRequest, selectThread } from '../lib/threadActions'
 import { Spinner } from './ui/Spinner'
 import { Modal } from './ui/Modal'
 import {
+  enterAction,
   filterPullRequests,
+  rovingIndex,
   startButtonModel,
   startErrorCode,
   startErrorMessage,
@@ -33,7 +35,8 @@ interface StartFromPullRequestDialogProps {
 /**
  * Starts a thread from a pull request of the project's repository: pick one of its open pull requests or paste a
  * URL, a number or a `gh pr checkout` command. The new thread's worktree starts at the pull request's head and its
- * composer holds the pull request's title, description and review comments.
+ * composer holds the pull request's title, description and review comments. The arrows move through the results from
+ * the field or the list; Enter on words picks the highlighted result, and only a second Enter (or Start) starts it.
  */
 export function StartFromPullRequestDialog({ projectId, projectName, onClose }: StartFromPullRequestDialogProps) {
   const [query, setQuery] = useState('')
@@ -42,6 +45,10 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
   const [resolved, setResolved] = useState<ResolvedState>({ status: 'idle' })
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  // The highlighted result, moved by the arrows from the field or within the list.
+  const [active, setActive] = useState(0)
+  const listId = useId()
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([])
 
   useEffect(() => {
     let current = true
@@ -87,6 +94,12 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
   const summary = resolved.status === 'ready' ? resolved.resolved.pullRequest : null
   const existing = resolved.status === 'ready' ? resolved.resolved.threads : []
   const button = startButtonModel(summary, existing, starting)
+  const activeIndex = visible.length === 0 ? -1 : Math.min(active, visible.length - 1)
+  const activeItem = activeIndex >= 0 ? visible[activeIndex] : null
+
+  useEffect(() => {
+    if (activeIndex >= 0) optionRefs.current[activeIndex]?.scrollIntoView?.({ block: 'nearest' })
+  }, [activeIndex])
 
   const start = async () => {
     if (!reference || starting || resolved.status !== 'ready') return
@@ -130,24 +143,36 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
         </>
       }
     >
-      <p className="start-from-pr-lead">
-        A new thread in {projectName} starts at the pull request&apos;s head commit, in its own worktree.
+      <p className="start-from-pr-lead" title="The new thread starts at the pull request's head commit">
+        {projectName} · Starts in its own worktree
       </p>
       <input
         className="start-from-pr-input"
+        role="combobox"
         aria-label="Pull request URL, number or gh pr checkout command, or search the list"
+        aria-controls={listId}
+        aria-expanded={visible.length > 0}
+        aria-autocomplete="list"
+        aria-activedescendant={activeItem ? `${listId}-${activeItem.number}` : undefined}
         placeholder="URL, number or `gh pr checkout` command — or search below"
         value={query}
         autoFocus
         onChange={(event) => {
           setQuery(event.target.value)
           setPicked(null)
+          setActive(0)
           setStartError(null)
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
-            void start()
+            const next = rovingIndex(Math.max(0, activeIndex), event.key, visible.length)
+            if (next !== null) setActive(next)
+          } else if (event.key === 'Enter') {
+            event.preventDefault()
+            const action = enterAction({ query, active: activeItem?.number ?? null, picked })
+            if (action === 'pick' && activeItem) setPicked(activeItem.number)
+            else if (action === 'start') void start()
           }
         }}
       />
@@ -189,7 +214,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
           {startError}
         </p>
       )}
-      <div className="start-from-pr-list" role="listbox" aria-label="Open pull requests">
+      <div id={listId} className="start-from-pr-list" role="listbox" aria-label="Open pull requests">
         {list.status === 'loading' && (
           <p className="start-from-pr-quiet">
             <Spinner size={12} /> Loading open pull requests…
@@ -198,14 +223,27 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
         {list.status === 'error' && <p className="start-from-pr-error">{list.message}</p>}
         {list.status === 'ready' && list.items.length === 0 && <p className="start-from-pr-quiet">No open pull requests.</p>}
         {list.status === 'ready' && list.items.length > 0 && visible.length === 0 && <p className="start-from-pr-quiet">No open pull request matches.</p>}
-        {visible.map((item) => (
+        {visible.map((item, index) => (
           <button
             key={item.number}
+            ref={(element) => { optionRefs.current[index] = element }}
+            id={`${listId}-${item.number}`}
             type="button"
             role="option"
+            // One stop in the tab order: the highlighted result; the arrows move between the rest.
+            tabIndex={index === activeIndex ? 0 : -1}
             aria-selected={picked === item.number}
+            data-active={index === activeIndex || undefined}
             className={`start-from-pr-row${picked === item.number ? ' selected' : ''}`}
+            onFocus={() => setActive(index)}
             onClick={() => setPicked(item.number)}
+            onKeyDown={(event) => {
+              const next = rovingIndex(index, event.key, visible.length)
+              if (next === null) return
+              event.preventDefault()
+              setActive(next)
+              optionRefs.current[next]?.focus()
+            }}
           >
             <span className="start-from-pr-row-title">
               <span className="start-from-pr-row-number">#{item.number}</span> {item.title}

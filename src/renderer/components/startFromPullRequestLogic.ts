@@ -44,3 +44,37 @@ export function startButtonModel(summary: PullRequestSummary | null, threads: Re
   if (starting) return { label: 'Starting…', allowClosed, allowDuplicate }
   return { label: allowDuplicate ? 'Start another thread' : allowClosed ? 'Start anyway' : 'Start thread', allowClosed, allowDuplicate }
 }
+
+/** The query is a pull request reference (a URL, number or `gh pr checkout` command), not words that narrow the list. */
+export function isTypedReference(query: string): boolean {
+  const typed = query.trim()
+  return typed !== '' && parsePullRequestReference(typed) !== null
+}
+
+/**
+ * What Enter does in the field. A typed reference starts at once, as before. Words only narrow the list, so Enter first
+ * picks the highlighted result and starts only once that result is the picked one: filtering and pressing Enter never
+ * launches a thread the person has not seen named.
+ */
+export function enterAction(input: { query: string; active: number | null; picked: number | null }): 'start' | 'pick' | 'none' {
+  if (isTypedReference(input.query)) return 'start'
+  if (input.active !== null && input.active !== input.picked) return 'pick'
+  return input.picked !== null ? 'start' : 'none'
+}
+
+/** The result a key moves to among `count` results: arrows wrap, Home and End go to the ends. Null for any other key. */
+export function rovingIndex(current: number, key: string, count: number): number | null {
+  if (count === 0) return null
+  switch (key) {
+    case 'ArrowDown':
+      return (current + 1) % count
+    case 'ArrowUp':
+      return (current - 1 + count) % count
+    case 'Home':
+      return 0
+    case 'End':
+      return count - 1
+    default:
+      return null
+  }
+}
