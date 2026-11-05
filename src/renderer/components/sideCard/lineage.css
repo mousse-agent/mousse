@@ -181,12 +181,15 @@ button.lineage-row:focus-visible {
   justify-content: center;
 }
 
+/* Turns with the finished group's Collapse: same easing and open/close durations (components/ui/Collapse). */
 .lineage-group-chevron {
-  transition: transform 120ms ease;
+  transition: transform 130ms var(--ui-collapse-ease-close);
 }
 
 .lineage-group[data-open='true'] .lineage-group-chevron {
   transform: rotate(90deg);
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
 }
 
 @media (prefers-reduced-motion: reduce) {

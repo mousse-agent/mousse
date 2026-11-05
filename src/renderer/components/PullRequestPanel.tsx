@@ -50,6 +50,7 @@ import {
   type GitAction,
   type PullRequestFoundRow
 } from './sideCard/gitSectionLogic'
+import { Collapse } from './ui/Collapse'
 import './pullRequestPanel.css'
 
 export interface PanelActions {
@@ -202,21 +203,19 @@ function FileGroupView({ group, initiallyOpen, actions }: { group: PullRequestFi
         {group.outdatedCount > 0 && <span className="pr-panel-badge" data-tone="neutral">{group.outdatedCount} outdated</span>}
         <span className="pr-panel-count">{commentCountLabel(group.commentCount)}</span>
       </button>
-      {open && (
-        <>
-          <ul className="pr-panel-threads" aria-label={`Comments on ${group.path}`}>
-            {threads.items.map((thread) => (
-              <ThreadView key={thread.key} thread={thread} actions={actions} />
-            ))}
-          </ul>
-          {threads.hidden > 0 && (
-            <button type="button" className="pr-panel-more" onClick={() => setShownThreads(shownThreads + PANEL_LIMITS.step)}>
-              Show {Math.min(PANEL_LIMITS.step, threads.hidden)} more {threads.hidden === 1 ? 'thread' : 'threads'}
-              <span className="pr-panel-more-count">{threads.hidden} not shown</span>
-            </button>
-          )}
-        </>
-      )}
+      <Collapse open={open} itemCount={threads.items.length}>
+        <ul className="pr-panel-threads ui-collapse-items" aria-label={`Comments on ${group.path}`}>
+          {threads.items.map((thread) => (
+            <ThreadView key={thread.key} thread={thread} actions={actions} />
+          ))}
+        </ul>
+        {threads.hidden > 0 && (
+          <button type="button" className="pr-panel-more" onClick={() => setShownThreads(shownThreads + PANEL_LIMITS.step)}>
+            Show {Math.min(PANEL_LIMITS.step, threads.hidden)} more {threads.hidden === 1 ? 'thread' : 'threads'}
+            <span className="pr-panel-more-count">{threads.hidden} not shown</span>
+          </button>
+        )}
+      </Collapse>
     </li>
   )
 }

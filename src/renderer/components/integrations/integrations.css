@@ -72,8 +72,8 @@
 .integration-disclosure > summary::-webkit-details-marker { display: none; }
 .integration-disclosure > summary:hover { color: var(--int-fg); }
 .integration-disclosure > summary:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
-.integration-disclosure-chevron { transition: transform 0.15s; }
-.integration-disclosure[open] .integration-disclosure-chevron { transform: rotate(90deg); }
+.integration-disclosure-chevron { transition: transform 130ms var(--ui-collapse-ease-close); }
+.integration-disclosure[open] .integration-disclosure-chevron { transform: rotate(90deg); transition-duration: 160ms; transition-timing-function: var(--ui-collapse-ease); }
 .integration-disclosure-body { padding-top: var(--space-8, 8px); }
 /* One-row choices: icon on the title line, the detail 2px under the title. Selection is a filled background. */
 .integrations-choice, .integration-upload-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-8, 8px); }
