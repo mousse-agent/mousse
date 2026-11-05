@@ -118,6 +118,9 @@ describe('an error in the transcript', () => {
     const onRetry = vi.fn()
     render(createElement(ErrorMessage, { title: 'Request failed', message: 'Rate limited', onRetry }))
     expect(text()).toContain('Request failed')
+    // A text button right after the message, not an icon at the end of the row.
+    expect(button('Retry')!.textContent).toBe('Retry')
+    expect(button('Retry')!.previousSibling?.textContent).toBe('Rate limited')
     act(() => button('Retry')!.click())
     expect(onRetry).toHaveBeenCalledOnce()
   })
