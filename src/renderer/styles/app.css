@@ -586,8 +586,21 @@ html.platform-darwin .titlebar-left {
   text-overflow: ellipsis;
 }
 
+/* A terminal's folder: quieter than its name, and the first to give way. */
+.main-view-tab-detail {
+  min-width: 0;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 2;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 @container main-area (max-width: 520px) {
-  .main-view-tab-label {
+  .main-view-tab-label,
+  .main-view-tab-detail {
     display: none;
   }
 
@@ -4098,12 +4111,44 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
+.git-toolbar-info > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-branch,
+.git-toolbar-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder gives way before the branch when the toolbar is narrow. */
+.git-toolbar-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-shrink: 3;
+  margin-left: 4px;
+  color: var(--text-secondary);
+}
+
+.git-toolbar-folder > svg {
+  flex-shrink: 0;
+}
+
+/* Sections size from these (see sectionStyle in gitPanelLogic.ts). If every section is at its
+   floor and the panel is shorter still, the whole list scrolls rather than hiding one. */
 .git-changes {
+  --git-section-head: 24px;
+  --git-row: 28px;
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 

@@ -21,8 +21,16 @@ import {
   syncControls,
   syncLabel,
   syncState,
+  COMMITS_FLOOR_SHARE,
+  SECTION_FLOOR_ROWS,
+  SECTION_RATIO_MAX,
+  SECTION_RATIO_MIN,
+  resizeSectionPair,
+  sectionStyle,
+  type SectionSizes,
   type SyncActivity
 } from '../src/renderer/components/git/gitPanelLogic'
+import { CommitsSection } from '../src/renderer/components/GitPanel'
 import type { GitFileChange, GitScope, GitStatusSnapshot } from '../src/shared/types'
 
 const project: GitScope = { projectId: 'p1', workspaceThreadId: null }
@@ -326,6 +334,80 @@ describe('changes list markup', () => {
     expect(selected).toContain('background:')
     expect(selected).not.toMatch(/border|box-shadow|outline/)
     expect(css).not.toMatch(/\.git-file-row[^{]*::(before|after)/)
+  })
+})
+
+describe('section sizing', () => {
+  const files = (count: number) => Array.from({ length: count }, (_, index) => change(`f${index}.ts`))
+  const render = (changes: GitFileChange[], flex: SectionSizes = {}) =>
+    renderToStaticMarkup(createElement(GitChangesList, {
+      changes,
+      selected: null,
+      onSelect: () => undefined,
+      scope: project,
+      busy: false,
+      onRowAction: () => undefined,
+      onSectionAction: () => undefined,
+      flex
+    }))
+  const styleOf = (html: string, id: string) => html.match(new RegExp(`data-section="${id}" style="([^"]*)"`))?.[1] ?? ''
+  const commits = (count: number, flex?: number) =>
+    renderToStaticMarkup(createElement(CommitsSection, {
+      commits: Array.from({ length: count }, (_, index) => ({
+        hash: `h${index}`, shortHash: `h${index}`, message: `c${index}`, author: 'a', date: 'd', pushed: true, onRemote: true
+      })),
+      flex
+    }))
+
+  it('with no changed files shows a clean tree and gives Commits the panel', () => {
+    expect(render([])).toContain('Working tree clean')
+    expect(styleOf(commits(0), 'commits')).toContain('flex:1 1 0')
+    // An empty history still keeps its one line in view.
+    expect(sectionStyle('commits', 0, undefined).minHeight).toContain('1 * var(--git-row)')
+  })
+
+  it('sizes one changed file to its row, not to a share of the panel', () => {
+    const style = styleOf(render(files(1)), 'changes')
+    expect(style).toContain('flex:0 1 auto')
+    expect(style).toContain('min-height:calc(var(--git-section-head) + 1 * var(--git-row))')
+  })
+
+  it('lets many changed files scroll in their list while a few rows stay in view', () => {
+    const style = styleOf(render(files(200)), 'changes')
+    expect(style).toContain('flex:0 1 auto')
+    expect(style).toContain(`${SECTION_FLOOR_ROWS} * var(--git-row)`)
+    expect(style).not.toContain('200')
+  })
+
+  it('keeps a long history reachable: Commits takes the rest and keeps a share when files fill the panel', () => {
+    const { flex, minHeight } = sectionStyle('commits', 500, undefined)
+    expect(flex).toBe('1 1 0')
+    expect(minHeight).toBe(`min(${COMMITS_FLOOR_SHARE}, calc(var(--git-section-head) + 500 * var(--git-row)))`)
+    // A short history keeps no more than its own rows.
+    expect(sectionStyle('commits', 2, undefined).minHeight).toContain('2 * var(--git-row)')
+  })
+
+  it('keeps a dragged weight, and sizes a section without one by its content', () => {
+    const html = render([...files(3), change('n.ts', { status: 'untracked' })], { changes: 240, commits: 360 })
+    expect(styleOf(html, 'changes')).toContain('flex:240 1 0')
+    expect(styleOf(html, 'untracked')).toContain('flex:0 1 auto')
+    expect(styleOf(commits(4, 360), 'commits')).toContain('flex:360 1 0')
+  })
+
+  it('moves a divider between two weighted sections within the limits and leaves the others', () => {
+    const sizes: SectionSizes = { staged: 100, changes: 300, commits: 400 }
+    expect(resizeSectionPair(sizes, 'staged', 'changes', 0.5)).toEqual({ staged: 200, changes: 200, commits: 400 })
+    expect(resizeSectionPair(sizes, 'staged', 'changes', 0)).toEqual({ staged: 400 * SECTION_RATIO_MIN, changes: 400 * SECTION_RATIO_MAX, commits: 400 })
+    expect(resizeSectionPair({}, 'staged', 'changes', 0.5)).toEqual({})
+  })
+
+  it('lets the whole list scroll when every section is at its floor', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/styles/app.css'), 'utf8')
+    const start = css.indexOf('.git-changes {')
+    const rule = css.slice(start, css.indexOf('}', start))
+    expect(rule).toContain('overflow-y: auto')
+    expect(rule).toContain('--git-section-head:')
+    expect(rule).toContain('--git-row:')
   })
 })
 
