@@ -17,11 +17,11 @@ describe('the bash card', () => {
     document.body.innerHTML = ''
   })
 
-  const mount = () => {
+  const mount = (extra: { bashLabel?: string } = {}) => {
     const host = document.body.appendChild(document.createElement('div'))
     root = createRoot(host)
     act(() => root!.render(createElement(BashToolTerminalCard, {
-      step: { id: 'b1', type: 'tool-call', toolName: 'Bash', duration: 0, bashCommand: command, bashOutput: output, bashExitCode: 0 },
+      step: { id: 'b1', type: 'tool-call', toolName: 'Bash', duration: 0, bashCommand: command, bashOutput: output, bashExitCode: 0, ...extra },
       state: 'complete',
       onComplete: () => undefined
     })))
@@ -31,6 +31,11 @@ describe('the bash card', () => {
   it('shows the whole command in the collapsed header and leaves the cut to the row width', () => {
     const header = mount().querySelector('button')!
     expect(header.textContent).toContain(command)
+    expect(header.querySelector('.font-mono.truncate')?.getAttribute('title')).toBe(command)
+  })
+
+  it('prefers the command as run over the tool label', () => {
+    const header = mount({ bashLabel: 'npx vitest run tests/checkout.test.ts--sequence.shuffle' }).querySelector('button')!
     expect(header.querySelector('.font-mono.truncate')?.getAttribute('title')).toBe(command)
   })
 

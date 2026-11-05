@@ -51,7 +51,8 @@ export function BashToolTerminalCard({
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
   // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
-  const summary = (step.bashLabel ?? command ?? "").replace(/\s+/g, " ").trim();
+  // The command as run comes first: the tool's label can differ from it (spacing included).
+  const summary = (command ?? step.bashLabel ?? "").replace(/\s+/g, " ").trim();
   // Expanded, the body shows the full `$ command`, so the header does not repeat it.
   const hideSummary = expanded && Boolean(command);
   const hasExitCode = typeof step.bashExitCode === "number";
