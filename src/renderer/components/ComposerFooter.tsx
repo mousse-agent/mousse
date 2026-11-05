@@ -6,12 +6,18 @@ import type { ContextUsageSnapshot } from '../../shared/types'
 import { listingServes } from '../../shared/providerInstances'
 import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { shortModelName } from '../../shared/modelNames'
-import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
+import { carryReasoningLevel, PermissionChip, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
+import { formatBinding } from '../../shared/commands'
+import { useCommandBindings } from '../commands/commandRegistry'
+import { useAppStore } from '../stores/appStore'
+
+/** Alt+Enter in the composer while a run is going sends the text as a steer. */
+export const STEER_BINDING = 'Alt+Enter'
 
 function useMenuScrollFade() {
   const scrollFadeTimerRef = useRef<number | null>(null)
@@ -56,6 +62,8 @@ export interface ComposerFooterProps {
   onContextOpenChange: (open: boolean) => void
   onAttachClick: () => void
   loading?: boolean
+  /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
+  stoppable?: boolean
   disabled?: boolean
   canSend?: boolean
   isRecording?: boolean
@@ -97,6 +105,7 @@ export function ComposerFooter({
   onContextOpenChange,
   onAttachClick,
   loading = false,
+  stoppable = loading,
   disabled = false,
   canSend = false,
   isRecording = false,
@@ -136,9 +145,13 @@ export function ComposerFooter({
   const buttonText = [modelButtonLabel, fasterSpeed, levelText].filter(Boolean).join(' ')
   const buttonLabel = `${modelReadOnly ? 'Assigned model' : 'Model'}: ${buttonText}`
   const modelButtonTitle = providerAttention ? `${buttonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : buttonLabel
-  // An assigned model (a subagent's) cannot change; its permission mode still can.
-  const runOnly = modelReadOnly && Boolean(permissionControl)
-  const pickerDisabled = modelReadOnly && !runOnly
+  // An assigned model (a subagent's) cannot change: the button only names it. Its permission mode still can, on the chip.
+  const pickerDisabled = modelReadOnly
+  const bindings = useCommandBindings()
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const stopBinding = bindings['run.stop']
+  const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
+  const queueTitle = `Queue · ${formatBinding('Enter', platform)} — Steer · ${formatBinding(STEER_BINDING, platform)}`
   const closePicker = () => {
     onModelMenuOpenChange(false)
     modelButtonRef.current?.focus()
@@ -163,17 +176,14 @@ export function ComposerFooter({
       if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
       return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
     },
-    // Under the picker: the highlighted model's speed on the left, the thread's permission mode on the right.
+    // Under the picker: the highlighted model's speed. The permission mode has its own chip beside the model button.
     footer: (target: ModelPickTarget | undefined) => {
       const resolved = target ? resolveTarget(target) : undefined
       const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
-      if (!speeds && !permissionControl) return null
-      return <>
-        <div className="model-picker-footer-start">
-          {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onModelSelect} onClose={closePicker} /> : null}
-        </div>
-        {permissionControl ? <PermissionMenuButton control={permissionControl} onClose={closePicker} /> : null}
-      </>
+      if (!resolved || !speeds) return null
+      return <div className="model-picker-footer-start">
+        <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onModelSelect} onClose={closePicker} />
+      </div>
     }
   }
   const emptyModelMenuStyle = useFloatingPosition({
@@ -217,34 +227,23 @@ export function ComposerFooter({
       onImplementPlan?.()
       return
     }
-    // Prefer send (including queue-while-loading) when the composer has content.
-    if (canSend) {
-      onSend?.()
-      return
-    }
-    if (loading) {
-      onStop?.()
-      return
-    }
-    if (!isRecording) {
-      onStartRecording?.()
-    }
+    if (canSend) onSend?.()
   }
+  // The send slot is Send, Queue, Stop or Stop recording. While a run goes and the box has text, Stop
+  // sits left of it, so Queue and Stop are both one click and the slot never moves.
+  const stopInSlot = stoppable && !canSend
+  const stopButton = (className: string) => (
+    <button type="button" className={className} title={stopTitle} aria-label="Stop run" onClick={onStop} disabled={disabled}>
+      <Square size={14} strokeWidth={2} fill="currentColor" />
+    </button>
+  )
 
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
         <div className="composer-run-controls">
+          {permissionControl ? <PermissionChip control={permissionControl} /> : null}
           <div className="composer-model-picker" ref={modelPickerRef}>
-            {modelMenuOpen && runOnly && permissionControl ? (
-              <ComposerRunMenu
-                selection={selection}
-                permission={permissionControl}
-                anchorRef={modelButtonRef}
-                contentRef={modelMenuContentRef}
-                onClose={closePicker}
-              />
-            ) : null}
             {!modelReadOnly && modelMenuOpen && (
               <>
                 {providers.length === 0 ? (
@@ -293,7 +292,7 @@ export function ComposerFooter({
               type="button"
               className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
               aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
-              aria-haspopup={pickerDisabled ? undefined : runOnly ? 'menu' : 'listbox'}
+              aria-haspopup={pickerDisabled ? undefined : 'listbox'}
               aria-label={buttonLabel}
               title={modelButtonTitle}
               disabled={pickerDisabled}
@@ -345,6 +344,22 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
+        {primaryAction !== 'implement-plan' && !stoppable && !isRecording && onStartRecording ? (
+          <button
+            type="button"
+            className="composer-icon-btn"
+            title="Dictate"
+            aria-label="Dictate"
+            aria-busy={recordingPending || transcribing}
+            onClick={onStartRecording}
+            disabled={disabled || recordingPending || transcribing}
+          >
+            <Mic size={16} strokeWidth={2} />
+          </button>
+        ) : null}
+
+        {primaryAction !== 'implement-plan' && !isRecording && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
+
         {primaryAction === 'implement-plan' ? (
           <button
             type="button"
@@ -364,39 +379,18 @@ export function ComposerFooter({
           >
             <Square size={14} strokeWidth={2} fill="currentColor" />
           </button>
-        ) : canSend ? (
-          <button
-            type="button"
-            className="composer-action-btn composer-action-btn-active"
-            title={loading ? 'Queue message' : 'Send message'}
-            aria-label={loading ? 'Queue message' : 'Send message'}
-            onClick={handleActionClick}
-            disabled={disabled}
-          >
-            <ArrowUp size={16} strokeWidth={2} />
-          </button>
-        ) : loading ? (
-          <button
-            type="button"
-            className="composer-action-btn composer-action-btn-stop"
-            title="Stop"
-            aria-label="Stop generation"
-            onClick={handleActionClick}
-            disabled={disabled}
-          >
-            <Square size={14} strokeWidth={2} fill="currentColor" />
-          </button>
+        ) : stopInSlot ? (
+          stopButton('composer-action-btn composer-action-btn-stop')
         ) : (
           <button
             type="button"
-            className="composer-action-btn"
-            title="Voice input"
-            aria-label="Voice input"
-            aria-busy={recordingPending || transcribing}
+            className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
+            title={loading ? queueTitle : 'Send'}
+            aria-label={loading ? 'Queue message' : 'Send message'}
             onClick={handleActionClick}
-            disabled={disabled || recordingPending || transcribing}
+            disabled={disabled || !canSend}
           >
-            <Mic size={16} strokeWidth={2} />
+            <ArrowUp size={16} strokeWidth={2} />
           </button>
         )}
       </div>

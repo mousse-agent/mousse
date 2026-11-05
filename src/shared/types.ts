@@ -1140,6 +1140,12 @@ export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
 }
 
+/** Whether Stop can end the turn: one that runs, or one that waits on an approval or an answer. */
+export function isTurnStoppable(state: Pick<TurnState, 'phase' | 'turnId'> | undefined): boolean {
+  if (!state) return false
+  return isTurnActivePhase(state.phase) || (state.phase === 'awaiting_input' && Boolean(state.turnId))
+}
+
 /** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
 export function turnPhaseActivity(phase: TurnPhase, blockedOnWait = false): ThreadActivityState {
   if (phase === 'awaiting_input') return 'awaiting_input'
