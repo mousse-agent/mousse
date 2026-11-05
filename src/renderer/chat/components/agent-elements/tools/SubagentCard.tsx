@@ -5,6 +5,7 @@ import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { isSubagentStartTool } from "../../../../../shared/subagentTools";
 import { openThread } from "../../../../lib/openThread";
 import { SubagentAvatar } from "../../../../components/SubagentAvatar";
+import { Collapse } from "../../../../components/ui/Collapse";
 import { subagentBadgeTone, subagentIconId } from "../../../../components/subagentStatus";
 import { getToolStatus } from "../utils/format-tool";
 import { GenericTool } from "./generic-tool";
@@ -222,9 +223,9 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
           </span>
         </span>
         {elapsed && <span className="subagent-group-elapsed">{elapsed}</span>}
-        <IconChevronDown className={`subagent-group-chevron${open ? " is-open" : ""}`} aria-hidden="true" />
+        <IconChevronDown className="subagent-group-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />
       </button>
-      {open && <div className="subagent-group-rows">{children}</div>}
+      <Collapse open={open} className="subagent-group-rows" itemCount={models.length}>{children}</Collapse>
     </div>
   );
 }

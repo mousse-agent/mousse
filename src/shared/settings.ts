@@ -94,11 +94,20 @@ export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label
   { value: 'model-max', label: 'Model Max Context' }
 ]
 
+/** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
+export const DEFAULT_CONTEXT_COMPACTION_TOKENS: ContextCompactionTokens = 'model-max'
+
+/**
+ * Marker on the stored context section: the default above has been applied once. Every install wrote
+ * the previous default (128k) to disk, so a stored 128k without this marker is that old default.
+ */
+export const CONTEXT_COMPACTION_DEFAULT_MARKER = 'modelMaxDefault'
+
 export function normalizeContextSettings(raw?: Partial<ContextSettings> | null): ContextSettings {
   return {
     compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
     compactionTokens: CONTEXT_COMPACTION_OPTIONS.some(({ value }) => value === raw?.compactionTokens)
-      ? raw!.compactionTokens! : 128000
+      ? raw!.compactionTokens! : DEFAULT_CONTEXT_COMPACTION_TOKENS
   }
 }
 
