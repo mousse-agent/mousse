@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { act, createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,6 +13,7 @@ import {
   type ComposerNoticeProps
 } from '../../src/renderer/components/ComposerNotice'
 import { PendingChangesNotice, discardDialogText } from '../../src/renderer/components/PendingChangesNotice'
+import { ServiceLostNotice } from '../../src/renderer/components/ServiceLostNotice'
 import type { PendingChangesDetails } from '../../src/shared/workspace'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -74,6 +77,28 @@ describe('the notice store', () => {
     store.set('gone', null)
     expect(listener).toHaveBeenCalledTimes(1)
   })
+
+  it('stacks only the lost service above a blocking notice; otherwise it is one line like the rest', () => {
+    const store = new ComposerNoticeStore()
+    const service: ComposerNoticeProps = { tone: 'error', title: 'Service lost', stacksAbove: true }
+    const approval: ComposerNoticeProps = { tone: 'warning', title: 'Approval', blocking: true }
+    store.set('send', notice('error', 'Send failed'))
+    store.set('service', service)
+    // No blocking notice: the newest error wins, nothing stacks.
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+    store.set('approval', approval)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()?.title).toBe('Service lost')
+    // An ordinary error still waits behind the approval.
+    store.set('service', null)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()).toBeNull()
+    store.set('service', service)
+    store.set('approval', null)
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+  })
 })
 
 describe('the notice slot', () => {
@@ -113,7 +138,7 @@ describe('one notice', () => {
 
   it('an icon action is a labelled icon button; an uncommon one keeps its text', () => {
     const retry = vi.fn()
-    draw({ tone: 'error', title: 'Connection lost', actions: [{ label: 'Retry', icon: createElement('svg'), onClick: retry }] })
+    draw({ tone: 'error', title: 'Could not send', actions: [{ label: 'Retry', icon: createElement('svg'), onClick: retry }] })
     const button = byName(host, 'Retry')!
     expect(button.textContent).toBe('')
     expect(button.title).toBe('Retry')
@@ -136,6 +161,63 @@ describe('one notice', () => {
       .toEqual(['Deny', 'Approve', 'Show the request'])
     click(byName(host, 'Show the request'))
     expect(jump).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the background service notice', () => {
+  const draw = (lost: boolean, onReconnect = vi.fn(), onDismiss = vi.fn()) =>
+    render(createElement(ServiceLostNotice, { key: 'service', lost, onReconnect, onDismiss }))
+
+  it('names the background service, not "connection", and explains in the tooltip', () => {
+    const onReconnect = vi.fn()
+    draw(true, onReconnect)
+    const [line] = shown()
+    expect(line.getAttribute('data-tone')).toBe('error')
+    expect(line.querySelector('.composer-notice-title-full')!.textContent).toBe("Can't reach Mousse's background service")
+    expect(line.querySelector('.composer-notice-title-short')!.textContent).toBe('Background service unreachable')
+    expect(line.getAttribute('aria-label')).toBe("Can't reach Mousse's background service")
+    expect(line.querySelector('.composer-notice-text')!.getAttribute('title')).toBe(
+      'This window lost its link to the Mousse service that runs your agents. Agents may still be running. Nothing you send reaches them until it reconnects.'
+    )
+    expect(line.textContent).not.toMatch(/connection lost/i)
+    const reconnect = byName(line, 'Reconnect')!
+    expect(reconnect.title).toBe('Reconnect')
+    expect(reconnect.querySelector('svg')).not.toBeNull()
+    click(reconnect)
+    expect(onReconnect).toHaveBeenCalledTimes(1)
+    draw(false)
+    expect(shown()).toHaveLength(0)
+  })
+
+  it('shows the shorter title when the line is narrow', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
+    expect(css).toMatch(/\.composer-notice-slot\s*\{[^}]*container:\s*composer-notice \/ inline-size;/)
+    expect(css).toMatch(/\.composer-notice-title-short\s*\{\s*display:\s*none;/)
+    const narrow = css.slice(css.indexOf('@container composer-notice (max-width: 420px)'))
+    expect(narrow).toMatch(/^@container composer-notice[^{]*\{\s*\.composer-notice-title-full\s*\{\s*display:\s*none;\s*\}\s*\.composer-notice-title-short\s*\{\s*display:\s*inline;/)
+  })
+})
+
+describe('the transcript under a notice', () => {
+  const polish = readFileSync(resolve(process.cwd(), 'src/renderer/styles/polish.css'), 'utf8')
+  const body = (selector: string) => {
+    const start = polish.indexOf(`${selector} {`)
+    expect(start, selector).toBeGreaterThanOrEqual(0)
+    return polish.slice(start, polish.indexOf('}', start))
+  }
+
+  it('keeps its end, fade, Go to latest and prompt rail clear of the notice line', () => {
+    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot)'))
+      .toMatch(/--chat-notice-stack:\s*42px;[\s\S]*--chat-notice-fade:\s*24px;/)
+    // Two stacked lines (the lost service above an approval) reserve two lines.
+    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot > .composer-notice + .composer-notice)'))
+      .toMatch(/--chat-notice-stack:\s*84px;/)
+    expect(body('.chat:not(.chat--empty) .an-message-list > div')).toContain('var(--chat-notice-stack, 0px)')
+    const mask = polish.slice(polish.indexOf('--transcript-mask:'), polish.indexOf('-webkit-mask-image', polish.indexOf('--transcript-mask:')))
+    expect(mask).toMatch(/#000 max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - 32px\)\)/)
+    expect(mask).toMatch(/transparent max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - var\(--chat-notice-fade, 0px\) \+ 24px\)\)/)
+    expect(body('.chat-jump')).toContain('var(--chat-notice-stack, 0px)')
+    expect(body('.chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail')).toContain('var(--chat-notice-stack, 0px)')
   })
 })
 

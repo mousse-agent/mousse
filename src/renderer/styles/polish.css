@@ -1141,8 +1141,21 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: 22px;
 }
 
+/* The notice line floats above the composer stack, so the transcript (its end, its fade, Go to latest and the
+   prompt rail) also keeps clear of it: the 36px line plus its 6px gap. The fade ends at the line's top, since
+   the line is narrower than the composer and would not hide what fades out beside it. */
+.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot) {
+  --chat-notice-stack: 42px;
+  --chat-notice-fade: 24px;
+}
+
+/* The lost background service stacked above a waiting approval: two lines. */
+.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot > .composer-notice + .composer-notice) {
+  --chat-notice-stack: 84px;
+}
+
 .chat:not(.chat--empty) .an-message-list > div {
-  padding-bottom: calc(var(--chat-composer-stack, 160px) + 32px);
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + var(--chat-notice-stack, 0px) + 32px);
 }
 
 .chat:not(.chat--empty) .an-message-list {
@@ -1150,8 +1163,8 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
     to bottom,
     transparent 0,
     #000 28px,
-    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 32px)),
-    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) + 24px)),
+    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - var(--chat-notice-stack, 0px) - 32px)),
+    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) - var(--chat-notice-stack, 0px) - var(--chat-notice-fade, 0px) + 24px)),
     transparent 100%
   );
   -webkit-mask-image: var(--transcript-mask);
@@ -1159,11 +1172,11 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 .chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail {
-  bottom: calc(var(--chat-composer-stack, 0px) + 4px);
+  bottom: calc(var(--chat-composer-stack, 0px) + var(--chat-notice-stack, 0px) + 4px);
 }
 
 .chat-jump {
-  bottom: calc(var(--chat-composer-stack, 16px) + 10px);
+  bottom: calc(var(--chat-composer-stack, 16px) + var(--chat-notice-stack, 0px) + 10px);
   width: 32px;
   height: 32px;
   border: 1px solid var(--ui-line-strong);

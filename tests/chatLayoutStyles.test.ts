@@ -124,13 +124,13 @@ describe('chat layout styles', () => {
     expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
   })
 
-  it('cuts the approval command, not the title, and sets the connection state apart', () => {
+  it('cuts the approval command, not the title, and stacks a second notice line above the first', () => {
     const rule = (selector: string) => rulesFor(css, selector).find((entry) => entry.selector.endsWith(selector))!
     expect(rule('.composer-notice-title:has(+ .composer-notice-detail)').body).toMatch(/flex:\s*none;/)
     expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
-    const note = rule('.composer-notice-note')
-    expect(note.body).toMatch(/flex:\s*none;/)
-    expect(note.body).toMatch(/color:\s*var\(--warning\);/)
-    expect(rule('.composer-notice-note::before').body).toMatch(/content:\s*'·'/)
+    const slot = rule('.composer-notice-slot').body
+    expect(slot).toMatch(/flex-direction:\s*column;/)
+    expect(slot).toMatch(/gap:\s*6px;/)
+    expect(css).not.toContain('.composer-notice-note')
   })
 })

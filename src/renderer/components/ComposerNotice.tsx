@@ -9,7 +9,8 @@ import { IconButton } from './ui/IconButton'
  * The one notice line above the composer. Every source (a failed send, Undo, the queue, dictation,
  * a paused run, a waiting approval) registers its notice with `useComposerNotice`; the slot shows only
  * one: a blocking notice (a waiting approval) first, then the most severe, newest first within a tone.
- * The others show once it is dismissed or resolves.
+ * The others show once it is dismissed or resolves. One exception: a notice that stops everything
+ * (`stacksAbove`, the lost background service) shows on its own line above a blocking notice.
  */
 
 export type ComposerNoticeTone = 'info' | 'warning' | 'error'
@@ -41,10 +42,10 @@ export interface ComposerNoticeProps {
   tone: ComposerNoticeTone
   /** One short line. Longer wording goes in `tooltip`. */
   title: string
+  /** Replaces `title` when the line is narrow. */
+  shortTitle?: string
   /** Quieter text after the title on the same line, cut to fit (the steered text, an approval's command). */
   detail?: string
-  /** A muted state after the detail that is never cut ("Connection lost" on a waiting approval). */
-  note?: string
   /** The full wording, shown on hover. */
   tooltip?: string
   /** Replaces the tone icon (a paused run shows a pause glyph). */
@@ -62,6 +63,11 @@ export interface ComposerNoticeProps {
   label?: string
   /** The run waits on it (an approval), so no other notice, not even an error, hides it. */
   blocking?: boolean
+  /**
+   * It stops everything (the lost background service), so it is not hidden behind a blocking notice
+   * either: it gets its own line above it. Without a blocking notice it takes part in the one-line rule.
+   */
+  stacksAbove?: boolean
 }
 
 const TONE_RANK: Record<ComposerNoticeTone, number> = { info: 0, warning: 1, error: 2 }
@@ -135,14 +141,17 @@ function ComposerNoticeMenu({ items }: { items: ComposerNoticeMenuItem[] }) {
 }
 
 /** One notice: tone icon, one line, its actions and "…" menu, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, detail, note, tooltip, icon, actions = [], menu, onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+export function ComposerNotice({ tone, title, shortTitle, detail, tooltip, icon, actions = [], menu, onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
   return (
     <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
-        <span className="composer-notice-title">{title}</span>
+        <span className="composer-notice-title">
+          {shortTitle
+            ? <><span className="composer-notice-title-full">{title}</span><span className="composer-notice-title-short">{shortTitle}</span></>
+            : title}
+        </span>
         {detail && <span className="composer-notice-detail">{detail}</span>}
-        {note && <span className="composer-notice-note">{note}</span>}
       </span>
       {actions.map((action, index) => (
         <button
@@ -177,12 +186,13 @@ export function ComposerNotice({ tone, title, detail, note, tooltip, icon, actio
 
 interface Entry { notice: ComposerNoticeProps; order: number }
 
-/** The notices registered under one composer, and the one on top. */
+/** The notices registered under one composer, the one on top, and the line stacked above it. */
 export class ComposerNoticeStore {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Set<() => void>()
   private counter = 0
   private current: ComposerNoticeProps | null = null
+  private stacked: ComposerNoticeProps | null = null
 
   /** Registers, updates (`notice`) or removes (`null`) the notice of one source. */
   set(id: string, notice: ComposerNoticeProps | null): void {
@@ -190,29 +200,36 @@ export class ComposerNoticeStore {
     if (notice) this.entries.set(id, { notice, order: entry?.order ?? ++this.counter })
     else if (entry) this.entries.delete(id)
     else return
-    const next = this.pick()
-    if (next === this.current) return
+    const entries = [...this.entries.values()]
+    const next = pick(entries)
+    // Only over a blocking notice does a `stacksAbove` one get a line of its own; otherwise the pick above covers it.
+    const above = next?.blocking ? pick(entries.filter((candidate) => candidate.notice.stacksAbove)) : null
+    if (next === this.current && above === this.stacked) return
     this.current = next
+    this.stacked = above
     for (const listener of this.listeners) listener()
   }
 
   readonly top = (): ComposerNoticeProps | null => this.current
 
+  /** The line above `top`: a `stacksAbove` notice while `top` is blocking, else null. */
+  readonly above = (): ComposerNoticeProps | null => this.stacked
+
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
   }
+}
 
-  private pick(): ComposerNoticeProps | null {
-    let best: Entry | undefined
-    for (const entry of this.entries.values()) {
-      if (!best) { best = entry; continue }
-      const rank = Number(Boolean(entry.notice.blocking)) - Number(Boolean(best.notice.blocking))
-        || TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
-      if (rank > 0 || (rank === 0 && entry.order > best.order)) best = entry
-    }
-    return best?.notice ?? null
+function pick(entries: Entry[]): ComposerNoticeProps | null {
+  let best: Entry | undefined
+  for (const entry of entries) {
+    if (!best) { best = entry; continue }
+    const rank = Number(Boolean(entry.notice.blocking)) - Number(Boolean(best.notice.blocking))
+      || TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
+    if (rank > 0 || (rank === 0 && entry.order > best.order)) best = entry
   }
+  return best?.notice ?? null
 }
 
 const ComposerNoticeContext = createContext<ComposerNoticeStore | null>(null)
@@ -240,12 +257,21 @@ export function ComposerNoticeSource({ notice }: { notice: ComposerNoticeProps |
   return null
 }
 
-const NO_STORE = { subscribe: () => () => undefined, top: () => null }
+const NO_STORE = { subscribe: () => () => undefined, top: () => null, above: () => null }
 
-/** The line above the composer: the top notice, or nothing. It floats, so the composer never moves. */
+/**
+ * The line above the composer: the top notice, or nothing; with a stacked notice, that one's line sits
+ * directly above it. It floats, so the composer never moves.
+ */
 export function ComposerNoticeSlot() {
   const store = useContext(ComposerNoticeContext) ?? NO_STORE
   const notice = useSyncExternalStore(store.subscribe, store.top)
+  const above = useSyncExternalStore(store.subscribe, store.above)
   if (!notice) return null
-  return <div className="composer-notice-slot"><ComposerNotice {...notice} /></div>
+  return (
+    <div className="composer-notice-slot">
+      {above && <ComposerNotice {...above} />}
+      <ComposerNotice {...notice} />
+    </div>
+  )
 }

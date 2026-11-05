@@ -1355,8 +1355,11 @@ html.platform-darwin .titlebar-left {
   bottom: calc(100% + 6px);
   z-index: 4;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   pointer-events: none;
+  container: composer-notice / inline-size;
 }
 
 .composer-notice {
@@ -1410,23 +1413,26 @@ html[data-theme='high-contrast'] .composer-notice {
   flex: none;
 }
 
+/* A notice with a shorter title switches to it when the line is narrow. */
+.composer-notice-title-short {
+  display: none;
+}
+
+@container composer-notice (max-width: 420px) {
+  .composer-notice-title-full {
+    display: none;
+  }
+
+  .composer-notice-title-short {
+    display: inline;
+  }
+}
+
 .composer-notice-detail {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text-secondary);
-}
-
-.composer-notice-note {
-  flex: none;
-  color: var(--warning);
-}
-
-/* A quiet "·" sets the state apart from the detail; only the state word takes the status colour. */
-.composer-notice-note::before {
-  content: '·' / '';
-  margin-right: 8px;
   color: var(--text-secondary);
 }
 
