@@ -8702,8 +8702,7 @@ export class OrchestratorService extends EventEmitter {
       if (item) return { steered: false, queued: true, item }
     }
     // A paused run has no turn to join. The text is kept as a held message, as a steer that names the paused run is
-    // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays. A person who wants it to run
-    // now sends it as a message, which ends the pause.
+    // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays, as a message sent now does.
     const paused = this.runEngine?.store.getPausedRun(threadId)
     if (paused && text.trim()) {
       this.enqueueLateSteer(threadId, text, undefined, undefined, paused.runId, undefined, opts?.permissionMode, opts?.sentFrom)
@@ -8873,8 +8872,12 @@ export class OrchestratorService extends EventEmitter {
       throw new Error(`Thread deleted: ${threadId}`)
     }
 
+    // A person's new message on a thread paused by a usage limit joins the queue and the pause stays: it runs after
+    // the continue turn (at the reset or Resume now), or at once when the pause is cancelled. Agents' messages,
+    // follow-ups from a parent, wakes and continue turns keep their own rules.
+    const queueBehindPause = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake' && !opts?.agent && !opts?.delegation && !opts?.bindDelivery
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
-    if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
+    if (opts?.forceQueue || session.isTurnRunning() || (queueBehindPause && this.hasPausedRun(threadId))) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
       ? () => {
@@ -8897,6 +8900,7 @@ export class OrchestratorService extends EventEmitter {
     const deniesApprovals = !opts?.forceQueue && !opts?.delegation && !opts?.bindDelivery && opts?.preemptQuestions !== false
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
+    let heldByPause = false
     if (this.runEngine) {
       const text = normalizeSendRequest(input).content
       const result = await this.runEngine.dispatch({
@@ -8911,7 +8915,8 @@ export class OrchestratorService extends EventEmitter {
         ...(deniesApprovals
           ? { settleApprovals: { ...(opts?.continuationOfRunId || opts?.source === 'wake' || !text.trim() ? {} : { feedback: text }), answeredBy: opts?.actor ?? { kind: 'user' as const } } }
           : {}),
-        ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {})
+        ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
+        ...(queueBehindPause ? { queueBehindPause: true } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -8942,6 +8947,7 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...(workflowRun ? { workflowRun } : {}), ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+      heldByPause = Boolean(result.heldByPause)
       if (opts?.sentFrom) this.recordSentFrom(threadId, run.runId, opts.sentFrom.node)
       // This message ended a usage-limit pause (it is a person's): the continue message that waited for the
       // reset is not wanted any more, and the thread no longer shows as paused.
@@ -8992,18 +8998,25 @@ export class OrchestratorService extends EventEmitter {
         return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
       })()
 
-    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser) {
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause) {
       const item = this.enqueueForThread(threadId, input, {
         source: opts?.source,
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
         origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined)
       })
+      // The pause ended between the admission and the item (Cancel, Stop): the drain that ending scheduled may have
+      // looked before the item was there, so the message is not left waiting for a drain that never comes.
+      if (heldByPause && !this.hasPausedRun(threadId)) {
+        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+        else this.scheduleQueueDrain(session)
+      }
       return {
         message: '',
         actions: [],
         queued: true,
         queueItem: item,
+        ...(heldByPause ? { heldByPause: true } : {}),
         ...run
       }
     }
@@ -10874,8 +10887,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Whether a drain must leave the queue alone: the thread is paused by a usage limit and the next
    * pending item (the one `claimNextNormal` would take) is not that pause's continue message. What was
-   * queued before the pause waits behind it, in its original order, and what is sent during it is
-   * either a person's message (which ends the pause) or held the same way.
+   * queued before the pause waits behind it, in its original order, and so does what is sent during it.
    */
   private pausedHoldsQueue(threadId: string, items: QueuedMessage[]): boolean {
     let paused: RunRecord | null | undefined

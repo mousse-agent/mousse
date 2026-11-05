@@ -91,6 +91,12 @@ export type RunCommand =
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
       agentOrigin?: { hops: number }
+      /**
+       * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
+       * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
+       * queues it; the queue holds it until the continue turn has run or the pause is cancelled.
+       */
+      queueBehindPause?: boolean
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
   | {
@@ -135,6 +141,8 @@ export type CommandResult =
       replayed: boolean
       /** A send that ended the thread's pause in its transaction: the paused run, and the resume item it had (SPEC §5). */
       endedPause?: { runId: string; resumeItemId?: string }
+      /** A send with `queueBehindPause` that found the thread paused: the paused run, whose pause it left in place. */
+      heldByPause?: { runId: string }
     }
   | { status: 'rejected'; reason: string; sequence: number; replayed?: boolean }
   | {
@@ -1894,7 +1902,9 @@ export class RunEngine extends EventEmitter {
       if (command.bindDelivery?.requestIds.length) this.approvals.bindDelivery(command.bindDelivery.requestIds, run.runId)
       // The replacement exists before the pause ends, so a subagent's task stays `running` across the hand-over.
       let endedPause: { runId: string; resumeItemId?: string } | undefined
-      if (paused) {
+      // A person's message that waits behind the pause leaves it in place; the run stays queued until the queue lets it go.
+      const heldByPause = paused && command.queueBehindPause && !resuming ? { runId: paused.runId } : undefined
+      if (paused && !heldByPause) {
         endedPause = { runId: paused.runId, ...(paused.outcome?.pause?.resumeItemId ? { resumeItemId: paused.outcome.pause.resumeItemId } : {}) }
         this.endPause(paused.runId, !resuming ? 'user_message' : command.source === 'resume' ? 'resume' : 'resume_now')
       }
@@ -1909,9 +1919,10 @@ export class RunEngine extends EventEmitter {
         runId: run.runId,
         sequence,
         ...(endedPause ? { endedPause } : {}),
+        ...(heldByPause ? { heldByPause } : {}),
         ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {})
       })
-      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}) }
+      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
     })
   }
 
@@ -2125,6 +2136,7 @@ function replay(receipt: ReceiptRecord): CommandResult {
     reason?: string
     activeRunId?: string | null
     endedPause?: { runId: string; resumeItemId?: string }
+    heldByPause?: { runId: string }
   }
   const sequence = stored.sequence ?? 0
   if (receipt.status === 'accepted')
@@ -2133,7 +2145,8 @@ function replay(receipt: ReceiptRecord): CommandResult {
       runId: stored.runId ?? '',
       sequence,
       replayed: true,
-      ...(stored.endedPause ? { endedPause: stored.endedPause } : {})
+      ...(stored.endedPause ? { endedPause: stored.endedPause } : {}),
+      ...(stored.heldByPause ? { heldByPause: stored.heldByPause } : {})
     }
   if (receipt.status === 'rejected')
     return { status: 'rejected', reason: stored.reason ?? 'rejected', sequence, replayed: true }

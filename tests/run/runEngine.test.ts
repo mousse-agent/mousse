@@ -775,6 +775,25 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(await sendFrom('t1', 'message-1', 'gui')).toEqual({ ...sent, replayed: true })
     })
 
+    it("a person's message that queues behind the pause leaves it, and its timer, in place", async () => {
+      fixture()
+      const run = await paused()
+
+      const sent = await f!.engine.dispatch({ kind: 'send', threadId: 't1', clientRequestId: 'message-1', source: 'gui', queueBehindPause: true })
+
+      expect(sent).toEqual({ status: 'accepted', runId: 'run:thread:t1:ordinal:2', sequence: expect.any(Number), replayed: false, heldByPause: { runId: run.runId } })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+      expect(f!.store.getRun(run.runId)!.outcome!.pause!.endedBy).toBeUndefined()
+      expect(f!.store.getRun('run:thread:t1:ordinal:2')).toMatchObject({ status: 'queued', source: 'gui' })
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+      // A retry replays the receipt, heldByPause included, and writes nothing.
+      expect(await f!.engine.dispatch({ kind: 'send', threadId: 't1', clientRequestId: 'message-1', source: 'gui', queueBehindPause: true })).toEqual({ ...sent, replayed: true })
+      // On a thread that is not paused the flag changes nothing.
+      f!.engine.endPause(run.runId, 'cancel')
+      const later = await f!.engine.dispatch({ kind: 'send', threadId: 't1', clientRequestId: 'message-2', source: 'gui', queueBehindPause: true })
+      expect(later).toEqual({ status: 'accepted', runId: 'run:thread:t1:ordinal:3', sequence: expect.any(Number), replayed: false })
+    })
+
     it('a scheduled send is refused thread_paused and writes nothing: the pause, its timer and its chain stay', async () => {
       fixture()
       const run = await paused()
