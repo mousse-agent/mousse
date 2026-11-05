@@ -35,7 +35,7 @@
   font-family: var(--font-sans);
 }
 
-body,
+body { font-family: var(--font-sans); }
 
 pre,
 code,
