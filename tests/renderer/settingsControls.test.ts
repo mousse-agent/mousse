@@ -199,7 +199,7 @@ describe('Settings > Agents > Compact context', () => {
 
   it('choosing what is already saved writes nothing', () => {
     const { updates } = show()
-    pick('At 128k tokens')
+    pick('At model maximum')
     expect(updates).not.toHaveBeenCalled()
   })
 })
