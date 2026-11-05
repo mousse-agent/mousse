@@ -8,15 +8,7 @@
 }
 
 .devices-dialog-btn.primary {
-  border-color: transparent;
-  background-color: var(--accent);
-  color: var(--ui-on-accent, #fff);
   font-weight: 500;
-}
-
-.devices-dialog-btn.primary:hover:not(:disabled) {
-  background-color: var(--accent);
-  filter: brightness(1.06);
 }
 
 .devices-dialog-btn.danger-fill {

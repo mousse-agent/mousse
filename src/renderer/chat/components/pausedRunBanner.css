@@ -78,17 +78,6 @@
   box-shadow: var(--ui-focus-ring);
 }
 
-.chat-run-paused-btn-primary {
-  border-color: transparent;
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.chat-run-paused-btn-primary:hover {
-  background: var(--gradient-accent);
-  filter: brightness(1.08);
-}
-
 .chat-run-paused-btn[aria-disabled="true"] {
   opacity: 0.55;
   cursor: default;

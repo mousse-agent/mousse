@@ -307,18 +307,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
-.icon-btn-primary {
-  width: 36px;
-  height: 36px;
-  background: var(--gradient-accent);
-  color: white;
-  flex-shrink: 0;
-}
-
-.icon-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
 .icon-btn-titlebar {
   width: 32px;
   height: 32px;
@@ -967,20 +955,6 @@ html.platform-darwin .titlebar-left {
   font-size: 13px;
   font-weight: 500;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.btn-primary {
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.btn-primary:hover {
-  filter: brightness(1.08);
-}
-
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .btn-ghost {
@@ -2364,20 +2338,8 @@ html.platform-darwin .titlebar-left {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
-  background: rgba(var(--accent-rgb), 0.35);
-  color: var(--text-primary);
   flex-shrink: 0;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.composer-implement-btn:hover:not(:disabled) {
-  background: rgba(var(--accent-pale-rgb), 0.45);
-  color: white;
-}
-
-.composer-implement-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .composer-action-btn {
@@ -5106,16 +5068,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   color: var(--text-secondary);
 }
 
-.composer-question-submit {
-  color: var(--text-primary);
-  background: rgba(var(--accent-deep-rgb), 0.28);
-}
-
-.composer-question-submit:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .composer-question-steps {
   display: flex;
   align-items: center;
@@ -5965,14 +5917,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .composer-question-prompt--approval { white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-question-reason { margin: 0 0 8px; font-size: 12px; color: var(--text-secondary); }
 
-.composer-question-submit {
-  background: var(--gradient-accent);
-  color: white;
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.25);
-}
-
-.composer-question-submit:hover:not(:disabled) { filter: brightness(1.06); transform: translateY(-0.5px); }
+.composer-question-submit { font-weight: 600; }
 
 .queued-messages {
   border-radius: 16px 16px 0 0;
