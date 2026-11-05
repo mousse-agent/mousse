@@ -57,18 +57,19 @@ export function TitleBar() {
           <div className="titlebar-brand">
             <button
               type="button"
-              className="titlebar-sidebar-toggle"
+              className={`titlebar-sidebar-toggle${showBadge ? ' titlebar-sidebar-toggle--badged' : ''}`}
               aria-label={toggleLabel}
               title={toggleLabel}
               onClick={() => setThreadsSidebarOpen(!threadsSidebarOpen)}
             >
               <PanelLeft size={16} strokeWidth={2} />
+              {/* Inside the button, so the count lands on the toggle wherever the title bar puts it. */}
+              {showBadge && (
+                <span className="titlebar-attention-badge" aria-hidden="true">
+                  {needsMeCount > 99 ? '99+' : needsMeCount}
+                </span>
+              )}
             </button>
-            {showBadge && (
-              <span className="titlebar-attention-badge" aria-hidden="true">
-                {needsMeCount > 99 ? '99+' : needsMeCount}
-              </span>
-            )}
             <img
               className="titlebar-logo-icon"
               src={logoIcon}
