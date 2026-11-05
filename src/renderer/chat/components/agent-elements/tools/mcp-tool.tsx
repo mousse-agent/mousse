@@ -2,7 +2,7 @@ import { memo, useMemo } from "react";
 import { Streamdown } from "streamdown";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
-import { Plug } from "../../../../lib/icons";
+import { IconX, Plug } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { codeHighlighter } from "../code-highlighter";
 
@@ -173,14 +173,16 @@ export const McpTool = memo(function McpTool({
   chatStatus,
   defaultOpen,
 }: McpToolProps) {
-  const { isPending, isInterrupted } = getToolStatus(part, chatStatus);
+  const { isPending, isInterrupted, isError } = getToolStatus(part, chatStatus);
+  const failed = isError && !isPending;
 
   const title = useMemo(() => {
     if (part.state === "input-streaming")
       return `Preparing ${mcpInfo.displayName}`;
     if (isPending) return getActiveTitle(mcpInfo);
+    if (failed) return `Failed ${mcpInfo.displayName}`;
     return getCompletedTitle(mcpInfo);
-  }, [part.state, isPending, mcpInfo]);
+  }, [part.state, isPending, failed, mcpInfo]);
 
   const subtitle = useMemo(() => {
     if (part.state === "input-streaming") return "";
@@ -214,10 +216,17 @@ export const McpTool = memo(function McpTool({
   return (
     <div className="an-tool-mcp">
       <ToolRowBase
-        icon={<Plug size={18} />}
+        icon={
+          failed ? (
+            <IconX size={16} strokeWidth={2.5} className="text-[var(--danger)]" />
+          ) : (
+            <Plug size={18} />
+          )
+        }
         shimmerLabel={title}
         completeLabel={title}
         isAnimating={isPending}
+        failed={failed}
         detail={subtitle || undefined}
         trailingContent={undefined}
         expandable={hasExpandableContent}

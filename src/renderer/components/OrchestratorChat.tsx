@@ -29,6 +29,7 @@ import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOut
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
+import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -102,6 +103,14 @@ function releaseComposerMediaUrls(media: ComposerMediaDraft): void {
 /** One picker selection as a comparable string. */
 function selectionKey(selection: { instanceId?: string; llmProvider: string; pickerId: string }): string {
   return `${selection.instanceId ?? ''}\u0000${selection.llmProvider}\u0000${selection.pickerId}`
+}
+
+/**
+ * The model catalogue to keep after a read: the current one when the read returned the same providers
+ * and models, so a repeated read does not hand the picker a new list.
+ */
+function keepCatalog(current: LlmProviderOption[], next: LlmProviderOption[]): LlmProviderOption[] {
+  return JSON.stringify(current) === JSON.stringify(next) ? current : next
 }
 
 /** The thread's model is exactly the wanted one: the same account, model and reasoning level. */
@@ -493,7 +502,7 @@ export function OrchestratorChat() {
       window.mousse.settings.get(),
       window.mousse.settings.getOptions()
     ])
-    setCatalog(options.llmProviders)
+    setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setProfileDefault((current) =>
@@ -538,13 +547,22 @@ export function OrchestratorChat() {
   const remoteAppliedRef = useRef<{ context: string; shown: string } | undefined>(undefined)
   const refreshSelectionRef = useRef(refreshSelection)
   refreshSelectionRef.current = refreshSelection
+  // Coming back from another computer reads this computer's settings again. The read also replaces the
+  // model catalogue, which `providers` is built from, so this runs on a change of computer only: keyed on
+  // `providers` it re-read settings after every read, without end. The first read is the settings effect's.
+  const wasRemoteRef = useRef(false)
   useEffect(() => {
-    if (!remoteNode) {
-      remoteAppliedRef.current = undefined
-      void refreshSelectionRef.current()
+    if (remoteNode) {
+      wasRemoteRef.current = true
       return
     }
-    if (!remoteOptions.loaded) return
+    remoteAppliedRef.current = undefined
+    if (!wasRemoteRef.current) return
+    wasRemoteRef.current = false
+    void refreshSelectionRef.current()
+  }, [remoteNode])
+  useEffect(() => {
+    if (!remoteNode || !remoteOptions.loaded) return
     const own = remoteDraft ? undefined : activeThreadModelOverride
     const remote = remoteDefaultRef.current
     const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
@@ -573,7 +591,7 @@ export function OrchestratorChat() {
       void window.mousse.settings
         .getOptions()
         .then((options) => {
-          if (request === catalogRequest) setCatalog(options.llmProviders)
+          if (request === catalogRequest) setCatalog((current) => keepCatalog(current, options.llmProviders))
         })
         .catch(() => undefined)
     })
@@ -806,7 +824,8 @@ export function OrchestratorChat() {
           ])
         }
         if (result.error) {
-          setSendError(sendErrorLine(result.error))
+          // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
+          if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
           // Admission succeeded: the prompt is already saved in the transcript.
@@ -887,6 +906,20 @@ export function OrchestratorChat() {
   }, [activeThreadId, refreshTurnActive])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
+
+  // Retry and Continue on the last turn send through the normal path, never while a run is going.
+  const resendBusy = turnActive || loading
+  const turnActions = useMemo<TurnActions | null>(() => {
+    if (!activeThreadId) return null
+    return createTurnActions({
+      // Read at use: depending on the transcript would rebuild this on every streamed token.
+      prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
+      send: (content, images) => {
+        if (resendBusy || !useAppStore.getState().workspaceReady) return
+        void sendMessage(content, chatMode, images, activeThreadId)
+      }
+    })
+  }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return
@@ -1171,6 +1204,7 @@ export function OrchestratorChat() {
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
         permissionRequests={permissionRequests.controls}
+        turnActions={turnActions}
         composer={(
       <div
         ref={inputAreaRef}

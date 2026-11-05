@@ -17,7 +17,7 @@
   background: var(--vscode-sideBar-background, rgba(var(--surface-strong-rgb), 0.72));
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  animation: threads-sidebar-slide-in 0.2s ease-out;
+  animation: threads-sidebar-slide-in var(--ui-dur-slow) ease-out;
 }
 
 /* Hover-to-reveal when the left sidebar is closed. No equivalent for the right side. */
@@ -42,7 +42,7 @@
   z-index: 50;
   display: flex;
   box-shadow: 12px 0 32px rgba(0, 0, 0, 0.35);
-  animation: threads-sidebar-slide-in 0.18s ease-out;
+  animation: threads-sidebar-slide-in calc(180ms * var(--ui-motion-scale)) ease-out;
 }
 
 .threads-sidebar-peek .threads-sidebar {
@@ -52,16 +52,16 @@
 }
 
 .threads-sidebar-closing {
-  animation: threads-sidebar-slide-out 0.2s ease-in forwards;
+  animation: threads-sidebar-slide-out var(--ui-dur-slow) ease-in forwards;
 }
 
 .threads-sidebar-peek-closing {
-  animation: threads-sidebar-slide-out 0.2s ease-in forwards;
+  animation: threads-sidebar-slide-out var(--ui-dur-slow) ease-in forwards;
 }
 
 .resizer-threads-closing {
   opacity: 0;
-  transition: opacity 0.2s ease-in;
+  transition: opacity var(--ui-dur-slow) ease-in;
 }
 
 @keyframes threads-sidebar-slide-out {
@@ -326,10 +326,20 @@
   }
 }
 
+/* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
+   merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
-  margin: 2px 0 8px 17px;
+  margin: 2px 0 0 17px;
   padding-left: 6px;
   border-left: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+}
+
+/* In a closing group a row's highlight (selected, hovered) fades with its text, quicker than the clip
+   shrinks, so no strip of it is left once the text is gone. */
+.app .ui-collapse[data-motion='exit'] .threads-sidebar-thread {
+  background: transparent;
+  box-shadow: none;
+  transition: background-color 70ms var(--ui-collapse-ease-close), box-shadow 70ms var(--ui-collapse-ease-close);
 }
 
 .threads-sidebar-thread {
@@ -397,7 +407,7 @@
 .threads-sidebar-thread-list {
   max-height: calc(var(--threads-sidebar-row-height) * 5);
   overflow: hidden;
-  transition: max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
