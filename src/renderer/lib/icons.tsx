@@ -56,6 +56,7 @@ import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import FileAddIcon from '@hugeicons/core-free-icons/FileAddIcon'
 import FileExportIcon from '@hugeicons/core-free-icons/FileExportIcon'
 import FileScriptIcon from '@hugeicons/core-free-icons/FileScriptIcon'
+import FileVerifiedIcon from '@hugeicons/core-free-icons/FileVerifiedIcon'
 import Flag01Icon from '@hugeicons/core-free-icons/Flag01Icon'
 import FlashIcon from '@hugeicons/core-free-icons/FlashIcon'
 import Folder01Icon from '@hugeicons/core-free-icons/Folder01Icon'
@@ -311,6 +312,7 @@ export const ChevronsUp = /* @__PURE__ */ createIcon('ChevronsUp', ArrowUpDouble
 export const CircleX = /* @__PURE__ */ createIcon('CircleX', CancelCircleIcon)
 export const FileCode = /* @__PURE__ */ createIcon('FileCode', FileScriptIcon)
 export const FilePlus = /* @__PURE__ */ createIcon('FilePlus', FileAddIcon)
+export const FileApproved = /* @__PURE__ */ createIcon('FileApproved', FileVerifiedIcon)
 export const FileJs = /* @__PURE__ */ createIcon('FileJs', JavaScriptIcon)
 export const FolderSearch = /* @__PURE__ */ createIcon('FolderSearch', FolderSearchIcon)
 export const Logout = /* @__PURE__ */ createIcon('Logout', Logout01Icon)
