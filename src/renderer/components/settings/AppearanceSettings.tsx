@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import type { AppearanceSettings as AppearanceValues, MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
 import { Palette } from '../../lib/icons'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { FontPicker } from './FontPicker'
 
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
@@ -36,6 +37,15 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
   )
 }
 
+/**
+ * A patch that sets one font and nothing else. The daemon merges it into the current settings, so
+ * a font that finishes downloading later cannot restore other appearance values from an older
+ * render. DeepPartial does not reach into interfaces, hence the cast.
+ */
+function fontPatch(font: Pick<AppearanceValues, 'interfaceFont'> | Pick<AppearanceValues, 'codeFont'>): MousseSettingsUpdate {
+  return { appearance: font } as MousseSettingsUpdate
+}
+
 export interface AppearanceSettingsProps {
   settings: MousseSettings
   options: SettingsOptions
@@ -49,7 +59,7 @@ export interface AppearanceSettingsProps {
   onCommitAcrylicIntensity: (value: number) => void
 }
 
-/** Settings → Appearance: theme, accent, glass, math and thread colors. */
+/** Settings → Appearance: theme, accent, fonts, glass, math and thread colors. */
 export function AppearanceSettings({
   settings,
   options,
@@ -105,6 +115,30 @@ export function AppearanceSettings({
                 />
               ))}
             </div>
+          }
+        />
+        <SettingsRow
+          title="Interface font"
+          description={<span title="Menus, chat, settings and other text. A Google font downloads once when chosen and then works offline.">Menus, chat and settings.</span>}
+          control={
+            <FontPicker
+              role="interface"
+              ariaLabel="Interface font"
+              value={appearance.interfaceFont}
+              onChange={(interfaceFont) => onUpdate(fontPatch({ interfaceFont }))}
+            />
+          }
+        />
+        <SettingsRow
+          title="Code font"
+          description={<span title="Code blocks in chat, diffs and review, the file editor, terminals and command output. Lists monospace fonts. A Google font downloads once when chosen and then works offline.">Code, diffs, editor and terminals.</span>}
+          control={
+            <FontPicker
+              role="code"
+              ariaLabel="Code font"
+              value={appearance.codeFont}
+              onChange={(codeFont) => onUpdate(fontPatch({ codeFont }))}
+            />
           }
         />
         <SettingsRow
