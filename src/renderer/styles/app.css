@@ -128,12 +128,9 @@ html.platform-darwin .titlebar-left {
   position: relative;
 }
 
+/* Relative by default so the attention badge sits on the button in any title bar layout. */
 .titlebar-sidebar-toggle {
-  position: absolute;
-  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
-  top: 50%;
-  z-index: 1;
-  transform: translateY(-50%);
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -148,8 +145,19 @@ html.platform-darwin .titlebar-left {
   app-region: no-drag;
 }
 
+/* In the brand block the toggle lies over the logo. */
+.titlebar-brand > .titlebar-sidebar-toggle {
+  position: absolute;
+  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+}
+
+/* A toggle that carries a count stays visible. */
 .titlebar-brand:hover .titlebar-sidebar-toggle,
-.titlebar-sidebar-toggle:focus-visible {
+.titlebar-sidebar-toggle:focus-visible,
+.titlebar-sidebar-toggle--badged {
   opacity: 1;
   pointer-events: auto;
 }
@@ -157,8 +165,8 @@ html.platform-darwin .titlebar-left {
 /* While the sidebar is closed: how many threads need the person, on the corner of its toggle. */
 .titlebar-attention-badge {
   position: absolute;
-  left: calc((var(--navigation-rail-width) + var(--titlebar-height) * 0.64) / 2 - 9px);
-  top: calc(50% - var(--titlebar-height) * 0.32 - 3px);
+  top: -4px;
+  right: -6px;
   z-index: 2;
   min-width: 14px;
   height: 14px;
@@ -188,7 +196,8 @@ html.platform-darwin .titlebar-left {
 }
 
 .titlebar-brand:hover .titlebar-logo-icon,
-.titlebar-brand:has(.titlebar-sidebar-toggle:focus-visible) .titlebar-logo-icon {
+.titlebar-brand:has(.titlebar-sidebar-toggle:focus-visible) .titlebar-logo-icon,
+.titlebar-brand:has(.titlebar-sidebar-toggle--badged) .titlebar-logo-icon {
   opacity: 0;
   pointer-events: none;
 }
