@@ -79,6 +79,7 @@ function ReadAloudSpeechSettings() {
   const previewLoading = previewStatus === 'loading'
   const previewError = useReadAloudStore((state) => (state.error?.key === PREVIEW_KEY ? state.error.message : null))
   const toggle = useReadAloudStore((state) => state.toggle)
+  const warmReadAloud = useReadAloudStore((state) => state.warm)
   const stop = useReadAloudStore((state) => state.stop)
   const preferences = useSpeechPreferences((state) => state.preferences)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
@@ -153,6 +154,8 @@ function ReadAloudSpeechSettings() {
               aria-label={previewing ? 'Stop sample' : 'Play sample'}
               aria-busy={previewLoading || undefined}
               onClick={playSample}
+              onPointerEnter={warmReadAloud}
+              onFocus={warmReadAloud}
             >
               {previewLoading ? (
                 <Loader2 size={14} strokeWidth={2} className="icon-spin" aria-hidden="true" />

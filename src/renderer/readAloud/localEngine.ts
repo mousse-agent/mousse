@@ -4,12 +4,12 @@ import { CLIP_GAP_SECONDS, MAX_START_DELAY_SECONDS, startDelaySeconds, trimSilen
 import type { SpeakOptions } from './playback'
 import { createLevelMeter } from '../speech/audioLevels'
 import { serveModelFiles } from '../speechModels/pageSupport'
+import { speechModelThreads } from '../speechModels/threads'
 import { splitSpeechSegments } from './speechText'
 
 /**
- * Each worker runs its model on one WebAssembly thread (only dictation asks for more), where one
- * worker produces audio at roughly 0.6x to 0.7x real time. Two workers voicing consecutive segments
- * in parallel stay ahead of playback.
+ * One worker on one WebAssembly thread produces audio at roughly 0.6x to 0.7x real time. Two
+ * workers voicing consecutive segments in parallel stay ahead of playback.
  */
 const POOL_SIZE = 2
 /** Segments voiced ahead of the one playing; each holds a few seconds of audio. */
@@ -21,8 +21,14 @@ const LOOKAHEAD_SEGMENTS = 8
  */
 const IDLE_DISPOSE_MS = 5 * 60_000
 
+/** How far a worker has got with its model, as `localEngineState` reports it. */
+export type LocalEngineState = 'cold' | 'loading' | 'ready'
+
 /** The workers of the model that was used last; another model replaces them. */
 let pool: { modelId: LocalTtsModelId; workers: Worker[] } | null = null
+/** Workers whose model is loaded (they voiced a segment or finished warming), and workers still loading it. */
+const loadedWorkers = new WeakSet<Worker>()
+const warmingWorkers = new WeakSet<Worker>()
 let lastRequestId = 0
 let activeSessions = 0
 /** Ends each running read or phone job with an error; its workers are about to be terminated. */
@@ -31,6 +37,15 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null
 
 function send(target: Worker, message: LocalTtsWorkerRequest): void {
   target.postMessage(message)
+}
+
+/**
+ * ONNX Runtime threads for each worker: the speech models' share of the cores (see
+ * `speechModelThreads`), split between the workers the model may run side by side.
+ */
+export function localTtsWorkerThreads(model: LocalTtsModel): number {
+  const total = speechModelThreads(navigator.hardwareConcurrency, typeof SharedArrayBuffer === 'function')
+  return Math.max(1, Math.floor(total / (model.maxWorkers ?? POOL_SIZE)))
 }
 
 /** Each model family runs in its own worker file. */
@@ -50,7 +65,7 @@ function createWorker(model: LocalTtsModel): Worker {
       created = new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
   }
   serveModelFiles(created, (path) => window.mousse.readAloud.readLocalModelFile(model.id, path))
-  send(created, { type: 'init', modelId: model.id })
+  send(created, { type: 'init', modelId: model.id, threads: localTtsWorkerThreads(model) })
   return created
 }
 
@@ -64,6 +79,45 @@ function ensurePool(model: LocalTtsModel, segments: number): Worker[] {
   const size = Math.min(model.maxWorkers ?? POOL_SIZE, segments)
   while (pool.workers.length < size) pool.workers.push(createWorker(model))
   return pool.workers.slice(0, size)
+}
+
+function workerState(worker: Worker): LocalEngineState {
+  return loadedWorkers.has(worker) ? 'ready' : warmingWorkers.has(worker) ? 'loading' : 'cold'
+}
+
+/** Whether the first worker for `modelId` has its model loaded, is loading it, or has none. */
+export function localEngineState(modelId: LocalTtsModelId): LocalEngineState {
+  const first = pool?.modelId === modelId ? pool.workers[0] : undefined
+  return first ? workerState(first) : 'cold'
+}
+
+/**
+ * Starts the first worker for `modelId` and loads its model, so a read that starts soon after does
+ * not wait for loading. Does nothing when that model is loaded or loading, or while another model
+ * is reading. A failure is left for the read that follows to report. The worker is dropped after
+ * the usual idle delay when no read follows.
+ */
+export function warmLocalEngine(modelId: LocalTtsModelId): void {
+  const model = findLocalTtsModel(modelId)
+  if (!model) return
+  if (pool && pool.modelId !== model.id && activeSessions > 0) return
+  const [worker] = ensurePool(model, 1)
+  if (workerState(worker) !== 'cold') return
+  warmingWorkers.add(worker)
+  const id = ++lastRequestId
+  const started = performance.now()
+  const onMessage = (event: MessageEvent<LocalTtsWorkerEvent>): void => {
+    const message = event.data
+    if (message.type === 'file-request' || message.id !== id) return
+    worker.removeEventListener('message', onMessage)
+    warmingWorkers.delete(worker)
+    if (message.type !== 'ready') return
+    loadedWorkers.add(worker)
+    console.info(`[read aloud] ${model.label} loaded in ${message.loadMs} ms, ${Math.round(performance.now() - started)} ms after warming started`)
+  }
+  worker.addEventListener('message', onMessage)
+  send(worker, { type: 'warm', id })
+  if (activeSessions === 0) scheduleIdleDispose()
 }
 
 function cancelIdleDispose(): void {
@@ -96,6 +150,29 @@ interface SegmentState extends SegmentTiming {
 
 const seconds = (): number => performance.now() / 1000
 
+interface FirstAudio {
+  model: LocalTtsModel
+  /** A read plays the audio here; a phone job hands it over to the phone. */
+  use: 'read' | 'phone'
+  /** When the read was asked for, and when its first audio plays or is handed over. In seconds. */
+  requestedAt: number
+  audibleAt: number
+  first: SegmentTiming
+  modelState: LocalEngineState
+  segments: number
+  workers: number
+}
+
+/** Logs how long a read took from the request to its first audio, the measure read aloud is tuned by. */
+function logFirstAudio({ model, use, requestedAt, audibleAt, first, modelState, segments, workers }: FirstAudio): void {
+  const ms = (from: number | undefined, to: number | undefined): number => Math.round(((to ?? 0) - (from ?? 0)) * 1000)
+  console.info(
+    `[read aloud] ${model.label}${use === 'phone' ? ' for a phone' : ''}: first audio after ${ms(requestedAt, audibleAt)} ms, ` +
+      `first segment of ${first.chars} characters voiced in ${ms(first.startedAt, first.finishedAt)} ms, model was ${modelState}, ` +
+      `${segments} segment(s) on ${workers} worker(s) with ${localTtsWorkerThreads(model)} thread(s) each`
+  )
+}
+
 /** Speaks `text` with a local model. Resolves when playback ends or is aborted. */
 export function speakWithLocalModel(
   modelId: LocalTtsModelId,
@@ -111,6 +188,8 @@ export function speakWithLocalModel(
     cancelIdleDispose()
     activeSessions++
     const workers = ensurePool(model, segments.length)
+    const requestedAt = seconds()
+    const modelState = workerState(workers[0])
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)
@@ -193,6 +272,8 @@ export function speakWithLocalModel(
       if (!started) {
         started = true
         onPlaying()
+        const audibleAt = seconds() + Math.max(0, startAt - context.currentTime)
+        logFirstAudio({ model, use: 'read', requestedAt, audibleAt, first: states[0], modelState, segments: segments.length, workers: workers.length })
       }
     }
 
@@ -238,6 +319,8 @@ export function speakWithLocalModel(
         settle(new Error(message.message))
         return
       }
+      if (message.type !== 'audio') return
+      loadedWorkers.add(request.worker)
       const state = states[request.index]
       const samples = trimSilence(message.samples, message.sampleRate)
       state.audio = { samples, sampleRate: message.sampleRate }
@@ -297,6 +380,9 @@ export function synthesizeWithLocalModel(
     cancelIdleDispose()
     activeSessions++
     const workers = ensurePool(model, segments.length)
+    const requestedAt = seconds()
+    const modelState = workerState(workers[0])
+    const first: SegmentTiming = { chars: segments[0].length }
     const results: Array<{ samples: Float32Array; sampleRate: number } | undefined> = []
     const inFlight = new Map<number, { index: number; worker: Worker }>()
     const busy = new Set<Worker>()
@@ -329,6 +415,7 @@ export function synthesizeWithLocalModel(
         const id = ++lastRequestId
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
+        if (nextDispatch === 0) first.startedAt = seconds()
         send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? model.defaultVoice, speed })
         nextDispatch++
       }
@@ -344,6 +431,12 @@ export function synthesizeWithLocalModel(
       if (message.type === 'error') {
         settle(new Error(message.message))
         return
+      }
+      if (message.type !== 'audio') return
+      loadedWorkers.add(request.worker)
+      if (request.index === 0) {
+        first.finishedAt = seconds()
+        logFirstAudio({ model, use: 'phone', requestedAt, audibleAt: first.finishedAt, first, modelState, segments: segments.length, workers: workers.length })
       }
       results[request.index] = { samples: trimSilence(message.samples, message.sampleRate), sampleRate: message.sampleRate }
       void emitReady()

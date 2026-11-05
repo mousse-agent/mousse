@@ -4,13 +4,18 @@ import { setupLocalModelWorker, type ModelFileRequest, type ModelFileResponse } 
 
 /**
  * What every local read aloud worker shares: the messages it exchanges with the page, and a host
- * that tells it which model to run, loads that model on first use, and voices requests one at a
- * time. Each model family (`runtime`) has its own worker file that supplies only `load`.
+ * that tells it which model to run, loads that model on first use (or on `warm`), and voices
+ * requests one at a time. Each model family (`runtime`) has its own worker file that supplies only
+ * `load`.
  */
 
-/** Messages from the page to a worker. `init` comes first and names the model. */
+/**
+ * Messages from the page to a worker. `init` comes first and names the model, and the ONNX Runtime
+ * threads to use (one when unset). `warm` loads the model ahead of the first `speak`.
+ */
 export type LocalTtsWorkerRequest =
-  | { type: 'init'; modelId: LocalTtsModelId }
+  | { type: 'init'; modelId: LocalTtsModelId; threads?: number }
+  | { type: 'warm'; id: number }
   | { type: 'speak'; id: number; text: string; voice: string; speed: number }
   | { type: 'cancel'; id: number }
   | ModelFileResponse
@@ -18,6 +23,8 @@ export type LocalTtsWorkerRequest =
 /** Messages from a worker to the page. */
 export type LocalTtsWorkerEvent =
   | ModelFileRequest
+  /** Answers `warm` once the model is loaded, with how long that took. */
+  | { type: 'ready'; id: number; loadMs: number }
   | { type: 'audio'; id: number; samples: Float32Array; sampleRate: number }
   | { type: 'error'; id: number; message: string }
 
@@ -78,6 +85,18 @@ export function runLocalTtsWorker<Model extends LocalTtsModel>({ accepts, load }
   const cancelled = new Set<number>()
   let queue: Promise<void> = Promise.resolve()
 
+  // Only loads. Unlike dictation's Parakeet, a throwaway run after loading does not pay off here:
+  // on Kokoro 82M it took longer than it saved on the first segment, and a click during it waits.
+  const warm = async (id: number): Promise<void> => {
+    try {
+      const started = performance.now()
+      await loadSynthesizer()
+      post({ type: 'ready', id, loadMs: Math.round(performance.now() - started) })
+    } catch (error) {
+      post({ type: 'error', id, message: errorMessage(error) })
+    }
+  }
+
   const speak = async (id: number, text: string, voice: string, speed: number): Promise<void> => {
     try {
       if (cancelled.has(id)) return
@@ -101,7 +120,9 @@ export function runLocalTtsWorker<Model extends LocalTtsModel>({ accepts, load }
       const chosen = findLocalTtsModel(message.modelId)
       if (!chosen || !accepts(chosen) || model) return
       model = chosen
-      support = setupLocalModelWorker({ repo: chosen.repo, files: chosen.files, post })
+      support = setupLocalModelWorker({ repo: chosen.repo, files: chosen.files, post, threads: message.threads })
+    } else if (message.type === 'warm') {
+      queue = queue.then(() => warm(message.id))
     } else if (message.type === 'speak') {
       queue = queue.then(() => speak(message.id, message.text, message.voice, message.speed))
     } else if (message.type === 'cancel') {

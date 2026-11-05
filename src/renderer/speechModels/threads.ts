@@ -1,6 +1,7 @@
 /**
- * Most threads a dictation model gets. On Parakeet 110M (issue #513), 4 threads ran the encoder
- * 2.4 times faster than 1; 8 added less than 10% more while taking twice the cores.
+ * Most threads a speech model gets: a dictation worker, or the read aloud workers together. On
+ * Parakeet 110M (issue #513), 4 threads ran the encoder 2.4 times faster than 1; 8 added less than
+ * 10% more while taking twice the cores.
  */
 export const MAX_SPEECH_THREADS = 4
 

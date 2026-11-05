@@ -49,6 +49,16 @@ class FakeWorker extends EventTarget {
     this.terminated++
   }
 
+  warmRequests(): Array<{ type: 'warm'; id: number }> {
+    return this.posted.filter((message): message is { type: 'warm'; id: number } => message.type === 'warm')
+  }
+
+  /** Answers the last warm request as loaded. */
+  answerWarm(): void {
+    const request = this.warmRequests().at(-1)!
+    this.reply({ type: 'ready', id: request.id, loadMs: 400 })
+  }
+
   speakRequests(): SpeakRequest[] {
     return this.posted.filter((message): message is SpeakRequest => message.type === 'speak')
   }
@@ -331,9 +341,9 @@ describe('local read aloud with more than one model', () => {
 
     const [kitten, kokoro] = FakeWorker.all
     expect(kitten.url.pathname).toMatch(/kittenWorker\.ts$/)
-    expect(kitten.posted[0]).toEqual({ type: 'init', modelId: 'kitten-tts-micro' })
+    expect(kitten.posted[0]).toMatchObject({ type: 'init', modelId: 'kitten-tts-micro' })
     expect(kokoro.url.pathname).toMatch(/kokoroWorker\.ts$/)
-    expect(kokoro.posted[0]).toEqual({ type: 'init', modelId: 'kokoro-82m' })
+    expect(kokoro.posted[0]).toMatchObject({ type: 'init', modelId: 'kokoro-82m' })
   })
 
   it('replaces the workers when another model is read, and keeps them for the same model', async () => {
@@ -351,7 +361,7 @@ describe('local read aloud with more than one model', () => {
     await finishRead(startRead(SHORT, new AbortController(), 'supertonic-3'))
     const [worker] = FakeWorker.all
     expect(worker.url.pathname).toMatch(/supertonicWorker\.ts$/)
-    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'supertonic-3' })
+    expect(worker.posted[0]).toMatchObject({ type: 'init', modelId: 'supertonic-3' })
     expect(worker.speakRequests()[0]).toMatchObject({ voice: 'F1' })
   })
 
@@ -365,7 +375,7 @@ describe('local read aloud with more than one model', () => {
     await finishRead(startRead(SHORT, new AbortController(), 'pocket-tts-fr'))
     const [worker] = FakeWorker.all
     expect(worker.url.pathname).toMatch(/pocketWorker\.ts$/)
-    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'pocket-tts-fr' })
+    expect(worker.posted[0]).toMatchObject({ type: 'init', modelId: 'pocket-tts-fr' })
     expect(worker.speakRequests()[0]).toMatchObject({ voice: 'alba' })
   })
 
@@ -410,5 +420,95 @@ describe('local read aloud with more than one model', () => {
     await done
     expect(onClip).toHaveBeenCalledTimes(2)
     expect(FakeWorker.all).toHaveLength(1)
+  })
+})
+
+describe('local read aloud loads the model before the click', () => {
+  it('loads the first worker ahead of a read, and the read then uses that worker', async () => {
+    engine.warmLocalEngine('kokoro-82m')
+    const [worker] = FakeWorker.all
+    expect(worker.posted.map((message) => message.type)).toEqual(['init', 'warm'])
+    expect(engine.localEngineState('kokoro-82m')).toBe('loading')
+
+    worker.answerWarm()
+    expect(engine.localEngineState('kokoro-82m')).toBe('ready')
+    await finishRead(startRead(SHORT))
+    expect(FakeWorker.all).toHaveLength(1)
+    expect(worker.speakRequests()).toHaveLength(1)
+  })
+
+  it('asks a worker to warm up only once', () => {
+    engine.warmLocalEngine('kokoro-82m')
+    engine.warmLocalEngine('kokoro-82m')
+    FakeWorker.all[0].answerWarm()
+    engine.warmLocalEngine('kokoro-82m')
+    expect(FakeWorker.all).toHaveLength(1)
+    expect(FakeWorker.all[0].warmRequests()).toHaveLength(1)
+  })
+
+  it('does not warm a worker that has already voiced a read', async () => {
+    await finishRead(startRead(SHORT))
+    engine.warmLocalEngine('kokoro-82m')
+    expect(FakeWorker.all[0].warmRequests()).toHaveLength(0)
+  })
+
+  it('tries again after a failed warm-up', () => {
+    engine.warmLocalEngine('kokoro-82m')
+    const [worker] = FakeWorker.all
+    worker.reply({ type: 'error', id: worker.warmRequests()[0].id, message: 'file missing' })
+    expect(engine.localEngineState('kokoro-82m')).toBe('cold')
+
+    engine.warmLocalEngine('kokoro-82m')
+    expect(worker.warmRequests()).toHaveLength(2)
+  })
+
+  it('drops a warmed model five minutes later when no read follows', async () => {
+    engine.warmLocalEngine('kokoro-82m')
+    const [worker] = FakeWorker.all
+    worker.answerWarm()
+    await vi.advanceTimersByTimeAsync(IDLE_MS - 1)
+    expect(worker.terminated).toBe(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(worker.terminated).toBe(1)
+  })
+
+  it('does not stop another model that is reading', async () => {
+    const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
+    engine.warmLocalEngine('kokoro-82m')
+    expect(FakeWorker.all).toHaveLength(1)
+    expect(FakeWorker.all[0].terminated).toBe(0)
+    await finishRead(read)
+  })
+
+  it('logs the time to the first audio and whether the model was loaded', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    engine.warmLocalEngine('kokoro-82m')
+    FakeWorker.all[0].answerWarm()
+    await finishRead(startRead(SHORT))
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(/^\[read aloud\] Kokoro 82M loaded in 400 ms, \d+ ms after warming started$/))
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(/^\[read aloud\] Kokoro 82M: first audio after \d+ ms, .*model was ready, 1 segment\(s\) on 1 worker\(s\)/))
+    info.mockRestore()
+  })
+})
+
+describe('local read aloud threads', () => {
+  const threadsFor = (modelId: LocalTtsModelId): number | undefined => {
+    // The next model's read ends this one.
+    startRead(SHORT, new AbortController(), modelId).done.catch(() => undefined)
+    return (FakeWorker.all.at(-1)!.posted[0] as { threads?: number }).threads
+  }
+
+  it('splits the speech threads between the workers a model may run side by side', () => {
+    vi.stubGlobal('navigator', { hardwareConcurrency: 24 })
+    vi.stubGlobal('SharedArrayBuffer', class {})
+    expect(threadsFor('kokoro-82m')).toBe(2)
+    // Supertonic runs on one worker, so that worker gets them all.
+    expect(threadsFor('supertonic-3')).toBe(4)
+  })
+
+  it('uses one thread per worker without shared memory', () => {
+    vi.stubGlobal('navigator', { hardwareConcurrency: 24 })
+    vi.stubGlobal('SharedArrayBuffer', undefined)
+    expect(threadsFor('kokoro-82m')).toBe(1)
   })
 })
