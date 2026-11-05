@@ -21,6 +21,7 @@ import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
+import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 
 import { openSurface } from './lib/surfaces'
 import { isSessionClosing } from './lib/errorText'
@@ -587,6 +588,7 @@ export default function App() {
       </div>
 
       <CommandPalette />
+      <ThreadRenameDialog />
 
     </div>
 
