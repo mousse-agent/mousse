@@ -147,6 +147,9 @@ interface AppState {
   setPaletteOpen: (open: boolean) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
+  /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
+  threadFeedOrder: string[]
+  setThreadFeedOrder: (ids: string[]) => void
   sidebarMode: 'projects' | 'chats'
   setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
@@ -361,7 +364,7 @@ const personalWorkspaceKeys = [
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
-  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView',
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
   'reviewIgnoreWhitespace'
 ] as const
 let profileActivated = false
@@ -456,6 +459,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
+  threadFeedOrder: [],
+  setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
   worktreeByDefault: true,
   setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
@@ -681,6 +686,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
       threadsSidebarView: 'projects' as 'projects' | 'threads' | 'chats',
+      threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
@@ -699,6 +705,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       try {
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
+        if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
       } catch { /* malformed profile-local state is discarded */ }
     }
     messageCache.clear()

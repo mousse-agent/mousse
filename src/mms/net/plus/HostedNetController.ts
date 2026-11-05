@@ -25,6 +25,13 @@ import { DEFAULT_DIRECT_PATH, type DirectPathConfig } from '../transports/phoneW
  */
 const RENEW_MAX_MS = 5 * 60_000
 
+/**
+ * Timers stop counting while the computer sleeps, so a renewal wait is taken in steps of at most
+ * this long against the wall clock: after a night asleep the lapsed registration is renewed within
+ * seconds of waking, not up to RENEW_MAX_MS later.
+ */
+const RENEW_WAKE_CHECK_MS = 15_000
+
 /** The shortest wait a Space-peer route can impose between renewal passes, so a failing pass cannot spin. */
 const RENEW_MIN_MS = 20_000
 
@@ -531,9 +538,27 @@ export class HostedNetController implements HostedNet {
         )
       )
     this.plusRenewalDueAt = now + delay
+    this.waitForRenewal()
+    if (!this.plusAbortBound) {
+      this.plusAbortBound = true
+      this.host.signal.addEventListener(
+        'abort',
+        () => {
+          if (this.plusRenewal) clearTimeout(this.plusRenewal)
+          this.plusRenewal = undefined
+        },
+        { once: true }
+      )
+    }
+  }
+
+  /** Runs the renewal pass once the wall clock reaches plusRenewalDueAt, checking in short steps. */
+  private waitForRenewal(): void {
+    const left = Math.max(0, this.plusRenewalDueAt - this.host.clock.now())
     this.plusRenewal = setTimeout(() => {
       this.plusRenewal = undefined
       if (this.host.signal.aborted) return
+      if (this.host.clock.now() < this.plusRenewalDueAt) return this.waitForRenewal()
       void this.host
         .serial(async () => {
           try {
@@ -549,19 +574,8 @@ export class HostedNetController implements HostedNet {
           this.host.fail(error)
           this.host.emit()
         })
-    }, delay)
+    }, Math.min(left, RENEW_WAKE_CHECK_MS))
     this.plusRenewal.unref?.()
-    if (!this.plusAbortBound) {
-      this.plusAbortBound = true
-      this.host.signal.addEventListener(
-        'abort',
-        () => {
-          if (this.plusRenewal) clearTimeout(this.plusRenewal)
-          this.plusRenewal = undefined
-        },
-        { once: true }
-      )
-    }
   }
 
   private enrollmentEligible(): boolean {
