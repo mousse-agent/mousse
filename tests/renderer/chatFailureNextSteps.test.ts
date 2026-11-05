@@ -8,7 +8,9 @@ import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/
 import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-elements/tools/tool-calls-group'
 import { BashToolTerminalCard } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
-import { TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
+import { createTurnActions, TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
+import { chatStatusFromPhase, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
 
@@ -145,6 +147,55 @@ describe('an error in the transcript', () => {
   it('offers no Retry while a run streams', () => {
     render(list(actions(), 'streaming'))
     expect(button('Retry')).toBeNull()
+  })
+})
+
+describe('a failed turn', () => {
+  const failedThread: ChatMessage[] = [
+    { id: 'u1', role: 'user', content: 'Fix the staging deploy', timestamp: '2026-11-05T10:00:00.000Z' },
+    {
+      id: 's1',
+      role: 'system',
+      content: '[provider_request_invalid] The provider could not accept this request.',
+      timestamp: '2026-11-05T10:00:01.000Z',
+      error: { code: 'provider_request_invalid', message: 'The provider could not accept this request.' }
+    }
+  ]
+  const shown = (messages: ChatMessage[], send: (content: string, images?: ChatImageAttachment[]) => void) =>
+    createElement(
+      TurnActionsContext.Provider,
+      { value: createTurnActions({ prompt: (id) => messages.find((message) => message.id === id && message.role === 'user'), send }) },
+      createElement(MessageList, { messages: mousseToUIMessages(messages), status: chatStatusFromPhase('failed') })
+    )
+
+  it('shows its error in the transcript with Retry', () => {
+    render(shown(failedThread, vi.fn()))
+    expect(text()).toContain('Request failed')
+    expect(text()).toContain('The provider could not accept this request.')
+    expect(button('Retry')?.disabled).toBe(false)
+  })
+
+  it('sends the prompt again through the send path on Retry', () => {
+    const send = vi.fn()
+    render(shown(failedThread, send))
+    act(() => button('Retry')!.click())
+    expect(send).toHaveBeenCalledExactlyOnceWith('Fix the staging deploy', undefined)
+  })
+
+  it('resends the images it still has and says when some are missing', () => {
+    const send = vi.fn()
+    const withImages: ChatMessage[] = [
+      { ...failedThread[0], images: [{ name: 'a.png', mimeType: 'image/png', data: 'AAAA' }, { name: 'b.png', mimeType: 'image/png', data: '' }] },
+      failedThread[1]
+    ]
+    render(shown(withImages, send))
+    act(() => button('Retry (images not resent)')!.click())
+    expect(send).toHaveBeenCalledWith('Fix the staging deploy', [{ name: 'a.png', mimeType: 'image/png', data: 'AAAA' }])
+  })
+
+  it('keeps other lines from Mousse out of the transcript', () => {
+    expect(mousseToUIMessages([{ id: 's2', role: 'system', content: 'Turn stopped.', timestamp: '2026-11-05T10:00:02.000Z' }])
+      .flatMap((message) => message.parts).some((part) => (part as { type: string }).type === 'error')).toBe(false)
   })
 })
 
