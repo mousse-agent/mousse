@@ -69,14 +69,17 @@ afterEach(() => {
 describe('the Agents tab sidebar', () => {
   it('says one line per empty section and hides Recent', () => {
     show(ChatsSidebar, [])
-    expect(text('.chat-empty-hint')).toEqual(['No agents · Create one in Automations', 'No groups'])
+    expect(text('.chat-empty-hint')).toEqual(['No agents', 'No groups'])
     expect(text('.chat-section-heading h2')).toEqual(['Roster', 'Groups'])
     expect(host.textContent).not.toContain('Open a Space conversation')
   })
 
   it('opens Automations at Agents from the empty roster', () => {
     show(ChatsSidebar, [])
-    click(button('Create one in Automations'))
+    const create = button('Create agent')
+    expect(create?.classList.contains('settings-btn')).toBe(true)
+    expect(create?.querySelector('svg')).not.toBeNull()
+    click(create)
     expect(useAppStore.getState().scheduledOpen).toBe(true)
     expect(useAppStore.getState().automationsSectionRequest).toEqual({ section: 'agents' })
   })
@@ -86,6 +89,7 @@ describe('the Agents tab sidebar', () => {
     expect(button('New group')).toBeUndefined()
     show(ChatsSidebar, [agent])
     expect(button('New group')?.getAttribute('title')).toBe('New group')
+    expect(button('Create agent')).toBeUndefined()
   })
 
   it('keeps Spaces one click away from the Groups heading', () => {

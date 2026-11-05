@@ -19,8 +19,9 @@
 .chat-working-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; flex-shrink: 0; }
 .chat-empty-hint { font-size: 11px; line-height: 1.6; color: var(--text-secondary); margin: 0 8px 14px; }
 .chat-section-actions { display: flex; align-items: center; gap: 2px; }
-.chat-empty-link { padding: 0; border: 0; background: none; color: var(--text-secondary); font: inherit; text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 2px; cursor: pointer; }
-.chat-empty-link:hover, .chat-empty-link:focus-visible { color: var(--text-primary); text-decoration-color: currentColor; }
+/* The empty roster's one action: a neutral settings button sized like "Add project" under the first-launch composer. */
+/* Outside .settings-page it carries the spacing tokens of its anatomy (glyph gap, padding). */
+.chat-empty-create-agent { --space-4: 4px; --space-12: 12px; display: flex; height: 28px; width: fit-content; margin: 0 var(--ui-row-x, 8px) 14px; border-radius: var(--ui-control-radius); font-size: 12.5px; }
 .chat-recent-section { border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin-top: 16px; padding-top: 1px; }
 .chat-search { display: flex; align-items: center; border: 1px solid rgba(var(--accent-pale-rgb), .15); border-radius: 7px; margin: 0 6px 10px; padding: 5px; }
 .chat-search input { background: transparent; border: 0; min-width: 0; width: 100%; color: var(--text-primary); font-size: 12px; outline: 0; }
