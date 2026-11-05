@@ -19,7 +19,7 @@ describe('title bar layout', () => {
   it('uses native app-region drag on the title bar (not JS setBounds drag)', () => {
     expect(appStyles).toMatch(/\.titlebar-drag\s*\{[\s\S]*?-webkit-app-region:\s*drag/)
     expect(appStyles).toMatch(/\.titlebar-controls\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
-    expect(appStyles).toMatch(/\.titlebar-sidebar-toggle\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
+    expect(appStyles).toMatch(/\.titlebar-start-actions\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
   })
 
   it('keeps overlay-page headers clear of the macOS traffic lights', () => {

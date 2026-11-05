@@ -1,4 +1,7 @@
-import { PanelLeft, PanelRightClose, PanelRightOpen, SidebarRight } from '../lib/icons'
+import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen, Search } from '../lib/icons'
+import { useShortcutTitle } from '../commands/commandRegistry'
+import { createAndSelectThread } from '../lib/threadActions'
+import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { IconButton } from './IconButton'
 import {
@@ -27,6 +30,17 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
+  // In the Chats tab, New and Search act on agent chats.
+  const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
+  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : 'Show sidebar'
+  const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
+  const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
+  const searchTitle = useShortcutTitle('Search threads', 'threads.search')
+  const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')
+  // A disabled button explains why instead of offering its key.
+  const sideCardTitle = sideCardUnavailable ? sideCardButtonTitle(sideCardUnavailable) : detailsTitle
+  const panelLabel = mainAreaOpen ? 'Hide panel' : 'Show panel'
+  const panelTitle = useShortcutTitle(panelLabel, 'mainArea.toggle')
 
   const toggleSideCard = () => {
     const { sideCardOn, mainAreaOpen, sideCardOverlayOpen } = useAppStore.getState()
@@ -40,37 +54,53 @@ export function TitleBar() {
           Do not also call maximize() here — that toggles and undoes the OS maximize. */}
       <div className="titlebar-drag">
         <div className="titlebar-left">
-          <div className="titlebar-brand">
-            <button
-              type="button"
+          {/* The logo only marks the drag area above the rail; the actions follow it. */}
+          <img
+            className="titlebar-logo-icon"
+            src={logoIcon}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+          />
+          <div className="titlebar-start-actions">
+            <IconButton
+              icon={PanelLeft}
+              label={sidebarLabel}
+              title={sidebarTitle}
+              variant="titlebar"
               className="titlebar-sidebar-toggle"
-              aria-label={threadsSidebarOpen ? 'Close threads sidebar' : 'Open threads sidebar'}
-              title={threadsSidebarOpen ? 'Close threads sidebar' : 'Open threads sidebar'}
+              aria-expanded={threadsSidebarOpen}
               onClick={() => setThreadsSidebarOpen(!threadsSidebarOpen)}
-            >
-              <PanelLeft size={16} strokeWidth={2} />
-            </button>
-            <img
-              className="titlebar-logo-icon"
-              src={logoIcon}
-              alt=""
-              aria-hidden="true"
-              draggable={false}
             />
-            <span
-              className={`titlebar-title${threadsSidebarOpen ? ' titlebar-title-visible' : ''}`}
-            >
-              Mousse
-            </span>
+            <IconButton
+              icon={Edit}
+              label={chatsMode ? 'New chat' : 'New thread'}
+              title={chatsMode ? 'New chat' : newThreadTitle}
+              variant="titlebar"
+              onClick={() => {
+                if (chatsMode) useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })
+                else void createAndSelectThread()
+              }}
+            />
+            <IconButton
+              icon={Search}
+              label={chatsMode ? 'Search chats' : 'Search threads'}
+              title={chatsMode ? 'Search chats' : searchTitle}
+              variant="titlebar"
+              onClick={() => {
+                if (chatsMode) useChatsStore.setState({ searchOpen: true })
+                else useAppStore.getState().setThreadSearchOpen(true)
+              }}
+            />
           </div>
         </div>
       </div>
       <div className="titlebar-controls">
         <div className="titlebar-app-actions">
           <IconButton
-            icon={SidebarRight}
+            icon={Info}
             label="Thread details"
-            title={sideCardButtonTitle(sideCardUnavailable)}
+            title={sideCardTitle}
             variant="titlebar"
             className={sideCardVisible ? 'titlebar-side-card-on' : undefined}
             aria-pressed={sideCardVisible}
@@ -79,7 +109,8 @@ export function TitleBar() {
           />
           <IconButton
             icon={mainAreaOpen ? PanelRightClose : PanelRightOpen}
-            label={mainAreaOpen ? 'Hide app panel' : 'Show app panel'}
+            label={panelLabel}
+            title={panelTitle}
             variant="titlebar"
             className={mainAreaOpen ? 'titlebar-panel-open' : undefined}
             onClick={() => setMainAreaOpen(!mainAreaOpen)}
