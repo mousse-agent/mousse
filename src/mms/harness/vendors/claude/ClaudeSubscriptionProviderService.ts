@@ -145,6 +145,8 @@ export type ClaudeSubscriptionChatInput = {
   mcpTurnToken?: string
   /** Mousse's own instructions, appended to Claude Code's system prompt. */
   systemPromptAppend?: string
+  /** Claude Code compacts its session just below this many tokens (`claudeAutoCompactEnv`); absent keeps its default. */
+  autoCompactTokens?: number
   /**
    * `never`: a tool call that needs the user's approval, and `AskUserQuestion`, are denied without
    * asking (`RunPolicy.approvals`): nobody answers this run.
@@ -593,6 +595,21 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
   const env = { ...source }
   for (const key of ['ELECTRON_RUN_AS_NODE', ...CLAUDE_SESSION_MARKERS]) delete env[key]
   return env
+}
+
+/** Claude Code accepts an auto-compact window from 100K to 1M tokens. */
+const CLAUDE_AUTO_COMPACT_MIN = 100_000
+const CLAUDE_AUTO_COMPACT_MAX = 1_000_000
+
+/**
+ * The user's compaction threshold, as the window Claude Code's own auto-compact measures against
+ * (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`). Claude Code compacts a little below it to leave room for the
+ * reply, and never above the model's own window.
+ */
+export function claudeAutoCompactEnv(tokens: number | undefined): Record<string, string> {
+  if (tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) return {}
+  const window = Math.min(CLAUDE_AUTO_COMPACT_MAX, Math.max(CLAUDE_AUTO_COMPACT_MIN, Math.round(tokens)))
+  return { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(window) }
 }
 
 /** Claude Code's launch args that add text to its system prompt. */
@@ -1957,7 +1974,12 @@ export class ClaudeSubscriptionProviderService {
     const integrations = locked ? undefined : input.integrations
     // User MCP servers reference their secrets as `${VAR}`; the values ride in Claude's environment.
     // A locked turn's environment is built from nothing (`lockedEnv`), with the instance's key last.
-    const env = locked ? this.finalEnv(this.dependencies.lockedEnv!(locked.cwd)) : this.finalEnv({ ...this.environment(), ...integrations?.env })
+    // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
+    // results that fill its context, so only its auto-compact can keep it under the threshold.
+    const compaction = claudeAutoCompactEnv(input.autoCompactTokens)
+    const env = locked
+      ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
+      : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
     // cancellation. A one-shot query also hands it to the SDK; a live query has a lifetime of its own.
     const controller = new AbortController()

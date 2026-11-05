@@ -10167,6 +10167,8 @@ export class OrchestratorService extends EventEmitter {
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
           },
+          ...(contextSettings.compactionEnabled && typeof contextSettings.compactionTokens === 'number'
+            ? { compactionTokens: contextSettings.compactionTokens } : {}),
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
             return nativeAgentHistory(this.nativeContext)

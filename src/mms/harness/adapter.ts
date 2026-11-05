@@ -368,6 +368,12 @@ export interface AdapterHost {
      */
     prepareNativeContext(provider: string, model: string): RecoveredContext | null
     /**
+     * The user's compaction threshold in tokens, for a runtime that compacts its own session (most
+     * of its context is tool calls and results Mousse's transcript never holds). Absent when
+     * compaction is off or set to the model's maximum: the runtime keeps its own default.
+     */
+    compactionTokens?: number
+    /**
      * Appends the turn's reply (with the metrics reported through `TurnSink.providerMetrics`) to
      * the canonical transcript, once, persists it and returns the serialised history the runtime
      * fingerprints for session resume (`commitConversation`).
