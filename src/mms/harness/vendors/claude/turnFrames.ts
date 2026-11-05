@@ -86,9 +86,11 @@ export class TurnFrames {
           if (this.thinking) this.sink.onThinking?.(this.thinking)
         }
       }
-      // Each thinking block is a paragraph of its own.
+      // Each thinking block is a paragraph of its own, and so is each text block (a note before a tool call, then the answer).
       if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id && this.thinking)
         this.thinking += '\n\n'
+      if (event.type === 'content_block_start' && event.content_block.type === 'text' && !message.parent_tool_use_id && /\S$/.test(this.text))
+        this.text += '\n\n'
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         const parent = message.parent_tool_use_id ?? undefined
         // A call of a subagent this turn does not have open (a background agent of an earlier turn) is not this turn's.

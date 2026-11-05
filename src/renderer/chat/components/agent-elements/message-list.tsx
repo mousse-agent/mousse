@@ -54,6 +54,7 @@ import {
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  settleFinishedTurn,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptUndoButton } from "../../../components/PromptUndoControls";
@@ -1706,7 +1707,7 @@ export const MessageList = memo(function MessageList({
                             // Subagent results whose subagents have a card in
                             // the thread show there, as the card's state: the
                             // results add no line of their own.
-                            const answerMsgs = turn.assistantMsgs.flatMap((msg) => {
+                            const turnMsgs = turn.assistantMsgs.flatMap((msg) => {
                               const notice = readSubagentNotice(msg);
                               if (!notice) return [msg];
                               const rest = notice.filter(
@@ -1715,13 +1716,20 @@ export const MessageList = memo(function MessageList({
                               if (rest.length === 0) return [];
                               return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
                             });
-                            const analyses = answerMsgs.map((msg) =>
+                            const turnAnalyses = turnMsgs.map((msg) =>
                               analyzeAssistantMessage(
                                 msg.parts ?? [],
                                 suppressQuestionTool,
                                 subagentCardIds,
                               ),
                             );
+                            // A finished turn ends on its answer: the notes and
+                            // activity that led to it collapse above it.
+                            const settled = isTurnStreaming
+                              ? { order: turnMsgs.map((_, index) => index), analyses: turnAnalyses }
+                              : settleFinishedTurn(turnMsgs, turnAnalyses);
+                            const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
+                            const analyses = settled.order.map((index) => settled.analyses[index]!);
                             const segments = partitionTurnSegments(
                               analyses.map((a) => a.toolsOnly),
                               analyses.map((a) => a.cardsOnly),

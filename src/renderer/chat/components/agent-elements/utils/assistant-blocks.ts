@@ -159,8 +159,70 @@ export type TurnSegment =
   | { kind: "tools"; msgIndices: number[] }
   | { kind: "cards"; msgIndices: number[] };
 
-/** A thinking part's text: what streamed so far, or its final output. */
+/** A note the agent wrote while it worked, as a row of a finished turn's activity. */
+export const NOTE_PART_TYPE = "tool-Note";
+
+/** The text of a reply row, or "" when the message is not one. */
+function replyText(message: SettleTurnMessage): string {
+  if (message.role !== "assistant") return "";
+  return (message.parts ?? [])
+    .filter(isTextPart)
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export type SettleTurnMessage = { id: string; role?: string; parts?: unknown[] };
+
+/**
+ * A finished turn as it reads once the work is done: its answer, the last reply row, comes last.
+ * Activity after the answer moves above it, and reply rows before it that hold only text (the
+ * agent's notes before its tool calls) join the activity as note rows. Returns the order to draw
+ * the messages in and each message's analysis; a turn with no reply text keeps its order.
+ */
+export function settleFinishedTurn(
+  messages: SettleTurnMessage[],
+  analyses: AssistantMessageAnalysis[],
+): { order: number[]; analyses: AssistantMessageAnalysis[] } {
+  const order = messages.map((_, index) => index);
+  let answer = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (replyText(messages[index]!)) {
+      answer = index;
+      break;
+    }
+  }
+  if (answer === -1) return { order, analyses };
+  const settled = analyses.map((analysis, index) => {
+    const message = messages[index]!;
+    const text = index < answer ? replyText(message) : "";
+    if (!text || !(message.parts ?? []).every(isTextPart)) return analysis;
+    const part: ToolPartBase = {
+      type: NOTE_PART_TYPE,
+      toolCallId: `${message.id}-note`,
+      state: "output-available",
+      input: { text },
+    };
+    return { toolsOnly: true, toolItems: [{ part }], cardsOnly: false, cardParts: [] };
+  });
+  const after = order.filter((index) => index > answer);
+  return {
+    order: [
+      ...order.filter((index) => index < answer),
+      ...after.filter((index) => settled[index]!.toolsOnly),
+      answer,
+      ...after.filter((index) => !settled[index]!.toolsOnly),
+    ],
+    analyses: settled,
+  };
+}
+
+/** A thinking part's text (what streamed so far, or its final output), or a note's. */
 function thoughtTextFromPart(part: ToolPartBase): string {
+  if (part.type === NOTE_PART_TYPE) {
+    const text = isRecord(part.input) ? part.input.text : undefined;
+    return typeof text === "string" ? text : "";
+  }
   if (part.type !== "tool-Thinking") return "";
   const input = isRecord(part.input) ? part.input.thought : undefined;
   const output = part.output ?? part.result;
@@ -173,8 +235,8 @@ function thoughtTextFromPart(part: ToolPartBase): string {
 
 /**
  * Title for a grouped run of thoughts and tool calls: one line from the
- * latest thought that actually has text. Empty when the run should fall back
- * to "Tool calls".
+ * latest thought (or note) that actually has text. Empty when the run should
+ * fall back to "Tool calls".
  */
 export function activityGroupLabel(items: AssistantToolItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {

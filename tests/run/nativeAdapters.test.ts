@@ -161,13 +161,14 @@ describe('ClaudeSubscriptionAdapter', () => {
   it('builds the chat input and relays the stream, steer, metrics and commit through the sink', async () => {
     const client = claudeClient(async (chat) => {
       chat.onThinking?.('Considering')
-      chat.onText('Hel')
+      chat.onText('Reading')
+      chat.onText('Reading the file.')
       expect(chat.drainSteer?.()).toBe('steer text')
       chat.onSteer?.('steer text')
       chat.onTool?.({ phase: 'start', callId: 'tool-1', title: 'Read', toolName: 'Read' })
-      // The runtime's thinking is cumulative; what follows the call is a thought of its own.
+      // The runtime's thinking and text are cumulative; what follows the call is a thought and a reply row of its own.
       chat.onThinking?.('Considering\n\nRead the file next')
-      chat.onText('Hello')
+      chat.onText('Reading the file.\n\nHello')
       chat.onLineEdits?.(3)
       chat.onMetrics?.({
         realModelName: 'claude-real',
@@ -177,7 +178,7 @@ describe('ClaudeSubscriptionAdapter', () => {
         usage: { input: 10, output: 5, cacheRead: 10, cacheWrite: 5, totalTokens: 30, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         context: { input: 10, cacheRead: 10, cacheWrite: 5, contextWindow: 200_000 }
       })
-      return 'Hello'
+      return 'Reading the file.\n\nHello'
     })
     const sink = recordingSink()
     const turnHost = host({ prepareNativeContext: () => ({ messages: [], nativeHistory: 'compacted history' }) })
@@ -208,11 +209,14 @@ describe('ClaudeSubscriptionAdapter', () => {
       'thinking',
       'text',
       'text',
+      'text',
       'steerAccepted',
       'thinking',
+      'text',
       'tool',
       'thinking',
       'thinking',
+      'text',
       'text',
       'lineEdits',
       'providerMetrics',
@@ -229,9 +233,13 @@ describe('ClaudeSubscriptionAdapter', () => {
       { phase: 'delta', content: 'Read the file next' },
       { phase: 'complete', content: 'Read the file next' }
     ])
+    // The note before the call closes its reply row too; the answer after it gets a row of its own.
     expect(sink.calls.filter(([name]) => name === 'text').map(([, event]) => event)).toEqual([
       { phase: 'start', content: '', contentIndex: 0 },
-      { phase: 'delta', content: 'Hel', contentIndex: 0 },
+      { phase: 'delta', content: 'Reading', contentIndex: 0 },
+      { phase: 'delta', content: 'Reading the file.', contentIndex: 0 },
+      { phase: 'complete', content: 'Reading the file.', contentIndex: 0 },
+      { phase: 'start', content: '', contentIndex: 0 },
       { phase: 'delta', content: 'Hello', contentIndex: 0 },
       { phase: 'complete', content: 'Hello', contentIndex: 0 }
     ])
@@ -245,10 +253,11 @@ describe('ClaudeSubscriptionAdapter', () => {
       activity: { toolName: 'Read' }
     })
     expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 10, output: 5, cacheRead: 10, cacheWrite: 5 })
-    expect(turnHost.committed).toEqual(['Hello'])
-    expect(client.commitConversation).toHaveBeenCalledWith('thread-1', 'history+Hello')
+    // The turn's whole text is still the reply the run and the native history keep.
+    expect(turnHost.committed).toEqual(['Reading the file.\n\nHello'])
+    expect(client.commitConversation).toHaveBeenCalledWith('thread-1', 'history+Reading the file.\n\nHello')
     expect(result).toMatchObject({
-      text: 'Hello',
+      text: 'Reading the file.\n\nHello',
       aborted: false,
       modelName: 'claude-real',
       totalResponseTimeMs: 50,
