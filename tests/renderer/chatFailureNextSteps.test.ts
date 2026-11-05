@@ -9,6 +9,7 @@ import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-element
 import { BashToolTerminalCard } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { ErrorMessage } from '../../src/renderer/chat/components/agent-elements/error-message'
 import { TurnActionsContext, type TurnActions } from '../../src/renderer/chat/components/agent-elements/turn-actions'
+import { RunInterruptedNotice } from '../../src/renderer/chat/components/MousseAgentChatShell'
 import type { TimelineStep } from '../../src/renderer/chat/components/agent-elements/types/timeline'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -144,5 +145,22 @@ describe('an error in the transcript', () => {
   it('offers no Retry while a run streams', () => {
     render(list(actions(), 'streaming'))
     expect(button('Retry')).toBeNull()
+  })
+})
+
+describe('a stopped run', () => {
+  const continueButton = () => [...host.querySelectorAll('button')].find((entry) => entry.textContent === 'Continue')
+
+  it('offers Continue on the interrupted notice', () => {
+    const onContinue = vi.fn()
+    render(createElement(RunInterruptedNotice, { onContinue }))
+    expect(text()).toContain('Run interrupted')
+    act(() => continueButton()!.click())
+    expect(onContinue).toHaveBeenCalledOnce()
+  })
+
+  it('shows no Continue without one, as while a run is going', () => {
+    render(createElement(RunInterruptedNotice, {}))
+    expect(continueButton()).toBeUndefined()
   })
 })

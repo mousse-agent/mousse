@@ -58,6 +58,17 @@ function MousseInputBarSlot() {
   return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
 
+/** The last turn of a stopped run; Continue picks the work up again. */
+export function RunInterruptedNotice({ onContinue }: { onContinue?: () => void }) {
+  return <div className="chat-run-interrupted" role="status">
+    <span className="chat-run-interrupted-label">
+      <X size={12} strokeWidth={1.8} aria-hidden="true" />
+      <span>Run interrupted</span>
+      {onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+    </span>
+  </div>
+}
+
 interface MousseAgentChatShellProps {
   threadId?: string | null
   busy?: boolean
@@ -119,13 +130,7 @@ export function MousseAgentChatShell({
           slots={slots}
           lastTurnNotice={<>
             <WorkspaceRecoveryBanner threadId={threadId} />
-            {paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <div className="chat-run-interrupted" role="status">
-              <span className="chat-run-interrupted-label">
-                <X size={12} strokeWidth={1.8} aria-hidden="true" />
-                <span>Run interrupted</span>
-                {turnActions && !busy && <button type="button" className="chat-run-interrupted-action" onClick={turnActions.continueRun}>Continue</button>}
-              </span>
-            </div> : undefined}
+            {paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <RunInterruptedNotice onContinue={turnActions && !busy ? turnActions.continueRun : undefined} /> : undefined}
           </>}
           showCopyToolbar
           enableImagePreview
