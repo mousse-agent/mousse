@@ -1,0 +1,148 @@
+/* Collapse (components/ui/Collapse.tsx): a quick height and fade when a group opens or closes.
+   Height: the grid row goes 0fr -> 1fr while the clip (min-height 0, overflow hidden) follows it, so the
+   content is laid out once at its full size and only the clip changes. Fade: the content fades and drops
+   in by 3px; in a short list the first eight items do it one after another, 12ms apart.
+   The group is the same one-cell grid whether it moves or not. A settled group then has a 1fr row for
+   the close to start from, and its content's margins stay inside it in every state, so nothing shifts
+   when the motion ends. `data-motion` is present only while it moves: a settled group clips nothing
+   (focus rings, hover actions), and rows added to an open list just appear.
+   Selectors use child combinators so a nested group (a folder in a tree) keeps its own state.
+   Durations match COLLAPSE_OPEN_MS / COLLAPSE_CLOSE_MS / COLLAPSE_STAGGER_MS. */
+
+/* Open: a strong ease-out. Close: a milder ease-out, so the short close still shows its middle frames
+   instead of finishing in its first third. */
+:root {
+  --ui-collapse-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ui-collapse-ease-close: cubic-bezier(0.5, 1, 0.89, 1);
+}
+
+.ui-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.ui-collapse-clip {
+  min-width: 0;
+  min-height: 0;
+}
+
+.ui-collapse[data-motion] > .ui-collapse-clip {
+  overflow: hidden;
+}
+
+/* Open: 0fr -> 1fr, content fades in and settles from 3px above. */
+.ui-collapse[data-motion='enter'] {
+  transition: grid-template-rows 160ms var(--ui-collapse-ease);
+}
+
+.ui-collapse[data-motion='enter'] > .ui-collapse-clip > * {
+  transition: opacity 160ms var(--ui-collapse-ease), transform 160ms var(--ui-collapse-ease);
+}
+
+@starting-style {
+  .ui-collapse[data-motion='enter'] {
+    grid-template-rows: 0fr;
+  }
+
+  .ui-collapse[data-motion='enter'] > .ui-collapse-clip > * {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* Short lists: the first eight items follow one another. Items are the inner wrapper's children, or the
+   children of a `.ui-collapse-items` list directly inside it (which then does not move as one item). */
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(-n + 8),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(-n + 8) {
+  transition: opacity 160ms var(--ui-collapse-ease), transform 160ms var(--ui-collapse-ease);
+}
+
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(2),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(2) { transition-delay: 12ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(3),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(3) { transition-delay: 24ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(4),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(4) { transition-delay: 36ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(5),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(5) { transition-delay: 48ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(6),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(6) { transition-delay: 60ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(7),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(7) { transition-delay: 72ms; }
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(8),
+.ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(8) { transition-delay: 84ms; }
+
+@starting-style {
+  .ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > :not(.ui-collapse-items):nth-child(-n + 8),
+  .ui-collapse[data-motion='enter'][data-stagger] > .ui-collapse-clip > * > .ui-collapse-items > :nth-child(-n + 8) {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* Close: 1fr -> 0fr while the content fades out, all at once. */
+.ui-collapse[data-motion='exit'] {
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 130ms var(--ui-collapse-ease-close);
+}
+
+.ui-collapse[data-motion='exit'] > .ui-collapse-clip > * {
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity 110ms var(--ui-collapse-ease-close), transform 130ms var(--ui-collapse-ease-close);
+}
+
+/* The bottom edge of a closing group fades out over its last 20px (the last 4px fully), so a row the
+   shrinking clip cuts through (a selected row's highlight) fades with its text instead of showing as a
+   sliver once the text is gone. */
+.ui-collapse[data-motion='exit'] > .ui-collapse-clip {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent calc(100% - 4px));
+}
+
+/* A toggle's chevron turns with the group: same easing, the open or close duration, starting in the same
+   frame (it changes in the same render as the group). The chevron marks itself open with `data-open`, and
+   this rule turns it: one glyph, rotated by `transform` (a chevron that points down when open sets
+   `--ui-collapse-chevron-turn: 180deg`). Tailwind's `rotate-*` classes set the separate `rotate` property,
+   which is listed too so such a class still turns instead of snapping. */
+.ui-collapse-chevron {
+  transform: rotate(0deg);
+  transition-property: transform, rotate;
+  transition-duration: 130ms;
+  transition-timing-function: var(--ui-collapse-ease-close);
+}
+
+.ui-collapse-chevron[data-open] {
+  transform: rotate(var(--ui-collapse-chevron-turn, 90deg));
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
+}
+
+/* Native <details> disclosures (Settings "Advanced", dialog disclosures) get the same height and fade. */
+details.ui-collapse-details {
+  interpolate-size: allow-keywords;
+}
+
+details.ui-collapse-details::details-content {
+  block-size: 0;
+  overflow: clip;
+  opacity: 0;
+  transition: block-size 130ms var(--ui-collapse-ease-close), opacity 110ms var(--ui-collapse-ease-close), content-visibility 130ms allow-discrete;
+}
+
+details.ui-collapse-details[open]::details-content {
+  block-size: auto;
+  opacity: 1;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-collapse[data-motion],
+  .ui-collapse[data-motion] *,
+  .ui-collapse-chevron,
+  details.ui-collapse-details::details-content {
+    transition: none !important;
+  }
+}
