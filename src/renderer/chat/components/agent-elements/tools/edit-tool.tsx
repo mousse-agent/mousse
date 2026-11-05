@@ -5,6 +5,7 @@ import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
+import { Collapse } from "../../../../components/ui/Collapse";
 import { CODE_FONT_VAR } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
@@ -371,15 +372,17 @@ export function EditToolDiffCard({
         )}
         {hasBody && isCollapsible && (
           <IconChevronRight
-            className={
-              "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
-              (isExpanded ? "rotate-90" : "rotate-0")
-            }
+            className="ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted ml-1"
+            data-open={isExpanded || undefined}
           />
         )}
       </button>
-      {hasBody && (!isCollapsible || isExpanded) ? (
-        <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
+      <Collapse
+        open={hasBody && (!isCollapsible || isExpanded)}
+        animate={isCollapsible}
+        className={`${diffClassName} text-[12px]`}
+        style={diffCssVars}
+      >
           <div
             className={isCollapsible ? "group/edit-diff relative" : "relative"}
           >
@@ -482,8 +485,7 @@ export function EditToolDiffCard({
               </>
             )}
           </div>
-        </div>
-      ) : null}
+      </Collapse>
       {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
     </div>
   );

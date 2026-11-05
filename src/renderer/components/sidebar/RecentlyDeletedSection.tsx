@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ArchiveRestore, RotateCcw, Trash2 } from '../../lib/icons'
 import { createTrashController, deleteElsewhere, trashRows, type TrashController, type TrashState } from '../../lib/trashInventory'
 import { PermanentDeleteDialog } from './PermanentDeleteDialog'
+import { Collapse } from '../ui/Collapse'
 import { skippedLine } from '../../lib/threadSearchSkipped'
 
 /** While the section is open the list is re-read this often, so the countdown and the daemon's own sweeps show up. */
@@ -128,14 +129,13 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
           <span className="threads-sidebar-settled-count" data-testid="sidebar-trash-count">{rows.length}</span>
         </button>
       </div>
-      {expanded && (
-        <div id={listId} className="threads-sidebar-tree threads-sidebar-trash-list">
+      <Collapse open={expanded} id={listId} className="threads-sidebar-tree threads-sidebar-trash-list" itemCount={rows.length}>
           {state.refreshError && <p className="threads-sidebar-trash-error" role="alert">{state.refreshError}</p>}
           {strayNotice && <p className="threads-sidebar-trash-error" role="alert">{strayNotice}</p>}
           {skippedLine(state.skipped, 'Not listed') && <p className="threads-sidebar-trash-meta" data-testid="sidebar-trash-skipped">{skippedLine(state.skipped, 'Not listed')}</p>}
           {rows.length === 0
             ? <div className="threads-sidebar-empty">{state.loaded ? 'No recently deleted threads' : 'Loading…'}</div>
-            : <ul className="threads-sidebar-trash-rows" aria-label="Recently deleted threads">
+            : <ul className="threads-sidebar-trash-rows ui-collapse-items" aria-label="Recently deleted threads">
                 {rows.map((row) => {
                   const notice = state.notice?.taskId === row.taskId ? state.notice.message : undefined
                   return (
@@ -157,8 +157,7 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
                   )
                 })}
               </ul>}
-        </div>
-      )}
+      </Collapse>
     </div>
   )
 }
