@@ -295,7 +295,7 @@
 .speech-models-progress-fill {
   stroke: var(--accent);
   stroke-linecap: round;
-  transition: stroke-dashoffset 0.2s;
+  transition: stroke-dashoffset var(--ui-dur-slow);
 }
 
 .speech-models-progress > .settings-icon-btn {
