@@ -854,11 +854,13 @@ html[data-theme='high-contrast'] .settings-seg button.on {
 
 .settings-advanced-chevron {
   color: var(--text-secondary);
-  transition: transform 0.15s;
+  transition: transform 130ms var(--ui-collapse-ease-close);
 }
 
 .settings-advanced[open] .settings-advanced-chevron {
   transform: rotate(90deg);
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
 }
 
 .settings-advanced-body > .settings-group:first-child {

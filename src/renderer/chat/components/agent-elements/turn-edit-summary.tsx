@@ -184,7 +184,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
         >
-          <ChevronRight size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
+          <ChevronRight size={14} strokeWidth={2} className={`turn-edits-chevron ui-collapse-chevron${open ? " is-open" : ""}`} data-open={open || undefined} />
           <span className="turn-edits-count">{countLabel}</span>
           <Stat added={summary.added} removed={summary.removed} />
         </button>

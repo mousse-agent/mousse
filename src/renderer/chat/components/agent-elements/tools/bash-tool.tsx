@@ -148,9 +148,10 @@ export function BashToolTerminalCard({
         )}
         <IconChevronRight
           className={cn(
-            "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out",
+            "ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted",
             expanded && "rotate-90",
           )}
+          data-open={expanded || undefined}
         />
       </button>
       <Collapse open={expanded} className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">

@@ -373,9 +373,10 @@ export function EditToolDiffCard({
         {hasBody && isCollapsible && (
           <IconChevronRight
             className={
-              "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
+              "ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted ml-1 " +
               (isExpanded ? "rotate-90" : "rotate-0")
             }
+            data-open={isExpanded || undefined}
           />
         )}
       </button>

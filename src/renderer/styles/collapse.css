@@ -2,24 +2,30 @@
    Height: the grid row goes 0fr -> 1fr while the clip (min-height 0, overflow hidden) follows it, so the
    content is laid out once at its full size and only the clip changes. Fade: the content fades and drops
    in by 3px; in a short list the first eight items do it one after another, 12ms apart.
-   `data-motion` is present only while it moves: a settled group is a plain block that clips nothing
+   The group is the same one-cell grid whether it moves or not. A settled group then has a 1fr row for
+   the close to start from, and its content's margins stay inside it in every state, so nothing shifts
+   when the motion ends. `data-motion` is present only while it moves: a settled group clips nothing
    (focus rings, hover actions), and rows added to an open list just appear.
    Selectors use child combinators so a nested group (a folder in a tree) keeps its own state.
    Durations match COLLAPSE_OPEN_MS / COLLAPSE_CLOSE_MS / COLLAPSE_STAGGER_MS. */
 
-.ui-collapse {
+/* Open: a strong ease-out. Close: a milder ease-out, so the short close still shows its middle frames
+   instead of finishing in its first third. */
+:root {
   --ui-collapse-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ui-collapse-ease-close: cubic-bezier(0.5, 1, 0.89, 1);
+}
+
+.ui-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
 }
 
 .ui-collapse-clip {
   min-width: 0;
   min-height: 0;
-}
-
-.ui-collapse[data-motion] {
-  display: grid;
-  grid-template-rows: 1fr;
 }
 
 .ui-collapse[data-motion] > .ui-collapse-clip {
@@ -79,13 +85,24 @@
 /* Close: 1fr -> 0fr while the content fades out, all at once. */
 .ui-collapse[data-motion='exit'] {
   grid-template-rows: 0fr;
-  transition: grid-template-rows 130ms var(--ui-collapse-ease);
+  transition: grid-template-rows 130ms var(--ui-collapse-ease-close);
 }
 
 .ui-collapse[data-motion='exit'] > .ui-collapse-clip > * {
   opacity: 0;
   transform: translateY(-3px);
-  transition: opacity 110ms var(--ui-collapse-ease), transform 130ms var(--ui-collapse-ease);
+  transition: opacity 110ms var(--ui-collapse-ease-close), transform 130ms var(--ui-collapse-ease-close);
+}
+
+/* A toggle's chevron turns with the group: same easing, the open or close duration, starting in the same
+   frame (it changes in the same render as the group). The chevron marks itself open with `data-open`. */
+.ui-collapse-chevron {
+  transition: transform 130ms var(--ui-collapse-ease-close);
+}
+
+.ui-collapse-chevron[data-open] {
+  transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
 }
 
 /* Native <details> disclosures (Settings "Advanced", dialog disclosures) get the same height and fade. */
@@ -97,18 +114,20 @@ details.ui-collapse-details::details-content {
   block-size: 0;
   overflow: clip;
   opacity: 0;
-  transition: block-size 130ms var(--ui-collapse-ease), opacity 110ms var(--ui-collapse-ease), content-visibility 130ms allow-discrete;
+  transition: block-size 130ms var(--ui-collapse-ease-close), opacity 110ms var(--ui-collapse-ease-close), content-visibility 130ms allow-discrete;
 }
 
 details.ui-collapse-details[open]::details-content {
   block-size: auto;
   opacity: 1;
   transition-duration: 160ms;
+  transition-timing-function: var(--ui-collapse-ease);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .ui-collapse[data-motion],
   .ui-collapse[data-motion] *,
+  .ui-collapse-chevron,
   details.ui-collapse-details::details-content {
     transition: none !important;
   }

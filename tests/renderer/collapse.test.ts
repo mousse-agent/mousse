@@ -83,6 +83,18 @@ describe('Collapse', () => {
     expect(host.innerHTML).toBe('')
   })
 
+  it('keeps the rows mounted and inert for the whole close, then unmounts them', () => {
+    draw({ open: true })
+    draw({ open: false })
+    expect(host.querySelectorAll('.ui-collapse > .ui-collapse-clip > ul.rows > li')).toHaveLength(3)
+    expect(host.querySelector('.ui-collapse ul.rows')?.closest('[inert]')).toBe(shell())
+    advance(COLLAPSE_CLOSE_MS - 10)
+    expect(host.querySelectorAll('li')).toHaveLength(3)
+    expect(shell()?.hasAttribute('inert')).toBe(true)
+    advance(100)
+    expect(host.querySelectorAll('li')).toHaveLength(0)
+  })
+
   it('reopening while it closes keeps the content and turns back', () => {
     draw({ open: true })
     draw({ open: false })
@@ -127,6 +139,22 @@ describe('Collapse', () => {
     expect(css).not.toMatch(/nth-child\(9\)/)
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*transition: none !important/)
   })
+
+  it('lays a settled group out as the same one-row grid it moves in, so the close has a row to shrink from', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
+    const base = css.match(/\n\.ui-collapse \{([^}]*)\}/)?.[1] ?? ''
+    expect(base).toMatch(/display: grid;/)
+    expect(base).toMatch(/grid-template-rows: 1fr;/)
+    // Only the clip and the transitions depend on the motion; the layout does not.
+    expect(css).not.toMatch(/\.ui-collapse\[data-motion\] \{[^}]*display/)
+  })
+
+  it('turns the chevron with the group: the open and close durations and easings', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
+    expect(css).toMatch(/\[data-motion='exit'\]\s*\{[^}]*grid-template-rows 130ms var\(--ui-collapse-ease-close\)/)
+    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transition: transform 130ms var\(--ui-collapse-ease-close\);/)
+    expect(css).toMatch(/\.ui-collapse-chevron\[data-open\] \{\s*transition-duration: 160ms;\s*transition-timing-function: var\(--ui-collapse-ease\);/)
+  })
 })
 
 describe('Collapse adopters', () => {
@@ -160,12 +188,18 @@ describe('Collapse adopters', () => {
     const toggle = host.querySelector<HTMLButtonElement>('button[aria-expanded]')!
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(host.textContent).not.toContain('Read a.ts')
+    const chevron = () => toggle.querySelector('.ui-collapse-chevron')
+    expect(chevron()?.hasAttribute('data-open')).toBe(false)
     act(() => toggle.click())
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(shell()?.dataset.motion).toBe('enter')
+    expect(chevron()?.hasAttribute('data-open')).toBe(true)
     expect(host.querySelector('.ui-collapse-items')?.children).toHaveLength(2)
     act(() => toggle.click())
+    // The chevron turns back in the same render the close starts, while the rows are still there.
     expect(shell()?.dataset.motion).toBe('exit')
+    expect(chevron()?.hasAttribute('data-open')).toBe(false)
+    expect(host.textContent).toContain('Read a.ts')
     advance(COLLAPSE_CLOSE_MS + 50)
     expect(host.textContent).not.toContain('Read a.ts')
   })

@@ -326,8 +326,10 @@
   }
 }
 
+/* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
+   merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
-  margin: 2px 0 8px 17px;
+  margin: 2px 0 0 17px;
   padding-left: 6px;
   border-left: 1px solid rgba(var(--accent-pale-rgb), 0.1);
 }

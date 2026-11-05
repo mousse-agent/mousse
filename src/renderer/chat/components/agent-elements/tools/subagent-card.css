@@ -231,7 +231,6 @@
   width: 14px;
   height: 14px;
   color: var(--ui-faint);
-  transition: transform 120ms ease;
 }
 
 .subagent-group-chevron.is-open {

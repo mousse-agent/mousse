@@ -83,10 +83,11 @@ export function ToolRowBase({
         <div>
           <IconChevronRight
             className={cn(
-              "shrink-0 text-muted-foreground transition-transform duration-150 ease-out",
+              "ui-collapse-chevron shrink-0 text-muted-foreground",
               "size-[18px]",
               isExpanded ? "rotate-90" : "rotate-0",
             )}
+            data-open={isExpanded || undefined}
           />
         </div>
       )}
