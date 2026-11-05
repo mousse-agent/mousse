@@ -29,6 +29,13 @@ function isTextPart(part: MessagePart): part is { type: "text"; text: string } {
   );
 }
 
+/** The file name an attached image part carries, if any. */
+function getImageNameFromPart(part: unknown): string | undefined {
+  if (!isRecord(part)) return undefined;
+  const name = part.filename ?? part.name ?? part.fileName;
+  return typeof name === "string" && name.trim() ? name : undefined;
+}
+
 function getImageUrlFromPart(part: unknown): string | null {
   if (!isRecord(part)) return null;
   const type = part.type;
@@ -107,7 +114,7 @@ export const UserMessage = memo(function UserMessage({
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
 
-  const images: string[] = [];
+  const images: Array<{ url: string; name?: string }> = [];
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
   const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
@@ -116,7 +123,7 @@ export const UserMessage = memo(function UserMessage({
       if (reference) references.push(reference);
     }
     const imageUrl = getImageUrlFromPart(part);
-    if (imageUrl) images.push(imageUrl);
+    if (imageUrl) images.push({ url: imageUrl, name: getImageNameFromPart(part) });
     const file = getFileFromPart(part);
     if (file) files.push(file);
   }
@@ -124,9 +131,10 @@ export const UserMessage = memo(function UserMessage({
     for (const att of message.experimental_attachments as Array<{
       contentType?: string;
       url?: string;
+      name?: string;
     }>) {
       if (att.contentType?.startsWith("image/") && att.url) {
-        images.push(att.url);
+        images.push({ url: att.url, name: att.name || undefined });
       }
     }
   }
@@ -137,36 +145,45 @@ export const UserMessage = memo(function UserMessage({
   const sentFromName = (message.metadata as { sentFrom?: { name?: unknown } } | undefined)?.sentFrom?.name;
   const sentFrom = typeof sentFromName === "string" && sentFromName ? sentFromName : undefined;
 
-  const lightboxImages = images.map((url, i) => ({
+  const lightboxImages = images.map(({ url, name }, i) => ({
     id: `${message.id}-img-${i}`,
     url,
-    filename: `image-${i + 1}`,
+    filename: name ?? `Image ${i + 1}`,
   }));
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
       <div className="chat-user-bubble max-w-[calc(95%-40px)] ms-[70px] px-3.5 py-1.5 text-base rounded-an-message bg-an-user-message-bg text-an-user-message-text">
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
-        {images.map((url, i) => (
-          <div
-            key={i}
-            className={cn(
-              "h-[132px] w-[196px] shrink-0 p-1.5 bg-an-foreground/4 rounded-an-message",
-              enableImagePreview && "cursor-pointer",
-            )}
-            onClick={
-              enableImagePreview ? () => setLightboxIndex(i) : undefined
-            }
-          >
+        {images.map(({ url, name }, i) => {
+          const label = name ?? `Image ${i + 1}`;
+          const image = (
             <img
               src={url}
-              alt="attachment"
+              alt={label}
               loading="lazy"
               decoding="async"
               className="block h-[120px] w-[184px] object-cover rounded-an-message-inner"
             />
-          </div>
-        ))}
+          );
+          const tileClass = "chat-user-image h-[132px] w-[196px] shrink-0 p-1.5 bg-an-foreground/4 rounded-an-message";
+          return enableImagePreview ? (
+            <button
+              key={i}
+              type="button"
+              className={cn(tileClass, "cursor-pointer")}
+              aria-label={name ? `Open ${name}` : `Open image ${i + 1}`}
+              title={name}
+              onClick={() => setLightboxIndex(i)}
+            >
+              {image}
+            </button>
+          ) : (
+            <div key={i} className={tileClass}>
+              {image}
+            </div>
+          );
+        })}
       </div>}
       {enableImagePreview && lightboxImages.length > 0 && (
         <ImageLightbox
