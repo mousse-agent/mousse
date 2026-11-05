@@ -302,34 +302,40 @@ function CopyButton({
     onCopied?.();
   };
   return (
-    <button
-      type="button"
-      tabIndex={-1}
-      onClick={handleCopy}
-      onPointerDown={(event) => {
-        event.stopPropagation();
-      }}
-      onMouseDown={(event) => event.stopPropagation()}
-      className={cn(
-        "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
-        "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
-      )}
-    >
-      <div className="relative w-3.5 h-3.5">
-        <IconCopy
-          className={cn(
-            "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-            copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
-          )}
-        />
-        <IconCheck
-          className={cn(
-            "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-            copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
-          )}
-        />
-      </div>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={handleCopy}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+        title="Copy"
+        aria-label="Copy"
+        className={cn(
+          "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
+          "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
+        )}
+      >
+        <div className="relative w-3.5 h-3.5">
+          <IconCopy
+            className={cn(
+              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
+              copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
+            )}
+          />
+          <IconCheck
+            className={cn(
+              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
+              copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
+            )}
+          />
+        </div>
+      </button>
+      <span className="sr-only" role="status" aria-live="polite">
+        {copied ? "Copied" : ""}
+      </span>
+    </>
   );
 }
 
@@ -407,14 +413,13 @@ function MetadataButton({
     <div ref={rootRef} className="relative flex items-center">
       <button
         type="button"
-        tabIndex={-1}
         onClick={() => setOpen((value) => !value)}
         onPointerDown={(event) => {
           event.stopPropagation();
         }}
         onMouseDown={(event) => event.stopPropagation()}
-        title="Response metadata"
-        aria-label="Response metadata"
+        title="Details"
+        aria-label="Details"
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls={panelId}
@@ -437,7 +442,6 @@ function MetadataButton({
             </span>
             <button
               type="button"
-              tabIndex={-1}
               onClick={() => setOpen(false)}
               aria-label="Close response metadata"
               className="flex size-5 items-center justify-center rounded-md opacity-60 hover:opacity-100 hover:bg-an-foreground/10"
@@ -510,7 +514,8 @@ function MessageToolbar({
     <div
       data-find-ignore
       className={cn(
-        "relative flex items-center gap-1 pt-1 text-sm text-an-foreground-muted/70 opacity-0 transition-opacity duration-100 pointer-events-none",
+        // Keyboard focus shows the toolbar the same way hover does.
+        "chat-message-toolbar relative flex items-center gap-1 pt-1 text-sm text-an-foreground-muted/70 opacity-0 transition-opacity duration-100 pointer-events-none focus-within:opacity-100 focus-within:pointer-events-auto",
         heightClass,
         alignClass,
         hoverClass,

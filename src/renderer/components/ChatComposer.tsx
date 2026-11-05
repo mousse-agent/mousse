@@ -91,6 +91,8 @@ export interface ChatComposerProps {
   /** Receives the inline `@skill` token (if any) so the parent can send this
    * prompt in skill mode without flipping the global chat mode. */
   onSend: (skillMode?: SkillChatMode) => void
+  /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
+  sendLabel?: string
   onStop?: () => void
   /** When true, `/skills` is treated as literal text instead of opening the skill picker. */
   disableSkillsPicker?: boolean
@@ -170,6 +172,7 @@ export function ChatComposer({
   placeholder = 'Describe a task or ask a question',
   loadingPlaceholder = 'Running… send queues next',
   onSend,
+  sendLabel,
   onStop,
   disableSkillsPicker = false,
   banner,
@@ -860,6 +863,7 @@ export function ChatComposer({
         recordingPending={recordingPending}
         transcribing={transcribing}
         onSend={submit}
+        sendLabel={sendLabel}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}

@@ -39,8 +39,11 @@ export function isV5ToolPart(part: unknown): part is ToolPartBase {
   );
 }
 
-/** Rows that need their own surface and never join an activity group. */
-const STANDALONE_TOOL_TYPES = new Set(["tool-Question"]);
+/**
+ * Rows that need their own surface and never join an activity group. Answered questions stay in
+ * view: a collapsed "Tool calls" group would hide what the user decided.
+ */
+const STANDALONE_TOOL_TYPES = new Set(["tool-Question", "tool-QuestionAnswers"]);
 
 export type AssistantToolItem = {
   part: ToolPartBase;
