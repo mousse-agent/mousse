@@ -9,15 +9,27 @@ import { isLibraryFiltered, uniqueLibraryRuntimes, EMPTY_LIBRARY_QUERY } from '.
 import { ArchiveDefinitionDialog } from '../../src/renderer/components/automations/EditorParts'
 import { RefreshToolsButton } from '../../src/renderer/components/automations/LibraryParts'
 import { definitionSaveState, fixIssuesLabel, publishBlockReason, SAVE_STATE_LABELS } from '../../src/renderer/components/automations/editorState'
+import { WorkflowEditor } from '../../src/renderer/components/workflows/WorkflowEditor'
 import { WorkflowLibrary } from '../../src/renderer/components/workflows/WorkflowLibrary'
-import type { WorkflowDefinitionsClient, WorkflowLibraryItem } from '../../src/renderer/components/workflows/client'
+import type { WorkflowDefinitionsClient, WorkflowLeaveGuard, WorkflowLibraryItem } from '../../src/renderer/components/workflows/client'
 import { uniqueWorkflowStatuses } from '../../src/renderer/components/workflows/libraryFilter'
+import { confirmNavigation } from '../../src/renderer/services/navigationGuards'
 import { IsolatedAgentDefinitionsClient } from '../fixtures/agent-platform/agent-editor-client'
+import { IsolatedWorkflowDefinitionsClient } from '../fixtures/agent-platform/workflow-editor-client'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // The orb preview draws on a canvas jsdom does not have; the editor's header is what these tests read.
 vi.mock('../../src/renderer/components/orb/OrbAppearanceEditor', () => ({ OrbAppearanceEditor: () => null }))
+// The graph canvas and the code editor need layout jsdom does not have; the source is a plain textarea here.
+vi.mock('../../src/renderer/components/workflows/WorkflowCanvas', () => ({ WorkflowCanvas: () => null }))
+vi.mock('../../src/renderer/components/workflows/WorkflowSourceEditor', async () => {
+  const { createElement: h } = await import('react')
+  return {
+    WorkflowSourceEditor: ({ value, diagnosticsText, onChange }: { value: string; diagnosticsText?: string; onChange: (text: string) => void }) =>
+      h('textarea', { 'data-test-source': '', 'data-error': diagnosticsText ?? '', value, onChange: (event: { target: { value: string } }) => onChange(event.target.value) })
+  }
+})
 
 let root: Root
 let host: HTMLElement
@@ -277,5 +289,101 @@ describe('agent editor header', () => {
     await flush()
     expect(archive).toHaveBeenCalledWith({ profileId: 'p', id: created.id })
     expect(onBack).toHaveBeenCalled()
+  })
+
+  it('a failed archive keeps the unsaved edits and the leave guard; a retry that succeeds leaves without asking', async () => {
+    const client = new IsolatedAgentDefinitionsClient()
+    const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
+    const archive = vi.spyOn(client, 'archive').mockRejectedValueOnce({ code: 'UNAVAILABLE', message: 'daemon offline' })
+    const onBack = await openEditor(client, created.id)
+    const name = () => document.querySelector<HTMLInputElement>('[data-field="name"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(name(), 'Helper  edited ')
+      name().dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const confirmArchive = async () => {
+      await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Agent actions"]')!.click())
+      await act(async () => document.querySelector<HTMLButtonElement>('[role="menu"] [data-action="archive"]')!.click())
+      expect(document.body.textContent).toContain('Your unsaved edits are discarded.')
+      await act(async () => document.querySelector<HTMLButtonElement>('[data-action="confirm-archive"]')!.click())
+      await flush()
+    }
+    await confirmArchive()
+    expect(archive).toHaveBeenCalledTimes(1)
+    expect(onBack).not.toHaveBeenCalled()
+    expect(name().value).toBe('Helper  edited ')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits')
+    expect(document.querySelector('[data-agent-editor]')?.getAttribute('data-dirty')).toBe('true')
+    expect(document.querySelector('.agent-banner--error')?.textContent).toBe("Couldn't archive: daemon offline")
+    // The ordinary leave guard still asks about the kept edits.
+    let left: boolean | undefined
+    await act(async () => { void confirmNavigation().then((allowed) => { left = allowed }) })
+    expect(button('Discard changes')).toBeDefined()
+    await act(async () => button('Keep editing')!.click())
+    await flush()
+    expect(left).toBe(false)
+    expect(name().value).toBe('Helper  edited ')
+    // Retry: Archive is offered again and, once it succeeds, leaving does not ask a second time.
+    await confirmArchive()
+    expect(archive).toHaveBeenCalledTimes(2)
+    expect(onBack).toHaveBeenCalledTimes(1)
+    expect(await confirmNavigation()).toBe(true)
+    expect(button('Discard changes')).toBeUndefined()
+  })
+})
+
+describe('workflow editor archive', () => {
+  it('a failed archive keeps the source text, its error and the unsaved state; a retry that succeeds leaves without asking', async () => {
+    const client = new IsolatedWorkflowDefinitionsClient()
+    const created = await client.create({ profileId: 'p', name: 'Nightly' })
+    const archive = vi.spyOn(client, 'archive').mockRejectedValueOnce({ code: 'UNAVAILABLE', message: 'daemon offline' })
+    const onBack = vi.fn()
+    let guard: WorkflowLeaveGuard | null = null
+    await act(async () => root.render(createElement(WorkflowEditor, {
+      profileId: 'p',
+      definitionId: created.id,
+      client,
+      catalogs: { ...client.catalogs, models: [] },
+      onBack,
+      onRegisterLeaveGuard: (next: WorkflowLeaveGuard | null) => { guard = next }
+    })))
+    await flush()
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="view-source"]')!.click())
+    const source = () => document.querySelector<HTMLTextAreaElement>('[data-test-source]')!
+    const broken = `${source().value}\n{ not valid`
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(source(), broken)
+      source().dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const sourceError = source().getAttribute('data-error')
+    expect(sourceError).toBeTruthy()
+    const confirmArchive = async () => {
+      await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Workflow actions"]')!.click())
+      await act(async () => document.querySelector<HTMLButtonElement>('[role="menu"] [data-action="archive"]')!.click())
+      expect(document.body.textContent).toContain('Your unsaved edits are discarded.')
+      await act(async () => document.querySelector<HTMLButtonElement>('[data-action="confirm-archive"]')!.click())
+      await flush()
+    }
+    await confirmArchive()
+    expect(archive).toHaveBeenCalledTimes(1)
+    expect(onBack).not.toHaveBeenCalled()
+    expect(source().value).toBe(broken)
+    expect(source().getAttribute('data-error')).toBe(sourceError)
+    expect(document.querySelector('[data-workflow-editor]')?.getAttribute('data-dirty')).toBe('true')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits · Invalid source')
+    expect(document.querySelector('.wf-banner--error')?.textContent).toBe("Couldn't archive: daemon offline")
+    // The ordinary leave guard still asks about the kept edits.
+    let left: boolean | undefined
+    await act(async () => { void guard!('navigate').then((allowed) => { left = allowed }) })
+    expect(button('Discard changes')).toBeDefined()
+    await act(async () => button('Keep editing')!.click())
+    await flush()
+    expect(left).toBe(false)
+    expect(source().value).toBe(broken)
+    await confirmArchive()
+    expect(archive).toHaveBeenCalledTimes(2)
+    expect(onBack).toHaveBeenCalledTimes(1)
+    expect(await guard!('navigate')).toBe(true)
+    expect(button('Discard changes')).toBeUndefined()
   })
 })

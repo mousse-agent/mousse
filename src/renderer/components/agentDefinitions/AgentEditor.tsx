@@ -88,9 +88,13 @@ export function AgentEditor({
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [archiving, setArchiving] = useState(false)
   const publishReasonId = useId()
   const pendingLeave = useRef<(() => void) | null>(null)
   const navigationDecision = useRef<((allow: boolean) => void) | null>(null)
+  // Set only once the archive succeeded: the confirmed edits went with the definition, so leaving
+  // for the library does not ask about them again. A failed archive leaves it unset and keeps them.
+  const archived = useRef(false)
   const [desktop, setDesktop] = useState(
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1100px)').matches
   )
@@ -138,7 +142,7 @@ export function AgentEditor({
   const dirty = Boolean(draft && baseline && !snapshotsEqual(draft, baseline))
   useEffect(() => {
     if (!dirty) return
-    const unregister = registerNavigationGuard(() => new Promise<boolean>((resolve) => {
+    const unregister = registerNavigationGuard(() => archived.current ? true : new Promise<boolean>((resolve) => {
       onRequestAttention?.()
       navigationDecision.current?.(false)
       navigationDecision.current = resolve
@@ -148,7 +152,11 @@ export function AgentEditor({
       }
       setLeaveOpen(true)
     }))
-    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (archived.current) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
     window.addEventListener('beforeunload', beforeUnload)
     return () => {
       unregister()
@@ -284,20 +292,23 @@ export function AgentEditor({
     }
   }
 
+  // The draft, unsaved edits included, stays until the archive succeeds; a failure keeps it as it was.
   const archive = async () => {
     if (!record) return
     const started = gate.current.current()
-    setSaving(true)
+    setArchiving(true)
     setError(null)
     try {
       await client.archive({ profileId, id: record.id })
-      if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return
+      archived.current = true
+      onBack()
     } catch (caught) {
       if (shouldApplyAsyncResult(started, gate.current.current())) {
-        setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+        setError(`Couldn't archive: ${isAgentDefinitionClientError(caught) ? caught.message : String(caught)}`)
       }
     } finally {
-      if (shouldApplyAsyncResult(started, gate.current.current())) setSaving(false)
+      if (shouldApplyAsyncResult(started, gate.current.current())) setArchiving(false)
     }
   }
 
@@ -353,7 +364,7 @@ export function AgentEditor({
             type="button"
             className="btn btn-sm"
             data-action="save-draft"
-            disabled={saving || !dirty}
+            disabled={saving || archiving || !dirty}
             onClick={() => void saveDraft()}
           >
             {saving ? 'Saving…' : 'Save draft'}
@@ -362,7 +373,7 @@ export function AgentEditor({
             type="button"
             className="btn btn-primary btn-sm"
             data-action="publish"
-            disabled={saving || !canPublish}
+            disabled={saving || archiving || !canPublish}
             title={publishReason ?? undefined}
             aria-describedby={publishReason ? publishReasonId : undefined}
             onClick={() => void publish()}
@@ -372,7 +383,7 @@ export function AgentEditor({
           {publishReason ? <span id={publishReasonId} className="sr-only">{publishReason}</span> : null}
           <RowMenu
             label="Agent actions"
-            disabled={saving}
+            disabled={saving || archiving}
             items={[
               { label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(() => void duplicate()) },
               {
@@ -500,8 +511,6 @@ export function AgentEditor({
         onCancel={() => setArchiveOpen(false)}
         onConfirm={() => {
           setArchiveOpen(false)
-          // The dialog said unsaved edits go; drop them so the leave guard does not ask again.
-          setDraft(baseline)
           void archive()
         }}
       />

@@ -115,8 +115,12 @@ export function WorkflowEditor({
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [archiving, setArchiving] = useState(false)
   const publishReasonId = useId()
   const pendingLeave = useRef<(() => void) | null>(null)
+  // Set only once the archive succeeded: the confirmed edits went with the definition, so leaving
+  // for the library does not ask about them again. A failed archive leaves it unset and keeps them.
+  const archived = useRef(false)
   const [view, setView] = useState<'canvas' | 'source'>('canvas')
   const [sourceText, setSourceText] = useState('')
   const [sourceError, setSourceError] = useState<string | null>(null)
@@ -208,7 +212,7 @@ export function WorkflowEditor({
 
   const leaveGuard = useCallback<WorkflowLeaveGuard>(
     async (_reason: WorkflowLeaveReason) => {
-      if (!dirty) return true
+      if (!dirty || archived.current) return true
       return await new Promise<boolean>((resolve) => {
         pendingLeave.current = () => resolve(true)
         const previousStay = () => resolve(false)
@@ -460,17 +464,26 @@ export function WorkflowEditor({
         }
       })
   }
+  // The draft and the source text, unsaved edits and source errors included, stay until the archive
+  // succeeds; a failure keeps them as they were.
   const archive = () => {
     if (!client.archive) return
     const started = gate.current.current()
+    setArchiving(true)
+    setError(null)
     void client.archive({ profileId, id: document.id })
       .then(() => {
-        if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
+        if (!shouldApplyAsyncResult(started, gate.current.current())) return
+        archived.current = true
+        onBack()
       })
       .catch((caught: unknown) => {
         if (shouldApplyAsyncResult(started, gate.current.current())) {
-          setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+          setError(`Couldn't archive: ${isWorkflowClientError(caught) ? caught.message : String(caught)}`)
         }
+      })
+      .finally(() => {
+        if (shouldApplyAsyncResult(started, gate.current.current())) setArchiving(false)
       })
   }
   const step = (direction: 'undo' | 'redo') => {
@@ -559,7 +572,7 @@ export function WorkflowEditor({
             type="button"
             className="btn btn-sm"
             data-action="save-draft"
-            disabled={saving || !dirty || readOnly}
+            disabled={saving || archiving || !dirty || readOnly}
             onClick={() => void saveDraft()}
           >
             {saving ? 'Saving…' : 'Save draft'}
@@ -568,7 +581,7 @@ export function WorkflowEditor({
             type="button"
             className="btn btn-primary btn-sm"
             data-action="publish"
-            disabled={saving || !canPublish || readOnly}
+            disabled={saving || archiving || !canPublish || readOnly}
             title={publishReason ?? undefined}
             aria-describedby={publishReason ? publishReasonId : undefined}
             onClick={() => void publish()}
@@ -578,7 +591,7 @@ export function WorkflowEditor({
           {publishReason ? <span id={publishReasonId} className="sr-only">{publishReason}</span> : null}
           <RowMenu
             label="Workflow actions"
-            disabled={saving}
+            disabled={saving || archiving}
             items={[
               ...(duplicateSupported ? [{ label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(duplicate) }] : []),
               {
@@ -797,12 +810,6 @@ export function WorkflowEditor({
         onCancel={() => setArchiveOpen(false)}
         onConfirm={() => {
           setArchiveOpen(false)
-          // The dialog said unsaved edits go; drop them so the leave guard does not ask again.
-          if (baseline) {
-            setDraft(baseline)
-            setSourceText(stringifyManifest(baseline.manifest))
-          }
-          setSourceError(null)
           archive()
         }}
       />
