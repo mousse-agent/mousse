@@ -827,6 +827,38 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   box-shadow: var(--ui-specular);
 }
 
+/* MoreDetails: a quiet text toggle after a description, and the rules it folds away. */
+.settings-more-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.settings-more-btn:hover {
+  color: var(--text-primary);
+}
+
+.settings-more-btn:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.settings-more-body {
+  display: block;
+  margin-top: var(--space-4);
+}
+
+.settings-more-body[hidden] {
+  display: none;
+}
+
 .settings-muted {
   font-size: var(--settings-fs-small);
   color: var(--text-secondary);

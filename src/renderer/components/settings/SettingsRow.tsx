@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 import { ChevronRight, type IconComponent } from '../../lib/icons'
 
 /**
@@ -218,5 +218,26 @@ export function SettingsAdvanced({ label = 'Advanced', children }: { label?: str
       </summary>
       <div className="settings-advanced-body">{children}</div>
     </details>
+  )
+}
+
+/**
+ * The exact rules behind a one-line description, folded behind a small "Details" toggle. Built from
+ * phrasing elements only, so it fits inside a heading's description paragraph as well as a row's.
+ * The text stays in the document while folded; the toggle reports its state to screen readers.
+ */
+export function MoreDetails({ label = 'Details', children }: { label?: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  return (
+    <>
+      {' '}
+      <button type="button" className="settings-more-btn" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((value) => !value)}>
+        {label}
+      </button>
+      <span id={bodyId} className="settings-more-body" hidden={!open}>
+        {children}
+      </span>
+    </>
   )
 }
