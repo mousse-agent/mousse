@@ -62,6 +62,7 @@ import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloud
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
 import {
   classifyIntent,
+  nextComposerCompact,
   reduceFollow,
   type FollowEvent,
   type FollowMode,
@@ -87,6 +88,8 @@ export type MessageListProps = {
   status: ChatStatus;
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
+  /** The composer should fold to one line: the reader is browsing earlier messages. */
+  onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
@@ -898,6 +901,7 @@ export const MessageList = memo(function MessageList({
   showCopyToolbar = true,
   lastTurnNotice,
   onAtBottomChange,
+  onComposerCompactChange,
   suppressQuestionTool = false,
   initialScrollBehavior = "bottom",
   enableImagePreview = true,
@@ -979,10 +983,26 @@ export const MessageList = memo(function MessageList({
 
   const isStreaming = status === "streaming" || status === "submitted";
 
+  // Folded or not, recomputed with every follow event; reported only on change.
+  const composerCompactRef = useRef(false);
+  const onComposerCompactChangeRef = useRef(onComposerCompactChange);
+  onComposerCompactChangeRef.current = onComposerCompactChange;
+
   const dispatchFollow = useCallback((event: FollowEvent) => {
     const next = reduceFollow(followModeRef.current, event);
     followModeRef.current = next;
     setIsPinned(next === "following-end");
+    const container = chatContainerRef.current;
+    const compact = nextComposerCompact(composerCompactRef.current, {
+      mode: next,
+      distanceFromEnd: container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight
+        : 0,
+    });
+    if (compact !== composerCompactRef.current) {
+      composerCompactRef.current = compact;
+      onComposerCompactChangeRef.current?.(compact);
+    }
   }, []);
 
   // What the user just did to the scroll position. Assigned on every render so

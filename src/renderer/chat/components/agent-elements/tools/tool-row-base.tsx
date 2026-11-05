@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { Collapsible } from "@base-ui/react/collapsible";
+import { useState, type ReactNode } from "react";
+import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
@@ -19,6 +19,8 @@ export type ToolRowBaseProps = {
   expanded?: boolean;
   defaultOpen?: boolean;
   onToggleExpand?: () => void;
+  /** Rows in the panel when it is a list; a long one opens without the per-row stagger. */
+  itemCount?: number;
   children?: ReactNode;
 };
 
@@ -35,10 +37,13 @@ export function ToolRowBase({
   expanded,
   defaultOpen = false,
   onToggleExpand,
+  itemCount,
   children,
 }: ToolRowBaseProps) {
   const isComplete = !isAnimating;
-  const isExpanded = expanded ?? false;
+  // Uncontrolled rows (no `expanded`) keep their own open state, seeded by `defaultOpen`.
+  const [ownOpen, setOwnOpen] = useState(defaultOpen);
+  const isExpanded = expanded ?? ownOpen;
   const canToggle = expandable && (isComplete || isExpanded || isAnimating);
 
   const row = (
@@ -85,11 +90,8 @@ export function ToolRowBase({
       {expandable && (isComplete || isExpanded || isAnimating) && (
         <div>
           <IconChevronRight
-            className={cn(
-              "shrink-0 text-muted-foreground transition-transform duration-150 ease-out",
-              "size-[18px]",
-              "rotate-0 group-data-panel-open:rotate-90",
-            )}
+            className="ui-collapse-chevron shrink-0 text-muted-foreground size-[18px]"
+            data-open={isExpanded || undefined}
           />
         </div>
       )}
@@ -100,38 +102,29 @@ export function ToolRowBase({
     return <div className="an-tool-chrome flex flex-col gap-1">{row}</div>;
   }
 
-  const rootProps =
-    expanded === undefined
-      ? { defaultOpen }
-      : { open: expanded, onOpenChange: onToggleExpand };
+  const toggle = () => {
+    if (expanded === undefined) setOwnOpen((open) => !open);
+    else onToggleExpand?.();
+  };
 
   return (
-    <Collapsible.Root
-      className="an-tool-chrome flex flex-col gap-2 w-full"
-      {...rootProps}
-    >
-      <Collapsible.Trigger
+    <div className="an-tool-chrome flex flex-col w-full">
+      <button
+        type="button"
         className="group flex"
+        aria-expanded={isExpanded}
         disabled={!canToggle}
         aria-disabled={!canToggle}
+        onClick={toggle}
       >
         {row}
-      </Collapsible.Trigger>
-      <Collapsible.Panel
-        // NOTE: intentionally no height animation here. Animating
-        // `h-[var(--collapsible-panel-height)]` with `transition-all`
-        // forces a layout per frame while measuring heavy panel content
-        // (diffs, markdown, nested tools) and fights the message-list
-        // ResizeObserver scroll-follow — that's the expand/collapse
-        // stutter. Instant open/close = single layout pass. The chevron
-        // rotation above is transform-only and stays cheap.
-        className={cn(
-          "overflow-hidden",
-          "[&[hidden]:not([hidden='until-found'])]:hidden",
-        )}
-      >
+      </button>
+      {/* The shared Collapse animates a grid row, so the panel content is laid out once at full size and
+          only its clip changes per frame (an animated `height` re-measured the diffs, markdown and nested
+          tools every frame). The gap sits inside it as padding so it opens and closes with the panel. */}
+      <Collapse open={isExpanded} className="overflow-hidden pt-2" itemCount={itemCount}>
         {children}
-      </Collapsible.Panel>
-    </Collapsible.Root>
+      </Collapse>
+    </div>
   );
 }
