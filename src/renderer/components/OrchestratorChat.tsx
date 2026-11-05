@@ -1313,31 +1313,6 @@ export function OrchestratorChat() {
           {...(showQuestions ? { inert: true } : {})}
         >
           <div className="composer-collapse-inner">
-            {newChat && (
-              <ComposerWorkspaceToolbar
-                key={`${profileId}:${activeThreadId ?? '__blank__'}`}
-                projects={toolbarProjects}
-                workspace={workspace}
-                disabled={workspaceLocked}
-                device={{
-                  localName,
-                  devices: runOnDevices,
-                  notSharing,
-                  onRefresh: refreshRunOnDevices,
-                  onSelect: (node) => void selectRunOnDevice(node),
-                  onOpenRemoteProject: openProjectOnRunOnDevice
-                }}
-                onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                onOpenProject={async () => {
-                  const project = await window.mousse.projects.open()
-                  const state = useAppStore.getState()
-                  if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
-                  if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
-                  setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
-                }}
-                onError={setSendError}
-              />
-            )}
             <ChatComposer
               disabled={workspacePending || !workspaceReady}
               input={input}
@@ -1370,7 +1345,36 @@ export function OrchestratorChat() {
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
-              banner={<><RemoteSubagentNotice runsOn={activeThread?.runsOn} /><SubagentComposerBanner threadId={activeThreadId} /></>}
+              // The new-thread row is the card's top row: one surface with the input.
+              banner={<>
+                {newChat && (
+                  <ComposerWorkspaceToolbar
+                    key={`${profileId}:${activeThreadId ?? '__blank__'}`}
+                    projects={toolbarProjects}
+                    workspace={workspace}
+                    disabled={workspaceLocked}
+                    device={{
+                      localName,
+                      devices: runOnDevices,
+                      notSharing,
+                      onRefresh: refreshRunOnDevices,
+                      onSelect: (node) => void selectRunOnDevice(node),
+                      onOpenRemoteProject: openProjectOnRunOnDevice
+                    }}
+                    onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+                    onOpenProject={async () => {
+                      const project = await window.mousse.projects.open()
+                      const state = useAppStore.getState()
+                      if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
+                      if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
+                      setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
+                    }}
+                    onError={setSendError}
+                  />
+                )}
+                <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
+                <SubagentComposerBanner threadId={activeThreadId} />
+              </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}

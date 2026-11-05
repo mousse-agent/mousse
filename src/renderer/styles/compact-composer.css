@@ -81,20 +81,6 @@
   border-radius: 6px;
 }
 
-.chat-input-area .composer-workspace-toolbar {
-  gap: 12px;
-  margin: 0 8px -1px;
-  padding: 5px 10px 6px;
-  border-color: var(--border);
-  border-radius: 10px 10px 0 0;
-}
-
-.chat-input-area .composer-workspace-project {
-  padding: 4px 6px;
-  margin-left: -6px;
-  border-radius: 6px;
-}
-
 .composer-workspace-menu .composer-workspace-menu-item {
   padding: 6px 8px;
   gap: 8px;
