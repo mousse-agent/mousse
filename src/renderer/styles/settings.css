@@ -218,6 +218,38 @@ html[data-theme='high-contrast'] .settings-page {
   padding-top: var(--space-4);
 }
 
+/* Search results: the setting's whole title (it wraps, never cut: some titles differ only at the end),
+   then its page on a muted second line. */
+.settings-nav-results {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.settings-nav-result {
+  align-items: flex-start;
+}
+
+.settings-nav-result-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.settings-nav-result-title {
+  /* The first line centres on the 20px icon beside it. */
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.settings-nav-result-page {
+  margin-bottom: var(--space-4);
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--ui-faint, var(--text-secondary));
+}
+
 .settings-nav-empty {
   padding: var(--space-8);
   font-size: var(--settings-fs-small);
@@ -257,26 +289,24 @@ html[data-theme='high-contrast'] .settings-nav-item-icon {
   box-shadow: inset 0 0 0 1px var(--ui-line-strong);
 }
 
-/* The open section's hue, reused by its section-heading icons. */
+/* The open section's hue (data-page-hue, set even while search results replace the nav),
+   reused by its section-heading icons. */
 .settings-page { --settings-page-hue: var(--text-secondary); }
-.settings-page:has(.settings-nav-item.active [data-hue='1']) { --settings-page-hue: var(--hue-1); }
-.settings-page:has(.settings-nav-item.active [data-hue='2']) { --settings-page-hue: var(--hue-2); }
-.settings-page:has(.settings-nav-item.active [data-hue='3']) { --settings-page-hue: var(--hue-3); }
-.settings-page:has(.settings-nav-item.active [data-hue='4']) { --settings-page-hue: var(--hue-4); }
-.settings-page:has(.settings-nav-item.active [data-hue='5']) { --settings-page-hue: var(--hue-5); }
-.settings-page:has(.settings-nav-item.active [data-hue='6']) { --settings-page-hue: var(--hue-6); }
+.settings-page[data-page-hue='1'] { --settings-page-hue: var(--hue-1); }
+.settings-page[data-page-hue='2'] { --settings-page-hue: var(--hue-2); }
+.settings-page[data-page-hue='3'] { --settings-page-hue: var(--hue-3); }
+.settings-page[data-page-hue='4'] { --settings-page-hue: var(--hue-4); }
+.settings-page[data-page-hue='5'] { --settings-page-hue: var(--hue-5); }
+.settings-page[data-page-hue='6'] { --settings-page-hue: var(--hue-6); }
 
 /* A row's primary action icon takes the page hue; neutral pages use the accent. */
 .settings-page { --settings-action-hue: var(--accent); }
-.settings-page:has(.settings-nav-item.active :is([data-hue='1'], [data-hue='2'], [data-hue='3'], [data-hue='4'], [data-hue='5'], [data-hue='6'])) {
+.settings-page:is([data-page-hue='1'], [data-page-hue='2'], [data-page-hue='5']) {
   --settings-action-hue: var(--settings-page-hue);
 }
 
 /* Pages whose hue reads as a status colour (3 green ~ success, 4 amber ~ warning,
-   6 rose ~ danger) use the accent for action icons, so status colours keep one meaning. */
-.settings-page:has(.settings-nav-item.active :is([data-hue='3'], [data-hue='4'], [data-hue='6'])) {
-  --settings-action-hue: var(--accent);
-}
+   6 rose ~ danger) keep the accent for action icons, so status colours keep one meaning. */
 
 /* ---------- Content column ---------- */
 .settings-content {
@@ -326,6 +356,15 @@ html[data-theme='high-contrast'] .settings-nav-item-icon {
 
 .settings-page-desc {
   margin: var(--space-4) 0 0;
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* Why a search result's setting is not on the page (it needs a model, a sign-in…). */
+.settings-page-note {
+  width: min(100%, var(--settings-content-w));
+  margin: 0 0 var(--space-8);
   font-size: var(--settings-fs-small);
   line-height: 1.5;
   color: var(--text-secondary);
