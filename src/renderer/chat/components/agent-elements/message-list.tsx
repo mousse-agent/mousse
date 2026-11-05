@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
+import { motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
@@ -20,6 +21,7 @@ import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
+import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
 import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
@@ -43,6 +45,7 @@ import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
+import { getToolStatus } from "./utils/format-tool";
 import {
   activityGroupLabel,
   analyzeAssistantMessage,
@@ -60,6 +63,7 @@ import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloud
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
 import {
   classifyIntent,
+  nextComposerCompact,
   reduceFollow,
   type FollowEvent,
   type FollowMode,
@@ -85,6 +89,8 @@ export type MessageListProps = {
   status: ChatStatus;
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
+  /** The composer should fold to one line: the reader is browsing earlier messages. */
+  onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
@@ -799,17 +805,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return;
       }
       cancelScroll();
-      const reduceMotion =
-        typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (reduceMotion) {
+      // Animation speed (or the OS reduced-motion setting) scales the glide; Off jumps.
+      const scale = motionScale();
+      if (scale === 0) {
         container.scrollTop = targetTop;
         return;
       }
       // Custom eased glide — native smooth scroll is janky over long
       // distances. Distance-based duration keeps short hops snappy.
-      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22);
+      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22) * scale;
       const startedAt = performance.now();
       const step = (now: number) => {
         const t = Math.min(1, (now - startedAt) / duration);
@@ -896,6 +900,7 @@ export const MessageList = memo(function MessageList({
   showCopyToolbar = true,
   lastTurnNotice,
   onAtBottomChange,
+  onComposerCompactChange,
   suppressQuestionTool = false,
   initialScrollBehavior = "bottom",
   enableImagePreview = true,
@@ -977,10 +982,26 @@ export const MessageList = memo(function MessageList({
 
   const isStreaming = status === "streaming" || status === "submitted";
 
+  // Folded or not, recomputed with every follow event; reported only on change.
+  const composerCompactRef = useRef(false);
+  const onComposerCompactChangeRef = useRef(onComposerCompactChange);
+  onComposerCompactChangeRef.current = onComposerCompactChange;
+
   const dispatchFollow = useCallback((event: FollowEvent) => {
     const next = reduceFollow(followModeRef.current, event);
     followModeRef.current = next;
     setIsPinned(next === "following-end");
+    const container = chatContainerRef.current;
+    const compact = nextComposerCompact(composerCompactRef.current, {
+      mode: next,
+      distanceFromEnd: container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight
+        : 0,
+    });
+    if (compact !== composerCompactRef.current) {
+      composerCompactRef.current = compact;
+      onComposerCompactChangeRef.current?.(compact);
+    }
   }, []);
 
   // What the user just did to the scroll position. Assigned on every render so
@@ -1720,6 +1741,11 @@ export const MessageList = memo(function MessageList({
                                     msg={msg}
                                     isLast={isLastMsg}
                                     isStreaming={isStreaming}
+                                    retryPromptId={
+                                      isLastTurn && !isStreaming
+                                        ? turn.userMsg?.id
+                                        : undefined
+                                    }
                                     suppressQuestionTool={suppressQuestionTool}
                                     ToolRendererComponent={CustomToolRenderer}
                                     toolRenderers={toolRenderers}
@@ -1761,6 +1787,13 @@ export const MessageList = memo(function MessageList({
                                   }
                                   label={groupLabel}
                                   autoOpen={anyToolPending}
+                                  failed={
+                                    items.filter(
+                                      (item) =>
+                                        getToolStatus(item.part).isError,
+                                    ).length
+                                  }
+                                  live={isLastTurn && isStreaming}
                                 >
                                   {items.map((item, k) => (
                                     <CustomToolRenderer
@@ -1925,6 +1958,7 @@ function AssistantParts({
   msg,
   isLast,
   isStreaming,
+  retryPromptId,
   suppressQuestionTool,
   ToolRendererComponent,
   toolRenderers,
@@ -1932,6 +1966,8 @@ function AssistantParts({
   msg: UIMessage;
   isLast: boolean;
   isStreaming: boolean;
+  /** The last turn's prompt, offered for Retry beside an error. Absent on earlier turns. */
+  retryPromptId?: string;
   suppressQuestionTool: boolean;
   ToolRendererComponent: React.ComponentType<ToolRendererProps>;
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
@@ -1940,6 +1976,10 @@ function AssistantParts({
     () => normalizeAssistantToolParts(msg.parts ?? []) as unknown[],
     [msg.parts],
   );
+  const turnActions = useTurnActions();
+  const retryTitle =
+    retryPromptId && turnActions ? turnActions.retryTitle(retryPromptId) : null;
+  const retry = retryPromptId && turnActions ? turnActions.retry : undefined;
 
   const { elements } = useMemo(() => {
     const elems: React.ReactNode[] = [];
@@ -2022,6 +2062,12 @@ function AssistantParts({
             key={`${msg.id}-error-${i}`}
             title={part.title}
             message={part.message}
+            onRetry={
+              retry && retryPromptId && retryTitle !== null
+                ? () => retry(retryPromptId)
+                : undefined
+            }
+            retryTitle={retryTitle ?? undefined}
           />,
         );
         i++;
@@ -2068,6 +2114,9 @@ function AssistantParts({
     msg.id,
     isLast,
     isStreaming,
+    retryPromptId,
+    retry,
+    retryTitle,
     suppressQuestionTool,
     ToolRendererComponent,
     toolRenderers,

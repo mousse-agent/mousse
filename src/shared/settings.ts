@@ -56,6 +56,24 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** Tint each thread in the Threads tab with its project's color. */
   threadProjectColors: boolean
+  /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
+  animationSpeed: AnimationSpeed
+}
+
+export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
+
+export const ANIMATION_SPEEDS: readonly AnimationSpeed[] = ['off', 'fast', 'normal', 'slow']
+
+/** Multiplier on every UI motion duration (`--ui-motion-scale`). */
+export const ANIMATION_SPEED_SCALE: Readonly<Record<AnimationSpeed, number>> = {
+  off: 0,
+  fast: 0.6,
+  normal: 1,
+  slow: 1.6
+}
+
+export function isAnimationSpeed(value: unknown): value is AnimationSpeed {
+  return typeof value === 'string' && (ANIMATION_SPEEDS as readonly string[]).includes(value)
 }
 
 export interface NotificationSettings {
@@ -94,11 +112,20 @@ export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label
   { value: 'model-max', label: 'Model Max Context' }
 ]
 
+/** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
+export const DEFAULT_CONTEXT_COMPACTION_TOKENS: ContextCompactionTokens = 'model-max'
+
+/**
+ * Marker on the stored context section: the default above has been applied once. Every install wrote
+ * the previous default (128k) to disk, so a stored 128k without this marker is that old default.
+ */
+export const CONTEXT_COMPACTION_DEFAULT_MARKER = 'modelMaxDefault'
+
 export function normalizeContextSettings(raw?: Partial<ContextSettings> | null): ContextSettings {
   return {
     compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
     compactionTokens: CONTEXT_COMPACTION_OPTIONS.some(({ value }) => value === raw?.compactionTokens)
-      ? raw!.compactionTokens! : 128000
+      ? raw!.compactionTokens! : DEFAULT_CONTEXT_COMPACTION_TOKENS
   }
 }
 
@@ -581,7 +608,8 @@ export function getDefaultSettings(): MousseSettings {
       renderMath: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true
+      threadProjectColors: true,
+      animationSpeed: 'normal'
     },
     notifications: {
       threadCompletionSound: true,
@@ -701,7 +729,8 @@ export function normalizeAppearance(
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors
+      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+    animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed
   }
 }
 
