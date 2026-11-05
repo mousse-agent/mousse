@@ -6,6 +6,7 @@ import { createReviewComment, joinReviewPath, REVIEW_EXCERPT_MAX_LINES, type Cha
 import type { ReviewFileResult, ReviewFileSide, ReviewScope } from '../../../shared/review'
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
+import { Switch } from '../settings/SettingsRow'
 import { CODE_FONT } from '../../lib/typography'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
 import { languageForPath } from '../../utils/fileEditor'
@@ -47,14 +48,19 @@ export interface ReviewDiffPaneProps {
 
 const textOf = (side: ReviewFileSide): string => (side && 'content' in side ? side.content : '')
 
-/** The whitespace switch shared by the Review and Git toolbars. It changes highlighting only. */
+const WHITESPACE_LABEL = 'Ignore leading/trailing whitespace'
+
+/**
+ * The whitespace switch shared by the Review and Git toolbars. It changes highlighting only. The app's switch, labelled
+ * by its text: clicking either toggles it, and Space or Enter does on the switch.
+ */
 export function WhitespaceToggle() {
   const ignore = useAppStore((s) => s.reviewIgnoreWhitespace)
   const setIgnore = useAppStore((s) => s.setReviewIgnoreWhitespace)
   return (
     <label className="review-toggle" title="Changes the highlighting only; counts stay the same.">
-      <input type="checkbox" checked={ignore} onChange={(event) => setIgnore(event.target.checked)} />
-      Ignore leading/trailing whitespace
+      <Switch checked={ignore} label={WHITESPACE_LABEL} onChange={setIgnore} />
+      <span>{WHITESPACE_LABEL}</span>
     </label>
   )
 }
