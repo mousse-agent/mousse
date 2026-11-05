@@ -49,6 +49,8 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Tint each thread in the Threads tab with its project's color. */
+  threadProjectColors: boolean
 }
 
 export interface NotificationSettings {
@@ -571,7 +573,8 @@ export function getDefaultSettings(): MousseSettings {
       accentColor: '#a785c7',
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
-      renderMath: true
+      renderMath: true,
+      threadProjectColors: true
     },
     notifications: {
       threadCompletionSound: true,
@@ -687,7 +690,9 @@ export function normalizeAppearance(
     acrylicIntensity: clampAcrylicIntensity(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
-    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath
+    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    threadProjectColors:
+      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors
   }
 }
 

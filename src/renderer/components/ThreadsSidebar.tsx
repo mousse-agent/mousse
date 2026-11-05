@@ -32,6 +32,7 @@ import { ThreadComputerBadge } from './ComputerBadge'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { projectHues } from '../lib/projectHues'
+import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
@@ -415,6 +416,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // match none of this computer's stay groups of their own, named with their computer.
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
+  const threadProjectColors = useThreadProjectColors()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
@@ -849,8 +851,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const showTrailing = Boolean(statusNode || thread.worktreeEnabled || thread.node)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
-    // Only the Threads tab's cards carry the project's tint; a thread without a project has none.
-    const hue = layout === 'card' && group ? hueByGroup.get(group.id) : undefined
+    // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
+    // project has none.
+    const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
 
 
 
