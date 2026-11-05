@@ -1007,6 +1007,20 @@ html.platform-darwin .titlebar-left {
   }
 }
 
+/* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
+/* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
+.chat-empty-add-project {
+  --space-4: 4px;
+  --space-12: 12px;
+  --space-16: 16px;
+  display: flex;
+  height: 28px;
+  width: fit-content;
+  margin: var(--space-16) auto 0;
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
+}
+
 /* Queued messages stack — visually attached above the composer */
 .queued-messages {
   display: flex;
@@ -1430,6 +1444,19 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.composer-command-suggestion-empty-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-command-suggestion-empty-link:hover {
+  text-decoration: underline;
 }
 
 /* `@` mention rows: icon, name, dimmed parent folder. The selected row only gets the shared background. */

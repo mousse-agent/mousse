@@ -93,10 +93,10 @@
   color: var(--ui-faint);
 }
 
+/* A text action beside the count, not a second boxed control. */
 .earlier-messages-load {
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 0;
+  border: 0;
   background: transparent;
   color: var(--text-primary);
   font: inherit;
@@ -104,7 +104,7 @@
 }
 
 .earlier-messages-load:hover:not(:disabled) {
-  background: var(--ui-hover);
+  text-decoration: underline;
 }
 
 .earlier-messages-load:disabled {
