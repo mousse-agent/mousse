@@ -462,6 +462,21 @@ export function composerAutoModel(input: {
   return pickerOffers(input.profileDefault, input.providers) ? undefined : fallbackModel(input.providers)
 }
 
+/**
+ * The model the composer on this computer shows once settings are read: the thread's own, else the
+ * one it starts on by itself, else the profile default. Undefined when there is none yet (no default,
+ * providers still loading): the composer keeps the model it shows rather than reading "Select model".
+ */
+export function composerSelection<T extends PickerSelection>(input: {
+  threadModel: T | undefined
+  profileDefault: T
+  providers: readonly PickerProvider[]
+}): T | PickerSelection | undefined {
+  if (input.threadModel?.model) return input.threadModel
+  const auto = composerAutoModel({ remote: false, threadModel: undefined, profileDefault: input.profileDefault, providers: input.providers })
+  return auto ?? (input.profileDefault.model ? input.profileDefault : undefined)
+}
+
 /** Model ids hidden or starred per instance, from device snapshots (prefs are not per project). */
 export function modelPrefsByInstance(snapshots: readonly InstanceSnapshot[] | undefined): Map<string, { hidden: Set<string>; favorites: Set<string> }> {
   const prefs = new Map<string, { hidden: Set<string>; favorites: Set<string> }>()
