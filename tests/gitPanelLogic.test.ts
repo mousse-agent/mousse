@@ -7,8 +7,15 @@ import { GitChangesList } from '../src/renderer/components/git/GitChangesList'
 import { GitSyncBar } from '../src/renderer/components/git/GitSyncBar'
 import {
   IDLE_SYNC_ACTIVITY,
+  SECTION_RATIO_MAX,
+  SECTION_RATIO_MIN,
   abortLabel,
+  discardConfirmLabel,
+  discardMenuLabel,
   discardPrompt,
+  keyedSectionRatio,
+  resizeSectionPair,
+  sectionPairRatio,
   fetchResultNotice,
   groupChanges,
   pullChoices,
@@ -274,12 +281,12 @@ describe('changes list markup', () => {
     const changes = section(html, 'changes')
     expect(staged).toContain('mm.ts')
     expect(staged).toContain('aria-label="Unstage mm.ts"')
-    expect(staged).toContain('aria-label="Discard changes to mm.ts"')
+    expect(staged).toContain('aria-label="More actions for mm.ts"')
     expect(staged).not.toContain('aria-label="Stage mm.ts"')
     expect(staged).toContain('>Unstage all<')
     expect(changes).toContain('mm.ts')
     expect(changes).toContain('aria-label="Stage mm.ts"')
-    expect(changes).toContain('aria-label="Discard changes to mm.ts"')
+    expect(changes).toContain('aria-label="More actions for mm.ts"')
     expect(changes).not.toContain('aria-label="Unstage mm.ts"')
     expect(changes).toContain('>Stage all<')
   })
@@ -291,20 +298,20 @@ describe('changes list markup', () => {
     expect(section(html, 'changes')).not.toContain('c.ts')
   })
 
-  it('hides stage and unstage in a thread worktree and keeps discard', () => {
+  it('hides stage and unstage in a thread worktree and keeps discard in the More menu', () => {
     const html = render([change('mm.ts', { staged: true }), change('mm.ts'), change('new.ts', { status: 'untracked' })], thread)
     expect(html).not.toContain('aria-label="Stage ')
     expect(html).not.toContain('aria-label="Unstage ')
     expect(html).not.toContain('Stage all')
     expect(html).not.toContain('Unstage all')
-    expect(html).toContain('aria-label="Discard changes to mm.ts"')
-    expect(html).toContain('aria-label="Delete untracked file new.ts"')
+    expect(html).toContain('aria-label="More actions for mm.ts"')
+    expect(html).toContain('aria-label="More actions for new.ts"')
   })
 
   it('disables the buttons while a Git action runs', () => {
     const html = render([change('a.ts')], project, { busy: true })
     expect(html).toMatch(/aria-label="Stage a.ts"[^>]*disabled=""/)
-    expect(html).toMatch(/aria-label="Discard changes to a.ts"[^>]*disabled=""/)
+    expect(html).toMatch(/aria-label="More actions for a.ts"[^>]*disabled=""/)
     expect(html).toMatch(/class="git-section-action" disabled=""/)
   })
 
@@ -326,6 +333,69 @@ describe('changes list markup', () => {
     expect(selected).toContain('background:')
     expect(selected).not.toMatch(/border|box-shadow|outline/)
     expect(css).not.toMatch(/\.git-file-row[^{]*::(before|after)/)
+  })
+})
+
+describe('the More menu, status names and section dividers', () => {
+  const flex = { conflicts: 1, staged: 1, changes: 1, untracked: 1, commits: 1 }
+  const render = (changes: GitFileChange[], onDividerResize?: () => void) =>
+    renderToStaticMarkup(createElement(GitChangesList, {
+      changes,
+      selected: null,
+      onSelect: () => undefined,
+      scope: project,
+      busy: false,
+      onRowAction: () => undefined,
+      onSectionAction: () => undefined,
+      flex,
+      onDividerResize
+    }))
+
+  it('keeps Discard off the row: only Stage or Unstage sits next to the file, Discard waits in More', () => {
+    const html = render([change('a.ts'), change('b.ts', { staged: true })])
+    expect(html).not.toContain('data-action="discard"')
+    expect(html).toContain('aria-label="Stage a.ts"')
+    expect(html).toContain('aria-label="Unstage b.ts"')
+    expect(html).toMatch(/aria-label="More actions for a.ts"[^>]*aria-haspopup="menu"/)
+  })
+
+  it('names the More menu item for what it does to the file', () => {
+    expect(discardMenuLabel(change('a.ts'))).toBe('Discard changes…')
+    expect(discardMenuLabel(change('new.ts', { status: 'untracked' }))).toBe('Delete file…')
+    expect(discardConfirmLabel([change('new.ts', { status: 'untracked' })])).toBe('Delete')
+    expect(discardConfirmLabel([change('new.ts', { status: 'untracked' }), change('a.ts')])).toBe('Discard')
+    expect(discardConfirmLabel([])).toBe('Discard')
+  })
+
+  it("gives every status letter its full name as a tooltip and in the row's name", () => {
+    const html = render([change('a.ts'), change('c.ts', { status: 'conflicted' }), change('n.ts', { status: 'untracked' }), change('d.ts', { status: 'deleted', staged: true })])
+    expect(html).toContain('aria-label="a.ts, modified"')
+    expect(html).toContain('title="Modified" aria-hidden="true">M<')
+    expect(html).toContain('aria-label="c.ts, conflicted"')
+    expect(html).toContain('title="Conflicted" aria-hidden="true">!<')
+    expect(html).toContain('aria-label="n.ts, untracked"')
+    expect(html).toContain('aria-label="d.ts, deleted"')
+  })
+
+  it('lets a divider be focused and reports where it is, with its limits', () => {
+    const html = render([change('a.ts'), change('b.ts', { staged: true })], () => undefined)
+    expect(html).toMatch(/role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Resize Staged and Changes sections" aria-valuenow="50" aria-valuemin="15" aria-valuemax="85"/)
+    // Without a resize handler there is nothing to move with the keyboard, so it is not a tab stop.
+    expect(render([change('a.ts')])).not.toContain('tabindex="0"')
+  })
+
+  it('moves a divider by a step per arrow, to the limits with Home and End, and never past them', () => {
+    expect(keyedSectionRatio(0.5, 'ArrowDown')).toBeCloseTo(0.55)
+    expect(keyedSectionRatio(0.5, 'ArrowUp')).toBeCloseTo(0.45)
+    expect(keyedSectionRatio(0.5, 'Home')).toBe(SECTION_RATIO_MIN)
+    expect(keyedSectionRatio(0.5, 'End')).toBe(SECTION_RATIO_MAX)
+    expect(keyedSectionRatio(0.5, 'Enter')).toBeNull()
+    const moved = resizeSectionPair(flex, 'staged', 'changes', 0.7)
+    expect(sectionPairRatio(moved, 'staged', 'changes')).toBeCloseTo(0.7)
+    expect(moved.staged + moved.changes).toBeCloseTo(2)
+    expect(moved.untracked).toBe(1)
+    expect(sectionPairRatio(resizeSectionPair(flex, 'staged', 'changes', 0.99), 'staged', 'changes')).toBeCloseTo(SECTION_RATIO_MAX)
+    expect(sectionPairRatio(resizeSectionPair(flex, 'staged', 'changes', -1), 'staged', 'changes')).toBeCloseTo(SECTION_RATIO_MIN)
   })
 })
 

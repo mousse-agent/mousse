@@ -245,6 +245,68 @@ export function rowActionLabel(action: RowAction, file: GitFileChange): string {
   }
 }
 
+/** What each status letter means, for its tooltip and the row's accessible name. */
+export const STATUS_NAMES: Record<GitFileChange['status'], string> = {
+  modified: 'Modified',
+  added: 'Added',
+  deleted: 'Deleted',
+  renamed: 'Renamed',
+  copied: 'Copied',
+  untracked: 'Untracked',
+  ignored: 'Ignored',
+  conflicted: 'Conflicted'
+}
+
+/** The More menu's item for a file: deleting an untracked file, else throwing its changes away. */
+export function discardMenuLabel(file: GitFileChange): string {
+  return file.status === 'untracked' ? 'Delete file…' : 'Discard changes…'
+}
+
+/** The confirming button of a discard: Delete when every file is untracked and goes for good, else Discard. */
+export function discardConfirmLabel(files: readonly GitFileChange[]): 'Delete' | 'Discard' {
+  return files.length > 0 && files.every((file) => file.status === 'untracked') ? 'Delete' : 'Discard'
+}
+
+/** How far a divider between two sections may go: neither section gets less than this share of the pair. */
+export const SECTION_RATIO_MIN = 0.15
+export const SECTION_RATIO_MAX = 0.85
+/** One arrow press moves a divider by this share of the pair. */
+export const SECTION_RATIO_STEP = 0.05
+
+/** The upper section's share of the two around a divider. */
+export function sectionPairRatio(flex: Readonly<Record<GitSectionId, number>>, upper: GitSectionId, lower: GitSectionId): number {
+  const total = flex[upper] + flex[lower]
+  return total > 0 ? flex[upper] / total : 0.5
+}
+
+/** The sizes once the divider between `upper` and `lower` is at `ratio` (kept between the limits); the other sections keep theirs. */
+export function resizeSectionPair(
+  flex: Readonly<Record<GitSectionId, number>>,
+  upper: GitSectionId,
+  lower: GitSectionId,
+  ratio: number
+): Record<GitSectionId, number> {
+  const clamped = Math.min(SECTION_RATIO_MAX, Math.max(SECTION_RATIO_MIN, ratio))
+  const total = flex[upper] + flex[lower]
+  return { ...flex, [upper]: total * clamped, [lower]: total * (1 - clamped) }
+}
+
+/** Where a key moves a divider: arrows by a step (down gives the upper section more), Home and End to the limits. Null for other keys. */
+export function keyedSectionRatio(ratio: number, key: string): number | null {
+  switch (key) {
+    case 'ArrowDown':
+      return ratio + SECTION_RATIO_STEP
+    case 'ArrowUp':
+      return ratio - SECTION_RATIO_STEP
+    case 'Home':
+      return SECTION_RATIO_MIN
+    case 'End':
+      return SECTION_RATIO_MAX
+    default:
+      return null
+  }
+}
+
 const DISCARD_LIST_LIMIT = 10
 
 /**

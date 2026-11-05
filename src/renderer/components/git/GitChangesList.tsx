@@ -1,11 +1,18 @@
 import { Fragment } from 'react'
-import { Minus, Plus, RotateCcw } from '../../lib/icons'
+import { Minus, Plus } from '../../lib/icons'
 import type { GitFileChange, GitScope } from '../../../shared/types'
+import { RowMenu } from '../integrations/RowMenu'
 import {
+  discardMenuLabel,
   groupChanges,
+  keyedSectionRatio,
   rowActionLabel,
   rowActions,
+  SECTION_RATIO_MAX,
+  SECTION_RATIO_MIN,
   sectionAction,
+  sectionPairRatio,
+  STATUS_NAMES,
   type ChangeSectionId,
   type GitSectionId,
   type RowAction,
@@ -32,17 +39,16 @@ export const SECTION_TITLES: Record<GitSectionId, string> = {
   commits: 'Commits'
 }
 
-const ROW_ACTION_TITLES: Record<RowAction, string> = { stage: 'Stage', unstage: 'Unstage', discard: 'Discard' }
+const ROW_ACTION_TITLES: Record<Exclude<RowAction, 'discard'>, string> = { stage: 'Stage', unstage: 'Unstage' }
 const SECTION_ACTION_TITLES: Record<SectionAction, string> = { 'stage-all': 'Stage all', 'unstage-all': 'Unstage all' }
 
 export type { SelectedFile }
 
 type ScopeRules = Pick<GitScope, 'workspaceThreadId'>
 
-function RowActionIcon({ action }: { action: RowAction }) {
+function RowActionIcon({ action }: { action: Exclude<RowAction, 'discard'> }) {
   if (action === 'stage') return <Plus size={13} strokeWidth={2} aria-hidden="true" />
-  if (action === 'unstage') return <Minus size={13} strokeWidth={2} aria-hidden="true" />
-  return <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />
+  return <Minus size={13} strokeWidth={2} aria-hidden="true" />
 }
 
 interface ChangeSectionProps {
@@ -59,7 +65,10 @@ interface ChangeSectionProps {
   sectionRef?: (el: HTMLDivElement | null) => void
 }
 
-/** One list of files. A selected row has a background highlight only. */
+/**
+ * One list of files. A selected row has a background highlight only. Stage or Unstage sits on the row; Discard, which
+ * throws work away, waits in the row's More menu so the keyboard never lands on it next to Stage.
+ */
 export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRowAction, onSectionAction, flex, sectionRef }: ChangeSectionProps) {
   const sectionButton = sectionAction(id, scope)
   return (
@@ -80,6 +89,8 @@ export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRo
       <div className="git-section-list">
         {items.map((item) => {
           const actions = rowActions(item, scope)
+          const inline = actions.filter((action): action is Exclude<RowAction, 'discard'> => action !== 'discard')
+          const statusName = STATUS_NAMES[item.status]
           const isSelected = selected?.path === item.path && selected.staged === item.staged
           return (
             <div key={`${item.staged}-${item.path}`} className={`git-file-row${isSelected ? ' selected' : ''}`}>
@@ -87,14 +98,15 @@ export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRo
                 type="button"
                 className="git-file-select"
                 aria-current={isSelected ? 'true' : undefined}
+                aria-label={`${item.path}, ${statusName.toLowerCase()}`}
                 onClick={() => onSelect(item.path, item.staged)}
               >
-                <span className={`git-status-badge status-${item.status}`}>{STATUS_LABELS[item.status]}</span>
+                <span className={`git-status-badge status-${item.status}`} title={statusName} aria-hidden="true">{STATUS_LABELS[item.status]}</span>
                 <span className="git-file-path">{item.path}</span>
               </button>
               {actions.length > 0 && (
                 <span className="git-row-actions">
-                  {actions.map((action) => (
+                  {inline.map((action) => (
                     <button
                       key={action}
                       type="button"
@@ -108,6 +120,15 @@ export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRo
                       <RowActionIcon action={action} />
                     </button>
                   ))}
+                  {actions.includes('discard') && (
+                    <RowMenu
+                      label={`More actions for ${item.path}`}
+                      buttonClassName="git-row-action"
+                      iconSize={13}
+                      disabled={busy}
+                      items={[{ label: discardMenuLabel(item), ariaLabel: rowActionLabel('discard', item), danger: true, onSelect: () => onRowAction('discard', item) }]}
+                    />
+                  )}
                 </span>
               )}
             </div>
@@ -129,6 +150,8 @@ interface GitChangesListProps {
   flex: Record<GitSectionId, number>
   bindSectionRef?: (id: GitSectionId) => (el: HTMLDivElement | null) => void
   onDividerMouseDown?: (upper: GitSectionId, lower: GitSectionId) => void
+  /** Moves the divider between two sections to `ratio`, the upper one's share of the pair. */
+  onDividerResize?: (upper: GitSectionId, lower: GitSectionId, ratio: number) => void
 }
 
 const CHANGE_SECTIONS: readonly { id: ChangeSectionId; group: 'conflicts' | 'staged' | 'unstaged' | 'untracked' }[] = [
@@ -141,24 +164,39 @@ const CHANGE_SECTIONS: readonly { id: ChangeSectionId; group: 'conflicts' | 'sta
 /**
  * The Conflicts, Staged, Changes and Untracked lists with the dividers between them, and one
  * closing divider above the Commits list that follows. A file staged and edited again is in
- * both Staged and Changes, each with the actions of its own side.
+ * both Staged and Changes, each with the actions of its own side. A divider is dragged, or
+ * focused and moved with the arrow keys, Home and End.
  */
-export function GitChangesList({ changes, selected, onSelect, scope, busy, onRowAction, onSectionAction, flex, bindSectionRef, onDividerMouseDown }: GitChangesListProps) {
+export function GitChangesList({ changes, selected, onSelect, scope, busy, onRowAction, onSectionAction, flex, bindSectionRef, onDividerMouseDown, onDividerResize }: GitChangesListProps) {
   const groups = groupChanges(changes)
   const shown = CHANGE_SECTIONS.filter(({ group }) => groups[group].length > 0)
   if (shown.length === 0) {
     return <div className="git-empty git-empty-nested">Working tree clean</div>
   }
-  const divider = (upper: GitSectionId, lower: GitSectionId) => (
-    <div
-      key={`divider-${upper}-${lower}`}
-      className="git-section-divider"
-      onMouseDown={() => onDividerMouseDown?.(upper, lower)}
-      role="separator"
-      aria-orientation="horizontal"
-      aria-label={`Resize ${SECTION_TITLES[upper]} and ${SECTION_TITLES[lower]} sections`}
-    />
-  )
+  const divider = (upper: GitSectionId, lower: GitSectionId) => {
+    const ratio = sectionPairRatio(flex, upper, lower)
+    return (
+      <div
+        key={`divider-${upper}-${lower}`}
+        className="git-section-divider"
+        onMouseDown={() => onDividerMouseDown?.(upper, lower)}
+        onKeyDown={(event) => {
+          const next = onDividerResize ? keyedSectionRatio(ratio, event.key) : null
+          if (next === null) return
+          event.preventDefault()
+          onDividerResize?.(upper, lower, next)
+        }}
+        role="separator"
+        tabIndex={onDividerResize ? 0 : undefined}
+        aria-orientation="horizontal"
+        aria-label={`Resize ${SECTION_TITLES[upper]} and ${SECTION_TITLES[lower]} sections`}
+        aria-valuenow={Math.round(ratio * 100)}
+        aria-valuemin={Math.round(SECTION_RATIO_MIN * 100)}
+        aria-valuemax={Math.round(SECTION_RATIO_MAX * 100)}
+        aria-valuetext={`${SECTION_TITLES[upper]} ${Math.round(ratio * 100)}%`}
+      />
+    )
+  }
   return (
     <>
       {shown.map(({ id, group }, index) => (
