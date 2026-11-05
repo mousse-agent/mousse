@@ -414,7 +414,7 @@
   width: 13px;
 }
 
-/* Editor sections: heading, then rows on a surface. Inside the pane they sit closer together. */
+/* Editor sections: heading, then rows flat on the pane. Inside the pane they sit closer together. */
 
 .prov-editor > .prov-editor-section {
   padding-top: var(--space-24);
@@ -432,8 +432,18 @@
   font-size: var(--settings-fs-heading);
 }
 
+/* The pane is the provider's one surface (rule 2): its sections' rows sit flat on it, split by
+   their hairlines, with no surface or hover fill of their own. */
 .prov-editor .settings-group-rows {
-  background: var(--settings-surface);
+  --settings-surface-x: 0px;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.prov-editor .settings-group-rows > .settings-item:hover {
+  background: none;
 }
 
 .prov-editor .settings-item-desc .prov-status {

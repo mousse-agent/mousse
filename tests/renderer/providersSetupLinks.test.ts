@@ -3,6 +3,7 @@
  * Getting to a provider: Agents' default model, with nothing to choose, opens Providers; Providers
  * asks which scope it applies to only once there is a project to choose.
  */
+import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -74,5 +75,19 @@ describe('the Providers scope', () => {
     expect(html).toContain('Applying settings for')
     expect(html).toContain('aria-label="Settings scope"')
     expect(html).toContain('This device')
+  })
+})
+
+describe('the provider editor surface', () => {
+  it('is the pane alone: Setup and the other sections add no surface of their own', () => {
+    const css = readFileSync('src/renderer/styles/providers.css', 'utf8')
+    const rule = (selector: string) => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] ?? ''
+    const rows = rule('.prov-editor .settings-group-rows')
+    expect(rows).toMatch(/background:\s*none/)
+    expect(rows).toMatch(/box-shadow:\s*none/)
+    expect(rows).not.toContain('--settings-surface)')
+    expect(rule('.prov-editor .settings-group-rows > .settings-item:hover')).toMatch(/background:\s*none/)
+    // The pane stays the one subtle surface.
+    expect(rule('.prov-pane')).toContain('background: var(--settings-surface)')
   })
 })
