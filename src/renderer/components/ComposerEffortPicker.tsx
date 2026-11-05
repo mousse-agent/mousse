@@ -339,14 +339,26 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
   const limit = choice.reason ?? Object.values(choice.blocked)[0]
   const style = useFloatingPosition({ open, anchorRef: buttonRef, contentRef: menuRef, placement: 'above-start', deps: [control.mode] })
   const close = () => { setOpen(false); buttonRef.current?.focus() }
+  // The layer stays hidden until it is measured, and a hidden row cannot take focus.
+  const shown = open && style.visibility === 'visible'
+  useEffect(() => {
+    if (shown) focusRunSettings(menuRef.current, openedByKeyboard.current)
+  }, [shown])
   useEffect(() => {
     if (!open) return
-    focusRunSettings(menuRef.current, openedByKeyboard.current)
     const dismiss = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node) && !buttonRef.current?.contains(event.target as Node)) setOpen(false)
     }
+    // Escape closes wherever focus is (it can still be on the chip after a click).
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
     document.addEventListener('mousedown', dismiss)
-    return () => document.removeEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
   }, [open])
   const keys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
