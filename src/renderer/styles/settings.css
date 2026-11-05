@@ -465,6 +465,7 @@ html[data-theme='high-contrast'] .settings-group-icon {
 
 .settings-group-rows > :first-child,
 .settings-group-rows > .model-family-settings-fields:first-child > .settings-row:first-child,
+.settings-group-rows > .ui-collapse:first-child > .ui-collapse-clip > * > :first-child,
 .settings-advanced-body > :first-child {
   border-top: 0;
 }
