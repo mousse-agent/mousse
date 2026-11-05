@@ -41,6 +41,8 @@ export interface ComposerNoticeProps {
   tone: ComposerNoticeTone
   /** One short line. Longer wording goes in `tooltip`. */
   title: string
+  /** Replaces `title` when the line is narrow. */
+  shortTitle?: string
   /** Quieter text after the title on the same line, cut to fit (the steered text, an approval's command). */
   detail?: string
   /** A muted state after the detail that is never cut ("Connection lost" on a waiting approval). */
@@ -135,12 +137,16 @@ function ComposerNoticeMenu({ items }: { items: ComposerNoticeMenuItem[] }) {
 }
 
 /** One notice: tone icon, one line, its actions and "…" menu, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, detail, note, tooltip, icon, actions = [], menu, onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+export function ComposerNotice({ tone, title, shortTitle, detail, note, tooltip, icon, actions = [], menu, onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
   return (
     <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
-        <span className="composer-notice-title">{title}</span>
+        <span className="composer-notice-title">
+          {shortTitle
+            ? <><span className="composer-notice-title-full">{title}</span><span className="composer-notice-title-short">{shortTitle}</span></>
+            : title}
+        </span>
         {detail && <span className="composer-notice-detail">{detail}</span>}
         {note && <span className="composer-notice-note">{note}</span>}
       </span>

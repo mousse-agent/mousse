@@ -1357,6 +1357,7 @@ html.platform-darwin .titlebar-left {
   display: flex;
   justify-content: center;
   pointer-events: none;
+  container: composer-notice / inline-size;
 }
 
 .composer-notice {
@@ -1408,6 +1409,21 @@ html[data-theme='high-contrast'] .composer-notice {
 /* With a detail after it, the title keeps its width and the detail is the part that is cut. */
 .composer-notice-title:has(+ .composer-notice-detail) {
   flex: none;
+}
+
+/* A notice with a shorter title switches to it when the line is narrow. */
+.composer-notice-title-short {
+  display: none;
+}
+
+@container composer-notice (max-width: 420px) {
+  .composer-notice-title-full {
+    display: none;
+  }
+
+  .composer-notice-title-short {
+    display: inline;
+  }
 }
 
 .composer-notice-detail {
