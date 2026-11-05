@@ -26,6 +26,7 @@ import {
   BrowserAccessControl,
   BrowserDeviceToolbar,
   BrowserNotice,
+  BrowserStartPage,
   ClearCookiesDialog,
   DEVICE_PRESETS,
   browserAgentState,
@@ -333,22 +334,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onSt
   }, [tab.zoomFactor])
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
+  const blank = tab.url === BLANK_URL
   useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
   return (
     <KeepMounted active={active} preserveLayout
-      className={`browser-viewport${active ? ' active' : ''}`}
+      className={`browser-viewport${active ? ' active' : ''}${blank ? ' browser-viewport-blank' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
-      {tab.url === BLANK_URL && (
-        <div className="browser-blank" aria-hidden="true">
-          <MousseLogoOutline className="browser-blank-logo" />
-        </div>
-      )}
+      {blank && <BrowserStartPage />}
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
         inert={agentControlled}
-        className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
+        className={`browser-webview${blank ? ' browser-webview-hidden' : ''}`}
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}

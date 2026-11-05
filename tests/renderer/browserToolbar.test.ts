@@ -6,6 +6,7 @@ import {
   BrowserAccessControl,
   BrowserDeviceToolbar,
   BrowserNotice,
+  BrowserStartPage,
   ClearCookiesDialog,
   browserAgentState,
   deviceWidthLabel
@@ -109,6 +110,15 @@ describe('device toolbar', () => {
     expect(host.querySelector('select')).toBeNull()
     expect(host.querySelector('.ui-select[aria-label="Device"]')?.textContent).toContain('Responsive')
     expect(host.textContent).not.toContain('px')
+  })
+})
+
+describe('browser start page', () => {
+  it('shows one short address instruction', () => {
+    render(createElement(BrowserStartPage))
+    const page = host.querySelector('.browser-blank')!
+    expect(page.querySelectorAll('p')).toHaveLength(1)
+    expect(page.querySelector('p')?.textContent).toBe('Enter an address above')
   })
 })
 

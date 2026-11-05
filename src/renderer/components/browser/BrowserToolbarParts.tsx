@@ -1,5 +1,6 @@
 import { Bot, CircleAlert, CircleCheck, User, X } from '../../lib/icons'
 import type { InAppBrowserState } from '../../../shared/browser/inApp'
+import { MousseLogoOutline } from '../MousseLogoOutline'
 import { Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { Select } from '../ui/Select'
@@ -89,6 +90,19 @@ export function BrowserDeviceToolbar({ presetId, onChange }: { presetId: string;
         options={DEVICE_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
       />
       <span>{deviceWidthLabel(presetId)}</span>
+    </div>
+  )
+}
+
+/**
+ * The app-owned page a new tab shows. It sits over the hidden blank webview and uses the app
+ * theme; visited sites keep their own appearance.
+ */
+export function BrowserStartPage() {
+  return (
+    <div className="browser-blank">
+      <MousseLogoOutline className="browser-blank-logo" />
+      <p className="browser-blank-copy">Enter an address above</p>
     </div>
   )
 }
