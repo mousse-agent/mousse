@@ -555,7 +555,7 @@ export function PullRequestList({ rows, running = null, onChange, readMergeMetho
   if (shown.length === 0) return null
   return (
     <div className="side-card-git-prs">
-      {shown.map((row) => <PullRequestLink key={row.number} row={row} running={running} onChange={onChange} readMergeMethod={readMergeMethod} />)}
+      {shown.map((row) => <PullRequestLink key={row.url || row.number} row={row} running={running} onChange={onChange} readMergeMethod={readMergeMethod} />)}
       {hidden > 0 && (
         <button type="button" className="side-card-git-pr-more" aria-expanded={false} onClick={() => setExpanded(true)}>
           <ChevronDown size={12} aria-hidden="true" />
@@ -676,11 +676,12 @@ export function GitSectionView({
   const branchActions = branchActionState(scope.workspaceThreadId)
   const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   // Read as the same thread or project the section's lookup was, so a thread on another computer merges there.
+  const readThreadId = pullRequestReadThreadId(ownThreadId, workspaceThreadId)
   const { change: changePullRequest, readMergeMethod } = pullRequestActions({
     path,
     branch,
     projectId,
-    threadId: pullRequestReadThreadId(ownThreadId, workspaceThreadId),
+    threadId: readThreadId,
     begin,
     end,
     onNotice: setNotice
@@ -716,7 +717,8 @@ export function GitSectionView({
       />
       {model.pushButton?.note && <p className="side-card-git-quiet">{model.pushButton.note}</p>}
       <GitOperationStatus path={path} />
-      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={rows} running={running} onChange={changePullRequest} readMergeMethod={readMergeMethod} />
+      {/* An open Merge or Close question ends with the thread, folder or branch it was asked in. */}
+      <PullRequestList key={JSON.stringify([threadId, projectId, readThreadId, path, branch])} rows={rows} running={running} onChange={changePullRequest} readMergeMethod={readMergeMethod} />
       {prRow?.kind === 'found' && prRow.hint && <p className="side-card-git-pr-hint">{prRow.hint}</p>}
       {pullRequestError && (
         <p className="side-card-git-pr-error" role="alert" title={pullRequestError}>

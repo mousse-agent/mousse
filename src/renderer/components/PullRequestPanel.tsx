@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PullRequestComment, PullRequestDetail, PullRequestReview } from '../../shared/pullRequests'
 import { useActiveThreadPullRequest } from '../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../hooks/useTransientError'
@@ -27,6 +27,7 @@ import {
   prepareCommentBody,
   pullRequestBadge,
   pullRequestPanelState,
+  pullRequestQuestionIdentity,
   relativeTime,
   reviewLabel,
   reviewTone,
@@ -555,7 +556,8 @@ export function PullRequestPanel() {
   const source = useActiveThreadPullRequest(threadId)
   const { path, branch, projectId, folderThreadId, lookup } = source
   const { running, begin, end } = useGitActionRunner()
-  const [confirm, setConfirm] = useState<'merge' | 'close' | null>(null)
+  // The open Merge or Close question, with the thread, folder and pull request it was asked about.
+  const [asked, setAsked] = useState<{ action: 'merge' | 'close'; identity: string } | null>(null)
   const [actionError, setActionError] = useTransientError()
   const [notice, setNotice] = useTransientError(NOTICE_MS)
   const headerRef = useRef<HTMLDivElement>(null)
@@ -587,9 +589,19 @@ export function PullRequestPanel() {
   const changes = path
     ? pullRequestActions({ path, branch, projectId, threadId: folderThreadId, begin, end, onNotice: setNotice })
     : null
+  // A question belongs to what it was asked about: on another thread, folder, branch or pull request it is gone, never
+  // shown for (or run on) the new one.
+  const identity = pullRequestQuestionIdentity({ threadId, projectId, folderThreadId, path, branch, number })
+  // It also ends if the pull request stops being shown, so it is never reopened on a newer head without asking.
+  const askedStillShown = asked !== null && asked.identity === identity && row !== null
+  const confirm = askedStillShown ? asked.action : null
+  useEffect(() => {
+    if (asked && !askedStillShown) setAsked(null)
+  }, [asked, askedStillShown])
+  const ask = (action: 'merge' | 'close') => setAsked({ action, identity })
   // Focus goes back to what opened the prompt: Merge…, or the menu Close was chosen from.
   const dismiss = (action: 'merge' | 'close') => {
-    setConfirm(null)
+    setAsked(null)
     const selector = action === 'merge' ? '.pr-panel-merge' : '.pr-panel-menu'
     requestAnimationFrame(() => headerRef.current?.querySelector<HTMLElement>(selector)?.focus())
   }
@@ -625,19 +637,19 @@ export function PullRequestPanel() {
         refreshing={refreshing}
         onRefresh={refresh}
         onOpenFile={openFile}
-        headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={setConfirm} /> : undefined}
+        headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={ask} /> : undefined}
         headerBelow={
           <>
             {row && confirm && changes && (
               <div className="pr-panel-confirm">
                 <PullRequestConfirm
-                  key={confirm}
+                  key={`${confirm}\u0000${identity}`}
                   row={row}
                   action={confirm}
                   running={running}
                   onChange={changes.change}
                   readMergeMethod={changes.readMergeMethod}
-                  onDone={() => setConfirm(null)}
+                  onDone={() => setAsked(null)}
                   onDismiss={() => dismiss(confirm)}
                 />
               </div>

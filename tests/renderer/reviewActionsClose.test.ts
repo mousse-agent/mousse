@@ -2,7 +2,8 @@
 /**
  * Git and pull request actions next to the diff, mounted: Discard waits behind a file's More menu and asks in the
  * app's own dialog, the Create PR form shows only in the surface whose button opened it, the pull request panel offers
- * Create PR for a branch with none, and the Start from pull request list picks with Enter before it starts.
+ * Create PR for a branch with none, the Commit popover belongs to one folder, and the Start from pull request list picks
+ * with Enter before it starts.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -182,6 +183,46 @@ describe('the Create PR form in the surface that opened it', () => {
     await render(row('git-panel'))
     await act(async () => openCreatePullRequestForm(model().createScope!, 'side-card'))
     expect(document.body.querySelector('[role="dialog"][aria-label="Create pull request"]')).toBeNull()
+  })
+})
+
+describe('the Commit popover and its folder', () => {
+  const view = (): GitStatusView => ({ ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: status() })
+  const row = (path: string, scope: GitScope) => createElement(GitActionButtons, {
+    host: 'side-card',
+    path,
+    scope,
+    git: view(),
+    model: gitActionRowModel({ path, scope, projectId: scope.projectId, ownThreadId: 't1', status: status(), commitCount: 1, pullRequest: null }),
+    running: null,
+    begin: () => true,
+    end: () => undefined,
+    onActionError: () => undefined,
+    onNotice: () => undefined
+  })
+
+  beforeEach(() => {
+    vi.stubGlobal('mousse', {
+      pullRequests: { draft: vi.fn(() => new Promise(() => {})), baseBranches: vi.fn(() => new Promise(() => {})) },
+      git: { lastCommitMessage: vi.fn(async () => '') }
+    })
+  })
+
+  it('closes and drops the draft when another folder on the same branch is shown', async () => {
+    await render(row('k1', project))
+    await click(host.querySelector('.side-card-git-commit-button'))
+    const message = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')
+    expect(message).not.toBeNull()
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      setter?.call(message, 'fix the login')
+      message?.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+
+    await render(row('k2', { projectId: 'p2', workspaceThreadId: null }))
+    expect(document.body.querySelector('textarea[aria-label="Commit message"]')).toBeNull()
+    await click(host.querySelector('.side-card-git-commit-button'))
+    expect(document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')?.value).toBe('')
   })
 })
 

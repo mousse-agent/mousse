@@ -422,7 +422,9 @@ export function GitActionButtons({ host, path, scope, git, model, running, begin
         {pushButton && (
           <PushButton model={pushButton} busy={running === 'push'} lock={gitActionLock(running, 'push')} onPush={() => void push()} />
         )}
+        {/* The popover and its draft belong to one folder: another project, worktree or path starts closed and empty. */}
         <CommitButton
+          key={JSON.stringify([path, scope.projectId, scope.workspaceThreadId])}
           path={path}
           scope={scope}
           branch={branch}

@@ -7,6 +7,7 @@ import {
   gitErrorMessage,
   mergeConfirmation,
   mergedNotice,
+  pullRequestChangedSince,
   type GitAction,
   type PullRequestFoundRow
 } from './gitSectionLogic'
@@ -58,10 +59,12 @@ export function pullRequestActions(input: {
 }
 
 interface PullRequestConfirmProps {
+  /** The pull request as it is now; the confirmation acts on the one it opened on and says so when this one differs. */
   row: PullRequestFoundRow
   action: 'merge' | 'close'
   /** The Git action running on the surface, if any: one at a time. */
   running: GitAction | null
+  /** Bound to the folder the confirmation opened on: a later one is not picked up. */
   onChange?: PullRequestChange
   /** Reads the merge method when the Merge confirmation opens, so it can name it. */
   readMergeMethod?: PullRequestMergeMethodRead
@@ -74,43 +77,54 @@ interface PullRequestConfirmProps {
 /**
  * The confirmation before a pull request is merged or closed. It takes focus on Cancel, so a stray Enter does nothing
  * final; the Merge one names the target branch and the method, read once when it opens, and its button waits for it.
+ * It acts only on what it was opened on: that pull request, its head and its folder. If the head moves while it is open,
+ * it says so and asks for a fresh look before anything runs.
  */
 export function PullRequestConfirm({ row, action, running, onChange, readMergeMethod, onDone, onDismiss }: PullRequestConfirmProps) {
+  // What the question is about, taken together when it opens (or is looked at again): the pull request with its head,
+  // and the merge, close and method read bound to its folder.
+  const [asked, setAsked] = useState(() => ({ row, onChange, readMergeMethod }))
   const [error, setError] = useState<string | null>(null)
   // Undefined while it is read, null when it could not be.
   const [mergeMethod, setMergeMethod] = useState<PullRequestMergeMethod | null | undefined>(undefined)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const working = running === action
+  // While its own action runs, a refresh that shows the result is not a change to ask about.
+  const changed = !working && pullRequestChangedSince(asked.row, row)
   useEffect(() => {
     cancelRef.current?.focus()
   }, [])
-  // The method is read once per confirmation; a refreshed row does not ask again.
-  const readRef = useRef({ readMergeMethod, row })
-  readRef.current = { readMergeMethod, row }
+  // The method is read once per look at the pull request; a refreshed row does not ask again.
   useEffect(() => {
-    const { readMergeMethod: read, row: asked } = readRef.current
+    const { readMergeMethod: read, row: target } = asked
     if (action !== 'merge' || !read) return
     let current = true
-    read(asked).then((method) => { if (current) setMergeMethod(method) }, () => { if (current) setMergeMethod(null) })
+    read(target).then((method) => { if (current) setMergeMethod(method) }, () => { if (current) setMergeMethod(null) })
     return () => { current = false }
-  }, [action])
-  const mergePrompt = mergeConfirmation(row.number, row.base, readMergeMethod ? mergeMethod : null)
+  }, [action, asked])
+  const mergePrompt = mergeConfirmation(asked.row.number, asked.row.base, asked.readMergeMethod ? mergeMethod : null)
   const dismiss = () => {
     if (!working) onDismiss()
   }
   const run = async () => {
-    if (!onChange || running !== null) return
+    if (!asked.onChange || running !== null || changed) return
     setError(null)
-    // The merge uses the method the prompt named, never one read again later.
-    const failure = await onChange(action, row, action === 'merge' ? mergeMethod ?? undefined : undefined)
+    // The merge sends the head that was looked at and the method the prompt named, never ones read again later.
+    const failure = await asked.onChange(action, asked.row, action === 'merge' ? mergeMethod ?? undefined : undefined)
     if (failure) setError(failure)
     else onDone()
+  }
+  // Takes the pull request as it is now; the question is asked again about it.
+  const reviewAgain = () => {
+    setError(null)
+    setMergeMethod(undefined)
+    setAsked({ row, onChange, readMergeMethod })
   }
   return (
     <div
       className="side-card-git-pr-confirm"
       role="group"
-      aria-label={action === 'close' ? `Close ${row.number}` : `Merge ${row.number}`}
+      aria-label={action === 'close' ? `Close ${asked.row.number}` : `Merge ${asked.row.number}`}
       onKeyDown={(event) => {
         if (event.key !== 'Escape') return
         event.preventDefault()
@@ -119,21 +133,33 @@ export function PullRequestConfirm({ row, action, running, onChange, readMergeMe
       }}
     >
       <p className="side-card-git-pr-confirm-text">
-        {action === 'close' ? `Close ${row.number} without merging? Its branch stays.` : mergePrompt.text}
+        {action === 'close' ? `Close ${asked.row.number} without merging? Its branch stays.` : mergePrompt.text}
       </p>
+      {changed && (
+        <p className="side-card-git-error" role="alert">
+          {asked.row.number} changed since you opened this. Look again before you {action === 'merge' ? 'merge' : 'close'} it.
+        </p>
+      )}
       {error && <p className="side-card-git-error" role="alert" title={error}>{error}</p>}
       <div className="side-card-git-pr-confirm-actions">
         <button ref={cancelRef} type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={working} onClick={dismiss}>
           Cancel
         </button>
-        {action === 'merge' ? (
+        {changed ? (
+          // A pull request that is no longer open has nothing left to merge or close.
+          row.merge && (
+            <button type="button" className="side-card-git-submit" disabled={running !== null} onClick={reviewAgain}>
+              Review again
+            </button>
+          )
+        ) : action === 'merge' ? (
           <button
             type="button"
             className="side-card-git-pr-merge"
             data-ready
             aria-busy={working}
             // Not before the method is known: the button names what it does.
-            disabled={running !== null || (readMergeMethod !== undefined && mergeMethod === undefined)}
+            disabled={running !== null || (asked.readMergeMethod !== undefined && mergeMethod === undefined)}
             onClick={() => void run()}
           >
             <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />

@@ -932,6 +932,16 @@ const MERGE_METHOD_ACTIONS: Record<PullRequestMergeMethod, string> = {
  * it. `method` is undefined while it is read and null when it could not be (or the computer is too old to say); the
  * merge then goes without one, and the computer that merges uses the repository's default, else squash.
  */
+/**
+ * The pull request a merge or close question was asked about is no longer the one shown: another number, a new head,
+ * or it stopped being open. The question then needs a fresh look before it can run.
+ */
+export function pullRequestChangedSince(asked: PullRequestFoundRow, now: PullRequestFoundRow): boolean {
+  if (asked.value !== now.value || asked.url !== now.url) return true
+  if ((asked.merge === null) !== (now.merge === null)) return true
+  return (asked.merge?.headSha ?? null) !== (now.merge?.headSha ?? null)
+}
+
 export function mergeConfirmation(number: string, base: string, method: PullRequestMergeMethod | null | undefined): { text: string; action: string } {
   const into = base ? ` into ${base}` : ''
   if (method === undefined) return { text: `Merge ${number}${into}?`, action: 'Merge' }

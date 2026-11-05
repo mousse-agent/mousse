@@ -422,3 +422,18 @@ export function pullRequestBadge(pullRequest: { state: 'open' | 'closed' | 'merg
   if (pullRequest.state === 'closed') return { label: 'Closed', tone: 'failing' }
   return pullRequest.isDraft ? { label: 'Draft', tone: 'neutral' } : { label: 'Open', tone: 'passing' }
 }
+
+/**
+ * What a Merge or Close question in the panel is about: the active thread, the folder and branch its reads are made in,
+ * and the pull request number. A question asked about one is never shown for, or run on, another.
+ */
+export function pullRequestQuestionIdentity(input: {
+  threadId: string | null
+  projectId: string | null
+  folderThreadId: string | null
+  path: string | null
+  branch: string | null
+  number: number | null
+}): string {
+  return JSON.stringify([input.threadId, input.projectId, input.folderThreadId, input.path, input.branch, input.number])
+}
