@@ -445,21 +445,77 @@
 }
 
 /* Add device: one choice per way to add. */
-.devices-choice {
+/* Add device: one compact row per route, icon left of the title, its need or detail below. */
+.devices-routes {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  width: 100%;
-  padding: var(--space-8) var(--space-12);
-  border: 1px solid var(--ui-line-strong);
-  border-radius: var(--ui-control-radius);
-  font-size: var(--settings-fs-small);
-  color: var(--text-primary);
-  text-align: left;
 }
 
-.devices-choice:hover {
+.devices-choice {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  column-gap: var(--space-8);
+  row-gap: 2px;
+  align-items: center;
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.devices-choice > svg {
+  color: var(--text-secondary);
+}
+
+.devices-choice > strong {
+  font-size: var(--settings-fs-row);
+  font-weight: 400;
+}
+
+.devices-choice > span {
+  grid-column: 2;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small);
+}
+
+.devices-choice:hover:not([aria-disabled='true']) {
   background: var(--ui-hover);
+}
+
+.devices-choice:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+/* Still focusable so its need is read out; dimmed like any unavailable control. */
+.devices-choice[aria-disabled='true'] {
+  cursor: default;
+}
+
+.devices-choice[aria-disabled='true'] > svg,
+.devices-choice[aria-disabled='true'] > strong {
+  opacity: 0.5;
+}
+
+.devices-back {
+  margin-left: calc(-1 * var(--space-4));
+}
+
+.devices-invite-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-8);
+}
+
+.devices-invite-foot > .settings-muted {
+  margin-right: auto;
+  font-variant-numeric: tabular-nums;
 }
 
 /* The one-time notice about Mousse's Include line, inside the Editors group. */

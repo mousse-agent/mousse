@@ -30,15 +30,18 @@ export function ConfirmRemoveButton({
   )
 }
 
-/** Icon-only copy; the glyph turns into a green check for a moment once copied. */
-export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+/**
+ * Icon-only copy; the glyph turns into a green check for a moment once copied. With `announce`,
+ * a "Copied" word also shows beside it and is read out, for copies that matter (an invitation).
+ */
+export function CopyButton({ text, label = 'Copy', announce = false }: { text: string; label?: string; announce?: boolean }) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
     const timer = setTimeout(() => setCopied(false), 1500)
     return () => clearTimeout(timer)
   }, [copied])
-  return (
+  const button = (
     <button
       type="button"
       className="settings-icon-btn primary"
@@ -48,5 +51,12 @@ export function CopyButton({ text, label = 'Copy' }: { text: string; label?: str
     >
       {copied ? <Check size={14} className="settings-status-ok" /> : <Copy size={14} />}
     </button>
+  )
+  if (!announce) return button
+  return (
+    <span className="copy-announce">
+      <span className="copy-announce-status" role="status">{copied ? 'Copied' : ''}</span>
+      {button}
+    </span>
   )
 }

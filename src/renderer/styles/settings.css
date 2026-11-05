@@ -649,6 +649,22 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
   color: var(--text-primary);
 }
 
+/* A copy button that also says "Copied" beside itself for a moment. */
+.copy-announce {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.copy-announce-status {
+  color: var(--success);
+  font-size: var(--settings-fs-small);
+}
+
+.copy-announce-status:empty {
+  display: none;
+}
+
 /* Icon buttons side by side in one row control. */
 .settings-icon-actions {
   display: inline-flex;
