@@ -7,6 +7,8 @@ interface ComposerQuestionModalProps {
   pending: PendingUserQuestions
   onSubmit: (answers: UserQuestionAnswers) => void
   onDismiss: () => void
+  /** The answers chosen so far, each time they change (a message sent from the composer keeps them). */
+  onDraftChange?: (answers: UserQuestionAnswers) => void
 }
 
 /** How long a picked single choice stays visible before the next question slides in. */
@@ -46,6 +48,38 @@ export function resolveQuestionAnswers(
 
 /** The composer's hint while an approval request waits: a message is also an answer. */
 export const APPROVAL_COMPOSER_PLACEHOLDER = 'Answer the approval, or send a message to deny it and redirect the agent'
+
+/** The composer's hint while the agent's questions are open above it. */
+export const QUESTION_COMPOSER_PLACEHOLDER = 'Or reply in your own words'
+
+/**
+ * What sending from the composer does while questions are open: the message answers them, unless it
+ * carries images, which an answer cannot hold; then the questions are skipped and the message is sent.
+ */
+export function questionComposerSend(hasImages: boolean): { answers: boolean; label: string } {
+  return hasImages
+    ? { answers: false, label: 'Skip questions and send' }
+    : { answers: true, label: 'Answer with this message' }
+}
+
+/**
+ * The answers a message sent from the composer gives: the choices already made in the card stay,
+ * and the message answers every question the card has no answer for.
+ */
+export function answersWithMessage(
+  questions: UserQuestion[],
+  draft: UserQuestionAnswers,
+  message: string
+): UserQuestionAnswers {
+  const answers: UserQuestionAnswers = {}
+  for (const question of questions) {
+    const picked = draft[question.id]
+    answers[question.id] = isQuestionAnswered(question, picked, undefined)
+      ? picked
+      : question.allowMultiple ? [message] : message
+  }
+  return answers
+}
 
 /** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
 export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined): string | null {
@@ -221,7 +255,7 @@ function QuestionIndicator({ kind, checked }: { kind: 'radio' | 'checkbox'; chec
   )
 }
 
-export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: ComposerQuestionModalProps) {
+export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onDraftChange }: ComposerQuestionModalProps) {
   const total = pending.questions.length
   const [step, setStep] = useState(0)
   // Which way the current question slid in: 1 from the right, -1 from the left, 0 not at all.
@@ -250,6 +284,12 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
   }, [pending.requestId])
 
   useEffect(() => cancelAdvance, [])
+
+  const onDraftChangeRef = useRef(onDraftChange)
+  onDraftChangeRef.current = onDraftChange
+  useEffect(() => {
+    onDraftChangeRef.current?.(resolveQuestionAnswers(pending.questions, answers, customs))
+  }, [pending.questions, answers, customs])
 
   const clampedStep = Math.min(step, Math.max(total - 1, 0))
 

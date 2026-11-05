@@ -4978,7 +4978,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 /* The question dialog: the app's dialog surface, radius, insets and title (see .modal),
-   shown in place of the composer. One question at a time; the dots jump between them. */
+   shown above the composer. One question at a time; the dots jump between them. */
 .composer-question-modal {
   position: absolute;
   left: 12px;
@@ -5290,9 +5290,9 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   }
 }
 
-/* Question-tool swap: the modal replaces the composer in-flow while active.
- * Both wrappers animate height (grid-rows) + fade/slide so hiding the input
- * bar and re-showing it after submit happens without a layout jump. */
+/* The question card sits in flow directly above the composer, which stays usable. The wrapper
+ * animates its height (grid-rows) + fade/slide, so the card opens and closes without a layout
+ * jump; being in flow, its height is part of the composer stack the transcript leaves room for. */
 .composer-question-swap {
   display: grid;
   grid-template-rows: 0fr;
@@ -5312,7 +5312,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   overflow: hidden;
   min-height: 0;
 }
-/* In swap mode the modal is an in-flow replacement, not a floating overlay: it keeps
+/* Above the composer the card is in flow, not a floating overlay: it keeps
    the lit edge but casts no drop shadow, which the swap's clipping would cut into a band. */
 .composer-question-swap .composer-question-modal {
   position: static;
@@ -5323,33 +5323,8 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   box-shadow: var(--ui-dialog-edge);
 }
 
-.composer-collapse {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  transition:
-    grid-template-rows 300ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 220ms ease,
-    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.composer-collapse.is-collapsed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(8px) scale(0.99);
-  pointer-events: none;
-}
-.composer-collapse-inner {
-  overflow: visible;
-  min-height: 0;
-}
-.composer-collapse.is-collapsed .composer-collapse-inner {
-  overflow: hidden;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .composer-question-swap,
-  .composer-collapse {
+  .composer-question-swap {
     transition: none;
     transform: none;
   }

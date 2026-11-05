@@ -35,7 +35,7 @@ function provider(models: LlmModelOption[], autoPermissionMode = true, label = '
   return { id, label, models, caps: { toolControl: 'exact', autoPermissionMode, contextUsage: 'none' } as ProviderWithStatus['caps'] }
 }
 
-function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[] } = {}) {
+function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[]; send?: Partial<ComposerFooterProps> } = {}) {
   const onModelMenuOpenChange = vi.fn()
   const onModelSelect = vi.fn()
   const onPermission = vi.fn()
@@ -52,6 +52,7 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
     contextOpen: false,
     onContextOpenChange: vi.fn(),
     onAttachClick: vi.fn(),
+    ...options.send,
     ...(options.permission === false ? {} : { permission: { mode: options.mode ?? 'accept_edits', ...(options.ceiling ? { ceiling: options.ceiling, ceilingReason: 'This computer allows up to Auto-accept edits.' } : {}), onSelect: onPermission } })
   }
   act(() => root.render(createElement(ComposerFooter, props)))
@@ -423,5 +424,19 @@ describe('composer model picker', () => {
     root = createRoot(host)
     render({ readOnly: true, permission: false, open: false })
     expect(modelButton().disabled).toBe(true)
+  })
+})
+
+describe('composer send button', () => {
+  const sendButton = () => host.querySelector<HTMLButtonElement>('.composer-action-btn-active')!
+
+  it('says what sending does: send, queue, or what the parent names (answering open questions)', () => {
+    render({ open: false, send: { canSend: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Send message')
+    render({ open: false, send: { canSend: true, loading: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Queue message')
+    render({ open: false, send: { canSend: true, loading: true, sendLabel: 'Answer with this message' } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Answer with this message')
+    expect(sendButton().title).toBe('Answer with this message')
   })
 })

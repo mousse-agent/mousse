@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -6,9 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AUTO_ADVANCE_MS,
   ComposerQuestionModal,
+  QUESTION_COMPOSER_PLACEHOLDER,
   QuestionOptionList,
+  answersWithMessage,
   isQuestionAnswered,
   nextUnansweredStep,
+  questionComposerSend,
   questionDialogLabel,
   resolveQuestionAnswers
 } from '../src/renderer/components/ComposerQuestionModal'
@@ -141,11 +145,14 @@ describe('ComposerQuestionModal', () => {
     vi.useRealTimers()
   })
 
+  let drafts: UserQuestionAnswers[]
   const open = (questions: UserQuestion[]) => {
+    drafts = []
     act(() => root.render(createElement(ComposerQuestionModal, {
       pending: { requestId: 'r1', questions },
       onSubmit: (answers) => submitted.push(answers),
-      onDismiss: () => { dismissed += 1 }
+      onDismiss: () => { dismissed += 1 },
+      onDraftChange: (answers) => drafts.push(answers)
     })))
   }
   const prompts = () => [...host.querySelectorAll('.composer-question-prompt')].map((node) => node.textContent)
@@ -284,5 +291,37 @@ describe('ComposerQuestionModal', () => {
     click(button('Skip'))
     expect(dismissed).toBe(2)
     expect(submitted).toEqual([])
+  })
+
+  it('reports the choices made so far, for a message sent from the composer', () => {
+    open([single, multi])
+    expect(drafts.at(-1)).toEqual({ scope: '', areas: [] })
+    click(option('API'))
+    expect(drafts.at(-1)).toEqual({ scope: 'api', areas: [] })
+  })
+})
+
+describe('a message sent from the composer while questions are open', () => {
+  it('answers every question the card has no answer for and keeps the choices made', () => {
+    expect(answersWithMessage([single, multi, third], { scope: 'api', areas: [], size: '' }, 'Keep it small'))
+      .toEqual({ scope: 'api', areas: ['Keep it small'], size: 'Keep it small' })
+    expect(answersWithMessage([single, multi], { areas: ['ui'] }, 'Just the UI'))
+      .toEqual({ scope: 'Just the UI', areas: ['ui'] })
+  })
+
+  it('answers the questions, unless it carries images; then it skips them and sends', () => {
+    expect(questionComposerSend(false)).toEqual({ answers: true, label: 'Answer with this message' })
+    expect(questionComposerSend(true)).toEqual({ answers: false, label: 'Skip questions and send' })
+    expect(QUESTION_COMPOSER_PLACEHOLDER).toBe('Or reply in your own words')
+  })
+
+  it('the composer stays mounted and usable beside the card, and its message answers the questions', () => {
+    const source = readFileSync('src/renderer/components/OrchestratorChat.tsx', 'utf8')
+    // The card renders before (above) the composer in the same composer column, and nothing hides the composer.
+    expect(source.indexOf('<ComposerQuestionModal')).toBeLessThan(source.indexOf('<ChatComposer'))
+    expect(source).not.toMatch(/composer-collapse|inert: true/)
+    expect(source).toMatch(/placeholder=\{[^}]*questionsTakeMessage \? QUESTION_COMPOSER_PLACEHOLDER/)
+    expect(source).toMatch(/sendLabel=\{questionsTakeMessage\s*\?\s*questionComposerSend\(/)
+    expect(source).toMatch(/answerQuestionsDetailed\(\s*asked\.requestId,\s*answersWithMessage\(asked\.questions, draft, text\)/)
   })
 })

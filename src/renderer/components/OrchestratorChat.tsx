@@ -7,7 +7,8 @@ import type {
   PlanCardMetadata,
   PendingUserQuestions,
   QueuedMessage,
-  SkillChatMode
+  SkillChatMode,
+  UserQuestionAnswers
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
@@ -25,8 +26,15 @@ import {
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
 import { MousseLogoOutline } from './MousseLogoOutline'
-import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOutcome } from './ComposerQuestionModal'
-import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
+import {
+  APPROVAL_COMPOSER_PLACEHOLDER,
+  ComposerQuestionModal,
+  QUESTION_COMPOSER_PLACEHOLDER,
+  answersWithMessage,
+  describeAnswerOutcome,
+  questionComposerSend
+} from './ComposerQuestionModal'
+import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile, isImageMimeType } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
@@ -382,11 +390,14 @@ export function OrchestratorChat() {
     }
   }, [pendingQuestions, shownMessages, submitQuickActionDecision])
 
-  // The question tool replaces the composer while active: the input bar
-  // collapses away and re-expands after submit. Both directions animate so
-  // there is no layout jump. Inline quick-action approvals keep the composer
-  // visible (the decision UI lives on the card itself).
+  // The question card opens above the composer, which stays usable: a message sent while the
+  // questions are open answers them. The card's height animates in and out so there is no
+  // layout jump. Inline quick-action approvals have no card (the decision UI lives on the card itself).
   const showQuestions = Boolean(pendingQuestions && !quickActionApproval)
+  // Agent questions (not an approval request, whose message denies it) take the composer's message as their answer.
+  const questionsTakeMessage = showQuestions && !pendingQuestions?.approval
+  // The choices made in the card so far, kept when a message answers the rest.
+  const questionDraftRef = useRef<{ requestId: string; answers: UserQuestionAnswers } | null>(null)
   useEffect(() => {
     if (!showQuestions) return
     setRenderQuestions(true)
@@ -409,6 +420,9 @@ export function OrchestratorChat() {
   useEffect(() => {
     if (!showQuestions) return
     const timer = window.setTimeout(() => {
+      // Someone typing in the composer keeps it; an empty, unfocused composer hands focus to the first choice.
+      const composerInput = inputAreaRef.current?.querySelector<HTMLTextAreaElement>('.composer-input')
+      if (composerInput && (document.activeElement === composerInput || composerInput.value.trim())) return
       inputAreaRef.current
         ?.querySelector<HTMLElement>(
           '.composer-question-modal .composer-question-choice[tabindex="0"]'
@@ -958,6 +972,31 @@ export function OrchestratorChat() {
       return
     }
 
+    // Questions open above the composer: the message answers them, keeping the choices made in the card.
+    // A message with images cannot be an answer; it is sent as usual, which skips the questions.
+    const asked = questionsTakeMessage ? pendingQuestions : null
+    if (asked && text && questionComposerSend(images.length > 0).answers) {
+      const draft = questionDraftRef.current?.requestId === asked.requestId ? questionDraftRef.current.answers : {}
+      const outcome = await window.mousse.orchestrator.answerQuestionsDetailed(
+        asked.requestId,
+        answersWithMessage(asked.questions, draft, text),
+        questionAnswerThreadId(asked, activeThreadId)
+      )
+      setPendingQuestions((current) => (current?.requestId === asked.requestId ? null : current))
+      if (outcome.ok) {
+        clearComposer()
+        return
+      }
+      // Another client answered first or the request was closed: say so and keep the message.
+      const refusal = describeAnswerOutcome(outcome)
+      if (refusal) {
+        setSendError(refusal)
+        return
+      }
+      // The questions closed before the answer arrived: the message goes to the thread as usual.
+      if (!stillVisible()) return
+    }
+
     if (newChat) {
       // Apply this draft's workspace before sending; a project change creates a
       // new hidden draft instead of moving another thread's transcript storage.
@@ -1213,6 +1252,7 @@ export function OrchestratorChat() {
               <ComposerQuestionModal
                 key={questionsSnapshot.requestId}
                 pending={questionsSnapshot}
+                onDraftChange={(answers) => { questionDraftRef.current = { requestId: questionsSnapshot.requestId, answers } }}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
                   const threadId = questionAnswerThreadId(questionsSnapshot, activeThreadId)
@@ -1284,12 +1324,6 @@ export function OrchestratorChat() {
           </div>
         )}
 
-        <div
-          className={`composer-collapse${showQuestions ? ' is-collapsed' : ''}`}
-          aria-hidden={showQuestions || undefined}
-          {...(showQuestions ? { inert: true } : {})}
-        >
-          <div className="composer-collapse-inner">
             {newChat && (
               <ComposerWorkspaceToolbar
                 key={`${profileId}:${activeThreadId ?? '__blank__'}`}
@@ -1342,7 +1376,13 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
+              placeholder={!workspaceReady ? 'Loading workspace...'
+                : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
+                  : permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
+              loadingPlaceholder={questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER : undefined}
+              sendLabel={questionsTakeMessage
+                ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type))).label
+                : undefined}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
               banner={<><RemoteSubagentNotice runsOn={activeThread?.runsOn} /><SubagentComposerBanner threadId={activeThreadId} /></>}
@@ -1351,8 +1391,6 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
-          </div>
-        </div>
       </div>
         )}
       />
