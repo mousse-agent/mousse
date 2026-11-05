@@ -34,8 +34,11 @@ function readTerminalBackground(): string {
   return value || '#1a1228'
 }
 
-/** Keep a terminal's colours and font in step with the theme and the code font setting. */
-export function followXtermAppearance(terminal: Terminal): void {
+/**
+ * Keep a terminal's colours and font in step with the theme and the code font setting. A new font
+ * changes the cell size, so `refit` (the terminal's own fit-and-resize path) runs after it.
+ */
+export function followXtermAppearance(terminal: Terminal, refit?: () => void): void {
   const observer = new MutationObserver(() => {
     terminal.options.theme = getXtermTheme()
   })
@@ -50,6 +53,7 @@ export function followXtermAppearance(terminal: Terminal): void {
       unsubscribe = subscribeAppFonts(() => {
         terminal.options.fontFamily = ''
         terminal.options.fontFamily = xtermFont()
+        refit?.()
       })
     },
     dispose() {

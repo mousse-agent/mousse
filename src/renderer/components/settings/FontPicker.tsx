@@ -13,6 +13,7 @@ import {
 import { isGoogleFontLoaded, loadGoogleFont, useAppFontsVersion } from '../../lib/appFonts'
 import { isMonospaceFamily, listInstalledFontFamilies } from '../../lib/localFonts'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
+import { useAppStore } from '../../stores/appStore'
 import { ChevronDown, Download, Loader2, Search } from '../../lib/icons'
 import '../../styles/select.css'
 import '../../styles/font-picker.css'
@@ -65,6 +66,10 @@ function buildEntries(role: FontRole, query: string, installed: readonly string[
 export interface FontPickerProps {
   role: FontRole
   value: FontChoice
+  /**
+   * Saves the choice. It may run after a download, so it must save only this font, not a copy of
+   * other settings taken when the picker rendered.
+   */
   onChange: (choice: FontChoice) => Promise<void> | void
   ariaLabel: string
 }
@@ -157,6 +162,7 @@ export function FontPicker({ role, value, onChange, ariaLabel }: FontPickerProps
       return
     }
     setError(null)
+    const profileId = useAppStore.getState().profileId
     if (entry.choice.source === 'google' && entry.choice.family) {
       setBusy(entry.key)
       try {
@@ -168,6 +174,8 @@ export function FontPicker({ role, value, onChange, ariaLabel }: FontPickerProps
       } finally {
         setBusy(null)
       }
+      // The download outlived the profile it was chosen in; do not save it into the next one.
+      if (useAppStore.getState().profileId !== profileId) return
     }
     await onChange(entry.choice)
     close(true)

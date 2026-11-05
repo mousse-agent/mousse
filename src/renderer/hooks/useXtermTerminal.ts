@@ -87,7 +87,7 @@ export function useXtermTerminal(
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
     terminal.open(containerRef.current)
-    followXtermAppearance(terminal)
+    followXtermAppearance(terminal, () => fitAndResize(false))
 
     terminal.onData((data) => {
       void window.mousse.pty.write(ptyId, data)
@@ -126,7 +126,7 @@ export function useXtermTerminal(
       lastPtyDimensionsRef.current = undefined
       if (containerRef.current) containerRef.current.innerHTML = ''
     }
-  }, [ptyId, containerRef])
+  }, [ptyId, containerRef, fitAndResize])
 
   useEffect(() => {
     const unsub = window.mousse.pty.onData(({ ptyId: id, data }) => {

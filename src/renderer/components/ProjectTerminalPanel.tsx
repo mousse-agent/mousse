@@ -127,7 +127,6 @@ export function ProjectTerminalPanel() {
         theme: getXtermTheme()
       })
 
-      followXtermAppearance(terminal)
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
 
@@ -140,6 +139,10 @@ export function ProjectTerminalPanel() {
 
       terminal.open(wrapper)
       fitAddon.fit()
+      // Only the shown terminal refits; a hidden one has no size and refits when it is shown.
+      followXtermAppearance(terminal, () => {
+        if (wrapper.style.display !== 'none') fitTerminal(ptyId, false)
+      })
 
       const threadId =
         useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)?.ownerThreadId ?? undefined
@@ -156,7 +159,7 @@ export function ProjectTerminalPanel() {
         threadId
       })
     },
-    []
+    [fitTerminal]
   )
 
   const spawnShellForTab = useCallback(

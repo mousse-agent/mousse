@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import type { AppearanceSettings, MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
@@ -60,6 +60,15 @@ export interface GeneralSettingsProps {
   onPreviewAcrylicIntensity: (value: number) => void
   /** Saves a glass intensity (debounced by the caller). */
   onCommitAcrylicIntensity: (value: number) => void
+}
+
+/**
+ * A patch that sets one font and nothing else. The daemon merges it into the current settings, so
+ * a font that finishes downloading later cannot restore other appearance values from an older
+ * render. DeepPartial does not reach into interfaces, hence the cast.
+ */
+function fontPatch(font: Pick<AppearanceSettings, 'interfaceFont'> | Pick<AppearanceSettings, 'codeFont'>): MousseSettingsUpdate {
+  return { appearance: font } as MousseSettingsUpdate
 }
 
 /** Settings → General: appearance, permissions, runs, notifications, privacy and the installed version. */
@@ -128,7 +137,7 @@ export function GeneralSettings({
               role="interface"
               ariaLabel="Interface font"
               value={appearance.interfaceFont}
-              onChange={(interfaceFont) => onUpdate({ appearance: { ...appearance, interfaceFont } })}
+              onChange={(interfaceFont) => onUpdate(fontPatch({ interfaceFont }))}
             />
           }
         />
@@ -140,7 +149,7 @@ export function GeneralSettings({
               role="code"
               ariaLabel="Code font"
               value={appearance.codeFont}
-              onChange={(codeFont) => onUpdate({ appearance: { ...appearance, codeFont } })}
+              onChange={(codeFont) => onUpdate(fontPatch({ codeFont }))}
             />
           }
         />

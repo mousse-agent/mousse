@@ -122,9 +122,10 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
   useEffect(() => {
     if (!container.current) return
     const term = new Terminal({ allowTransparency: true, fontFamily: xtermFont(), fontSize: 12, theme: getXtermTheme(), cursorBlink: true })
-    followXtermAppearance(term)
     const fit = new FitAddon()
     term.loadAddon(fit); term.open(container.current); fit.fit()
+    const refit = () => { if (!container.current?.clientWidth) return; fit.fit(); if (controlRef.current) void request('chatResources.terminal.resize', { terminalId: terminal.id, columns: Math.min(500, Math.max(2, term.cols)), rows: Math.min(300, Math.max(2, term.rows)) }).catch(() => {}) }
+    followXtermAppearance(term, refit)
     let active = true, busy = false, sequence = 0
     const data = term.onData((value) => { if (controlRef.current) void request('chatResources.terminal.write', { terminalId: terminal.id, data: value }).catch((error) => { if (active) setError(message(error)) }) })
     const poll = async () => {
@@ -141,7 +142,7 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
     }
     void poll()
     const timer = setInterval(() => { void poll() }, 250)
-    const observer = new ResizeObserver(() => { if (!container.current?.clientWidth) return; fit.fit(); if (controlRef.current) void request('chatResources.terminal.resize', { terminalId: terminal.id, columns: Math.min(500, Math.max(2, term.cols)), rows: Math.min(300, Math.max(2, term.rows)) }).catch(() => {}) })
+    const observer = new ResizeObserver(refit)
     observer.observe(container.current)
     return () => { active = false; data.dispose(); observer.disconnect(); clearInterval(timer); term.dispose() }
   }, [request, terminal.id])
