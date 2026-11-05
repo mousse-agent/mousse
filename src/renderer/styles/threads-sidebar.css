@@ -1131,3 +1131,25 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   font-size: 11px;
   color: var(--text-secondary);
 }
+
+/* Where a row dragged in the Threads tab will land. */
+.threads-sidebar-thread-container.drop-before::before,
+.threads-sidebar-thread-container.drop-after::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.threads-sidebar-thread-container.drop-before::before {
+  top: -2px;
+}
+
+.threads-sidebar-thread-container.drop-after::before {
+  bottom: -2px;
+}

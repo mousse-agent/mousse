@@ -5915,6 +5915,16 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 }
 
 .composer-input::placeholder { color: rgba(255,255,255,0.42); }
+/* White placeholder vanishes on the light composer; high contrast needs more than 42%. */
+html[data-theme='light'] .composer-input::placeholder,
+html[data-theme='high-contrast'] .composer-input::placeholder {
+  color: var(--text-secondary);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .composer-input::placeholder {
+    color: var(--text-secondary);
+  }
+}
 
 .composer-footer {
   padding: 8px 10px 10px;
