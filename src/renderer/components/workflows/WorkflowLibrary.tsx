@@ -163,7 +163,7 @@ export function WorkflowLibrary({
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn"
             data-action="new-workflow"
             disabled={creating}
             onClick={() => setTemplateOpen(true)}

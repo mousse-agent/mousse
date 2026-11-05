@@ -154,7 +154,7 @@ export function AgentsLibrary({
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn"
             data-action="new-agent"
             disabled={creating}
             onClick={() => void createAgent()}

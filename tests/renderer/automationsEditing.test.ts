@@ -125,6 +125,8 @@ describe('libraries', () => {
     await flush()
     expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No agents yet.')
     expect(buttons().filter((item) => item.textContent?.includes('New agent'))).toHaveLength(1)
+    // Create is a neutral button, not an accent fill.
+    expect(document.querySelector('[data-action="new-agent"]')?.className).toBe('btn')
     expect(document.querySelector('[aria-label="Import agent"]')).not.toBeNull()
     expect(document.querySelector('.agent-library-toolbar')).toBeNull()
     expect(document.querySelector('h2')?.textContent).toBe('Agents')
@@ -165,6 +167,7 @@ describe('libraries', () => {
     await flush()
     expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No workflows yet.')
     expect(document.querySelectorAll('[data-action="new-workflow"]')).toHaveLength(1)
+    expect(document.querySelector('[data-action="new-workflow"]')?.className).toBe('btn')
     expect(document.querySelector('[aria-label="Import workflow"]')).not.toBeNull()
     expect(document.querySelector('.wf-toolbar')).toBeNull()
   })

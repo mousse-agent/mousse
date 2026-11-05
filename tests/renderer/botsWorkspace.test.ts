@@ -204,6 +204,17 @@ describe('Bots tab: approval', () => {
 })
 
 describe('Bots tab: list', () => {
+  it('an empty tab says it once, beside a neutral New bot like the other libraries', async () => {
+    const client = { list: vi.fn(async () => []), escalations: vi.fn(async () => []) } as unknown as PersonalBotsClient
+    await act(async () => root.render(createElement(BotsWorkspace, { client, providers: [], skills: [] })))
+    expect(document.querySelectorAll('.bots__muted')).toHaveLength(1)
+    expect(document.querySelector('.bots__empty')).toBeNull()
+    const create = document.querySelector<HTMLButtonElement>('[data-action="new-bot"]')!
+    expect(create.className).toBe('btn')
+    expect(create.querySelector('svg')).not.toBeNull()
+    expect(create.textContent?.trim()).toBe('New bot')
+  })
+
   it('lists bots with the inbox badge and the open escalations', async () => {
     const bot: BotSummary = { id: 'site-editor', name: 'Site editor', role: 'Keeps the site tidy', draftHash: 'h'.repeat(64), revision: 'h'.repeat(64), grant: { digest: 'd'.repeat(64), approvedAt: 'now' }, needsApproval: [], openEscalations: 1 }
     const client = {

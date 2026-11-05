@@ -11,7 +11,7 @@ import {
   type BotPermissionLine,
   type BotSummary
 } from '../../../shared/bots/personal/definition'
-import { ChevronRight } from '../../lib/icons'
+import { ChevronRight, Plus } from '../../lib/icons'
 import { Modal } from '../ui/Modal'
 import { Select } from '../ui/Select'
 import { Switch } from '../settings/SettingsRow'
@@ -161,7 +161,9 @@ export function BotsWorkspace({ client, providers, skills, active = true }: Bots
     <aside className="bots__list" aria-label="Bots">
       <div className="bots__list-head">
         <h2>Bots</h2>
-        <button type="button" className="btn btn-sm" onClick={() => setEditing({ definition: newBotDefinition('New bot', providers[0]) })}>New bot</button>
+        <button type="button" className="btn" data-action="new-bot" onClick={() => setEditing({ definition: newBotDefinition('New bot', providers[0]) })}>
+          <Plus size={14} /> New bot
+        </button>
       </div>
       {bots.length === 0 && <p className="bots__muted">No bots yet. A bot works on its own inside the permissions you approve once.</p>}
       <ul>
@@ -195,7 +197,7 @@ export function BotsWorkspace({ client, providers, skills, active = true }: Bots
         onContinue={(id, ack) => run(() => client.continue(id, ack))}
         onMarkDone={(id, ack) => run(() => client.markDone(id, ack))}
         onResetContext={(key) => run(() => client.resetContext(entry.id, key))}
-      /> : <p className="bots__muted bots__empty">Choose a bot, or make a new one.</p>}
+      /> : bots.length > 0 ? <p className="bots__muted bots__empty">Choose a bot.</p> : null}
     </main>
     {approving && entry?.approval && <ApprovalDialog
       name={entry.summary.name}
