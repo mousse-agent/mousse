@@ -1108,7 +1108,11 @@ html.platform-darwin .titlebar-left {
 }
 
 /* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
+/* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
 .chat-empty-add-project {
+  --space-4: 4px;
+  --space-12: 12px;
+  --space-16: 16px;
   display: flex;
   height: 28px;
   width: fit-content;

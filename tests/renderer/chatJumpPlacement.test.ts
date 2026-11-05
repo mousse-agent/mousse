@@ -48,4 +48,12 @@ describe('Add project on an empty new chat', () => {
     const chat = readFileSync(new URL('../../src/renderer/components/OrchestratorChat.tsx', import.meta.url), 'utf8')
     expect(chat.indexOf('<EmptyThreadAddProject')).toBeGreaterThan(chat.indexOf('<ComposerWorkspaceToolbar'))
   })
+
+  it('has the settings button gap and padding, though it renders outside Settings', () => {
+    // `.settings-btn` spaces with tokens defined on `.settings-page`; without them the glyph touches the word.
+    const css = rule(app, '.chat-empty-add-project')
+    for (const token of ['--space-4: 4px', '--space-12: 12px', '--space-16: 16px']) expect(css).toContain(token)
+    const button = readFileSync(new URL('../../src/renderer/components/EmptyThreadAddProject.tsx', import.meta.url), 'utf8')
+    expect(button).toContain('className="settings-btn chat-empty-add-project"')
+  })
 })
