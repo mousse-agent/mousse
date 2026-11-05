@@ -1413,6 +1413,11 @@ html[data-theme='high-contrast'] .composer-notice {
   color: var(--text-secondary);
 }
 
+.composer-notice-note {
+  flex: none;
+  color: var(--text-secondary);
+}
+
 .composer-notice-btn,
 .composer-notice-icon-btn {
   display: inline-flex;

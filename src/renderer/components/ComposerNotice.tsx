@@ -31,6 +31,8 @@ export interface ComposerNoticeProps {
   title: string
   /** Quieter text after the title on the same line, cut to fit (the steered text, an approval's command). */
   detail?: string
+  /** A muted state after the detail that is never cut ("Connection lost" on a waiting approval). */
+  note?: string
   /** The full wording, shown on hover. */
   tooltip?: string
   /** Replaces the tone icon (a paused run shows a pause glyph). */
@@ -56,13 +58,14 @@ function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
 }
 
 /** One notice: tone icon, one line, its actions, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+export function ComposerNotice({ tone, title, detail, note, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
   return (
     <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
         <span className="composer-notice-title">{title}</span>
         {detail && <span className="composer-notice-detail">{detail}</span>}
+        {note && <span className="composer-notice-note">{note}</span>}
       </span>
       {actions.map((action, index) => (
         <button
