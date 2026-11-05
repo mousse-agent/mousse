@@ -1224,8 +1224,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: 22px;
 }
 
+/* The last line ends above the composer and the strip Go to latest sits in. */
 .chat:not(.chat--empty) .an-message-list > div {
-  padding-bottom: calc(var(--chat-composer-stack, 160px) + 32px);
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + 56px);
 }
 
 .chat:not(.chat--empty) .an-message-list {
@@ -1233,8 +1234,8 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
     to bottom,
     transparent 0,
     #000 28px,
-    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 32px)),
-    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) + 24px)),
+    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 56px)),
+    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) - 40px)),
     transparent 100%
   );
   -webkit-mask-image: var(--transcript-mask);
@@ -1245,8 +1246,12 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   bottom: calc(var(--chat-composer-stack, 0px) + 4px);
 }
 
+/*
+ * On the composer's top edge, in a strip the transcript fades out before (see the mask above), so it
+ * never covers text. Hidden while a composer menu or the notice slot is open: they use that space.
+ */
 .chat-jump {
-  bottom: calc(var(--chat-composer-stack, 16px) + 10px);
+  bottom: calc(var(--chat-composer-stack, 32px) + 4px);
   width: 32px;
   height: 32px;
   border: 1px solid var(--ui-line-strong);
@@ -1254,6 +1259,10 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   background: var(--ui-raised);
   color: var(--text-primary);
   box-shadow: var(--ui-raised-shadow);
+}
+
+.chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump {
+  display: none;
 }
 
 .chat-jump-live {
