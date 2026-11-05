@@ -15,7 +15,7 @@ export const MESSAGE_SEARCH_MIN_LENGTH = 2
 export const MESSAGE_HITS_PER_THREAD = 3
 
 export type PaletteItem =
-  /** `category` is shown muted at the row's end, before the shortcut. */
+  /** `category` is shown muted at the row's end, before the shortcut, once per run (`categoryLabels`). */
   | { kind: 'command'; key: string; id: CommandId; title: string; category: string; terms: string[] }
   | { kind: 'thread'; key: string; id: string; title: string; detail?: string }
   /** `threadId` is the project's newest listed thread; without one the palette starts a thread in the project. */
@@ -81,7 +81,7 @@ export function messageQuery(query: string): string | null {
 
 /**
  * What the palette shows for a query. An empty query lists the newest threads ("Recent"), then every
- * eligible command. Typed text ranks commands, then threads, then projects with the same matcher, and
+ * eligible command (in `messages` mode, the newest threads only). Typed text ranks commands, then threads, then projects with the same matcher, and
  * adds the message hits grouped by thread (first in `messages` mode); a thread that also matches by
  * title is listed once, with its hits under its Threads row. A leading `>` limits the list to
  * commands. A thread or project on another computer names that computer; a project that several
@@ -130,7 +130,8 @@ export function buildPaletteGroups({
   if (!searching) {
     const recent = [...listed].sort(byNewest).slice(0, RECENT_THREAD_COUNT).map(threadItem)
     if (recent.length > 0) groups.push({ label: 'Recent', items: recent })
-    if (commandGroup) groups.push(commandGroup)
+    // Search opens on threads alone; commands wait for typed text or a leading `>`.
+    if (mode !== 'messages' && commandGroup) groups.push(commandGroup)
     return groups
   }
 
@@ -247,6 +248,20 @@ export function markMatches(text: string, match: string): Array<{ text: string; 
   }
   if (from < text.length) runs.push({ text: text.slice(from), match: false })
   return runs
+}
+
+/**
+ * The category each row shows at its end: a command names its category only where a run of
+ * same-category commands starts, so "Thread" is not repeated down the list. Other rows show none.
+ */
+export function categoryLabels(items: readonly PaletteItem[]): Array<string | undefined> {
+  let previous: string | undefined
+  return items.map((item) => {
+    const category = item.kind === 'command' ? item.category : undefined
+    const shown = category !== undefined && category !== previous ? category : undefined
+    previous = category
+    return shown
+  })
 }
 
 export function flattenGroups(groups: readonly PaletteGroup[]): PaletteItem[] {

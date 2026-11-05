@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { formatBinding } from '../../shared/commands'
 import type { ThreadSearchResult, ThreadSearchSkipped } from '../../shared/types'
 import { Search, X } from '../lib/icons'
@@ -6,6 +6,7 @@ import { currentContext, isCommandRegistered, useCommandBindings, useCommandOver
 import { chooseCommandPaletteItem, dismissPalette } from '../commands/paletteActions'
 import {
   buildPaletteGroups,
+  categoryLabels,
   eligibleCommands,
   markMatches,
   messageQuery,
@@ -62,6 +63,29 @@ function Marked({ text, match }: { text: string; match?: string }) {
   )
 }
 
+/**
+ * The height that shows whole rows only: the bottom of the lowest row that fits in `available`, or
+ * undefined when every row fits (or not even the first does). `bottoms` are the rows' bottom edges
+ * from the top of the list, in order.
+ */
+export function wholeRowsHeight(bottoms: readonly number[], available: number): number | undefined {
+  if (bottoms.length === 0 || bottoms[bottoms.length - 1]! <= available) return undefined
+  let fit: number | undefined
+  for (const bottom of bottoms) {
+    if (bottom > available) break
+    fit = bottom
+  }
+  return fit
+}
+
+/** Caps a scrolling list at its last whole row, so the row at the bottom edge is never cut to a sliver. */
+function fitWholeRows(list: HTMLElement): void {
+  list.style.maxHeight = ''
+  const bottoms = [...list.querySelectorAll<HTMLElement>('[role="option"]')].map((row) => row.offsetTop + row.offsetHeight)
+  const height = wholeRowsHeight(bottoms, list.clientHeight)
+  if (height !== undefined) list.style.maxHeight = `${height}px`
+}
+
 /** Grouped rows with one highlighted by background. Takes plain groups so other pickers can reuse it. */
 export function PaletteList<T extends PaletteListItem>({
   groups,
@@ -71,9 +95,18 @@ export function PaletteList<T extends PaletteListItem>({
   onActivate,
   onChoose
 }: PaletteListProps<T>) {
+  const listRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return
+    fitWholeRows(list)
+    const refit = () => fitWholeRows(list)
+    window.addEventListener('resize', refit)
+    return () => window.removeEventListener('resize', refit)
+  }, [groups])
   let position = 0
   return (
-    <div className="thread-search-results" id={listId} role="listbox" aria-label="Results">
+    <div ref={listRef} className="thread-search-results" id={listId} role="listbox" aria-label="Results">
       {groups.length === 0 && emptyLabel && <div className="thread-search-empty">{emptyLabel}</div>}
       {groups.map((group) => (
         <div key={group.label} className="thread-search-group" role="group" aria-label={group.label}>
@@ -209,7 +242,7 @@ function PaletteDialog() {
       switch (item.kind) {
         case 'command': {
           const binding = bindings[item.id]
-          return { ...row, trailing: item.category, shortcut: binding ? formatBinding(binding, platform) : undefined }
+          return { ...row, shortcut: binding ? formatBinding(binding, platform) : undefined }
         }
         case 'message':
           return { ...row, variant: 'snippet', match: item.match }
@@ -221,10 +254,13 @@ function PaletteDialog() {
     }
     const messages = found?.results
     const messagesCapped = (messages?.length ?? 0) >= MESSAGE_SEARCH_LIMIT
-    return buildPaletteGroups({ query, commands, threads, projects, computers, messages, expanded, messagesCapped, mode }).map((group) => ({
-      label: group.label,
-      items: group.items.map(toRow)
-    }))
+    return buildPaletteGroups({ query, commands, threads, projects, computers, messages, expanded, messagesCapped, mode }).map((group) => {
+      const categories = categoryLabels(group.items)
+      return {
+        label: group.label,
+        items: group.items.map((item, index) => ({ ...toRow(item), trailing: categories[index] }))
+      }
+    })
   }, [query, commands, threads, projects, computers, found, expanded, mode, bindings, platform])
   const rows = useMemo(() => groups.flatMap((group) => group.items), [groups])
   const active = Math.min(activeIndex, Math.max(rows.length - 1, 0))

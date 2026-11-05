@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerDialog } from '../src/renderer/components/ui/Modal'
-import { PaletteList, searchFailureLine, type PaletteListGroup } from '../src/renderer/components/CommandPalette'
+import { PaletteList, searchFailureLine, wholeRowsHeight, type PaletteListGroup } from '../src/renderer/components/CommandPalette'
 import {
   currentContext,
   isCommandRegistered,
@@ -494,6 +494,17 @@ describe('the palette list', () => {
     expect(html).toMatch(/class="thread-search-result palette-result palette-result--snippet active"/)
     expect(html).toContain('palette-result--more')
     expect(html).toContain('+4 more')
+  })
+
+  it('ends a scrolling list on a whole row, never a sliver of the next', () => {
+    // Rows end at 40, 80, 128 and 168; 150 of room shows three whole rows.
+    expect(wholeRowsHeight([40, 80, 128, 168], 150)).toBe(128)
+    expect(wholeRowsHeight([40, 80, 128], 128)).toBeUndefined()
+    expect(wholeRowsHeight([40, 80], 150)).toBeUndefined()
+    expect(wholeRowsHeight([], 150)).toBeUndefined()
+    // Not even one row fits: leave the list alone.
+    expect(wholeRowsHeight([60, 120], 50)).toBeUndefined()
+    expect(rule('.thread-search-results')).toMatch(/position:\s*relative/)
   })
 
   it('highlights the selected row with a background only, never an edge bar', () => {

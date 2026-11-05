@@ -6,12 +6,14 @@ import {
   MESSAGE_HITS_PER_THREAD,
   RECENT_THREAD_COUNT,
   buildPaletteGroups,
+  categoryLabels,
   eligibleCommands,
   flattenGroups,
   markMatches,
   messageQuery,
   paletteKeyAction,
-  type PaletteGroup
+  type PaletteGroup,
+  type PaletteItem
 } from '../src/renderer/commands/paletteItems'
 
 const titles = (query: string, items: string[]) => rankItems(query, items.map((title) => ({ title }))).map((item) => item.title)
@@ -165,9 +167,24 @@ describe('buildPaletteGroups', () => {
     expect(groups[1]!.items).toHaveLength(allCommands.length)
   })
 
-  it('leads with the recent threads in message mode too, before anything is typed', () => {
+  it('shows only the recent threads in message mode before anything is typed; commands wait for text or >', () => {
     const groups = buildPaletteGroups({ query: '', commands: allCommands, threads, projects, mode: 'messages' })
-    expect(groups.map((group) => group.label)).toEqual(['Recent', 'Commands'])
+    expect(groups.map((group) => group.label)).toEqual(['Recent'])
+    const commandsOnly = buildPaletteGroups({ query: '>', commands: allCommands, threads, projects, mode: 'messages' })
+    expect(commandsOnly.map((group) => group.label)).toEqual(['Commands'])
+  })
+
+  it("names a command's category once per run of same-category rows", () => {
+    const command = (id: string, category: string) => ({ ...allCommands[0]!, key: `command:${id}`, category }) as PaletteItem
+    const rows: PaletteItem[] = [
+      command('a', 'Thread'),
+      command('b', 'Thread'),
+      command('c', 'Thread'),
+      command('d', 'View'),
+      command('e', 'Thread'),
+      { kind: 'thread', key: 'thread:t1', id: 't1', title: 'Fix login' }
+    ]
+    expect(categoryLabels(rows)).toEqual(['Thread', undefined, undefined, 'View', 'Thread', undefined])
   })
 
   it('caps the recent threads', () => {
