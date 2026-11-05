@@ -347,7 +347,7 @@ export function ComposerFooter({
         {primaryAction !== 'implement-plan' && !stoppable && !isRecording && onStartRecording ? (
           <button
             type="button"
-            className="composer-icon-btn"
+            className="composer-icon-btn composer-dictate-btn"
             title="Dictate"
             aria-label="Dictate"
             aria-busy={recordingPending || transcribing}
