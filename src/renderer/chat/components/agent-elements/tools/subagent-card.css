@@ -238,7 +238,13 @@
   transform: rotate(180deg);
 }
 
+/* The gap under the group's head opens and closes with its rows. */
+.subagent-cards.is-group {
+  gap: 0;
+}
+
 .subagent-group-rows {
+  margin-top: 4px;
   display: flex;
   flex-direction: column;
   gap: 1px;
