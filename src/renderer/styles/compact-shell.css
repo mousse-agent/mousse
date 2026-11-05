@@ -27,6 +27,7 @@ html:not(.platform-darwin) .app {
   border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.07);
 }
 
+.app .titlebar-title,
 .overlay-titlebar h1 { font-size: 18px; }
 .app .titlebar-controls { gap: 1px; }
 

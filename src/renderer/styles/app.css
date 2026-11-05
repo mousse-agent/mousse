@@ -118,18 +118,63 @@ html.platform-darwin .titlebar-left {
   padding-left: var(--titlebar-traffic-light-inset);
 }
 
+/* The logo sits centred over the rail. At least rail-wide, so with the word
+   hidden the actions start where the sidebar does. */
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--titlebar-height) * 0.11);
+  min-width: var(--navigation-rail-width);
+  box-sizing: border-box;
+  padding-block: calc(var(--titlebar-height) * 0.18);
+  padding-left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
+  flex-shrink: 0;
+}
+
 .titlebar-logo-icon {
   flex-shrink: 0;
   width: calc(var(--titlebar-height) * 0.64);
   height: calc(var(--titlebar-height) * 0.64);
-  /* Centred over the rail, so the actions start where the sidebar does. */
-  margin-inline: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   object-fit: contain;
+}
+
+.titlebar-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: calc(var(--titlebar-height) * 0.54);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.2s ease, opacity 0.2s ease, margin 0.2s ease;
+  margin-left: 0;
+}
+
+/* Shown while the sidebar is open; the right margin keeps the actions clear of it. */
+.titlebar-title.titlebar-title-visible {
+  max-width: 10ch;
+  opacity: 1;
+  margin-left: calc(var(--titlebar-height) * 0.04);
+  margin-right: 8px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+/* Only far below the 900px window minimum (high zoom): the actions keep their room. */
+@media (max-width: 560px) {
+  .titlebar-title.titlebar-title-visible {
+    max-width: 0;
+    opacity: 0;
+    margin: 0;
+  }
 }
 
 .titlebar-start-actions {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 2px;
   -webkit-app-region: no-drag;
   app-region: no-drag;

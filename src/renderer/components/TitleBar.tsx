@@ -73,14 +73,21 @@ export function TitleBar() {
           Do not also call maximize() here — that toggles and undoes the OS maximize. */}
       <div className="titlebar-drag">
         <div className="titlebar-left">
-          {/* The logo only marks the drag area above the rail; the actions follow it. */}
-          <img
-            className="titlebar-logo-icon"
-            src={logoIcon}
-            alt=""
-            aria-hidden="true"
-            draggable={false}
-          />
+          {/* The logo and the word are part of the drag area; the actions follow them. */}
+          <div className="titlebar-brand">
+            <img
+              className="titlebar-logo-icon"
+              src={logoIcon}
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+            />
+            <span
+              className={`titlebar-title${threadsSidebarOpen ? ' titlebar-title-visible' : ''}`}
+            >
+              Mousse
+            </span>
+          </div>
           <div className="titlebar-start-actions">
             <IconButton
               icon={PanelLeft}
