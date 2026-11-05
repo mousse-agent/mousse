@@ -7,7 +7,7 @@ import { useCommand } from '../commands/commandRegistry'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
-import { CODE_FONT } from '../lib/typography'
+import { useMonacoCodeFont } from '../lib/monacoCodeFont'
 import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
 import { SerializedAutosave, normalizeWorkspacePath, reconcileExternalContent } from '../utils/fileWorkspace'
 import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type FileViewKind } from '../utils/fileEditor'
@@ -65,6 +65,7 @@ function assetSignature(data: ArrayLike<number>, mimeType: string): string {
 }
 
 export function FilesPanel() {
+  const codeFont = useMonacoCodeFont()
   const profileId = useAppStore((s) => s.profileId)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const threads = useAppStore((s) => s.threads)
@@ -524,7 +525,7 @@ export function FilesPanel() {
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: CODE_FONT, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
           : <div className="files-editor-empty"><p>Select a file from the tree</p></div>}
       </div>
     </div>

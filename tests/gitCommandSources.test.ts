@@ -29,6 +29,8 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   // `guarded` (actions/git.ts): `withoutRepoPrograms`, or for a snapshot store `checkStoreCommand`.
   'src/mms/git/reviewDiff.ts': 'guarded',
   'src/mms/actions/snapshots.ts': 'guarded',
+  // Streamed Git commands for filtered files (`streamGitAsync`), checked by `guardedAsync`.
+  'src/mms/actions/heldBytes.ts': 'guardedAsync',
   // A snapshot store's own commands (`runStoreGit`) and the check of every store command (`checkStoreCommand`).
   'src/mms/git/scopedRead.ts': 'assertGitAllowed',
   'src/mms/git/workingTreeStatus.ts': 'withoutRepoPrograms',
