@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { commandLabel } from "../../../../../shared/agentActivity";
 import { IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
 import { TextShimmer } from "../text-shimmer";
 import { Collapse } from "../../../../components/ui/Collapse";
@@ -10,8 +11,8 @@ import {
   mapToolInvocationToStep,
   mapToolStateToStepState,
 } from "../utils/tool-adapters";
-import { extractCommandSummary } from "../utils/format-tool";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
+import { bashOutputLines } from "../utils/bash-output";
 import { CopyIconButton } from "./copy-icon-button";
 
 export type BashToolTerminalCardProps = {
@@ -40,6 +41,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Geist Mono's ligatures draw "--" as one dash over the space before it ("test.ts --sequence" reads
+// "test.ts--sequence"), so the command shows its characters as typed.
+const COMMAND_TEXT = "font-mono text-[12.5px] [font-variant-ligatures:none]";
+
 export function BashToolTerminalCard({
   step,
   state,
@@ -52,9 +57,13 @@ export function BashToolTerminalCard({
   const isPending = state === "animating";
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
-  const summary = step.bashLabel
-    ? extractCommandSummary(step.bashLabel)
-    : extractCommandSummary(command);
+  // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
+  // Derived from the command as run, with its spacing: a tool's label can differ from it.
+  const summary = command
+    ? commandLabel(command)
+    : (step.bashLabel ?? "").replace(/\s+/g, " ").trim();
+  // Expanded, the body shows the full `$ command`, so the header does not repeat it.
+  const hideSummary = expanded && Boolean(command);
   const hasExitCode = typeof step.bashExitCode === "number";
   const exitFailed = hasExitCode && step.bashExitCode !== 0;
 
@@ -113,9 +122,12 @@ export function BashToolTerminalCard({
             <TextShimmer
               as="span"
               duration={1.2}
-              className="flex items-center text-xs m-0 truncate flex-1 min-w-0"
+              className={cn(
+                "flex items-center m-0 truncate flex-1 min-w-0",
+                summary ? COMMAND_TEXT : "text-xs",
+              )}
             >
-              {summary ? `Running ${summary}` : "Running command"}
+              {hideSummary ? "" : summary ? `Running ${summary}` : "Running command"}
             </TextShimmer>
           </>
         ) : (
@@ -126,11 +138,13 @@ export function BashToolTerminalCard({
             )}
             <span
               className={cn(
-                "text-xs truncate flex-1 min-w-0",
+                "truncate flex-1 min-w-0",
+                summary ? COMMAND_TEXT : "text-xs",
                 isError && !isInterrupted ? "text-[var(--danger)]" : "text-an-tool-color-muted",
               )}
+              title={hideSummary ? undefined : summary || undefined}
             >
-              {isInterrupted
+              {hideSummary ? null : isInterrupted
                 ? `${step.bashSummary ?? "Interrupted"}${summary ? `: ${summary}` : ""}`
                 : summary
                   ? isError
@@ -189,7 +203,12 @@ export function BashToolTerminalCard({
                 onScroll={handleOutputScroll}
                 className="flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
               >
-                {step.bashOutput}
+                {bashOutputLines(step.bashOutput).map((line, index) => (
+                  <span key={index} className={cn(line.failed && "text-[var(--danger)]")}>
+                    {index > 0 ? "\n" : ""}
+                    {line.text}
+                  </span>
+                ))}
               </div>
               {!isPending && <CopyIconButton text={step.bashOutput} label="Copy output" />}
             </div>
