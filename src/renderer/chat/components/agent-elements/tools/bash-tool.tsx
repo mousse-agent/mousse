@@ -9,8 +9,8 @@ import {
   mapToolInvocationToStep,
   mapToolStateToStepState,
 } from "../utils/tool-adapters";
-import { extractCommandSummary } from "../utils/format-tool";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
+import { bashOutputLines } from "../utils/bash-output";
 
 export type BashToolTerminalCardProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -50,9 +50,10 @@ export function BashToolTerminalCard({
   const isPending = state === "animating";
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
-  const summary = step.bashLabel
-    ? extractCommandSummary(step.bashLabel)
-    : extractCommandSummary(command);
+  // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
+  const summary = (step.bashLabel ?? command ?? "").replace(/\s+/g, " ").trim();
+  // Expanded, the body shows the full `$ command`, so the header does not repeat it.
+  const hideSummary = expanded && Boolean(command);
   const hasExitCode = typeof step.bashExitCode === "number";
   const exitFailed = hasExitCode && step.bashExitCode !== 0;
 
@@ -111,9 +112,12 @@ export function BashToolTerminalCard({
             <TextShimmer
               as="span"
               duration={1.2}
-              className="flex items-center text-xs m-0 truncate flex-1 min-w-0"
+              className={cn(
+                "flex items-center m-0 truncate flex-1 min-w-0",
+                summary ? "font-mono text-[12.5px]" : "text-xs",
+              )}
             >
-              {summary ? `Running ${summary}` : "Running command"}
+              {hideSummary ? "" : summary ? `Running ${summary}` : "Running command"}
             </TextShimmer>
           </>
         ) : (
@@ -129,11 +133,13 @@ export function BashToolTerminalCard({
             )}
             <span
               className={cn(
-                "text-xs truncate flex-1 min-w-0",
+                "truncate flex-1 min-w-0",
+                summary ? "font-mono text-[12.5px]" : "text-xs",
                 isError && !isInterrupted ? "text-red-400" : "text-an-tool-color-muted",
               )}
+              title={hideSummary ? undefined : summary || undefined}
             >
-              {isInterrupted
+              {hideSummary ? null : isInterrupted
                 ? `${step.bashSummary ?? "Interrupted"}${summary ? `: ${summary}` : ""}`
                 : summary
                   ? isError
@@ -184,7 +190,12 @@ export function BashToolTerminalCard({
                 (command || step.bashTruncated) && "mt-1",
               )}
             >
-              {step.bashOutput}
+              {bashOutputLines(step.bashOutput).map((line, index) => (
+                <span key={index} className={cn(line.failed && "text-[var(--danger)]")}>
+                  {index > 0 ? "\n" : ""}
+                  {line.text}
+                </span>
+              ))}
             </div>
           )}
           {(meta.length > 0 || isInterrupted) && (
