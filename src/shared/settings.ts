@@ -6,6 +6,7 @@ import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
 import type { ShortcutOverrides } from './commands'
+import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -49,6 +50,10 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Font for interface text. */
+  interfaceFont: FontChoice
+  /** Font for monospace text: code, diffs, the file editor and terminals. */
+  codeFont: FontChoice
 }
 
 export interface NotificationSettings {
@@ -571,7 +576,9 @@ export function getDefaultSettings(): MousseSettings {
       accentColor: '#a785c7',
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
-      renderMath: true
+      renderMath: true,
+      interfaceFont: { ...DEFAULT_FONT_CHOICE },
+      codeFont: { ...DEFAULT_FONT_CHOICE }
     },
     notifications: {
       threadCompletionSound: true,
@@ -687,7 +694,9 @@ export function normalizeAppearance(
     acrylicIntensity: clampAcrylicIntensity(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
-    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath
+    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    interfaceFont: normalizeFontChoice(raw.interfaceFont),
+    codeFont: normalizeFontChoice(raw.codeFont)
   }
 }
 

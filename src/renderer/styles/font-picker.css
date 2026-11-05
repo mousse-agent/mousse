@@ -1,0 +1,127 @@
+/* Font picker (components/settings/FontPicker.tsx). Same dropdown material as
+   select.css. Hover and keyboard highlight are the neutral --ui-hover fill;
+   the chosen font is a --ui-selected fill. No checkmarks, edge or side bars. */
+
+.font-picker-pop {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  max-height: min(420px, calc(100vh - 16px));
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  font-size: 13px;
+  animation: ui-select-in 0.12s ease-out;
+  transform-origin: top center;
+  -webkit-app-region: no-drag;
+}
+
+.font-picker-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin-bottom: 4px;
+  padding: 0 var(--ui-menu-row-x, 8px);
+  border-radius: var(--ui-menu-row-radius);
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  color: var(--text-secondary);
+}
+
+.font-picker-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+  backdrop-filter: none;
+}
+
+.font-picker-error {
+  flex-shrink: 0;
+  padding: 4px var(--ui-menu-row-x, 8px);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.font-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.font-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: var(--ui-row-height, 30px);
+  padding: 5px var(--ui-menu-row-x, 8px);
+  border-radius: var(--ui-menu-row-radius);
+  color: color-mix(in srgb, var(--text-primary) 85%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.font-picker-option.active {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.font-picker-option.selected {
+  background: var(--ui-selected);
+  color: var(--text-primary);
+}
+
+.font-picker-option-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-picker-empty {
+  padding: 8px var(--ui-menu-row-x, 8px);
+  color: var(--text-secondary);
+}
+
+.font-picker-preview {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px var(--ui-menu-row-x, 8px) 4px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.font-picker-preview-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-picker-preview-note {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .font-picker-pop {
+    animation: none;
+  }
+}

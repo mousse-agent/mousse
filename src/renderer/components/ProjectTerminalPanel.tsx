@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { isQualifiedId } from '../../shared/threadRef'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
-import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
+import { xtermFont, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
@@ -123,7 +123,7 @@ export function ProjectTerminalPanel() {
         allowTransparency: true,
         cursorBlink: true,
         fontSize: 13,
-        fontFamily: XTERM_FONT,
+        fontFamily: xtermFont(),
         theme: getXtermTheme()
       })
 

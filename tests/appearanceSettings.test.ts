@@ -42,7 +42,9 @@ describe('appearance settings', () => {
       accentColor: '#a785c7',
       acrylic: true,
       acrylicIntensity: 55,
-      renderMath: true
+      renderMath: true,
+      interfaceFont: { source: 'default' },
+      codeFont: { source: 'default' }
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',

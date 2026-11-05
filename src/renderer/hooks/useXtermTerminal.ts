@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
+import { followXtermAppearance, getXtermTheme, xtermFont } from '../lib/xtermTheme'
 import {
   dimensionsChanged,
   fitVisibleTerminal,
@@ -81,12 +81,13 @@ export function useXtermTerminal(
     const terminal = new Terminal({
       cursorBlink: true,
       fontSize: 13,
-      fontFamily: XTERM_FONT,
+      fontFamily: xtermFont(),
       theme: getXtermTheme()
     })
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
     terminal.open(containerRef.current)
+    followXtermAppearance(terminal)
 
     terminal.onData((data) => {
       void window.mousse.pty.write(ptyId, data)

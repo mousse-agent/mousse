@@ -10,6 +10,7 @@ import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
+import { FontPicker } from './FontPicker'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -117,6 +118,30 @@ export function GeneralSettings({
                 />
               ))}
             </div>
+          }
+        />
+        <SettingsRow
+          title="Interface font"
+          description={<span title="Menus, chat, settings and other text. A Google font downloads once when chosen and then works offline.">Menus, chat and settings.</span>}
+          control={
+            <FontPicker
+              role="interface"
+              ariaLabel="Interface font"
+              value={appearance.interfaceFont}
+              onChange={(interfaceFont) => onUpdate({ appearance: { ...appearance, interfaceFont } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Code font"
+          description={<span title="Code blocks in chat, diffs and review, the file editor, terminals and command output. Lists monospace fonts. A Google font downloads once when chosen and then works offline.">Code, diffs, editor and terminals.</span>}
+          control={
+            <FontPicker
+              role="code"
+              ariaLabel="Code font"
+              value={appearance.codeFont}
+              onChange={(codeFont) => onUpdate({ appearance: { ...appearance, codeFont } })}
+            />
           }
         />
         <SettingsRow
