@@ -71,7 +71,7 @@ export function StorageCleanupView(props: StorageCleanupViewProps) {
             </button>}
       </>
     : undefined
-  return <SettingsGroup title="Cleanup" icon={Sparkles} id="storage-cleanup" description={CLEANUP_COPY.idle}>
+  return <SettingsGroup anchor="storage-cleanup" title="Cleanup" icon={Sparkles} id="storage-cleanup" description={CLEANUP_COPY.idle}>
     <SettingsRow
       data-testid="storage-cleanup-now"
       title="Run the cleanup rules"

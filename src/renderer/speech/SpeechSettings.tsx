@@ -106,7 +106,7 @@ function ReadAloudSpeechSettings() {
   }
 
   return (
-    <SettingsGroup title="Read aloud" icon={VolumeHigh}>
+    <SettingsGroup anchor="speech-read-aloud" title="Read aloud" icon={VolumeHigh}>
       <SpeechModelSetting
         title="Model"
         description="Reads messages when you press read aloud under one."
@@ -125,6 +125,7 @@ function ReadAloudSpeechSettings() {
       {voices.length > 0 && (
         <SettingsRow
           title="Voice"
+          anchor="speech-voice"
           description={
             previewError ? (
               <span className="speech-settings-error" role="alert">
@@ -166,6 +167,7 @@ function ReadAloudSpeechSettings() {
       {selection && (
         <SettingsRow
           title="Speed"
+          anchor="speech-speed"
           titleId={speedLabelId}
           description="A change applies from the next sentence."
           control={<Segmented value={preferences.speed} options={SPEED_OPTIONS} onChange={setSpeed} ariaLabelledBy={speedLabelId} />}
@@ -201,7 +203,7 @@ function DictationSpeechSettings() {
       : 'Turns speech into text when you press the microphone in the message box.'
 
   return (
-    <SettingsGroup title="Dictation" icon={Mic}>
+    <SettingsGroup anchor="speech-dictation" title="Dictation" icon={Mic}>
       <SpeechModelSetting
         title="Model"
         description={modelDescription}
@@ -220,6 +222,7 @@ function DictationSpeechSettings() {
       {selection && (
         <SettingsRow
           title="Reduce background noise"
+          anchor="speech-noise"
           description="Removes fans, typing and street noise before your speech is turned into text."
           htmlFor={noiseSwitchId}
           control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}

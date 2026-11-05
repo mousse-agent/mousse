@@ -67,6 +67,7 @@ export function VocabularySetting({
     <>
       <SettingsRow
         title="Vocabulary"
+        anchor="speech-vocabulary"
         description="Names dictation should spell right."
         control={
           <button type="button" className="settings-btn" title="Edit vocabulary" onClick={open}>
