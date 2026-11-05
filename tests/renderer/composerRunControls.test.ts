@@ -385,7 +385,7 @@ describe('composer model picker', () => {
     spy.mockRestore()
     expect(permissionMenu()).not.toBeNull()
     expect(visibleAtFocus).toEqual([true])
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
+    expect(modeName(document.activeElement!)).toBe('Ask before acting')
     // Escape still closes when focus stayed on the chip.
     act(() => permissionButton().focus())
     key(permissionButton(), 'Escape')
