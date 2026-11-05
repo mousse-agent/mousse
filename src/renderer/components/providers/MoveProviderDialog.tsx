@@ -65,7 +65,7 @@ export function MoveDialogHost({
   onMoved?: () => Promise<void> | void
   onClose: () => void
 }) {
-  const [signIn, setSignIn] = useState<{ operationId: string; name: string } | null>(null)
+  const [signIn, setSignIn] = useState<{ operationId: string; name: string; retry: () => Promise<void> } | null>(null)
   const agent = foldedInto(piProviderIdOf(snapshot.instanceId))
   if (!agent) return null
   const { instances } = window.mousse.providers
@@ -84,13 +84,17 @@ export function MoveDialogHost({
           return result
         }}
         onSignIn={async (target) => {
-          const started = await instances.signIn(target.instanceId)
-          setSignIn({ operationId: started.operationId, name: target.displayName })
+          // Try again in the sign-in dialog starts the same sign-in afresh.
+          const start = async () => {
+            const started = await instances.signIn(target.instanceId)
+            setSignIn({ operationId: started.operationId, name: target.displayName, retry: start })
+          }
+          await start()
         }}
         onRecheck={async (target) => applySnapshot(await instances.recheck(target.instanceId))}
         onClose={onClose}
       />
-      <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={() => setSignIn(null)} />
+      <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={() => setSignIn(null)} onRetry={signIn?.retry} />
     </>
   )
 }

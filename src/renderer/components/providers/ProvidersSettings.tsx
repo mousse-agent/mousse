@@ -37,6 +37,15 @@ export interface ProvidersSettingsProps {
   ensureValidProviderSelection: (next: MousseSettings, providers?: LlmProviderOption[]) => Promise<MousseSettings>
 }
 
+/** The sign-in dialog's sign-in, how to start it again, and what closing it ends. */
+interface SignInSession {
+  operationId: string
+  name: string
+  retry: () => Promise<void>
+  /** Called when the dialog closes, finished or not. */
+  onEnd?: () => void
+}
+
 /** The scope last chosen on this page, kept while the app runs. */
 let lastScopeId = ''
 
@@ -92,7 +101,13 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [addOptions, setAddOptions] = useState<ProviderAddOption[]>([])
-  const [signIn, setSignIn] = useState<{ operationId: string; name: string } | null>(null)
+  const [signIn, setSignIn] = useState<SignInSession | null>(null)
+  /** Opens Models in the editor of this entry: after it signs in, to show what is connected now. */
+  const [revealModels, setRevealModels] = useState<{ instanceId: string; count: number } | null>(null)
+  const showModels = useCallback(
+    (instanceId: string) => setRevealModels((current) => ({ instanceId, count: (current?.count ?? 0) + 1 })),
+    []
+  )
   const [pageError, setPageError] = useState<string | null>(null)
   /** Something a finished action wants the user to know (files kept after a remove). */
   const [pageNotice, setPageNotice] = useState<string | null>(null)
@@ -116,12 +131,15 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       useProviderSnapshotsStore.subscribe((state, previous) => {
         for (const event of Object.values(state.operations)) {
           if (previous.operations[event.operationId] === event) continue
-          if (event.phase === 'completed' && event.kind === 'sign_in' && event.warning) setPageNotice(event.warning)
+          if (event.phase === 'completed' && event.kind === 'sign_in') {
+            if (event.warning) setPageNotice(event.warning)
+            showModels(event.instanceId)
+          }
           if (event.phase !== 'failed' || event.kind === 'sign_in') continue
           setPageError(event.error.message)
         }
       }),
-    []
+    [showModels]
   )
 
   const sorted = sortInstances(snapshots ?? [])
@@ -150,15 +168,50 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   /**
    * Starts the instance's sign-in and waits for its outcome. A browser sign-in or a guided key shows
-   * its prompts in the sign-in dialog; the environment's credentials are only checked.
+   * its prompts in the sign-in dialog; the environment's credentials are only checked. A failed
+   * sign-in waits in its dialog, where Try again starts a fresh one; closing the dialog ends the
+   * wait with that failure.
    */
   const runSignIn = async (instanceId: string, name: string, method: AddOptionMethod) => {
-    const started = await window.mousse.providers.instances.signIn(instanceId, method)
-    if (method !== 'ambient') setSignIn({ operationId: started.operationId, name })
-    const outcome = await operationOutcome(started)
-    if (outcome.phase === 'failed') throw new Error(outcome.error.message || (method === 'ambient' ? 'Could not verify the credentials.' : 'Sign-in failed.'))
-    if (outcome.phase === 'cancelled') throw new Error('Sign-in was cancelled.')
+    const { instances } = window.mousse.providers
+    if (method === 'ambient') {
+      const outcome = await operationOutcome(await instances.signIn(instanceId, method))
+      if (outcome.phase === 'failed') throw new Error(outcome.error.message || 'Could not verify the credentials.')
+      if (outcome.phase === 'cancelled') throw new Error('Sign-in was cancelled.')
+      return
+    }
+    await new Promise<void>((resolve, reject) => {
+      let failure: Error | null = null
+      const attempt = async () => {
+        const started = await instances.signIn(instanceId, method)
+        failure = null
+        // Closing ends the wait: a sign-in that completed resolves, any other rejects.
+        const onEnd = () => {
+          if (useProviderSnapshotsStore.getState().operations[started.operationId]?.phase === 'completed') resolve()
+          else reject(failure ?? new Error('Sign-in was cancelled.'))
+        }
+        setSignIn({ operationId: started.operationId, name, retry: attempt, onEnd })
+        const outcome = await operationOutcome(started)
+        if (outcome.phase === 'completed') resolve()
+        else if (outcome.phase === 'cancelled') reject(new Error('Sign-in was cancelled.'))
+        else failure = new Error(outcome.error.message || 'Sign-in failed.')
+      }
+      attempt().catch(reject)
+    })
   }
+
+  /** An agent's own sign-in: its prompts open the sign-in dialog, which can start it again. */
+  const startAgentSignIn = async (instanceId: string, name: string) => {
+    const started = await window.mousse.providers.instances.signIn(instanceId)
+    setSignIn({ operationId: started.operationId, name, retry: () => startAgentSignIn(instanceId, name) })
+  }
+
+  const signInRef = useRef(signIn)
+  signInRef.current = signIn
+  const closeSignIn = useCallback(() => {
+    signInRef.current?.onEnd?.()
+    setSignIn(null)
+  }, [])
 
   const setEnabled = async (snapshot: InstanceSnapshot, target: ProviderScope, enabled: boolean | null) => {
     applySnapshot(await window.mousse.providers.instances.setEnabled(snapshot.instanceId, target, enabled))
@@ -180,10 +233,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       update: async () => {
         await instances.update(id)
       },
-      signIn: async () => {
-        const started = await instances.signIn(id)
-        setSignIn({ operationId: started.operationId, name: snapshot.displayName })
-      },
+      signIn: () => startAgentSignIn(id, snapshot.displayName),
       signOut: async () => applySnapshot(await instances.signOut(id)),
       recheck: async () => applySnapshot(await instances.recheck(id)),
       allowKnownProblem: async (version) => applySnapshot(await instances.allowKnownProblem(id, version)),
@@ -246,6 +296,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     }
   }
 
+  const revealFor = (snapshot: InstanceSnapshot) => (revealModels?.instanceId === snapshot.instanceId ? revealModels.count : undefined)
+
   const renderEditor = (snapshot: InstanceSnapshot) => {
     const status = describeStatus(snapshot)
     // Hiding a model may hide the default one; move the default to a model that is still offered.
@@ -292,6 +344,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
           move={<MoveNotice snapshot={snapshot} snapshots={sorted} onMoved={reload} />}
           onSaveModelPrefs={onSaveModelPrefs}
           onRefreshModels={refreshModels(snapshot)}
+          revealModels={revealFor(snapshot)}
         />
       )
     }
@@ -317,12 +370,15 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         }}
         onSaveModelPrefs={onSaveModelPrefs}
         onRefreshModels={refreshModels(snapshot)}
+        revealModels={revealFor(snapshot)}
       />
     )
   }
 
   const checkedLabel = useRelativeTime(snapshots ? lastCheckedAt(snapshots) : null)
+  // A scope is a choice only once there is a project to choose.
   const scopeOptions = [{ value: '', label: 'This device' }, ...projects.map((project) => ({ value: project.id, label: project.name }))]
+  const hasScopeChoice = projects.length > 0
 
   const openAdd = () => {
     setPageError(null)
@@ -333,41 +389,45 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   return (
     <div className="prov-page">
-      <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={() => setSignIn(null)} />
+      <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={closeSignIn} onRetry={signIn?.retry} />
 
       <div className="prov-toolbar">
-        <span className="prov-scope">
-          <span className="prov-scope-label">Applying settings for</span>
-          <Select ariaLabel="Settings scope" size="small" value={scopeId} onChange={setScopeId} options={scopeOptions} />
-        </span>
+        <button type="button" className="settings-btn" onClick={openAdd}>
+          <Plus size={14} />
+          Add provider
+        </button>
         <span className="prov-toolbar-actions">
+          {hasScopeChoice && (
+            <span className="prov-scope">
+              <span className="prov-scope-label">Applying settings for</span>
+              <Select ariaLabel="Settings scope" size="small" value={scopeId} onChange={setScopeId} options={scopeOptions} />
+            </span>
+          )}
           <button
             type="button"
-            className="prov-ghost-btn"
-            title="Refresh provider status"
+            className="settings-icon-btn"
+            title={refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Refresh provider status (checked ${checkedLabel})` : 'Refresh provider status'}
+            aria-label="Refresh provider status"
             aria-busy={refreshing.busy !== null}
             disabled={refreshing.busy !== null}
             onClick={refreshStatus}
           >
-            <RefreshCw size={13} className={refreshing.busy ? 'icon-spin' : undefined} />
-            <span className="sr-only">Refresh provider status</span>
-            <span>{refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Checked ${checkedLabel}` : 'Checking'}</span>
+            <RefreshCw size={14} className={refreshing.busy ? 'icon-spin' : undefined} />
           </button>
           <button
             type="button"
-            className="prov-ghost-btn"
-            title="Refresh models"
+            className="settings-btn"
             aria-busy={refreshingModels.busy !== null}
             disabled={refreshingModels.busy !== null}
             onClick={refreshAllModels}
           >
-            {refreshingModels.busy ? <RefreshCw size={13} className="icon-spin" /> : <Sparkles size={13} />}
-            <span>{refreshingModels.busy ? 'Refreshing models' : 'Refresh models'}</span>
+            {refreshingModels.busy ? <RefreshCw size={14} className="icon-spin" /> : <Sparkles size={14} />}
+            {refreshingModels.busy ? 'Refreshing models' : 'Refresh models'}
           </button>
         </span>
       </div>
       {scopeId && (
-        <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project. Setup, runtime, environment and models apply to this device.</p>
+        <p className="prov-scope-note">Only the switches apply to this project; setup and models apply to this device. A provider off for the device stays off here.</p>
       )}
       {(pageError ?? refreshing.error ?? refreshingModels.error) && <p className="prov-error">{pageError ?? refreshing.error ?? refreshingModels.error}</p>}
       {pageNotice && <p className="prov-notice">{pageNotice}</p>}
@@ -383,6 +443,17 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         ) : (
           <p className="settings-muted prov-empty">Checking providers…</p>
         )
+      ) : sorted.length === 0 ? (
+        // Nothing to list: the empty editor alone, with the same Add provider as the heading.
+        <div className="prov-pane is-empty">
+          <div className="prov-pane-empty">
+            <p>Add a provider to start threads with its models.</p>
+            <button type="button" className="settings-btn" onClick={openAdd}>
+              <Plus size={14} />
+              Add provider
+            </button>
+          </div>
+        </div>
       ) : (
         <div className="prov-pane">
           <div className="prov-pane-list">
@@ -409,23 +480,20 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                 models={modelsFreshness(snapshot)}
                 toggle={switchStateOf(snapshot, scope)}
                 selected={selected?.instanceId === snapshot.instanceId}
-                onSelect={() => setSelectedId(snapshot.instanceId)}
+                onSelect={() => {
+                  if (revealModels?.instanceId !== snapshot.instanceId) setRevealModels(null)
+                  setSelectedId(snapshot.instanceId)
+                }}
                 onToggle={(next) => guard(() => setEnabled(snapshot, scope, next))}
                 onReset={scope.kind === 'project' ? () => guard(() => setEnabled(snapshot, scope, null)) : undefined}
               />
             ))}
-            <button type="button" className="prov-add-row" onClick={openAdd}>
-              <Plus size={16} />
-              Add provider
-            </button>
           </div>
           <div className="prov-pane-editor">
-            {selected ? (
+            {selected && (
               <div key={selected.instanceId} className="prov-editor">
                 {renderEditor(selected)}
               </div>
-            ) : (
-              <p className="prov-pane-empty">No providers configured.</p>
             )}
           </div>
         </div>
@@ -437,7 +505,10 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         addOptions={addOptions}
         handlers={addHandlers}
         onClose={() => setAddOpen(false)}
-        onFinished={setSelectedId}
+        onFinished={(instanceId) => {
+          setSelectedId(instanceId)
+          showModels(instanceId)
+        }}
       />
     </div>
   )

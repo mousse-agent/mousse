@@ -8,6 +8,7 @@ import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Select } from '../ui/Select'
 import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
+import { openSettingsSection } from '../../lib/settingsNavigation'
 
 /**
  * Settings > Agents: the default model and chat title model, plus context
@@ -51,10 +52,12 @@ export function AgentsSettings({
         <SettingsRow
           title="Default model"
           titleId="agents-default-model-title"
-          description={hasProviders
-            ? 'New chats start with this model.'
-            : 'Add a provider under Providers to choose a model.'}
-          control={
+          description={hasProviders ? 'New threads start with this model.' : 'Add a provider to choose a model.'}
+          control={!hasProviders ? (
+            <button type="button" className="settings-btn" onClick={() => openSettingsSection('providers')}>
+              Open Providers
+            </button>
+          ) : (
             <SettingsModelPicker
               id="agents-default-model"
               ariaLabel="Default model"
@@ -68,7 +71,7 @@ export function AgentsSettings({
                 void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, effort: pick.effort } })
               }
             />
-          }
+          )}
         />
         <SettingsRow
           title="Chat titles"
