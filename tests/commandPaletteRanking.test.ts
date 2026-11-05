@@ -262,6 +262,24 @@ describe('message hits in the palette', () => {
     expect(rows.some((row) => row.startsWith('more:'))).toBe(false)
   })
 
+  it('lists a thread that matches by title once, with its hits under its Threads row', () => {
+    const threads = [thread('a', 'Checkout flow')]
+    const groups = build('checkout', { threads })
+    expect(groups.find((group) => group.label === 'Threads')!.items.map((item) => `${item.kind}:${item.title}`)).toEqual([
+      'thread:Checkout flow',
+      'message:…the Checkout test m5…',
+      'message:…the Checkout test m4…',
+      'message:…the Checkout test m3…',
+      'more:+2 more'
+    ])
+    expect(messageRows(groups)).toEqual(['thread:Thread b', 'message:…the Checkout test n1…'])
+    expect(flattenGroups(groups).filter((item) => item.kind === 'thread' && item.id === 'a')).toHaveLength(1)
+  })
+
+  it('says "N+ more" when the search stopped at its hit limit', () => {
+    expect(messageRows(build('checkout', { messagesCapped: true }))).toContain('more:2+ more')
+  })
+
   it('puts messages after commands, threads and projects, and first in message mode', () => {
     const projects = [project('p1', 'Checkout service')]
     const threads = [thread('t1', 'Checkout flow')]

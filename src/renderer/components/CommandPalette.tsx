@@ -13,6 +13,7 @@ import {
   type PaletteItem
 } from '../commands/paletteItems'
 import { useComputers } from '../lib/computers'
+import { readableError } from '../lib/errorText'
 import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
 import { useAppStore } from '../stores/appStore'
 import '../styles/thread-search.css'
@@ -129,17 +130,25 @@ interface MessageSearch {
   skipped?: ThreadSearchSkipped[]
 }
 
+/** The line a failed message search shows in the palette. */
+export function searchFailureLine(error: unknown): string {
+  return `Could not search · ${readableError(error, 'Try again.')}`
+}
+
 /**
  * Searches message text for `text` after typing pauses. The previous answer stays until the next one
- * arrives, so the list never blanks while a search runs; a null `text` clears it at once.
+ * arrives, so the list never blanks while a search runs; a null `text` clears it at once. A failed
+ * search drops the old hits and says why in `error`.
  */
-function useMessageSearch(text: string | null): { found: MessageSearch | null; pending: boolean } {
+function useMessageSearch(text: string | null): { found: MessageSearch | null; pending: boolean; error: string } {
   const [found, setFound] = useState<MessageSearch | null>(null)
   const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
   useEffect(() => {
     if (!text) {
       setFound(null)
       setPending(false)
+      setError('')
       return
     }
     // A newer query replaces this one: its answer is dropped, and the daemon ends the calls it made to other computers.
@@ -150,11 +159,13 @@ function useMessageSearch(text: string | null): { found: MessageSearch | null; p
         (answer) => {
           if (!current) return
           setFound({ results: answer.results, skipped: answer.skipped })
+          setError('')
           setPending(false)
         },
-        (error: unknown) => {
+        (failure: unknown) => {
           if (!current) return
-          console.error('Message search failed', error)
+          setFound(null)
+          setError(searchFailureLine(failure))
           setPending(false)
         }
       )
@@ -164,7 +175,7 @@ function useMessageSearch(text: string | null): { found: MessageSearch | null; p
       clearTimeout(timer)
     }
   }, [text])
-  return { found, pending }
+  return { found, pending, error }
 }
 
 function PaletteDialog() {
@@ -182,7 +193,7 @@ function PaletteDialog() {
   const mode = useAppStore((state) => state.paletteMode)
   const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
   const bindings = useCommandBindings()
-  const { found, pending } = useMessageSearch(messageQuery(query))
+  const { found, pending, error: searchError } = useMessageSearch(messageQuery(query))
 
   const commands = useMemo(
     () => eligibleCommands(currentContext('palette'), isCommandRegistered),
@@ -208,7 +219,9 @@ function PaletteDialog() {
           return { ...row, detail: item.detail }
       }
     }
-    return buildPaletteGroups({ query, commands, threads, projects, computers, messages: found?.results, expanded, mode }).map((group) => ({
+    const messages = found?.results
+    const messagesCapped = (messages?.length ?? 0) >= MESSAGE_SEARCH_LIMIT
+    return buildPaletteGroups({ query, commands, threads, projects, computers, messages, expanded, messagesCapped, mode }).map((group) => ({
       label: group.label,
       items: group.items.map(toRow)
     }))
@@ -291,13 +304,14 @@ function PaletteDialog() {
           groups={groups}
           activeIndex={active}
           listId={LIST_ID}
-          // While message text is still being searched, an empty list is not yet "No results".
-          emptyLabel={pending ? '' : 'No results'}
+          // While message text is still being searched, an empty list is not yet "No results"; after a failed search the failure line says why.
+          emptyLabel={pending || searchError ? '' : 'No results'}
           onActivate={setActiveIndex}
           onChoose={choose}
         />
 
-        {skipped && <div className="thread-search-skipped">{skipped}</div>}
+        {searchError && <div className="thread-search-skipped" role="alert">{searchError}</div>}
+        {!searchError && skipped && <div className="thread-search-skipped">{skipped}</div>}
 
         <div className="thread-search-footer">
           <span className="thread-search-hint">

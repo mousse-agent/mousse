@@ -67,6 +67,8 @@ export interface PaletteInput {
   messages?: readonly ThreadSearchResult[]
   /** Threads whose message hits show in full, after their "+N more" row was chosen. */
   expanded?: ReadonlySet<string>
+  /** The search stopped at its hit limit, so a thread may have more hits than were returned. */
+  messagesCapped?: boolean
   /** `messages` puts the message hits first. */
   mode?: 'all' | 'messages'
 }
@@ -80,7 +82,8 @@ export function messageQuery(query: string): string | null {
 /**
  * What the palette shows for a query. An empty query lists the newest threads ("Recent"), then every
  * eligible command. Typed text ranks commands, then threads, then projects with the same matcher, and
- * adds the message hits grouped by thread (first in `messages` mode). A leading `>` limits the list to
+ * adds the message hits grouped by thread (first in `messages` mode); a thread that also matches by
+ * title is listed once, with its hits under its Threads row. A leading `>` limits the list to
  * commands. A thread or project on another computer names that computer; a project that several
  * computers hold for the same repository is one row, named as this computer's project is.
  */
@@ -92,6 +95,7 @@ export function buildPaletteGroups({
   computers,
   messages = [],
   expanded,
+  messagesCapped = false,
   mode = 'all'
 }: PaletteInput): PaletteGroup[] {
   const commandsOnly = query.trimStart().startsWith('>')
@@ -112,7 +116,7 @@ export function buildPaletteGroups({
   const computerName = (node: string): string => computers?.[node]?.name ?? UNKNOWN_COMPUTER_NAME
   const where = (projectName: string | undefined, node: string | undefined): string | undefined =>
     [projectName, node ? computerName(node) : undefined].filter(Boolean).join(' · ') || undefined
-  const threadItem = (thread: Thread): PaletteItem => {
+  const threadItem = (thread: Thread): Extract<PaletteItem, { kind: 'thread' }> => {
     const group = thread.projectId ? groupById.get(groupOf.get(thread.projectId) ?? '') : undefined
     return {
       kind: 'thread',
@@ -131,12 +135,32 @@ export function buildPaletteGroups({
   }
 
   const match = messageQuery(text)
-  const messageGroup = match ? messageHits(messages, match, expanded, where) : null
+  const hitsByThread = match ? groupMessageHits(messages) : new Map<string, ThreadSearchResult[]>()
+  const hitRows = (threadId: string, hits: readonly ThreadSearchResult[]): PaletteItem[] =>
+    messageHitRows(threadId, hits, match ?? '', expanded?.has(threadId) ?? false, messagesCapped)
+
+  const threadRows = rankItems(text, listed.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
+  const titled = new Set(threadRows.map((row) => row.id))
+
+  // Threads that match only by message text get their own header row in Messages.
+  const messageItems: PaletteItem[] = []
+  for (const [threadId, hits] of hitsByThread) {
+    if (titled.has(threadId)) continue
+    const first = hits[0]!
+    messageItems.push(
+      { kind: 'thread', key: `message-thread:${threadId}`, id: threadId, title: first.threadName, detail: where(first.projectName, first.node) },
+      ...hitRows(threadId, hits)
+    )
+  }
+  const messageGroup: PaletteGroup | null = messageItems.length > 0 ? { label: 'Messages', items: messageItems } : null
   if (mode === 'messages' && messageGroup) groups.push(messageGroup)
   if (mode !== 'messages' && commandGroup) groups.push(commandGroup)
 
-  const threadRows = rankItems(text, listed.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
-  if (threadRows.length > 0) groups.push({ label: 'Threads', items: threadRows })
+  const threadItems = threadRows.flatMap((row) => {
+    const hits = hitsByThread.get(row.id)
+    return hits ? [row, ...hitRows(row.id, hits)] : [row]
+  })
+  if (threadItems.length > 0) groups.push({ label: 'Threads', items: threadItems })
 
   const projectRows = rankItems(
     text,
@@ -167,17 +191,8 @@ export function buildPaletteGroups({
   return groups
 }
 
-/**
- * The message hits under one header row per thread, in the order the threads first appear. A thread's
- * hits are newest first (the search returns them oldest first) and stop at three, followed by a
- * "+N more" row, unless the thread is expanded.
- */
-function messageHits(
-  results: readonly ThreadSearchResult[],
-  match: string,
-  expanded: ReadonlySet<string> | undefined,
-  where: (projectName: string | undefined, node: string | undefined) => string | undefined
-): PaletteGroup | null {
+/** Message hits by thread, in the order the threads first appear (title and project matches are left out). */
+function groupMessageHits(results: readonly ThreadSearchResult[]): Map<string, ThreadSearchResult[]> {
   const byThread = new Map<string, ThreadSearchResult[]>()
   for (const result of results) {
     if (result.matchType !== 'message' || !result.messageId || !result.snippet) continue
@@ -185,26 +200,34 @@ function messageHits(
     if (hits) hits.push(result)
     else byThread.set(result.threadId, [result])
   }
-  const items: PaletteItem[] = []
-  for (const [threadId, hits] of byThread) {
-    const first = hits[0]!
-    items.push({
-      kind: 'thread',
-      key: `message-thread:${threadId}`,
-      id: threadId,
-      title: first.threadName,
-      detail: where(first.projectName, first.node)
-    })
-    const newest = [...hits].reverse()
-    const shown = expanded?.has(threadId) ? newest : newest.slice(0, MESSAGE_HITS_PER_THREAD)
-    for (const hit of shown) {
-      items.push({ kind: 'message', key: `message:${threadId}:${hit.messageId}`, id: hit.messageId!, threadId, title: hit.snippet!, match })
-    }
-    if (shown.length < newest.length) {
-      items.push({ kind: 'more', key: `more:${threadId}`, threadId, title: `+${newest.length - shown.length} more` })
-    }
-  }
-  return items.length > 0 ? { label: 'Messages', items } : null
+  return byThread
+}
+
+/**
+ * One thread's hit rows: newest first (the search returns them oldest first), stopping at three and a
+ * "+N more" row unless the thread is expanded. When the search stopped at its limit the count is a
+ * lower bound ("N+ more").
+ */
+function messageHitRows(
+  threadId: string,
+  hits: readonly ThreadSearchResult[],
+  match: string,
+  expanded: boolean,
+  capped: boolean
+): PaletteItem[] {
+  const newest = [...hits].reverse()
+  const shown = expanded ? newest : newest.slice(0, MESSAGE_HITS_PER_THREAD)
+  const rows: PaletteItem[] = shown.map((hit) => ({
+    kind: 'message',
+    key: `message:${threadId}:${hit.messageId}`,
+    id: hit.messageId!,
+    threadId,
+    title: hit.snippet!,
+    match
+  }))
+  const rest = newest.length - shown.length
+  if (rest > 0) rows.push({ kind: 'more', key: `more:${threadId}`, threadId, title: capped ? `${rest}+ more` : `+${rest} more` })
+  return rows
 }
 
 /**

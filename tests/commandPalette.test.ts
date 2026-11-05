@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerDialog } from '../src/renderer/components/ui/Modal'
-import { PaletteList, type PaletteListGroup } from '../src/renderer/components/CommandPalette'
+import { PaletteList, searchFailureLine, type PaletteListGroup } from '../src/renderer/components/CommandPalette'
 import {
   currentContext,
   isCommandRegistered,
@@ -463,6 +463,11 @@ describe('the palette list', () => {
       createElement(PaletteList, { groups: [], activeIndex: 0, listId: 'list', emptyLabel: '', onActivate: () => undefined, onChoose: () => undefined })
     )
     expect(pending).not.toContain('thread-search-empty')
+  })
+
+  it('says why a message search failed, without the transport prefix', () => {
+    expect(searchFailureLine(new Error("Error invoking remote method 'threads:search': Error: index is locked"))).toBe('Could not search · index is locked')
+    expect(searchFailureLine(new Error(''))).toBe('Could not search · Try again.')
   })
 
   it('draws a command on one line: title left, category and key right', () => {
