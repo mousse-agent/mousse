@@ -1,20 +1,29 @@
 import { COMMANDS, commandAllowedInContext, type CommandContext, type CommandId } from '../../shared/commands'
 import { visibleThreads } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
-import type { Project, Thread } from '../../shared/types'
+import type { Project, Thread, ThreadSearchResult } from '../../shared/types'
 import { nextPaletteIndex } from '../hooks/useMenuKeyboard'
 import { UNKNOWN_COMPUTER_NAME } from '../lib/computers'
 import { groupProjects } from '../lib/projectGroups'
 import { rankItems } from './paletteRank'
 
 /** How many threads an empty query lists, newest first. */
-export const RECENT_THREAD_COUNT = 8
+export const RECENT_THREAD_COUNT = 5
+/** Typed characters before the palette also searches message text. */
+export const MESSAGE_SEARCH_MIN_LENGTH = 2
+/** Message hits a thread shows before its "+N more" row. */
+export const MESSAGE_HITS_PER_THREAD = 3
 
 export type PaletteItem =
-  | { kind: 'command'; key: string; id: CommandId; title: string; detail: string; terms: string[] }
+  /** `category` is shown muted at the row's end, before the shortcut. */
+  | { kind: 'command'; key: string; id: CommandId; title: string; category: string; terms: string[] }
   | { kind: 'thread'; key: string; id: string; title: string; detail?: string }
   /** `threadId` is the project's newest listed thread; without one the palette starts a thread in the project. */
   | { kind: 'project'; key: string; id: string; title: string; detail: string; threadId?: string }
+  /** A message hit: `id` is the message, `title` its snippet, `match` the text to mark in it. */
+  | { kind: 'message'; key: string; id: string; threadId: string; title: string; match: string }
+  /** Shows the rest of a thread's message hits in place. */
+  | { kind: 'more'; key: string; threadId: string; title: string }
 
 export interface PaletteGroup {
   label: string
@@ -34,7 +43,7 @@ export function eligibleCommands(ctx: CommandContext, isRegistered: (id: Command
     key: `command:${command.id}`,
     id: command.id,
     title: command.title,
-    detail: command.category,
+    category: command.category,
     terms: [command.category, ...(command.searchTerms ?? [])]
   }))
 }
@@ -54,15 +63,37 @@ export interface PaletteInput {
   projects: readonly Project[]
   /** The names of the user's other computers by node, for the rows that are on one. */
   computers?: Readonly<Record<string, { name: string }>>
+  /** Hits of the message search for this query (the palette searches once two characters are typed). */
+  messages?: readonly ThreadSearchResult[]
+  /** Threads whose message hits show in full, after their "+N more" row was chosen. */
+  expanded?: ReadonlySet<string>
+  /** `messages` puts the message hits first. */
+  mode?: 'all' | 'messages'
+}
+
+/** The text to search messages for, or null: commands-only (`>`) and queries under two characters search none. */
+export function messageQuery(query: string): string | null {
+  const text = query.trim()
+  return !text.startsWith('>') && text.length >= MESSAGE_SEARCH_MIN_LENGTH ? text : null
 }
 
 /**
- * What the palette shows for a query. Commands first, then threads, then projects, each ranked by the
- * same matcher. An empty query lists every eligible command and the newest threads. A leading `>`
- * limits the list to commands. A thread or project on another computer names that computer; a project
- * that several computers hold for the same repository is one row, named as this computer's project is.
+ * What the palette shows for a query. An empty query lists the newest threads ("Recent"), then every
+ * eligible command. Typed text ranks commands, then threads, then projects with the same matcher, and
+ * adds the message hits grouped by thread (first in `messages` mode). A leading `>` limits the list to
+ * commands. A thread or project on another computer names that computer; a project that several
+ * computers hold for the same repository is one row, named as this computer's project is.
  */
-export function buildPaletteGroups({ query, commands, threads, projects, computers }: PaletteInput): PaletteGroup[] {
+export function buildPaletteGroups({
+  query,
+  commands,
+  threads,
+  projects,
+  computers,
+  messages = [],
+  expanded,
+  mode = 'all'
+}: PaletteInput): PaletteGroup[] {
   const commandsOnly = query.trimStart().startsWith('>')
   const text = commandsOnly ? query.trimStart().slice(1) : query
   const searching = text.trim() !== ''
@@ -72,56 +103,127 @@ export function buildPaletteGroups({ query, commands, threads, projects, compute
     text,
     commands.map((item) => ({ item, title: item.title, terms: item.kind === 'command' ? item.terms : undefined }))
   ).map((row) => row.item)
-  if (commandRows.length > 0) groups.push({ label: 'Commands', items: commandRows })
-  if (commandsOnly) return groups
+  const commandGroup: PaletteGroup | null = commandRows.length > 0 ? { label: 'Commands', items: commandRows } : null
+  if (commandsOnly) return commandGroup ? [commandGroup] : []
 
   const listed = listedThreads(threads)
   const { groups: projectGroups, groupOf } = groupProjects(projects)
   const groupById = new Map(projectGroups.map((group) => [group.id, group]))
   const computerName = (node: string): string => computers?.[node]?.name ?? UNKNOWN_COMPUTER_NAME
+  const where = (projectName: string | undefined, node: string | undefined): string | undefined =>
+    [projectName, node ? computerName(node) : undefined].filter(Boolean).join(' · ') || undefined
   const threadItem = (thread: Thread): PaletteItem => {
     const group = thread.projectId ? groupById.get(groupOf.get(thread.projectId) ?? '') : undefined
-    const detail = [group?.project.name, thread.node ? computerName(thread.node) : undefined].filter(Boolean).join(' · ')
     return {
       kind: 'thread',
       key: `thread:${thread.id}`,
       id: thread.id,
       title: thread.name,
-      detail: detail || undefined
+      detail: where(group?.project.name, thread.node)
     }
   }
 
-  const threadRows = searching
-    ? rankItems(text, listed.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
-    : [...listed].sort(byNewest).slice(0, RECENT_THREAD_COUNT).map(threadItem)
+  if (!searching) {
+    const recent = [...listed].sort(byNewest).slice(0, RECENT_THREAD_COUNT).map(threadItem)
+    if (recent.length > 0) groups.push({ label: 'Recent', items: recent })
+    if (commandGroup) groups.push(commandGroup)
+    return groups
+  }
+
+  const match = messageQuery(text)
+  const messageGroup = match ? messageHits(messages, match, expanded, where) : null
+  if (mode === 'messages' && messageGroup) groups.push(messageGroup)
+  if (mode !== 'messages' && commandGroup) groups.push(commandGroup)
+
+  const threadRows = rankItems(text, listed.map((thread) => ({ thread, title: thread.name }))).map((row) => threadItem(row.thread))
   if (threadRows.length > 0) groups.push({ label: 'Threads', items: threadRows })
 
-  if (searching) {
-    const projectRows = rankItems(
-      text,
-      projectGroups.map((group) => ({
-        group,
-        title: group.project.name,
-        // The other computers' names for the same repository find it too.
-        terms: group.members.slice(1).map((member) => member.name)
-      }))
-    ).map(({ group }): PaletteItem => {
-      const project = group.project
-      return {
-        kind: 'project',
-        key: `project:${group.id}`,
-        id: project.id,
-        title: project.name,
-        // A project that is on another computer only says which.
-        detail: project.node ? `Project · ${computerName(project.node)}` : 'Project',
-        threadId: [...listed]
-          .filter((thread) => thread.projectId && groupOf.get(thread.projectId) === group.id)
-          .sort(byNewest)[0]?.id
-      }
-    })
-    if (projectRows.length > 0) groups.push({ label: 'Projects', items: projectRows })
-  }
+  const projectRows = rankItems(
+    text,
+    projectGroups.map((group) => ({
+      group,
+      title: group.project.name,
+      // The other computers' names for the same repository find it too.
+      terms: group.members.slice(1).map((member) => member.name)
+    }))
+  ).map(({ group }): PaletteItem => {
+    const project = group.project
+    return {
+      kind: 'project',
+      key: `project:${group.id}`,
+      id: project.id,
+      title: project.name,
+      // A project that is on another computer only says which.
+      detail: project.node ? `Project · ${computerName(project.node)}` : 'Project',
+      threadId: [...listed]
+        .filter((thread) => thread.projectId && groupOf.get(thread.projectId) === group.id)
+        .sort(byNewest)[0]?.id
+    }
+  })
+  if (projectRows.length > 0) groups.push({ label: 'Projects', items: projectRows })
+
+  if (mode !== 'messages' && messageGroup) groups.push(messageGroup)
+  if (mode === 'messages' && commandGroup) groups.push(commandGroup)
   return groups
+}
+
+/**
+ * The message hits under one header row per thread, in the order the threads first appear. A thread's
+ * hits are newest first (the search returns them oldest first) and stop at three, followed by a
+ * "+N more" row, unless the thread is expanded.
+ */
+function messageHits(
+  results: readonly ThreadSearchResult[],
+  match: string,
+  expanded: ReadonlySet<string> | undefined,
+  where: (projectName: string | undefined, node: string | undefined) => string | undefined
+): PaletteGroup | null {
+  const byThread = new Map<string, ThreadSearchResult[]>()
+  for (const result of results) {
+    if (result.matchType !== 'message' || !result.messageId || !result.snippet) continue
+    const hits = byThread.get(result.threadId)
+    if (hits) hits.push(result)
+    else byThread.set(result.threadId, [result])
+  }
+  const items: PaletteItem[] = []
+  for (const [threadId, hits] of byThread) {
+    const first = hits[0]!
+    items.push({
+      kind: 'thread',
+      key: `message-thread:${threadId}`,
+      id: threadId,
+      title: first.threadName,
+      detail: where(first.projectName, first.node)
+    })
+    const newest = [...hits].reverse()
+    const shown = expanded?.has(threadId) ? newest : newest.slice(0, MESSAGE_HITS_PER_THREAD)
+    for (const hit of shown) {
+      items.push({ kind: 'message', key: `message:${threadId}:${hit.messageId}`, id: hit.messageId!, threadId, title: hit.snippet!, match })
+    }
+    if (shown.length < newest.length) {
+      items.push({ kind: 'more', key: `more:${threadId}`, threadId, title: `+${newest.length - shown.length} more` })
+    }
+  }
+  return items.length > 0 ? { label: 'Messages', items } : null
+}
+
+/**
+ * Splits `text` into runs and marks every case-insensitive occurrence of `match`, as the message
+ * search matches (lower case, accents kept).
+ */
+export function markMatches(text: string, match: string): Array<{ text: string; match: boolean }> {
+  const needle = match.toLowerCase()
+  if (!needle) return [{ text, match: false }]
+  const haystack = text.toLowerCase()
+  const runs: Array<{ text: string; match: boolean }> = []
+  let from = 0
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, from)) {
+    if (at > from) runs.push({ text: text.slice(from, at), match: false })
+    runs.push({ text: text.slice(at, at + needle.length), match: true })
+    from = at + needle.length
+  }
+  if (from < text.length) runs.push({ text: text.slice(from), match: false })
+  return runs
 }
 
 export function flattenGroups(groups: readonly PaletteGroup[]): PaletteItem[] {
