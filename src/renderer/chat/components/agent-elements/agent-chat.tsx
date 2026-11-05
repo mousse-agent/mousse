@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { MessageList } from "./message-list";
+import { useComposerFold } from "./composer-fold";
 import { Suggestions, type SuggestionItem } from "./input/suggestions";
 import { cn } from "./utils/cn";
 import type { AgentChatProps } from "./types";
@@ -32,7 +33,7 @@ export function AgentChat({
 }: AgentChatProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
-  const [atBottom, setAtBottom] = useState(true);
+  const composerFold = useComposerFold();
 
   const ResolvedInputBar = slots.InputBar;
   const isEmpty = !error && messages.length === 0;
@@ -122,7 +123,8 @@ export function AgentChat({
         classNames?.root,
         className,
       )}
-      data-composer-compact={!atBottom || undefined}
+      data-composer-compact={composerFold.compact || undefined}
+      data-composer-motion={composerFold.motion || undefined}
       style={style}
     >
       {isCenteredEmptyState ? (
@@ -159,7 +161,7 @@ export function AgentChat({
           classNames={classNames}
           slots={slots}
           toolRenderers={toolRenderers}
-          onAtBottomChange={setAtBottom}
+          onComposerCompactChange={composerFold.onCompactChange}
           lastTurnNotice={lastTurnNotice}
           showCopyToolbar={showCopyToolbar}
           initialScrollBehavior={initialScrollBehavior}
