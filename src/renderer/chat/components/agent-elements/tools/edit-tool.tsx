@@ -357,6 +357,7 @@ function EditLine({
   icon,
   label,
   name,
+  isFileName = true,
   title,
   added,
   removed,
@@ -371,6 +372,8 @@ function EditLine({
   icon: React.ReactNode;
   label: string;
   name: string;
+  /** False for a count ("3 files"), which stays in the muted label type. */
+  isFileName?: boolean;
   title?: string;
   added: number;
   removed: number;
@@ -387,14 +390,18 @@ function EditLine({
   const text = (
     <>
       <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && "text-red-400")}>{label}</span>
-      {name && (
-        <span className="an-edit-row-name min-w-0 truncate font-mono text-[13px] text-an-foreground">{name}</span>
-      )}
+      {name &&
+        (isFileName ? (
+          <span className="an-edit-row-name min-w-0 truncate font-mono text-[13px] text-an-foreground">{name}</span>
+        ) : (
+          <span className="an-edit-row-count shrink-0 whitespace-nowrap">{name}</span>
+        ))}
     </>
   );
   return (
-    <div className="an-edit-row group/edit-row flex flex-col min-w-0" data-status={status}>
-      <div className="an-tool-chrome flex items-center gap-1 min-w-0">
+    <div className="an-edit-row flex flex-col min-w-0" data-status={status}>
+      {/* The hover group is the line alone, so hovering a call's line does not show the actions of the file rows under it. */}
+      <div className="an-tool-chrome group/edit-line flex items-center gap-1 min-w-0">
         <button
           type="button"
           className={cn(
@@ -426,7 +433,7 @@ function EditLine({
           {!isPending && <Stat added={added} removed={removed} />}
         </button>
         {actions && (
-          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-row:opacity-100 group-focus-within/edit-row:opacity-100">
+          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100 group-has-[:focus-visible]/edit-line:opacity-100">
             {actions}
           </span>
         )}
@@ -528,6 +535,7 @@ function EditFilesGroup({ files, status }: { files: EditedFile[]; status: RowSta
       icon={fileIcon(verb)}
       label={label}
       name={count}
+      isFileName={false}
       added={added}
       removed={removed}
       status={rowStatus}

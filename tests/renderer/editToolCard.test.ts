@@ -150,6 +150,9 @@ describe('edit row', () => {
     click(toggle())
     const rows = [...host.querySelectorAll('.an-edit-files .an-edit-row-toggle')].map((row) => row.textContent)
     expect(rows).toEqual(['Editeda.ts+5−1', 'Editedb.ts+4−3', 'Createdc.ts+3'])
+    // The count is not a file name, and hovering the summary line does not reveal the file rows' actions.
+    expect(host.querySelector('.an-edit-row-count')!.textContent).toBe('3 files')
+    expect(host.querySelector('.an-edit-files')!.closest('[class*="group/edit-line"]')).toBeNull()
     click(host.querySelector('button[aria-label="Open b.ts in Review"]'))
     expect(calls.review).toEqual([['t1', 'turn-1', 'src/b.ts']])
   })
