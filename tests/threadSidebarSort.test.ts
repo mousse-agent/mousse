@@ -31,6 +31,19 @@ describe('sortSidebarThreads', () => {
     ])
   })
 
+  it('puts pinned threads first, each part by persisted order', () => {
+    const front = thread({ id: 'front', order: 0 })
+    const pinnedBack = thread({ id: 'pinned-back', order: 5, pinnedAt: '2026-01-02T00:00:00.000Z' })
+    const pinnedFront = thread({ id: 'pinned-front', order: 1, pinnedAt: '2026-01-03T00:00:00.000Z' })
+    const back = thread({ id: 'back', order: 3 })
+    expect(sortSidebarThreads([back, pinnedBack, front, pinnedFront]).map((entry) => entry.id)).toEqual([
+      'pinned-front',
+      'pinned-back',
+      'front',
+      'back'
+    ])
+  })
+
   it('breaks order ties with id', () => {
     const laterId = thread({ id: 'b', order: 0 })
     const earlierId = thread({ id: 'a', order: 0 })
