@@ -106,26 +106,26 @@ const launched = [u, intro, launch(0, 3), launch(1, 3), launch(2, 3)]
 describe('a reply that launches subagents whose results arrive one by one', () => {
   it('stays one turn with one working indicator, and the card shows each result', async () => {
     let view = await show(3, launched, 'streaming', ['working', 'working', 'working'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Working for 3 seconds'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Working · 3s'], notices: 0 })
     expect(view.text).toContain('3 subagents')
 
     // The parent's run ends while its subagents work: the reply goes on.
     view = await show(5, launched, 'completed', ['working', 'working', 'working'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Working for 5 seconds'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Working · 5s'], notices: 0 })
 
     // The first result wakes the parent: still the same turn, and the card counts it as done.
     const first = [...launched, result(0, 8), thought('t1', 9, 'One replied; two are still running.'), reply('a2', 10, 'Test Subagent One finished. Two and Three are still running.')]
     view = await show(10, first, 'streaming', ['done', 'working', 'working'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Working for 10 seconds'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Working · 10s'], notices: 0 })
     expect(view.text).toContain('2 working · 1 done')
     expect(view.text).not.toContain('finished task')
 
     view = await show(11, first, 'completed', ['done', 'working', 'working'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Working for 11 seconds'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Working · 11s'], notices: 0 })
 
     const all = [...first, result(1, 13), result(2, 18), reply('a3', 20, 'All three test subagents have now reported back.')]
     view = await show(20, all, 'streaming', ['done', 'done', 'done'])
-    expect(view).toMatchObject({ turns: 1, indicators: ['Working for 20 seconds'], notices: 0 })
+    expect(view).toMatchObject({ turns: 1, indicators: ['Working · 20s'], notices: 0 })
 
     view = await show(21, all, 'completed', ['done', 'done', 'done'])
     expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s'], notices: 0 })
@@ -142,7 +142,7 @@ describe('a reply that launches subagents whose results arrive one by one', () =
     const all = [...launched, result(0, 8), result(1, 9), result(2, 10), reply('a2', 12, 'All done.'), user('u2', 30, 'Thanks, now summarize')]
     const view = await show(31, all, 'streaming', ['done', 'done', 'done'])
     expect(view.turns).toBe(2)
-    expect(view.indicators).toEqual(['Worked for 12s', 'Working for 1 second'])
+    expect(view.indicators).toEqual(['Worked for 12s', 'Working · 1s'])
   })
 
   it('keeps a result line in the turn for a subagent with no card', async () => {
