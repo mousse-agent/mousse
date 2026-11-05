@@ -220,6 +220,50 @@ describe('Files tree', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull()
     expect(document.activeElement).toBe(readme)
   })
+
+  it('focuses the first item only once the menu is placed and visible', async () => {
+    await mountTree(async (path) => entries[path])
+    await flush()
+    const readme = row('README.md')
+    readme.focus()
+    const visibilityAtFocus: string[] = []
+    const record = () => visibilityAtFocus.push(document.querySelector<HTMLElement>('[role="menu"]')?.style.visibility ?? 'no menu')
+    document.addEventListener('focusin', record)
+    await press(readme, 'F10', { shiftKey: true })
+    document.removeEventListener('focusin', record)
+    expect(document.activeElement?.textContent).toBe('Add to chat')
+    expect(visibilityAtFocus).toEqual(['visible'])
+  })
+
+  it('a menu opened with the pointer moves with the arrow keys, and Escape returns focus to the row', async () => {
+    await mountTree(async (path) => entries[path])
+    await flush()
+    const readme = row('README.md')
+    const more = must(host.querySelector<HTMLButtonElement>('button[aria-label="Actions for README.md"]'), 'more button')
+    more.focus()
+    await click(more)
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement?.textContent).toBe('Add to chat')
+    await press(must(document.activeElement, 'menu item'), 'ArrowDown')
+    expect(document.activeElement?.textContent).toBe('Copy path')
+    await press(must(document.activeElement, 'menu item'), 'ArrowDown')
+    expect(document.activeElement?.textContent).toBe('Add to chat')
+    await press(must(document.activeElement, 'menu item'), 'ArrowUp')
+    expect(document.activeElement?.textContent).toBe('Copy path')
+    await press(must(document.activeElement, 'menu item'), 'Escape')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(readme)
+  })
+
+  it('Tab closes the menu from the row, so focus moves on from there', async () => {
+    await mountTree(async (path) => entries[path])
+    await flush()
+    const readme = row('README.md')
+    await click(host.querySelector('button[aria-label="Actions for README.md"]'))
+    await press(must(document.activeElement, 'menu item'), 'Tab')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(readme)
+  })
 })
 
 describe('Documents', () => {

@@ -52,14 +52,35 @@
   font-size: var(--settings-fs-small);
 }
 
-/* The total on the left, the grouping (and the computer, when there is a choice) on the right. */
+/* The donut on the left; beside it the total, with the grouping (and the computer, when there is
+   a choice) under it. Kept to the donut's height so Cleanup stays on the first screen. */
 .storage-usage-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-8) var(--space-12);
+  gap: var(--space-16);
   padding: var(--settings-row-y) 0 var(--space-8);
+}
+
+.storage-donut {
+  flex: 0 0 auto;
+}
+
+.storage-donut-track,
+.storage-donut-arc {
+  fill: none;
+}
+
+.storage-donut-track {
+  stroke: var(--ui-line);
+}
+
+.storage-usage-head {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  min-width: 0;
 }
 
 .storage-usage-summary {
@@ -84,8 +105,24 @@
 
 .storage-usage-filters {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-8);
+}
+
+/* Each row's swatch is its slice's colour, so the chart and the table read together. */
+.storage-row-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+}
+
+.storage-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
 }
 
 .storage-table {

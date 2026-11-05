@@ -186,8 +186,13 @@ function type(input: HTMLInputElement, value: string): void {
 const press = (element: HTMLElement, key: string) => element.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
 const callsOf = (method: string) => calls.filter((call) => call.method === method)
 const rowsOf = () => $$(tid('storage-usage-row')).map((row) => ({ key: row.dataset.key!, label: (row.querySelector('th')?.textContent ?? '').trim(), bytes: Number(row.dataset.bytes) }))
-// What one view draws: the total once, the table rows, and no chart or legend repeating them.
-const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), chart: $$('[data-testid^="storage-donut"], [data-testid="storage-legend-item"]').length })
+// What one view draws: the total once, the table rows, one donut arc per row with the row's swatch in the arc's colour, and no legend.
+const swatchesMatch = () => $$(tid('storage-usage-row')).every((row) => {
+  const arc = $$(tid('storage-donut-arc')).find((candidate) => candidate.dataset.key === row.dataset.key)
+  const swatch = row.querySelector<HTMLElement>(tid('storage-usage-swatch'))
+  return !!arc && !!swatch && swatch.style.background === arc.getAttribute('stroke')
+})
+const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), arcs: $$(tid('storage-donut-arc')).length, legend: $$('[data-testid="storage-legend-item"]').length, swatchesMatch: swatchesMatch() })
 // The page's sections in document order; the rule-review notice, when shown, is part of it.
 const pageOrder = () => $$('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-trash, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
 const valueOf = (testId: string) => $(tid(testId))?.dataset.value
@@ -309,7 +314,7 @@ async function run() {
   policy.otherRulesKept = structuredClone(daemon.policy)
   evidence.policy = policy
 
-  // Clean up now with a rule on: plan first, then confirm, then the report.
+  // Preview cleanup with a rule on: plan first, then confirm, then the report.
   const cleanup: Record<string, unknown> = {}
   cleanup.beforeRun = text(tid('storage-last-run'))
   cleanup.enabled = !$<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled
@@ -469,7 +474,7 @@ async function run() {
   // Trash is reviewed from the sidebar; the row says how many threads wait there.
   evidence.trash = { row: text(tid('storage-auto-empty')), reviewButton: Boolean($(tid('storage-review-trash-button'))), otherThreads: document.body.textContent?.includes('Other threads') ?? false }
 
-  // With every rule off, Clean up now has nothing to do and says so.
+  // With every rule off, Preview cleanup has nothing to do and says so.
   await pick('storage-auto-empty-select', 'never')
   await until(() => valueOf('storage-auto-empty-select') === 'never', 'trash never')
   await pick('storage-inactive-select', 'off')

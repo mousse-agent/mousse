@@ -56,9 +56,17 @@ function EntryMenu({ label, anchorRef, onPick, onClose }: {
 }) {
   const panelRef = useRef<HTMLDivElement>(null)
   const style = useFloatingPosition({ open: true, anchorRef, contentRef: panelRef, placement: 'below-end', gap: 4 })
+  const placed = style.visibility !== 'hidden'
+
+  // The layer starts hidden until it is placed, and a hidden item cannot take focus: wait for it.
+  const focused = useRef(false)
+  useEffect(() => {
+    if (!placed || focused.current) return
+    focused.current = true
+    panelRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [placed])
 
   useEffect(() => {
-    panelRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
     const pointer = (event: MouseEvent) => {
       const target = event.target as Node
       if (!anchorRef.current?.contains(target) && !panelRef.current?.contains(target)) onClose()
@@ -145,6 +153,7 @@ function TreeNode({
           ref={rowRef}
           type="button"
           className="file-tree-row"
+          data-path={entry.path}
           style={{ paddingLeft: 8 + depth * 14 }}
           aria-expanded={isDir ? expanded : undefined}
           aria-keyshortcuts="Shift+F10"

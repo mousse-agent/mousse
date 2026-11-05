@@ -115,7 +115,7 @@ export function trashCountSentence(count: number): string {
 export const RECOMMENDED_COPY = {
   title: 'Recommended cleanup rules are available',
   body: 'Nothing has changed: only the worktrees of deleted threads are removed automatically. Turning on more rules is up to you.',
-  modalIntro: 'These rules are off for you now. Turning them on lets Mousse remove these things on a schedule, and Clean up now shows you what before it removes anything.',
+  modalIntro: 'These rules are off for you now. Turning them on lets Mousse remove these things on a schedule, and Preview cleanup shows you what before it removes anything.',
   rules: {
     inactive: 'Remove worktrees inactive for 30 days',
     merged: 'Remove worktrees whose work is merged into the default branch',

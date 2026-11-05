@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
@@ -97,6 +97,8 @@ export function FilesPanel() {
   const selectedKeyRef = useRef<string | null>(null)
   const openRequestSequence = useRef(0)
   const panelRef = useRef<HTMLDivElement>(null)
+  /** A file closed from the tab strip while focus was in it; if it was the last one, the strip goes away too. */
+  const closedFromStrip = useRef<string | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchRequest, setSearchRequest] = useState<FilesSearchOpenRequest>({ mode: 'files', nonce: 0 })
   const searchReturnFocus = useRef<HTMLElement | null>(null)
@@ -419,9 +421,21 @@ export function FilesPanel() {
     saveBlockers.current.delete(key)
     if (current?.assetUrl) URL.revokeObjectURL(current.assetUrl)
     replaceFiles((all) => { const next = { ...all }; delete next[key]; return next })
+    if (panelRef.current?.querySelector('.files-editor > .ui-tabs')?.contains(document.activeElement)) closedFromStrip.current = path
     closeFileInStore(scope, path)
     return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
+
+  // With other files open the strip moves focus to the next tab. Closing the last one removes the strip,
+  // so focus goes to the closed file's row in the tree, or to the empty editor when that row is not shown.
+  useLayoutEffect(() => {
+    const closed = closedFromStrip.current
+    closedFromStrip.current = null
+    if (!closed || openPaths.length > 0) return
+    const panel = panelRef.current
+    const row = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])].find((element) => element.dataset.path === closed)
+    ;(row ?? panel?.querySelector<HTMLElement>('.files-editor-empty'))?.focus()
+  }, [openPaths.length])
 
   const beforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco
@@ -470,7 +484,7 @@ export function FilesPanel() {
           onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(path, filesRoot))} refreshKey={refreshKey} />
       </ResizablePanelSidebar>
       <div className="files-editor">
-        <TabBar
+        {openPaths.length > 0 && <TabBar
           label="Open files"
           activeId={selectedPath}
           tabs={openPaths.map((path) => {
@@ -484,7 +498,7 @@ export function FilesPanel() {
             setReferenceDragData(event.dataTransfer, filesEntryReference({ path, name: basename(path), kind: 'file', filesRoot, threadId: activeThreadId, projectId }))
             event.dataTransfer.setData('text/plain', path)
           }}
-        />
+        />}
         <div className="panel-toolbar files-editor-toolbar">
           <span className="panel-toolbar-path" title={selectedPath ?? undefined}>{selectedPath ?? 'Select a file'}</span>
           <div className="files-toolbar-actions">
@@ -528,7 +542,7 @@ export function FilesPanel() {
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
           : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: CODE_FONT, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
-          : <div className="files-editor-empty"><p>Select a file from the tree</p></div>}
+          : <div className="files-editor-empty" tabIndex={-1}><p>Select a file from the tree</p></div>}
       </div>
     </div>
   )

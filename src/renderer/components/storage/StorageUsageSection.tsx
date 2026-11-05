@@ -24,6 +24,7 @@ import { useAppStore } from '../../stores/appStore'
 import { SettingsGroup } from '../settings/SettingsRow'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select } from '../ui/Select'
+import { StorageDonut, sliceColor } from './StorageDonut'
 
 const GROUP_OPTIONS: ReadonlyArray<{ value: UsageGroupBy; label: string }> = [
   { value: 'project', label: 'By project' },
@@ -51,7 +52,10 @@ export interface StorageUsageViewProps {
   onOpen: (group: UsageGroup) => void
 }
 
-/** The Disk usage group: the total with a compact toolbar (grouping, and the computer when there is a choice), then one sortable table. */
+/**
+ * The Disk usage group: a donut beside the total and a compact toolbar (grouping, and the computer
+ * when there is a choice), then one sortable table whose row swatches match the donut's slices.
+ */
 export function StorageUsageView(props: StorageUsageViewProps) {
   const { machines, machine, by, results, loading, sort, now } = props
   const groups = results ? groupMachineUsage(results, by) : []
@@ -62,6 +66,8 @@ export function StorageUsageView(props: StorageUsageViewProps) {
   const oldest = results ? oldestMeasuredAt(results) : undefined
   const showMachine = (results?.length ?? 0) > 1
   const rows = sortRows(groups, sort)
+  // Colours follow the chart's order, not the table's sort, so a row keeps its slice's colour.
+  const colors = new Map(groups.map((group, index) => [group.key, sliceColor(group, index)]))
   // This computer, each other computer, and all of them: shown only when another computer exists.
   const machineOptions = [
     { value: 'self', label: SELF_MACHINE.name },
@@ -98,16 +104,19 @@ export function StorageUsageView(props: StorageUsageViewProps) {
     </span>}
   >
     <div className="storage-usage-toolbar">
-      <div className="storage-usage-summary">
-        {!results && <DelayedLoader size="small" label="Measuring disk usage" data-testid="storage-usage-loading" />}
-        {results && !answered && <span className="settings-muted" data-testid="storage-usage-none">No usage to show.</span>}
-        {answered && <p className="storage-usage-total" data-testid="storage-usage-total">
-          {partialTotal ? 'At least ' : ''}<strong>{formatBytes(total)}</strong><span className="settings-muted"> in total</span>
-        </p>}
-      </div>
-      <div className="storage-usage-filters">
-        {machines.length > 0 && <Select ariaLabel="Computer" size="small" data-testid="storage-machine-select" value={machine} onChange={props.onMachine} options={machineOptions} />}
-        <Select ariaLabel="Group by" size="small" data-testid="storage-groupby-select" value={by} onChange={(value) => props.onBy(value as UsageGroupBy)} options={GROUP_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />
+      {answered && <StorageDonut groups={groups} />}
+      <div className="storage-usage-head">
+        <div className="storage-usage-summary">
+          {!results && <DelayedLoader size="small" label="Measuring disk usage" data-testid="storage-usage-loading" />}
+          {results && !answered && <span className="settings-muted" data-testid="storage-usage-none">No usage to show.</span>}
+          {answered && <p className="storage-usage-total" data-testid="storage-usage-total">
+            {partialTotal ? 'At least ' : ''}<strong>{formatBytes(total)}</strong><span className="settings-muted"> in total</span>
+          </p>}
+        </div>
+        <div className="storage-usage-filters">
+          {machines.length > 0 && <Select ariaLabel="Computer" size="small" data-testid="storage-machine-select" value={machine} onChange={props.onMachine} options={machineOptions} />}
+          <Select ariaLabel="Group by" size="small" data-testid="storage-groupby-select" value={by} onChange={(value) => props.onBy(value as UsageGroupBy)} options={GROUP_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />
+        </div>
       </div>
     </div>
     {answered && <table className="storage-table" data-testid="storage-usage-table">
@@ -123,9 +132,12 @@ export function StorageUsageView(props: StorageUsageViewProps) {
       <tbody>
         {rows.map((group) => <tr key={group.key} data-testid="storage-usage-row" data-key={group.key} data-bytes={group.bytes}>
           <th scope="row">
-            {props.canOpen(group)
-              ? <button type="button" className="storage-row-link" onClick={() => props.onOpen(group)}>{group.label}</button>
-              : <span>{group.label}</span>}
+            <span className="storage-row-name">
+              <span className="storage-swatch" data-testid="storage-usage-swatch" style={{ background: colors.get(group.key) }} aria-hidden="true" />
+              {props.canOpen(group)
+                ? <button type="button" className="storage-row-link" onClick={() => props.onOpen(group)}>{group.label}</button>
+                : <span>{group.label}</span>}
+            </span>
           </th>
           {showMachine && by !== 'kind' && <td>{group.machine?.name ?? ''}</td>}
           <td className="storage-num">{formatBytes(group.bytes)}</td>
