@@ -454,6 +454,22 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
+    // Answers to the agent's questions are a step of the agent's turn (one row that opens to each
+    // question and its answer), not a message from the user. Older answers carry only the text and
+    // stay a user message: typed text can look the same, so it is not parsed.
+    if (msg.role === 'user' && msg.questionAnswers?.length) {
+      base.role = 'assistant'
+      base.parts = [{
+        type: 'tool-QuestionAnswers',
+        toolCallId: msg.id,
+        state: 'output-available',
+        input: { questions: msg.questionAnswers },
+      } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     if (msg.role === 'assistant' && msg.streaming) {
       const pending = streamingAppletPresentation(msg.content)
       if (pending.some(part => part.type === 'data-applet-pending')) {
