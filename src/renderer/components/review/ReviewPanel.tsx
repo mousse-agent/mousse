@@ -99,6 +99,11 @@ function TreeRows({
   )
 }
 
+/** A POSIX, drive-letter or UNC path; anything else is relative to the worktree. */
+function isAbsoluteReviewPath(path: string): boolean {
+  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)
+}
+
 function firstFilePath(nodes: TreeNode[]): string | null {
   for (const node of nodes) {
     if (node.kind === 'file') return node.path
@@ -115,7 +120,7 @@ export function ReviewPanel() {
   const threadState = useReviewStore((s) => (threadId ? s.byThread[threadId] : undefined))
   const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? NO_REFERENCES)
   const platform = useAppStore((s) => s.appInfo?.platform ?? '')
-  const { setScope, selectFile, saveViewState, resolveCommentReveal } = useReviewStore.getState()
+  const { setScope, selectFile, saveViewState, resolvePendingFile } = useReviewStore.getState()
 
   const [availability, setAvailability] = useState<{ threadId: string; value: WorkspaceAvailability } | null>(null)
   const [choices, setChoices] = useState<TurnChoice[]>([])
@@ -207,14 +212,16 @@ export function ReviewPanel() {
   const tree = useMemo(() => (files ? buildFileTree(files) : []), [files])
   const totals = useMemo(() => totalCounts(files ?? []), [files])
 
-  // A clicked comment pill names its file by absolute path; once its scope's list is here, open that file.
-  const pendingComment = threadState?.pendingComment
+  // A clicked comment pill or changed-files row names its file by absolute path (or relative to the worktree);
+  // once its scope's list is here, open that file.
+  const pendingFile = threadState?.pendingFile
   const root = result?.root
   useEffect(() => {
-    if (!threadId || !pendingComment || !files || !root) return
-    const match = files.find((file) => sameReviewFile(joinReviewPath(root, file.path), pendingComment.absolutePath, platform))
-    resolveCommentReveal(threadId, match?.path ?? null)
-  }, [threadId, pendingComment, files, root, platform, resolveCommentReveal])
+    if (!threadId || !pendingFile || !files || !root) return
+    const target = isAbsoluteReviewPath(pendingFile.path) ? pendingFile.path : joinReviewPath(root, pendingFile.path)
+    const match = files.find((file) => sameReviewFile(joinReviewPath(root, file.path), target, platform))
+    resolvePendingFile(threadId, match?.path ?? null)
+  }, [threadId, pendingFile, files, root, platform, resolvePendingFile])
 
   const commentsPerFile = useMemo(
     () =>
@@ -229,11 +236,11 @@ export function ReviewPanel() {
   // Keep the selected file when it is still listed; otherwise open the first one.
   const selectedPath = threadState?.selectedPath ?? null
   useEffect(() => {
-    if (!threadId || !files || list?.key !== listKey || pendingComment) return
+    if (!threadId || !files || list?.key !== listKey || pendingFile) return
     if (selectedPath && files.some((file) => file.path === selectedPath)) return
     const next = firstFilePath(tree)
     if (next !== selectedPath) selectFile(threadId, next)
-  }, [threadId, files, list?.key, listKey, selectedPath, pendingComment, tree, selectFile])
+  }, [threadId, files, list?.key, listKey, selectedPath, pendingFile, tree, selectFile])
 
   const toggleFolder = useCallback((path: string) => {
     setCollapsed((current) => {
