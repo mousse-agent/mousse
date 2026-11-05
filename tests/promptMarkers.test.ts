@@ -46,7 +46,7 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
     expect(result.cachedClick).toEqual({ count: 2, scrollTop: 224 })
     expect(result.bounded.rail).toBeLessThan(result.bounded.viewport)
     expect(result.bounded.scrollHeight).toBeGreaterThan(result.bounded.rail)
-    // In a narrow pane the transcript's text starts right of the rail instead of under it.
+    // The rail sits beside the transcript's text, never under it.
     expect(result.bounded.textLeft).toBeGreaterThanOrEqual(result.bounded.railRight)
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
