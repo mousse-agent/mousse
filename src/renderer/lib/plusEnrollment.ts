@@ -7,6 +7,7 @@ const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
 
 /** Why phone requests can't be approved from this computer yet, in one line; undefined when they can. */
 export function phonesBlocked(status: NetStatus | undefined, plus: PlusStatus | undefined): string | undefined {
+  if (plus?.reconnecting) return 'Reconnecting to Mousse ID. Phones can be added once it is back.'
   if (!plus?.connected) return 'Sign in to add phones.'
   if (!status?.enabled || !status.self) return 'Turn on networking under Devices to add phones.'
   if (status.keystore !== 'unlocked') return 'Unlock this device under Devices to add phones.'
