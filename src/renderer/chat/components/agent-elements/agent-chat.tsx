@@ -2,11 +2,11 @@
 
 import { useRef, useState } from "react";
 import { MessageList } from "./message-list";
-import { InputBar } from "./input-bar";
 import { useComposerFold } from "./composer-fold";
 import { Suggestions, type SuggestionItem } from "./input/suggestions";
 import { cn } from "./utils/cn";
 import type { AgentChatProps } from "./types";
+import type { QuestionAnswer } from "./question/question-prompt";
 
 export function AgentChat({
   messages,
@@ -35,7 +35,7 @@ export function AgentChat({
   const [draft, setDraft] = useState("");
   const composerFold = useComposerFold();
 
-  const ResolvedInputBar = slots?.InputBar ?? InputBar;
+  const ResolvedInputBar = slots.InputBar;
   const isEmpty = !error && messages.length === 0;
   const isCenteredEmptyState = isEmpty && emptyStatePosition === "center";
 
@@ -97,7 +97,7 @@ export function AgentChat({
               submitLabel: pendingQuestion.submitLabel,
               skipLabel: pendingQuestion.skipLabel,
               allowSkip: pendingQuestion.allowSkip,
-              onSubmit: (answer) => {
+              onSubmit: (answer: QuestionAnswer) => {
                 questionTool?.onAnswer?.({
                   toolCallId: pendingQuestion.toolCallId,
                   question:
