@@ -554,4 +554,30 @@ describe('composer send slot', () => {
     act(() => button('Stop recording').click())
     expect(onStopRecording).toHaveBeenCalledTimes(1)
   })
+
+  it('draws Send, Queue, Stop, Stop recording and the mic as circles, and nothing else in the footer', () => {
+    const css = readFileSync('src/renderer/styles/polish.css', 'utf8').replace(/\r\n/g, '\n')
+    const match = /\.app \.chat-input-area :is\(([^)]*)\) \{\n {2}border-radius: 50%;\n\}/.exec(css)
+    expect(match).not.toBeNull()
+    const round = match![1].split(',').map((selector) => selector.trim().replace(/^\./, ''))
+    // The rule beats the shared 9px square (one more class) and keeps its 30px size.
+    expect(css.indexOf(match![0])).toBeGreaterThan(css.indexOf('.app .chat-input-area .composer-action-btn {\n  width: 30px;\n  height: 30px;\n  border-radius: 9px;'))
+    const isRound = (label: string) => round.some((name) => button(label).classList.contains(name))
+    const states: Array<[Partial<ComposerFooterProps>, string[]]> = [
+      [{ canSend: true }, ['Dictate', 'Send message']],
+      [{ loading: true }, ['Stop run']],
+      [{ loading: true, canSend: true }, ['Stop run', 'Queue message']],
+      [{ isRecording: true }, ['Stop recording']]
+    ]
+    for (const [footer, labels] of states) {
+      slot(footer)
+      for (const label of labels) expect(isRound(label), label).toBe(true)
+      expect(isRound('Attach files')).toBe(false)
+      expect(round.some((name) => permissionButton().classList.contains(name))).toBe(false)
+      act(() => root.unmount())
+      root = createRoot(host)
+    }
+    // The focus ring is a shadow on the same box, so it follows the circle.
+    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  box-shadow: var(--ui-focus-ring);\n}`)
+  })
 })
