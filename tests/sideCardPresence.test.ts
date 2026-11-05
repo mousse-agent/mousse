@@ -187,8 +187,9 @@ describe('side card stylesheet', () => {
 
   it('matches the fade duration the presence logic waits for', () => {
     expect(SIDE_CARD_FADE_MS).toBe(180)
-    expect(css).toContain('transition: opacity 180ms ease, transform 180ms ease;')
-    expect(css).toMatch(/\.sidebar\.sidebar-full \.chat-input-area \{[^}]*transition: width 180ms ease, margin-left 180ms ease;/)
+    // Both scale with Animation speed; the exit wait follows (sideCardFadeMs).
+    expect(css).toContain('transition: opacity calc(180ms * var(--ui-motion-scale)) ease, transform calc(180ms * var(--ui-motion-scale)) ease;')
+    expect(css).toMatch(/\.sidebar\.sidebar-full \.chat-input-area \{[^}]*transition: width calc\(180ms \* var\(--ui-motion-scale\)\) ease, margin-left calc\(180ms \* var\(--ui-motion-scale\)\) ease;/)
   })
 
   it('lifts the aside above the incoming app panel only while a card is mounted in a narrowed aside', () => {
