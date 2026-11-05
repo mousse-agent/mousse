@@ -62,7 +62,7 @@
 .ui-select-chevron {
   flex-shrink: 0;
   color: var(--text-secondary);
-  transition: transform 0.15s ease;
+  transition: transform var(--ui-dur) ease;
 }
 
 .ui-select.open .ui-select-chevron {
@@ -83,7 +83,7 @@
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
   font-size: 13px;
   outline: none;
-  animation: ui-select-in 0.12s ease-out;
+  animation: ui-select-in var(--ui-dur-fast) ease-out;
   transform-origin: top center;
   -webkit-app-region: no-drag;
 }
