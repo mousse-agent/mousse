@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
+import { EmptyThreadHeading } from './EmptyThreadHeading'
+import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -158,6 +160,8 @@ export function OrchestratorChat() {
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
   const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
+  // Picked once per chat, so it holds while typing; another chat may get another line.
+  const emptyHeadline = useMemo(() => emptyThreadHeadline(new Date(), activeThreadId ?? '__blank__'), [activeThreadId])
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -1186,6 +1190,7 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
+        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
