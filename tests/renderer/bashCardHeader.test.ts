@@ -17,7 +17,7 @@ describe('the bash card', () => {
     document.body.innerHTML = ''
   })
 
-  const mount = (extra: { bashLabel?: string } = {}) => {
+  const mount = (extra: { bashLabel?: string; bashCommand?: string } = {}) => {
     const host = document.body.appendChild(document.createElement('div'))
     root = createRoot(host)
     act(() => root!.render(createElement(BashToolTerminalCard, {
@@ -37,6 +37,11 @@ describe('the bash card', () => {
   it('prefers the command as run over the tool label', () => {
     const header = mount({ bashLabel: 'npx vitest run tests/checkout.test.ts--sequence.shuffle' }).querySelector('button')!
     expect(header.querySelector('.font-mono.truncate')?.getAttribute('title')).toBe(command)
+  })
+
+  it('shows a wrapped command without its shell wrapper, spacing kept', () => {
+    const header = mount({ bashCommand: `/bin/zsh -lc '${command}'`, bashLabel: 'tests/checkout.test.ts--sequence.shuffle' }).querySelector('button')!
+    expect(header.querySelector('.font-mono.truncate')?.textContent).toBe(command)
   })
 
   it('does not repeat the command in the header once expanded', () => {

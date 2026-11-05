@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { commandLabel } from "../../../../../shared/agentActivity";
 import { IconCheck, IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
@@ -51,8 +52,10 @@ export function BashToolTerminalCard({
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
   // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
-  // The command as run comes first: the tool's label can differ from it (spacing included).
-  const summary = (command ?? step.bashLabel ?? "").replace(/\s+/g, " ").trim();
+  // Derived from the command as run, with its spacing: a tool's label can differ from it ("test.ts--sequence").
+  const summary = command
+    ? commandLabel(command)
+    : (step.bashLabel ?? "").replace(/\s+/g, " ").trim();
   // Expanded, the body shows the full `$ command`, so the header does not repeat it.
   const hideSummary = expanded && Boolean(command);
   const hasExitCode = typeof step.bashExitCode === "number";
