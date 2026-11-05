@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
 import { contextUsageKnown, contextUsageLevel, contextUsageSummary } from '../../src/renderer/components/ContextUsagePopover'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
+import { computeContextUsage } from '../../src/mms/orchestrator/contextUsage'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -84,6 +85,14 @@ describe('context ring', () => {
     expect(ring()).toBeNull()
   })
 
+  it('is hidden for a provider that reports usage but has no measured window yet', () => {
+    render(computeContextUsage({
+      messages: [], draftInput: '', contextLimit: 0, modelName: 'opus',
+      lastMeasuredInput: 2_000, lastMeasuredCacheRead: 40_000, lastMeasuredCacheWrite: 0, measuredAtMessageLength: 0
+    }))
+    expect(ring()).toBeNull()
+  })
+
   it('names the share and totals in its tooltip and colours by level', () => {
     render(usage(124_000))
     expect(ring()?.title).toBe('62% · 124K of 200K')
@@ -101,11 +110,13 @@ describe('context ring', () => {
     expect(contextUsageSummary(usage(900, 200_000, { source: 'estimated' }))).toBe('<1% · ~900 of 200K')
   })
 
-  it('opens a popover that does not repeat the tooltip numbers', () => {
+  it('opens a popover with one line of share and totals above the bar', () => {
     render(usage(124_000), { open: true })
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.getAttribute('aria-label')).toBe('Context usage: 62% · 124K of 200K tokens')
-    expect(dialog?.textContent).not.toContain('62%')
+    const summary = dialog?.querySelector('.context-usage-summary')
+    expect(summary?.textContent).toBe('62% · 124K of 200K')
+    expect(summary?.nextElementSibling?.classList.contains('context-usage-bar')).toBe(true)
     expect(dialog?.textContent).toContain('Prompt cache')
   })
 
