@@ -40,6 +40,7 @@ import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
+import { openSettingsSection } from '../lib/settingsNavigation'
 
 export interface AttachedFile {
   id: string
@@ -280,7 +281,7 @@ export function ChatComposer({
     : mentionResult?.indexing
       ? 'Indexing files…'
       : mentionResult?.truncated && mentionResult.results.length > 0
-        ? 'Large project: showing the first matches, keep typing'
+        ? 'First matches only'
         : null
   // With nothing to pick and nothing to say the list stays closed, so Enter sends the text as typed.
   const showMentionPicker =
@@ -787,7 +788,7 @@ export function ChatComposer({
           }}
           emptyText={
             enabledSkills.length === 0
-              ? 'No skills enabled. Enable skills in Settings.'
+              ? <>No skills · <button type="button" className="composer-command-suggestion-empty-link" onClick={() => openSettingsSection('integrations')}>Settings</button></>
               : 'No skills match that filter.'
           }
           registerRow={registerSuggestionRow}

@@ -1540,6 +1540,19 @@ html.platform-darwin .titlebar-left {
   line-height: 1.4;
 }
 
+.composer-command-suggestion-empty-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-command-suggestion-empty-link:hover {
+  text-decoration: underline;
+}
+
 /* `@` mention rows: icon, name, dimmed parent folder. The selected row only gets the shared background. */
 .composer-mention-row {
   display: flex;
