@@ -1186,9 +1186,6 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
-        {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
-          <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
-        )}
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
@@ -1357,6 +1354,9 @@ export function OrchestratorChat() {
             />
           </div>
         </div>
+        {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
+          <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
+        )}
       </div>
         )}
       />

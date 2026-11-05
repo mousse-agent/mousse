@@ -1107,12 +1107,14 @@ html.platform-darwin .titlebar-left {
   padding-bottom: 0;
 }
 
-/* Anchored above the input so the composer itself stays at the pane's midpoint. */
+/* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
 .chat-empty-add-project {
-  position: absolute;
-  bottom: calc(100% + var(--space-16));
-  left: 50%;
-  transform: translateX(-50%);
+  display: flex;
+  height: 28px;
+  width: fit-content;
+  margin: var(--space-16) auto 0;
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
 }
 
 /* Queued messages stack — visually attached above the composer */
