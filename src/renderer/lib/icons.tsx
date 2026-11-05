@@ -15,6 +15,7 @@ import ArrowLeft01Icon from '@hugeicons/core-free-icons/ArrowLeft01Icon'
 import ArrowLeft02Icon from '@hugeicons/core-free-icons/ArrowLeft02Icon'
 import ArrowRight01Icon from '@hugeicons/core-free-icons/ArrowRight01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
+import ArrowTurnForwardIcon from '@hugeicons/core-free-icons/ArrowTurnForwardIcon'
 import ArrowUp01Icon from '@hugeicons/core-free-icons/ArrowUp01Icon'
 import ArrowUp02Icon from '@hugeicons/core-free-icons/ArrowUp02Icon'
 import ArrowUpDoubleIcon from '@hugeicons/core-free-icons/ArrowUpDoubleIcon'
@@ -180,6 +181,7 @@ export const Archive = /* @__PURE__ */ createIcon('Archive', Archive01Icon)
 export const ArrowDownLeft = /* @__PURE__ */ createIcon('ArrowDownLeft', ArrowDownLeft01Icon)
 export const ArrowLeft = /* @__PURE__ */ createIcon('ArrowLeft', ArrowLeft02Icon)
 export const ArrowRight = /* @__PURE__ */ createIcon('ArrowRight', ArrowRight02Icon)
+export const ArrowTurnForward = /* @__PURE__ */ createIcon('ArrowTurnForward', ArrowTurnForwardIcon)
 export const ArrowUp = /* @__PURE__ */ createIcon('ArrowUp', ArrowUp02Icon)
 export const ArrowUpRight = /* @__PURE__ */ createIcon('ArrowUpRight', ArrowUpRight01Icon)
 export const CircleArrowUp = /* @__PURE__ */ createIcon('CircleArrowUp', CircleArrowUp02Icon)

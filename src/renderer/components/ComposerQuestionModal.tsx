@@ -42,7 +42,7 @@ export function resolveQuestionAnswers(
 }
 
 /** The composer's hint while an approval request waits: a message is also an answer. */
-export const APPROVAL_COMPOSER_PLACEHOLDER = 'Answer the approval, or send a message to deny it and redirect the agent'
+export const APPROVAL_COMPOSER_PLACEHOLDER = 'Type to deny and redirect'
 
 /** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
 export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined): string | null {

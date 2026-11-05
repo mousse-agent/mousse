@@ -14,7 +14,7 @@ import { fileWorkspaceScope } from '../stores/filesStore'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
 import { removeInlineSkillToken } from '../../shared/composerCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
-import { isTurnActivePhase } from '../../shared/types'
+import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { useCommand } from '../commands/commandRegistry'
 import {
@@ -27,6 +27,7 @@ import { QueuedMessages } from './QueuedMessages'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOutcome } from './ComposerQuestionModal'
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
+import { parseUserMessageContent } from '../utils/messageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
@@ -322,6 +323,18 @@ export function OrchestratorChat() {
   }, [shownRemote, activeThreadId, messages.length])
   const chatStatus = useMemo(() => chatStatusFromTurn(turnState), [turnState])
   const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
+  // Stop also ends a turn that waits on an approval or an answer (it closes the request).
+  const turnStoppable = isTurnStoppable(turnState)
+  // Up in an empty composer brings back the last prompt sent in this thread: its text, without attachments.
+  const lastPrompt = useCallback(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!
+      if (message.role !== 'user') continue
+      const text = parseUserMessageContent(message.content).text
+      if (text) return text
+    }
+    return undefined
+  }, [messages])
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is
   // injected mid-turn. Show the steered text as a pill above the composer so
@@ -888,7 +901,7 @@ export function OrchestratorChat() {
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
-  const handleSend = async (skillMode?: SkillChatMode) => {
+  const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
     // create two threads or submit the same first message twice.
@@ -947,6 +960,14 @@ export function OrchestratorChat() {
       if (steered) return
       // No active turn: treat as a normal user message (next-turn guidance).
       text = steerText
+    } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
+      // Alt+Enter during a run: the text goes into the running turn instead of the queue.
+      const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
+      if (steered) {
+        clearComposer()
+        return
+      }
+      // The turn ended meanwhile: send it like Enter would.
     }
 
     if (!text && images.length === 0) return
@@ -1342,9 +1363,11 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
-              onSend={(skillMode) => void handleSend(skillMode)}
+              stoppable={turnActive || loading || turnStoppable}
+              placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : ''}
+              onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
+              lastPrompt={lastPrompt}
               banner={<><RemoteSubagentNotice runsOn={activeThread?.runsOn} /><SubagentComposerBanner threadId={activeThreadId} /></>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}

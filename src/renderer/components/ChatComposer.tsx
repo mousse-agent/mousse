@@ -29,7 +29,7 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -40,6 +40,8 @@ import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
+import { formatBinding } from '../../shared/commands'
+import { useAppStore } from '../stores/appStore'
 
 export interface AttachedFile {
   id: string
@@ -83,14 +85,19 @@ export interface ChatComposerProps {
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
   loading?: boolean
+  /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
+  stoppable?: boolean
   disabled?: boolean
   placeholder?: string
-  /** What the empty input says while a turn runs; the composer queues the next message unless the parent says otherwise. */
-  loadingPlaceholder?: string
-  /** Receives the inline `@skill` token (if any) so the parent can send this
-   * prompt in skill mode without flipping the global chat mode. */
-  onSend: (skillMode?: SkillChatMode) => void
+  /**
+   * Receives the inline `@skill` token (if any) so the parent can send this
+   * prompt in skill mode without flipping the global chat mode. `steer` is set
+   * when Alt+Enter sent the text during a run: it goes into the running turn.
+   */
+  onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
   onStop?: () => void
+  /** The thread's last sent prompt, which Up in an empty box brings back. */
+  lastPrompt?: () => string | undefined
   /** When true, `/skills` is treated as literal text instead of opening the skill picker. */
   disableSkillsPicker?: boolean
   /** A row above the input, such as a subagent asking a question; it brings its own layout. */
@@ -165,11 +172,12 @@ export function ChatComposer({
   contextOpen,
   onContextOpenChange,
   loading = false,
+  stoppable = loading,
   disabled = false,
-  placeholder = 'Describe a task or ask a question',
-  loadingPlaceholder = 'Running… send queues next',
+  placeholder,
   onSend,
   onStop,
+  lastPrompt,
   disableSkillsPicker = false,
   banner,
   searchMentions,
@@ -178,6 +186,9 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  // The prompt Up brought back, until it is sent or edited: Escape clears it again.
+  const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
   useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
   const resizeDraft = useCallback(() => {
@@ -514,12 +525,14 @@ export function ChatComposer({
     }).finally(() => setPendingReferences((count) => count - 1))
   }
 
-  const submit = () => {
+  const submit = (options?: { steer?: boolean }) => {
     if (!canSend) return
     const skillMode: SkillChatMode | undefined = skillToken
       ? { type: 'skill', skillId: skillToken.skillId }
       : undefined
-    onSend(skillMode)
+    recalledRef.current = null
+    if (options?.steer) onSend(skillMode, options)
+    else onSend(skillMode)
   }
 
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
@@ -606,9 +619,29 @@ export function ChatComposer({
       onRemoveBrowserElement(browserElements[browserElements.length - 1].id)
       return
     }
+    const plainKey = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey
+    // Up in an empty box brings back the last prompt, caret at its end.
+    if (e.key === 'ArrowUp' && plainKey && input.length === 0) {
+      const recalled = lastPrompt?.()
+      if (recalled) {
+        e.preventDefault()
+        recalledRef.current = recalled
+        commitEdit({ value: recalled, caret: recalled.length })
+      }
+      return
+    }
+    if (e.key === 'Escape' && recalledRef.current !== null && input === recalledRef.current) {
+      e.preventDefault()
+      e.stopPropagation()
+      recalledRef.current = null
+      onInputChange('')
+      setCaret(0)
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      submit()
+      // Alt+Enter during a run steers the running turn; otherwise it sends like Enter.
+      submit(e.altKey && !e.ctrlKey && !e.metaKey && loading ? { steer: true } : undefined)
     }
   }
 
@@ -732,9 +765,9 @@ export function ChatComposer({
           onPaste={handlePaste}
           onFocus={resizeDraft}
           placeholder={
-            loading
-              ? loadingPlaceholder
-              : placeholder
+            placeholder ?? (loading
+              ? `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
+              : 'Ask anything · @ files · / commands')
           }
           rows={3}
           disabled={disabled}
@@ -853,12 +886,13 @@ export function ChatComposer({
         onContextOpenChange={onContextOpenChange}
         onAttachClick={() => fileInputRef.current?.click()}
         loading={loading}
+        stoppable={stoppable}
         disabled={disabled}
         canSend={canSend}
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}
-        onSend={submit}
+        onSend={() => submit()}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}
