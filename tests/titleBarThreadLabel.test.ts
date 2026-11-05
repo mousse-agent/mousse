@@ -12,6 +12,7 @@ const base = {
   threadsSidebarOpen: false,
   sidebarMode: 'projects' as const,
   usageOpen: false,
+  scheduledOpen: false,
   activeThreadId: 't1',
   threads: [thread, loose],
   projects: [project]
@@ -29,6 +30,8 @@ describe('title bar thread label', () => {
     expect(titlebarThreadLabel({ ...base, activeThreadId: 'gone' })).toBeNull()
     expect(titlebarThreadLabel({ ...base, sidebarMode: 'chats' })).toBeNull()
     expect(titlebarThreadLabel({ ...base, usageOpen: true })).toBeNull()
+    // The Automations page replaces the thread view.
+    expect(titlebarThreadLabel({ ...base, scheduledOpen: true })).toBeNull()
   })
 
   it('is muted, one ellipsized line, and leaves dragging to the title bar', () => {

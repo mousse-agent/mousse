@@ -27,9 +27,13 @@ const logoIcon = channelForVersion(BUILD_VERSION) === 'nightly' ? nightlyLogoIco
  * or null when the sidebar is open, no thread is open, or another view (agent chats, Usage) replaces it.
  */
 export function titlebarThreadLabel(
-  state: Pick<ReturnType<typeof useAppStore.getState>, 'threadsSidebarOpen' | 'sidebarMode' | 'usageOpen' | 'activeThreadId' | 'threads' | 'projects'>
+  state: Pick<
+    ReturnType<typeof useAppStore.getState>,
+    'threadsSidebarOpen' | 'sidebarMode' | 'usageOpen' | 'scheduledOpen' | 'activeThreadId' | 'threads' | 'projects'
+  >
 ): string | null {
-  if (state.threadsSidebarOpen || state.sidebarMode === 'chats' || state.usageOpen || !state.activeThreadId) return null
+  // Usage and Automations replace the thread view, so there is no open thread to name.
+  if (state.threadsSidebarOpen || state.sidebarMode === 'chats' || state.usageOpen || state.scheduledOpen || !state.activeThreadId) return null
   const thread = state.threads.find((candidate) => candidate.id === state.activeThreadId)
   if (!thread) return null
   const project = thread.projectId ? state.projects.find((candidate) => candidate.id === thread.projectId) : undefined
