@@ -7,7 +7,7 @@ import type { ReviewFileResult, ReviewFileSide, ReviewScope } from '../../../sha
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
 import { Switch } from '../settings/SettingsRow'
-import { CODE_FONT } from '../../lib/typography'
+import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
 import { languageForPath } from '../../utils/fileEditor'
 import { commentDecorations, commentScopeLabel, commentsForFile, scopeKey, selectedLineRange } from './reviewComments'
@@ -258,6 +258,7 @@ export function ReviewDiffPane({
     }
   }
 
+  const codeFont = useMonacoCodeFont()
   const options = useMemo<editor.IDiffEditorConstructionOptions>(
     () => ({
       automaticLayout: true,
@@ -272,10 +273,10 @@ export function ReviewDiffPane({
       folding: true,
       renderWhitespace: 'selection',
       wordWrap: 'off',
-      fontFamily: CODE_FONT,
+      fontFamily: codeFont,
       fontSize: 12
     }),
-    [ignoreWhitespace]
+    [codeFont, ignoreWhitespace]
   )
 
   const beforeMount: BeforeMount = (monaco) => applyEditorTheme(monaco)
