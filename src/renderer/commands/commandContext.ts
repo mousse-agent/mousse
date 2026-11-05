@@ -10,6 +10,9 @@ export type CommandStateSlice = Pick<AppSnapshot, 'activeThreadId' | 'turnStates
 /** Elements that take typed text. Monaco and xterm both focus a textarea, so this covers them too. */
 export const TEXT_FIELD_SELECTOR = 'input, textarea, [contenteditable="true"]'
 
+/** The open thread's composer. */
+export const COMPOSER_SELECTOR = '.chat-input-area .composer-input'
+
 /** What a `Node`-like target must answer: monaco and xterm both focus a textarea, so `closest` finds them. */
 export interface ClosestTarget {
   closest(selector: string): unknown
@@ -44,6 +47,7 @@ export function commandContextFromDom(
     runActive: phase !== undefined && isTurnActivePhase(phase),
     mainAreaOpen: state.mainAreaOpen,
     projectsMode: state.sidebarMode === 'projects',
-    inFilesPanel: Boolean(target?.closest('.files-panel'))
+    inFilesPanel: Boolean(target?.closest('.files-panel')),
+    inComposer: Boolean(target?.closest(COMPOSER_SELECTOR))
   }
 }
