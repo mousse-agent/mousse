@@ -130,6 +130,18 @@
   gap: 7px;
 }
 .chat-run-interrupted svg { flex-shrink: 0; }
+.chat-run-interrupted-action {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.chat-run-interrupted-action:hover { background: var(--ui-hover); }
+.chat-run-interrupted-action:focus-visible { outline: 1px solid var(--ui-line-strong); outline-offset: 1px; }
 
 /* Browsing earlier messages leaves one input line; focus restores the full draft. */
 .mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input {

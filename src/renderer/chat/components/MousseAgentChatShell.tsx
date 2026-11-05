@@ -16,6 +16,7 @@ import {
   type QuickActionApproval,
 } from './agent-elements/tools/quick-action-approval'
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
+import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
 import './agent-elements/agent-ui.css'
 
 /**
@@ -72,6 +73,8 @@ interface MousseAgentChatShellProps {
   quickActionApproval?: QuickActionApproval | null
   /** Waiting permission requests this window can answer inline, by request id. */
   permissionRequests?: Readonly<Record<string, PermissionRequestControls>>
+  /** Retry after an error and Continue after a stopped run, on the last turn. */
+  turnActions?: TurnActions | null
 }
 
 export function MousseAgentChatShell({
@@ -86,6 +89,7 @@ export function MousseAgentChatShell({
   composer,
   quickActionApproval,
   permissionRequests,
+  turnActions,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
@@ -103,6 +107,7 @@ export function MousseAgentChatShell({
       <PermissionRequestContext.Provider value={permissionRequests ?? NO_PERMISSION_REQUESTS}>
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
+      <TurnActionsContext.Provider value={turnActions ?? null}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -118,6 +123,7 @@ export function MousseAgentChatShell({
               <span className="chat-run-interrupted-label">
                 <X size={12} strokeWidth={1.8} aria-hidden="true" />
                 <span>Run interrupted</span>
+                {turnActions && !busy && <button type="button" className="chat-run-interrupted-action" onClick={turnActions.continueRun}>Continue</button>}
               </span>
             </div> : undefined}
           </>}
@@ -125,6 +131,7 @@ export function MousseAgentChatShell({
           enableImagePreview
           enableFind
         />
+      </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>
       </PermissionRequestContext.Provider>

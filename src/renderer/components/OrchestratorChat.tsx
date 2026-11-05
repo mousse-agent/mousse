@@ -29,6 +29,7 @@ import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOut
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
+import type { TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -888,6 +889,33 @@ export function OrchestratorChat() {
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
+  // Retry and Continue on the last turn send through the normal path, never while a run is going.
+  const resendBusy = turnActive || loading
+  const turnActions = useMemo<TurnActions | null>(() => {
+    if (!activeThreadId) return null
+    const send = (content: string, images?: Awaited<ReturnType<typeof filesToImagePayloads>>) => {
+      if (resendBusy || !useAppStore.getState().workspaceReady) return
+      void sendMessage(content, chatMode, images, activeThreadId)
+    }
+    // Read at use: depending on the transcript would rebuild this on every streamed token.
+    const prompt = (promptId: string) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')
+    return {
+      retryTitle: (promptId) => {
+        const message = prompt(promptId)
+        if (!message || !(message.content || message.images?.length)) return null
+        // An image of another computer's thread may be known by name only; it cannot go out again.
+        return message.images?.some((image) => !image.data) ? 'Retry (images not resent)' : 'Retry'
+      },
+      retry: (promptId) => {
+        const message = prompt(promptId)
+        if (!message) return
+        const images = message.images?.filter((image) => image.data)
+        send(message.content, images?.length ? images : undefined)
+      },
+      continueRun: () => send('Continue')
+    }
+  }, [activeThreadId, resendBusy, sendMessage, chatMode])
+
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
@@ -1171,6 +1199,7 @@ export function OrchestratorChat() {
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
         permissionRequests={permissionRequests.controls}
+        turnActions={turnActions}
         composer={(
       <div
         ref={inputAreaRef}
