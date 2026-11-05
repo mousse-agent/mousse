@@ -81,7 +81,7 @@
   --hue-5: #7fa4f8;
   --hue-6: #f38aa0;
 
-  /* Motion. Settings > General > Advanced > Animation speed sets the scale on
+  /* Motion. Settings > Appearance > Advanced > Animation speed sets the scale on
      <html> (lib/motion.ts): Off 0, Fast 0.6, Normal 1, Slow 1.6. UI motion
      uses these durations, or calc(<ms> * var(--ui-motion-scale)) for a
      bespoke one, so every speed and Off apply to it. Loaders and status

@@ -6,6 +6,7 @@ import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
 import type { ShortcutOverrides } from './commands'
+import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -49,6 +50,10 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Font for interface text. */
+  interfaceFont: FontChoice
+  /** Font for monospace text: code, diffs, the file editor and terminals. */
+  codeFont: FontChoice
   /** Tint each thread in the Threads tab with its project's color. */
   threadProjectColors: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -592,6 +597,8 @@ export function getDefaultSettings(): MousseSettings {
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true,
+      interfaceFont: { ...DEFAULT_FONT_CHOICE },
+      codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
       animationSpeed: 'normal'
     },
@@ -710,6 +717,8 @@ export function normalizeAppearance(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
     renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    interfaceFont: normalizeFontChoice(raw.interfaceFont),
+    codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
       typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed

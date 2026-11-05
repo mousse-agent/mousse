@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { ANIMATION_SPEED_SCALE, isAnimationSpeed, type AnimationSpeed } from '../../shared/settings'
 
-// Mirrors Settings > General > Advanced > Animation speed. useTheme feeds it from the open
+// Mirrors Settings > Appearance > Advanced > Animation speed. useTheme feeds it from the open
 // profile's settings; it stays at Normal until they load. The OS reduced-motion setting turns
 // motion off whatever the speed.
 //

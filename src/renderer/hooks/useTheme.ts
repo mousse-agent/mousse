@@ -7,6 +7,7 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
+import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setAnimationSpeed } from '../lib/motion'
 
@@ -195,6 +196,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
+  applyFontSettings(normalized)
   setAnimationSpeed(normalized.animationSpeed)
 }
 

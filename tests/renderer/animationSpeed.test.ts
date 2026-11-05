@@ -135,12 +135,12 @@ describe('Settings › General › Advanced', () => {
 
   it('saves the picked speed, which survives a reload and drives <html>', async () => {
     await loadMotion()
-    const { GeneralSettings } = await import('../../src/renderer/components/settings/GeneralSettings')
+    const { AppearanceSettings } = await import('../../src/renderer/components/settings/AppearanceSettings')
     const { applyAppearance } = await import('../../src/renderer/hooks/useTheme')
     const { MousseConfigStore } = await import('../../src/mms/config/MousseConfigStore')
     const { SettingsStore } = await import('../../src/mms/settings/SettingsStore')
     const store = new SettingsStore(MousseConfigStore.load(home))
-    const draw = () => act(() => view.render(createElement(GeneralSettings, {
+    const draw = () => act(() => view.render(createElement(AppearanceSettings, {
       settings: store.get(),
       options: { themes: THEME_OPTIONS, accentColors: ACCENT_COLORS, llmProviders: [], agentTypes: [] },
       onUpdate: async (partial) => { store.set(partial); applyAppearance(store.get().appearance); draw() },
