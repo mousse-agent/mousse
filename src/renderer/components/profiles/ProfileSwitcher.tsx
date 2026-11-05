@@ -45,7 +45,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   const account = useMousseId(withAccount)
   const signedIn = withAccount && !!account.plus?.connected
   const menuStyle = useFloatingPosition({
-    open, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-start',
+    open, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-start', matchAnchorWidth: true,
     deps: [profiles.length, error, withAccount, signedIn]
   })
 
@@ -264,7 +264,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
       setError(null)
       void reload().catch((cause) => setError(messageOf(cause)))
     }}>Retry profiles</button>
-  </div> : <div className="profile-switcher profile-switcher-sidebar profile-sidebar-loading" role="status">Loading profile…</div>
+  </div> : <div className="profile-switcher profile-switcher-sidebar profile-sidebar-loading" role="status" aria-label="Loading profile" />
 
   const avatar = (profile: ProfilePublicDto) => (
     <span className="profile-avatar" style={{ background: profileColor(profile) }} aria-hidden="true">
@@ -327,7 +327,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
             <span className="profile-menu-name">{profile.displayName}</span>
             {current && <Check size={14} aria-hidden="true" />}
           </button>
-          <button className="profile-menu-kebab" type="button" aria-label={`${profile.displayName} profile actions`}
+          <button className="profile-menu-kebab" type="button" aria-label={`${profile.displayName} profile actions`} title="Profile options"
             aria-haspopup="menu" aria-expanded={rowMenu?.id === profile.id} disabled={busy}
             onClick={(event) => toggleRowMenu(profile, event.currentTarget)}>
             <MoreHorizontal size={15} aria-hidden="true" />
@@ -364,7 +364,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
           </span>
         </> : <>
           {avatar(selected)}
-          <span className="profile-sidebar-text"><strong className="profile-sidebar-profile">{selected.displayName}</strong><span>Mousse profile</span></span>
+          <span className="profile-sidebar-text"><strong className="profile-sidebar-profile">{selected.displayName}</strong></span>
         </>}
         <ChevronUp size={16} aria-hidden="true" />
       </button>
