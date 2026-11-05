@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { UIMessage } from "ai";
 import { ChevronRight, FileText, Folder } from "../../../lib/icons";
 import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
+import { Collapse } from "../../../components/ui/Collapse";
 import { useAppStore } from "../../../stores/appStore";
 import { openTurnInReview } from "../../../components/review/openReview";
 import { extractFilePathArg } from "./utils/tool-adapters";
@@ -183,7 +184,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
         >
-          <ChevronRight size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
+          <ChevronRight size={14} strokeWidth={2} className="turn-edits-chevron ui-collapse-chevron" data-open={open || undefined} />
           <span className="turn-edits-count">{countLabel}</span>
           <Stat added={summary.added} removed={summary.removed} />
         </button>
@@ -196,17 +197,15 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           Review changes
         </button>
       </div>
-      {open && (
-        <ul className="turn-edits-folders">
-          {summary.folders.map((folder) => (
-            <li key={folder.folder} className="turn-edits-folder">
-              <Folder size={14} strokeWidth={1.8} />
-              <span className="turn-edits-folder-name">{folder.folder === "." ? "Project root" : folder.folder}</span>
-              <Stat added={folder.added} removed={folder.removed} />
-            </li>
-          ))}
-        </ul>
-      )}
+      <Collapse open={open} as="ul" className="turn-edits-folders" itemCount={summary.folders.length}>
+        {summary.folders.map((folder) => (
+          <li key={folder.folder} className="turn-edits-folder">
+            <Folder size={14} strokeWidth={1.8} />
+            <span className="turn-edits-folder-name">{folder.folder === "." ? "Project root" : folder.folder}</span>
+            <Stat added={folder.added} removed={folder.removed} />
+          </li>
+        ))}
+      </Collapse>
     </section>
   );
 }
