@@ -154,6 +154,26 @@ html.platform-darwin .titlebar-left {
   pointer-events: auto;
 }
 
+/* While the sidebar is closed: how many threads need the person, on the corner of its toggle. */
+.titlebar-attention-badge {
+  position: absolute;
+  left: calc((var(--navigation-rail-width) + var(--titlebar-height) * 0.64) / 2 - 9px);
+  top: calc(50% - var(--titlebar-height) * 0.32 - 3px);
+  z-index: 2;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--status-input);
+  color: var(--surface-base);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .titlebar-sidebar-toggle:hover {
   background: rgba(var(--accent-rgb), 0.16);
   color: var(--text-primary);

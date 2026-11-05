@@ -509,6 +509,47 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
+/* A project row's state: the worst of its threads as a dot, and while it is closed how many need the person. */
+.threads-sidebar-project-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.threads-sidebar-project-status--needs-me { color: var(--status-input); }
+.threads-sidebar-project-status--working { color: var(--status-running); }
+.threads-sidebar-project-status--paused { color: var(--warning); }
+.threads-sidebar-project-status--done { color: var(--status-done); }
+
+.threads-sidebar-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.threads-sidebar-project-status--working .threads-sidebar-status-dot {
+  animation: threads-sidebar-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes threads-sidebar-dot-pulse {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-project-status--working .threads-sidebar-status-dot { animation: none; }
+}
+
+/* Threads that wait for the person, from every project, above the list. */
+.threads-sidebar-needs-me {
+  margin-bottom: 8px;
+}
+
 .threads-sidebar-card-status,
 .threads-sidebar-card-age {
   display: inline-flex;

@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { PanelLeft, PanelRightClose, PanelRightOpen, SidebarRight } from '../lib/icons'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { IconButton } from './IconButton'
@@ -10,6 +11,8 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
+import { useNeedsMeThreads } from '../lib/needsMe'
+import { needsMeLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
 import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
@@ -27,6 +30,17 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
+  const needsMeCount = useNeedsMeThreads().length
+  // The sidebar shows who needs the person; while it is closed, its toggle carries the count.
+  const showBadge = !threadsSidebarOpen && needsMeCount > 0
+  const toggleLabel = threadsSidebarOpen
+    ? 'Close threads sidebar'
+    : showBadge ? `Open threads sidebar · ${needsMeLabel(needsMeCount)}` : 'Open threads sidebar'
+
+  // The dock or taskbar carries the same count while the window is in the background.
+  useEffect(() => {
+    void window.mousse?.app?.setAttentionCount?.(needsMeCount)?.catch(() => undefined)
+  }, [needsMeCount])
 
   const toggleSideCard = () => {
     const { sideCardOn, mainAreaOpen, sideCardOverlayOpen } = useAppStore.getState()
@@ -44,12 +58,17 @@ export function TitleBar() {
             <button
               type="button"
               className="titlebar-sidebar-toggle"
-              aria-label={threadsSidebarOpen ? 'Close threads sidebar' : 'Open threads sidebar'}
-              title={threadsSidebarOpen ? 'Close threads sidebar' : 'Open threads sidebar'}
+              aria-label={toggleLabel}
+              title={toggleLabel}
               onClick={() => setThreadsSidebarOpen(!threadsSidebarOpen)}
             >
               <PanelLeft size={16} strokeWidth={2} />
             </button>
+            {showBadge && (
+              <span className="titlebar-attention-badge" aria-hidden="true">
+                {needsMeCount > 99 ? '99+' : needsMeCount}
+              </span>
+            )}
             <img
               className="titlebar-logo-icon"
               src={logoIcon}
