@@ -43,6 +43,7 @@ import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
+import { getToolStatus } from "./utils/format-tool";
 import {
   activityGroupLabel,
   analyzeAssistantMessage,
@@ -1761,6 +1762,13 @@ export const MessageList = memo(function MessageList({
                                   }
                                   label={groupLabel}
                                   autoOpen={anyToolPending}
+                                  failed={
+                                    items.filter(
+                                      (item) =>
+                                        getToolStatus(item.part).isError,
+                                    ).length
+                                  }
+                                  live={isLastTurn && isStreaming}
                                 >
                                   {items.map((item, k) => (
                                     <CustomToolRenderer

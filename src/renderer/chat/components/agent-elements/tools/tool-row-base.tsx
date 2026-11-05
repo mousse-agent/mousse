@@ -9,7 +9,11 @@ export type ToolRowBaseProps = {
   shimmerLabel?: string;
   completeLabel: string;
   isAnimating: boolean;
+  /** A failed call: the label reads in the danger colour. */
+  failed?: boolean;
   detail?: string;
+  /** Short status after the detail (a failure count); never truncated. */
+  badge?: ReactNode;
   trailingContent?: ReactNode;
   expandable?: boolean;
   expanded?: boolean;
@@ -23,7 +27,9 @@ export function ToolRowBase({
   shimmerLabel,
   completeLabel,
   isAnimating,
+  failed = false,
   detail,
+  badge,
   trailingContent,
   expandable = false,
   expanded,
@@ -51,6 +57,7 @@ export function ToolRowBase({
         <span
           className={cn(
             "font-[450] whitespace-nowrap",
+            failed && !isAnimating && "text-[var(--danger)]",
             // A label with nothing after it (a thought) keeps to one line.
             detail || trailingContent ? "shrink-0" : "min-w-0 truncate",
           )}
@@ -72,6 +79,7 @@ export function ToolRowBase({
             {detail}
           </span>
         )}
+        {badge && <span className="shrink-0 whitespace-nowrap font-normal">{badge}</span>}
         {trailingContent}
       </div>
       {expandable && (isComplete || isExpanded || isAnimating) && (
