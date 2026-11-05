@@ -477,6 +477,18 @@ html.platform-darwin .overlay-titlebar {
   will-change: auto;
 }
 
+/* Animation speed Off (lib/motion.ts sets data-motion="off" on <html>, also when the OS
+   reduces motion). Spinners and loading shimmers keep moving so pending work still reads
+   as pending. 0.01ms rather than 0s so transitionend and animationend still fire. Same
+   specificity as the reduced-motion rule below: the attribute plus five :not() classes. */
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text),
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text)::before,
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text)::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
 /* Six :not() classes of specificity on purpose: sideCard.css beats this rule by one class.
    .agents-tasks-task-icon-spin and .specificity-pad match nothing; they only count toward that six. */
 @media (prefers-reduced-motion: reduce) {
