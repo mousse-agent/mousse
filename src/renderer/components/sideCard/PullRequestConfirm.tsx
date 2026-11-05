@@ -10,6 +10,7 @@ import {
   type GitAction,
   type PullRequestFoundRow
 } from './gitSectionLogic'
+import './gitSection.css'
 
 /**
  * Merge or close one pull request; resolves with the reason it failed, or null once it is done. `method` is the merge
