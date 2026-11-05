@@ -70,7 +70,7 @@ const PRIMARY_CLASSES = [
   '.chat-primary-button',
   '.an-approve-fill',
   '.composer-implement-btn',
-  '.composer-question-submit',
+  '.composer-question-btn.is-primary',
   '.chat-run-paused-btn-primary',
   '.chat-workspace-recovery-btn-primary',
   '.scheduled-btn.primary',
