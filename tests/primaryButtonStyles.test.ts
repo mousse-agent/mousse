@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const root = resolve(process.cwd(), 'src/renderer')
@@ -35,7 +35,7 @@ interface Rule { file: string; selector: string; body: string }
 function rules(file: string): Rule[] {
   const css = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
   return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({
-    file: relative(root, file),
+    file: relative(root, file).split(sep).join('/'),
     selector: match[1].trim(),
     body: match[2]
   }))
