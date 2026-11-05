@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Pause, Square } from '../../lib/icons'
+import { Pause } from '../../lib/icons'
 import { describePausedRun, pausedActionError, type PausedAction } from '../../lib/pausedRun'
 import { createPausedRunClient, type PausedRunClient } from '../../services/pausedRunClient'
 import { useAppStore } from '../../stores/appStore'
@@ -22,14 +22,15 @@ export interface PausedRunNoticeInput {
   onDismissError: () => void
   /**
    * Stops the thread and the subagents it started. The composer has no Stop while a run is paused (a paused
-   * thread is not running), so this is the one Stop in reach. Omitted where the shell has no Stop.
+   * thread is not running), so this is the one Stop in reach. It says "Stop thread" in words, so it is not read as
+   * a second End pause. Omitted where the shell has no Stop.
    */
   onStop?: () => void
 }
 
 /**
  * A run a usage limit paused, as the composer's notice: "Paused until 3:40 PM · in 2h 15m", the limit and what
- * happens next in the tooltip, then Resume now, End pause and Stop. A busy button keeps focus
+ * happens next in the tooltip, then Resume now, End pause and Stop thread. A busy button keeps focus
  * (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
  */
 export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError, onStop }: PausedRunNoticeInput): ComposerNoticeProps {
@@ -45,7 +46,7 @@ export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause,
     actions: [
       { label: busy === 'resume' ? 'Resuming…' : 'Resume now', blocked, busy: busy === 'resume', onClick: onResume },
       { label: busy === 'cancel' ? 'Ending…' : 'End pause', title: 'End the pause without continuing; queued messages go on', blocked, busy: busy === 'cancel', onClick: onEndPause },
-      ...(onStop ? [{ label: 'Stop this thread and the subagents it started', icon: <Square size={12} strokeWidth={2} fill="currentColor" />, blocked, onClick: onStop }] : [])
+      ...(onStop ? [{ label: 'Stop thread', title: 'Stop this thread and the subagents it started', blocked, onClick: onStop }] : [])
     ],
     ...(error ? { onDismiss: onDismissError } : {})
   }
