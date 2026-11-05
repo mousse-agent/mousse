@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   buildHeatmapGrid,
   getCountForDay,
@@ -12,6 +12,7 @@ import {
 import { Segmented, SettingsGroup, type SegmentedOption } from './settings/SettingsRow'
 import { Activity, Coins } from '../lib/icons'
 import { Select } from './ui/Select'
+import { Spinner } from './ui/Spinner'
 import { modelLabel } from '../../shared/modelChoice'
 import { resolveModelChoice } from '../lib/modelChoice'
 import '../styles/profile-heatmap.css'
@@ -108,12 +109,31 @@ function computeStreaks(stats: LineEditStatsSnapshot, filter: LineEditFilter): {
 }
 
 interface LineEditHeatmapProps {
-  stats: LineEditStatsSnapshot
+  /** Null while the edit history loads, and after it failed to load (`statsFailed`). */
+  stats: LineEditStatsSnapshot | null
+  statsFailed?: boolean
   /** Null while token usage loads, and after it failed to load (`usageFailed`). */
   usage?: UsageStatsSnapshot | null
   usageFailed?: boolean
 }
 
+/** How long data may take before its loader appears, so quick loads never flash one. */
+export const PENDING_DELAY_MS = 160
+
+/** Pending data: an empty slot at first, then a small spinner read out as `label`. */
+function Pending({ label }: { label: string }) {
+  const [shown, setShown] = useState(false)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShown(true), PENDING_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
+  return <div className="activity-loading" data-testid="activity-pending">
+    {shown && <span role="status" aria-label={label}><Spinner size={14} /></span>}
+  </div>
+}
+
+const NO_EDITS: LineEditStatsSnapshot = buildLineEditSnapshot({})
+const ACTIVITY_UNAVAILABLE = 'Couldn’t load activity.'
 const USAGE_UNAVAILABLE = 'Token usage unavailable'
 // Usage is recorded only when a runtime reports it, so an empty record is "none recorded", never "0 used".
 const NO_USAGE = 'No token usage recorded yet'
@@ -130,7 +150,9 @@ const METRIC_OPTIONS: ReadonlyArray<SegmentedOption<Metric>> = [
  * Activity on the Account page: the yearly heatmap and token usage, laid flat on the page in two
  * settings groups (no cards, no nested panels).
  */
-export function LineEditHeatmap({ stats, usage = null, usageFailed = false }: LineEditHeatmapProps) {
+export function LineEditHeatmap({ stats: loadedStats, statsFailed = false, usage = null, usageFailed = false }: LineEditHeatmapProps) {
+  // Each source stands alone: edits still loading or failed never hide token usage, nor the reverse.
+  const stats = loadedStats ?? NO_EDITS
   const filter: LineEditFilter = 'all'
   const [metric, setMetric] = useState<Metric>('lines')
   const [provider, setProvider] = useState('all')
@@ -160,10 +182,11 @@ export function LineEditHeatmap({ stats, usage = null, usageFailed = false }: Li
   const cacheEligible = filteredUsage.totals.input + filteredUsage.totals.cacheRead
   /** Why the usage figures are absent, or null when there are some. */
   const usageGap = !usage ? (usageFailed ? USAGE_UNAVAILABLE : null) : !usage.turns.length ? NO_USAGE : !hasUsage ? NO_USAGE_MATCH : null
-  // The heatmap's line for an empty history: '' while token usage is still loading, null when there is history.
+  const usagePending = !usage && !usageFailed
+  // The heatmap's line for a missing or empty history: '' while its source is still loading, null when there is history.
   const historyGap = metric === 'tokens'
-    ? (!usage && !usageFailed ? '' : usageGap)
-    : stats.total === 0 ? 'No edits recorded yet' : null
+    ? (usagePending ? '' : usageGap)
+    : !loadedStats ? (statsFailed ? ACTIVITY_UNAVAILABLE : '') : stats.total === 0 ? 'No edits recorded yet' : null
   const highlights = [
     { label: 'Most active month', value: activeMonth },
     { label: 'Most active day', value: activeDay },
@@ -185,7 +208,9 @@ export function LineEditHeatmap({ stats, usage = null, usageFailed = false }: Li
         action={<Segmented value={metric} options={METRIC_OPTIONS} onChange={setMetric} ariaLabel="Heatmap metric" />}
       >
         {historyGap !== null ? (
-          historyGap && <p className="settings-muted activity-empty" role="status">{historyGap}</p>
+          historyGap
+            ? <p className="settings-muted activity-empty" role="status">{historyGap}</p>
+            : <Pending label={metric === 'tokens' ? 'Loading token usage' : 'Loading activity'} key={metric} />
         ) : (
           <>
             <p className="activity-total">
@@ -252,45 +277,44 @@ export function LineEditHeatmap({ stats, usage = null, usageFailed = false }: Li
         )}
       </SettingsGroup>
 
-      {/* Shown once token usage has loaded or failed to; there is nothing to say before that. */}
-      {(usage || usageFailed) && (
-        <SettingsGroup
-          title="Token usage"
-          icon={Coins}
-          className="activity-group"
-          action={(showProviderFilter || showModelFilter) && (
-            <span className="activity-filters">
-              {showProviderFilter && (
-                <Select
-                  ariaLabel="Provider filter"
-                  value={provider}
-                  onChange={setProvider}
-                  options={[{ value: 'all', label: 'All providers' }, ...providers.map((item) => ({ value: item, label: item }))]}
-                />
-              )}
-              {showModelFilter && (
-                <Select
-                  ariaLabel="Model filter"
-                  value={model}
-                  onChange={setModel}
-                  options={[{ value: 'all', label: 'All models' }, ...models.map((item) => ({ value: item, label: modelLabel(resolveModelChoice({ provider: '', model: item })) }))]}
-                />
-              )}
-            </span>
-          )}
-        >
-          {usageGap ? (
-            <p className="settings-muted activity-empty" role="status">{usageGap}</p>
-          ) : (
-            <dl className="activity-stats usage-stats">
-              <UsageCount label="Tokens in" value={filteredUsage.totals.input} />
-              <UsageCount label="Tokens out" value={filteredUsage.totals.output} />
-              <UsageCount label="Cached" value={filteredUsage.totals.cacheRead + filteredUsage.totals.cacheWrite} />
-              {cacheEligible > 0 && <UsageRatio label="Cache ratio" ratio={filteredUsage.totals.cacheRatio} />}
-            </dl>
-          )}
-        </SettingsGroup>
-      )}
+      <SettingsGroup
+        title="Token usage"
+        icon={Coins}
+        className="activity-group"
+        action={(showProviderFilter || showModelFilter) && (
+          <span className="activity-filters">
+            {showProviderFilter && (
+              <Select
+                ariaLabel="Provider filter"
+                value={provider}
+                onChange={setProvider}
+                options={[{ value: 'all', label: 'All providers' }, ...providers.map((item) => ({ value: item, label: item }))]}
+              />
+            )}
+            {showModelFilter && (
+              <Select
+                ariaLabel="Model filter"
+                value={model}
+                onChange={setModel}
+                options={[{ value: 'all', label: 'All models' }, ...models.map((item) => ({ value: item, label: modelLabel(resolveModelChoice({ provider: '', model: item })) }))]}
+              />
+            )}
+          </span>
+        )}
+      >
+        {usagePending ? (
+          <Pending label="Loading token usage" />
+        ) : usageGap ? (
+          <p className="settings-muted activity-empty" role="status">{usageGap}</p>
+        ) : (
+          <dl className="activity-stats usage-stats">
+            <UsageCount label="Tokens in" value={filteredUsage.totals.input} />
+            <UsageCount label="Tokens out" value={filteredUsage.totals.output} />
+            <UsageCount label="Cached" value={filteredUsage.totals.cacheRead + filteredUsage.totals.cacheWrite} />
+            {cacheEligible > 0 && <UsageRatio label="Cache ratio" ratio={filteredUsage.totals.cacheRatio} />}
+          </dl>
+        )}
+      </SettingsGroup>
     </>
   )
 }

@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../../shared/lineEditStats'
 import { LineEditHeatmap } from './LineEditHeatmap'
-import { SettingsGroup } from './settings/SettingsRow'
-import { Activity } from '../lib/icons'
 
 /** Activity heatmap and token usage, shown on the Account page. */
 export function ActivitySection() {
@@ -29,12 +27,6 @@ export function ActivitySection() {
     })
   }, [])
 
-  if (!stats) {
-    return (
-      <SettingsGroup title="Activity" icon={Activity}>
-        <p className="settings-muted activity-loading">{loadFailed ? 'Couldn’t load activity.' : 'Loading activity…'}</p>
-      </SettingsGroup>
-    )
-  }
-  return <LineEditHeatmap stats={stats} usage={usage} usageFailed={usageFailed} />
+  // Edit history and token usage load on their own; neither waits for, or hides behind, the other.
+  return <LineEditHeatmap stats={stats} statsFailed={loadFailed} usage={usage} usageFailed={usageFailed} />
 }

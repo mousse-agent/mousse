@@ -93,13 +93,30 @@ describe('Activity history states', () => {
     expect(html).not.toContain('Current streak')
   })
 
-  it('token usage that failed to load is unavailable, not zero; while it loads there is no group', () => {
+  it('token usage that failed to load is unavailable, not zero; while it loads its group holds a pending slot, no figures', () => {
     const failed = render({ usage: null, usageFailed: true })
     expect(failed).toContain('Token usage unavailable')
     expect(failed).not.toContain('Tokens in')
     expect(failed).not.toContain('Provider filter')
 
     const loading = render({ usage: null })
-    expect(loading).not.toContain('Token usage')
+    expect(loading).toContain('Token usage')
+    expect(loading).toContain('data-testid="activity-pending"')
+    expect(loading).not.toContain('Tokens in')
+    expect(loading).not.toContain('No token usage')
+  })
+
+  it('edits that failed to load say so, and never hide token usage that loaded', () => {
+    const usage = buildUsageStatsSnapshot([{ timestamp: '2026-08-25T10:00:00.000Z', provider: 'openai', model: 'gpt-test', input: 1_000, output: 250, cacheRead: 0, cacheWrite: 0 }])
+    const html = render({ stats: null, statsFailed: true, usage })
+    expect(html).toContain('Couldn’t load activity.')
+    expect(html).not.toContain('No edits recorded yet')
+    expect(html).not.toContain('lines edited')
+    expect(html.replace(/<[^>]+>/g, '|')).toMatch(/Tokens in\|+1,000\b/)
+
+    const pending = render({ stats: null, usage })
+    expect(pending).toContain('data-testid="activity-pending"')
+    expect(pending).not.toContain('No edits recorded yet')
+    expect(pending).not.toContain('Loading activity…')
   })
 })
