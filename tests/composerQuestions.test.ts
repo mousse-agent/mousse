@@ -9,12 +9,13 @@ import {
   ComposerQuestionModal,
   QUESTION_COMPOSER_PLACEHOLDER,
   QuestionOptionList,
-  answersWithMessage,
+  answerWithMessage,
   isQuestionAnswered,
   nextUnansweredStep,
   questionComposerSend,
   questionDialogLabel,
-  resolveQuestionAnswers
+  resolveQuestionAnswers,
+  type QuestionCardHandle
 } from '../src/renderer/components/ComposerQuestionModal'
 import type { UserQuestion, UserQuestionAnswers } from '../src/shared/types'
 
@@ -145,15 +146,23 @@ describe('ComposerQuestionModal', () => {
     vi.useRealTimers()
   })
 
-  let drafts: UserQuestionAnswers[]
+  let card: { current: QuestionCardHandle | null }
+  let submits: boolean[]
   const open = (questions: UserQuestion[]) => {
-    drafts = []
+    card = { current: null }
+    submits = []
     act(() => root.render(createElement(ComposerQuestionModal, {
       pending: { requestId: 'r1', questions },
       onSubmit: (answers) => submitted.push(answers),
       onDismiss: () => { dismissed += 1 },
-      onDraftChange: (answers) => drafts.push(answers)
+      handleRef: card,
+      onComposerSubmitsChange: (value) => submits.push(value)
     })))
+  }
+  const sendFromComposer = (message: string) => {
+    let result: UserQuestionAnswers | null = null
+    act(() => { result = card.current!.answerWithMessage(message) })
+    return result
   }
   const prompts = () => [...host.querySelectorAll('.composer-question-prompt')].map((node) => node.textContent)
   const footer = () => [...host.querySelectorAll<HTMLButtonElement>('.composer-question-modal-footer button')]
@@ -293,25 +302,54 @@ describe('ComposerQuestionModal', () => {
     expect(submitted).toEqual([])
   })
 
-  it('reports the choices made so far, for a message sent from the composer', () => {
+  it('a message from the composer answers only the shown question, then the card moves on and fills its dot', () => {
+    open([single, multi, third])
+    expect(submits.at(-1)).toBe(false)
+    expect(sendFromComposer('Start with the reader')).toBeNull()
+    expect(prompts()).toEqual(['Which areas?'])
+    expect(dots().map((dot) => dot.className.includes('is-answered'))).toEqual([true, false, false])
+    expect(submitted).toEqual([])
+    // Back shows the message in the first question's "Other…" field, as if typed there.
+    click(button('Back'))
+    expect(host.querySelector<HTMLInputElement>('.composer-question-other-input')?.value).toBe('Start with the reader')
+  })
+
+  it('the last open question answered from the composer gives every answer once, each its own', () => {
+    open([single, multi, third])
+    expect(sendFromComposer('Start with the reader')).toBeNull()
+    click(option('Database'))
+    expect(submits.at(-1)).toBe(false)
+    expect(sendFromComposer('And the API')).toBeNull()
+    expect(prompts()).toEqual(['How big?'])
+    expect(submits.at(-1)).toBe(true)
+    expect(sendFromComposer('Small for now')).toEqual({ scope: 'Start with the reader', areas: ['db', 'And the API'], size: 'Small for now' })
+    // The caller submits those answers; the card does not submit them a second time.
+    expect(submitted).toEqual([])
+  })
+
+  it('after a composer answer, the card still submits from its own Submit with each answer once', () => {
     open([single, multi])
-    expect(drafts.at(-1)).toEqual({ scope: '', areas: [] })
-    click(option('API'))
-    expect(drafts.at(-1)).toEqual({ scope: 'api', areas: [] })
+    sendFromComposer('Start with the reader')
+    click(option('UI'))
+    click(button('Submit'))
+    expect(submitted).toEqual([{ scope: 'Start with the reader', areas: ['ui'] }])
   })
 })
 
 describe('a message sent from the composer while questions are open', () => {
-  it('answers every question the card has no answer for and keeps the choices made', () => {
-    expect(answersWithMessage([single, multi, third], { scope: 'api', areas: [], size: '' }, 'Keep it small'))
-      .toEqual({ scope: 'api', areas: ['Keep it small'], size: 'Keep it small' })
-    expect(answersWithMessage([single, multi], { areas: ['ui'] }, 'Just the UI'))
-      .toEqual({ scope: 'Just the UI', areas: ['ui'] })
+  it('answers the shown question as its "Other…" text; a picked single choice gives way, picked choices stay', () => {
+    const empty = { scope: '', areas: [], size: '' }
+    expect(answerWithMessage([single, multi, third], 0, { ...empty, scope: 'api' }, {}, 'Mine'))
+      .toEqual({ answers: { ...empty, scope: '' }, customs: { scope: 'Mine' }, complete: false })
+    expect(answerWithMessage([single, multi], 1, { scope: 'api', areas: ['ui'] }, {}, 'Also docs'))
+      .toEqual({ answers: { scope: 'api', areas: ['ui'] }, customs: { areas: 'Also docs' }, complete: true })
   })
 
-  it('answers the questions, unless it carries images; then it skips them and sends', () => {
-    expect(questionComposerSend(false)).toEqual({ answers: true, label: 'Answer with this message' })
-    expect(questionComposerSend(true)).toEqual({ answers: false, label: 'Skip questions and send' })
+  it('says it answers this question, or answers and submits on the last; with images it skips and sends', () => {
+    expect(questionComposerSend(false, false)).toEqual({ answers: true, label: 'Answer this question' })
+    expect(questionComposerSend(false, true)).toEqual({ answers: true, label: 'Answer and submit' })
+    expect(questionComposerSend(true, false)).toEqual({ answers: false, label: 'Skip questions and send' })
+    expect(questionComposerSend(true, true)).toEqual({ answers: false, label: 'Skip questions and send' })
     expect(QUESTION_COMPOSER_PLACEHOLDER).toBe('Or reply in your own words')
   })
 
@@ -321,7 +359,8 @@ describe('a message sent from the composer while questions are open', () => {
     expect(source.indexOf('<ComposerQuestionModal')).toBeLessThan(source.indexOf('<ChatComposer'))
     expect(source).not.toMatch(/composer-collapse|inert: true/)
     expect(source).toMatch(/placeholder=\{[^}]*questionsTakeMessage \? QUESTION_COMPOSER_PLACEHOLDER/)
-    expect(source).toMatch(/sendLabel=\{questionsTakeMessage\s*\?\s*questionComposerSend\(/)
-    expect(source).toMatch(/answerQuestionsDetailed\(\s*asked\.requestId,\s*answersWithMessage\(asked\.questions, draft, text\)/)
+    expect(source).toMatch(/sendLabel=\{questionsTakeMessage\s*\?\s*questionComposerSend\([^\n]*, questionAnswerSubmits\)\.label/)
+    expect(source).toMatch(/const answers = card\.answerWithMessage\(text\)\s*if \(!answers\) \{\s*clearComposer\(\)\s*return/)
+    expect(source).toMatch(/answerQuestionsDetailed\(\s*asked\.requestId,\s*answers,/)
   })
 })

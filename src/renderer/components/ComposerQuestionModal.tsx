@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type Ref } from 'react'
 import { Check, IconMessageCircleQuestion } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
 import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
@@ -7,8 +7,10 @@ interface ComposerQuestionModalProps {
   pending: PendingUserQuestions
   onSubmit: (answers: UserQuestionAnswers) => void
   onDismiss: () => void
-  /** The answers chosen so far, each time they change (a message sent from the composer keeps them). */
-  onDraftChange?: (answers: UserQuestionAnswers) => void
+  /** Filled with the handle the composer uses to answer the shown question. */
+  handleRef?: Ref<QuestionCardHandle | null>
+  /** Whether a message from the composer would answer the last open question (and so submit), each time that changes. */
+  onComposerSubmitsChange?: (submits: boolean) => void
 }
 
 /** How long a picked single choice stays visible before the next question slides in. */
@@ -53,32 +55,39 @@ export const APPROVAL_COMPOSER_PLACEHOLDER = 'Answer the approval, or send a mes
 export const QUESTION_COMPOSER_PLACEHOLDER = 'Or reply in your own words'
 
 /**
- * What sending from the composer does while questions are open: the message answers them, unless it
- * carries images, which an answer cannot hold; then the questions are skipped and the message is sent.
+ * What sending from the composer does while questions are open: the message answers the question the
+ * card shows, and submits all the answers when that was the last one without an answer. A message with
+ * images cannot be an answer; then the questions are skipped and the message is sent.
  */
-export function questionComposerSend(hasImages: boolean): { answers: boolean; label: string } {
-  return hasImages
-    ? { answers: false, label: 'Skip questions and send' }
-    : { answers: true, label: 'Answer with this message' }
+export function questionComposerSend(hasImages: boolean, submits: boolean): { answers: boolean; label: string } {
+  if (hasImages) return { answers: false, label: 'Skip questions and send' }
+  return { answers: true, label: submits ? 'Answer and submit' : 'Answer this question' }
 }
 
-/**
- * The answers a message sent from the composer gives: the choices already made in the card stay,
- * and the message answers every question the card has no answer for.
- */
-export function answersWithMessage(
+/** The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…" field. */
+export function answerWithMessage(
   questions: UserQuestion[],
-  draft: UserQuestionAnswers,
+  step: number,
+  answers: UserQuestionAnswers,
+  customs: Record<string, string>,
   message: string
-): UserQuestionAnswers {
-  const answers: UserQuestionAnswers = {}
-  for (const question of questions) {
-    const picked = draft[question.id]
-    answers[question.id] = isQuestionAnswered(question, picked, undefined)
-      ? picked
-      : question.allowMultiple ? [message] : message
-  }
-  return answers
+): { answers: UserQuestionAnswers; customs: Record<string, string>; complete: boolean } {
+  const question = questions[step]
+  if (!question) return { answers, customs, complete: false }
+  const nextCustoms = { ...customs, [question.id]: message }
+  // Single choice: the typed answer replaces a picked option, as "Other…" does. Several: it joins the picks.
+  const nextAnswers = question.allowMultiple ? answers : { ...answers, [question.id]: '' }
+  const complete = questions.every((each) => isQuestionAnswered(each, nextAnswers[each.id], nextCustoms[each.id]))
+  return { answers: nextAnswers, customs: nextCustoms, complete }
+}
+
+/** Lets the composer answer the question the card shows. */
+export interface QuestionCardHandle {
+  /**
+   * Answers the shown question with `message`. When every question then has an answer, returns all of them
+   * for the caller to submit; otherwise the card moves on to the next unanswered question and returns null.
+   */
+  answerWithMessage: (message: string) => UserQuestionAnswers | null
 }
 
 /** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
@@ -255,7 +264,7 @@ function QuestionIndicator({ kind, checked }: { kind: 'radio' | 'checkbox'; chec
   )
 }
 
-export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onDraftChange }: ComposerQuestionModalProps) {
+export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef, onComposerSubmitsChange }: ComposerQuestionModalProps) {
   const total = pending.questions.length
   const [step, setStep] = useState(0)
   // Which way the current question slid in: 1 from the right, -1 from the left, 0 not at all.
@@ -285,13 +294,38 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onDraftCha
 
   useEffect(() => cancelAdvance, [])
 
-  const onDraftChangeRef = useRef(onDraftChange)
-  onDraftChangeRef.current = onDraftChange
-  useEffect(() => {
-    onDraftChangeRef.current?.(resolveQuestionAnswers(pending.questions, answers, customs))
-  }, [pending.questions, answers, customs])
-
   const clampedStep = Math.min(step, Math.max(total - 1, 0))
+
+  // A message from the composer answers the shown question, as its "Other…" text, then the card moves
+  // on to the next unanswered question; focus stays in the composer for the next answer.
+  useImperativeHandle(handleRef, () => ({
+    answerWithMessage: (message: string) => {
+      cancelAdvance()
+      const next = answerWithMessage(pending.questions, clampedStep, answers, customs, message)
+      const question = pending.questions[clampedStep]
+      setAnswers(next.answers)
+      setCustoms(next.customs)
+      if (next.complete) return resolveQuestionAnswers(pending.questions, next.answers, next.customs)
+      // Going back shows the message in that question's "Other…" field (it slides out now, so nothing takes focus).
+      if (question) setOtherOpen((current) => ({ ...current, [question.id]: true }))
+      const answeredNow = pending.questions.map((each) => isQuestionAnswered(each, next.answers[each.id], next.customs[each.id]))
+      const target = nextUnansweredStep(answeredNow, clampedStep)
+      if (target !== clampedStep) {
+        setDirection(target > clampedStep ? 1 : -1)
+        setStep(target)
+      }
+      return null
+    }
+  }))
+
+  // Whether the shown question is the only one left without an answer: then a message from the composer submits.
+  const composerSubmits = pending.questions.every((question, index) =>
+    index === clampedStep || isQuestionAnswered(question, answers[question.id], customs[question.id]))
+  const onComposerSubmitsChangeRef = useRef(onComposerSubmitsChange)
+  onComposerSubmitsChangeRef.current = onComposerSubmitsChange
+  useEffect(() => {
+    onComposerSubmitsChangeRef.current?.(composerSubmits)
+  }, [composerSubmits])
 
   // After moving between questions, focus follows to the new question's choices.
   useEffect(() => {

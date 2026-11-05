@@ -7,8 +7,7 @@ import type {
   PlanCardMetadata,
   PendingUserQuestions,
   QueuedMessage,
-  SkillChatMode,
-  UserQuestionAnswers
+  SkillChatMode
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
@@ -30,9 +29,9 @@ import {
   APPROVAL_COMPOSER_PLACEHOLDER,
   ComposerQuestionModal,
   QUESTION_COMPOSER_PLACEHOLDER,
-  answersWithMessage,
   describeAnswerOutcome,
-  questionComposerSend
+  questionComposerSend,
+  type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile, isImageMimeType } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
@@ -391,13 +390,14 @@ export function OrchestratorChat() {
   }, [pendingQuestions, shownMessages, submitQuickActionDecision])
 
   // The question card opens above the composer, which stays usable: a message sent while the
-  // questions are open answers them. The card's height animates in and out so there is no
-  // layout jump. Inline quick-action approvals have no card (the decision UI lives on the card itself).
+  // questions are open answers the one the card shows. The card's height animates in and out so there
+  // is no layout jump. Inline quick-action approvals have no card (the decision UI lives on the card itself).
   const showQuestions = Boolean(pendingQuestions && !quickActionApproval)
-  // Agent questions (not an approval request, whose message denies it) take the composer's message as their answer.
+  // Agent questions (not an approval request, whose message denies it) take the composer's message as an answer.
   const questionsTakeMessage = showQuestions && !pendingQuestions?.approval
-  // The choices made in the card so far, kept when a message answers the rest.
-  const questionDraftRef = useRef<{ requestId: string; answers: UserQuestionAnswers } | null>(null)
+  // The card's handle for answering its shown question, and whether that answer would be the last one (and submit).
+  const questionCardRef = useRef<QuestionCardHandle | null>(null)
+  const [questionAnswerSubmits, setQuestionAnswerSubmits] = useState(false)
   useEffect(() => {
     if (!showQuestions) return
     setRenderQuestions(true)
@@ -972,14 +972,20 @@ export function OrchestratorChat() {
       return
     }
 
-    // Questions open above the composer: the message answers them, keeping the choices made in the card.
+    // Questions open above the composer: the message answers the question the card shows, and the card
+    // moves on to the next unanswered one. Answering the last one submits all the answers, once.
     // A message with images cannot be an answer; it is sent as usual, which skips the questions.
     const asked = questionsTakeMessage ? pendingQuestions : null
-    if (asked && text && questionComposerSend(images.length > 0).answers) {
-      const draft = questionDraftRef.current?.requestId === asked.requestId ? questionDraftRef.current.answers : {}
+    const card = questionCardRef.current
+    if (asked && card && text && questionComposerSend(images.length > 0, false).answers) {
+      const answers = card.answerWithMessage(text)
+      if (!answers) {
+        clearComposer()
+        return
+      }
       const outcome = await window.mousse.orchestrator.answerQuestionsDetailed(
         asked.requestId,
-        answersWithMessage(asked.questions, draft, text),
+        answers,
         questionAnswerThreadId(asked, activeThreadId)
       )
       setPendingQuestions((current) => (current?.requestId === asked.requestId ? null : current))
@@ -1252,7 +1258,8 @@ export function OrchestratorChat() {
               <ComposerQuestionModal
                 key={questionsSnapshot.requestId}
                 pending={questionsSnapshot}
-                onDraftChange={(answers) => { questionDraftRef.current = { requestId: questionsSnapshot.requestId, answers } }}
+                handleRef={questionCardRef}
+                onComposerSubmitsChange={setQuestionAnswerSubmits}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
                   const threadId = questionAnswerThreadId(questionsSnapshot, activeThreadId)
@@ -1381,7 +1388,7 @@ export function OrchestratorChat() {
                   : permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
               loadingPlaceholder={questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER : undefined}
               sendLabel={questionsTakeMessage
-                ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type))).label
+                ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
                 : undefined}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
