@@ -307,18 +307,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
-.icon-btn-primary {
-  width: 36px;
-  height: 36px;
-  background: var(--gradient-accent);
-  color: white;
-  flex-shrink: 0;
-}
-
-.icon-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
 .icon-btn-titlebar {
   width: 32px;
   height: 32px;
@@ -962,20 +950,6 @@ html.platform-darwin .titlebar-left {
   font-size: 13px;
   font-weight: 500;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.btn-primary {
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.btn-primary:hover {
-  filter: brightness(1.08);
-}
-
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .btn-ghost {
@@ -2359,20 +2333,8 @@ html.platform-darwin .titlebar-left {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
-  background: rgba(var(--accent-rgb), 0.35);
-  color: var(--text-primary);
   flex-shrink: 0;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.composer-implement-btn:hover:not(:disabled) {
-  background: rgba(var(--accent-pale-rgb), 0.45);
-  color: white;
-}
-
-.composer-implement-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .composer-action-btn {
@@ -3384,9 +3346,12 @@ html[data-theme='high-contrast'] {
 }
 
 /* Dialogs are the surface (mousse-ui skill, section 4): lit, not boxed. No
-   dividers: the header, body and footer share one 16px inset and are told apart
-   by position alone. The close glyph sits on the right edge of the row controls. */
+   dividers: the header, body and footer share one inset (--modal-inset) and are
+   told apart by position alone. The close glyph sits on the right edge of the row controls. */
 .modal {
+  --modal-inset: 16px;
+  --modal-footer-gap: 12px;
+  --modal-fade: 18px;
   background: var(--ui-raised);
   border-radius: var(--ui-card-radius);
   width: 560px;
@@ -3408,7 +3373,7 @@ html[data-theme='high-contrast'] {
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
-  padding: 12px 12px 4px 16px;
+  padding: 12px 12px 4px var(--modal-inset, 16px);
 }
 
 /* Without a visible title the close button keeps its corner and the content leads. */
@@ -3432,19 +3397,56 @@ html[data-theme='high-contrast'] {
 :is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
-.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
-.modal-footer > button { min-height: 36px; }
-/* Settings buttons keep the one control size in a footer too. */
-.modal-footer > .settings-btn { height: var(--settings-control-h, 28px); min-height: 0; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small, 12.5px); }
+/* The footer is its own row under the scrolling body: the dialog inset on the
+   sides and bottom, and a fixed gap above the buttons that content never fills. */
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: var(--modal-footer-gap, 12px) var(--modal-inset, 16px) var(--modal-inset, 16px); flex-shrink: 0; }
+/* Footer buttons keep the one control size (28px). */
+.modal-footer > button { height: var(--settings-control-h, 28px); min-height: 0; padding-block: 0; border-radius: var(--ui-control-radius); }
+.modal-footer > .settings-btn { font-size: var(--settings-fs-small, 12.5px); }
+
+/* A scrolling body fades its edges over --modal-fade instead of cutting rows
+   at the header or the footer: the top edge once the body is scrolled away
+   from the top, the bottom edge while more content is below. One mask, driven
+   by the body's own scroll position: each fade grows over the first (or
+   shrinks over the last) --modal-fade of scrolling, and a body that fits has
+   no scroll timeline, so both stay at 0 and nothing is drawn (no divider either). */
+@property --modal-body-fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --modal-body-fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes modal-body-fade-top {
+  from { --modal-body-fade-top: 0px; }
+  to { --modal-body-fade-top: var(--modal-fade, 18px); }
+}
+
+@keyframes modal-body-fade-bottom {
+  from { --modal-body-fade-bottom: var(--modal-fade, 18px); }
+  to { --modal-body-fade-bottom: 0px; }
+}
 
 .modal-body {
   min-height: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding: 0 var(--modal-inset, 16px) var(--modal-inset, 16px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  animation: modal-body-fade-top linear both, modal-body-fade-bottom linear both;
+  animation-timeline: scroll(self);
+  animation-range: 0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%;
 }
 
+/* Above a footer the body keeps only room for a focus ring: the footer's own
+   gap is the space. */
 .modal-body:has(+ .modal-footer) {
-  padding-bottom: 12px;
+  padding-bottom: 4px;
 }
 
 .modal-section {
@@ -5193,7 +5195,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   color: var(--text-secondary);
 }
 
-/* Flat buttons, no gradient: neutral by default, .is-primary for Submit, .is-quiet for Skip. */
+/* Flat buttons, no gradient: neutral by default, .is-quiet for Skip. Submit (.is-primary) uses the shared primary rule in polish.css. */
 .composer-question-btn {
   display: inline-flex;
   align-items: center;
@@ -5233,17 +5235,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 
 .composer-question-btn.is-quiet:hover {
   color: var(--text-primary);
-}
-
-.composer-question-btn.is-primary {
-  border-color: transparent;
-  background: var(--accent-deep);
-  color: #fff;
-  font-weight: 600;
-}
-
-.composer-question-btn.is-primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-deep) 88%, #fff);
 }
 
 @media (prefers-reduced-motion: reduce) {
