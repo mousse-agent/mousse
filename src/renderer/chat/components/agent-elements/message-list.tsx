@@ -21,6 +21,7 @@ import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
+import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
 import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
@@ -44,6 +45,7 @@ import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
+import { getToolStatus } from "./utils/format-tool";
 import {
   activityGroupLabel,
   analyzeAssistantMessage,
@@ -1739,6 +1741,11 @@ export const MessageList = memo(function MessageList({
                                     msg={msg}
                                     isLast={isLastMsg}
                                     isStreaming={isStreaming}
+                                    retryPromptId={
+                                      isLastTurn && !isStreaming
+                                        ? turn.userMsg?.id
+                                        : undefined
+                                    }
                                     suppressQuestionTool={suppressQuestionTool}
                                     ToolRendererComponent={CustomToolRenderer}
                                     toolRenderers={toolRenderers}
@@ -1780,6 +1787,13 @@ export const MessageList = memo(function MessageList({
                                   }
                                   label={groupLabel}
                                   autoOpen={anyToolPending}
+                                  failed={
+                                    items.filter(
+                                      (item) =>
+                                        getToolStatus(item.part).isError,
+                                    ).length
+                                  }
+                                  live={isLastTurn && isStreaming}
                                 >
                                   {items.map((item, k) => (
                                     <CustomToolRenderer
@@ -1944,6 +1958,7 @@ function AssistantParts({
   msg,
   isLast,
   isStreaming,
+  retryPromptId,
   suppressQuestionTool,
   ToolRendererComponent,
   toolRenderers,
@@ -1951,6 +1966,8 @@ function AssistantParts({
   msg: UIMessage;
   isLast: boolean;
   isStreaming: boolean;
+  /** The last turn's prompt, offered for Retry beside an error. Absent on earlier turns. */
+  retryPromptId?: string;
   suppressQuestionTool: boolean;
   ToolRendererComponent: React.ComponentType<ToolRendererProps>;
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
@@ -1959,6 +1976,10 @@ function AssistantParts({
     () => normalizeAssistantToolParts(msg.parts ?? []) as unknown[],
     [msg.parts],
   );
+  const turnActions = useTurnActions();
+  const retryTitle =
+    retryPromptId && turnActions ? turnActions.retryTitle(retryPromptId) : null;
+  const retry = retryPromptId && turnActions ? turnActions.retry : undefined;
 
   const { elements } = useMemo(() => {
     const elems: React.ReactNode[] = [];
@@ -2041,6 +2062,12 @@ function AssistantParts({
             key={`${msg.id}-error-${i}`}
             title={part.title}
             message={part.message}
+            onRetry={
+              retry && retryPromptId && retryTitle !== null
+                ? () => retry(retryPromptId)
+                : undefined
+            }
+            retryTitle={retryTitle ?? undefined}
           />,
         );
         i++;
@@ -2087,6 +2114,9 @@ function AssistantParts({
     msg.id,
     isLast,
     isStreaming,
+    retryPromptId,
+    retry,
+    retryTitle,
     suppressQuestionTool,
     ToolRendererComponent,
     toolRenderers,
