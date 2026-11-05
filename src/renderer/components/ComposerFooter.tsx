@@ -8,7 +8,7 @@ import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shar
 import { shortModelName } from '../../shared/modelNames'
 import { carryReasoningLevel, PermissionChip, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
-import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
@@ -124,6 +124,8 @@ export function ComposerFooter({
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
+  // The picker opens above the whole composer, as wide as it at most, so it never covers the draft.
+  const composerAnchorRef = useClosestAnchor(modelButtonRef, '.composer')
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
   const namedParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
@@ -280,7 +282,7 @@ export function ComposerFooter({
                     selectedModelId={selectedModelId}
                     onSelect={onModelSelect}
                     onMenuScroll={handleMenuScroll}
-                    anchorRef={modelButtonRef}
+                    anchorRef={composerAnchorRef}
                     contentRef={modelMenuContentRef}
                     runSettings={runSettings}
                   />

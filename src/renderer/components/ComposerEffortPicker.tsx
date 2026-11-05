@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as Rea
 import type { LlmModelOption } from '../../shared/settings'
 import { applyEffortToModelId, findModelFamily, formatEffortLabel, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
 import { Brain, Check, ChevronDown, Zap } from '../lib/icons'
-import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
 import { describePermissionMode } from '../../shared/permissionMode'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { PermissionModeSection, permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
@@ -68,8 +68,8 @@ function useDismiss(open: boolean, setOpen: (open: boolean) => void, anchorRef: 
   }, [open, setOpen, anchorRef, contentRef])
 }
 
-/** A one-line row of choices (speeds, permission modes): one stop for Up and Down, Left and Right inside. */
-const ROW = '.composer-run-menu-permission-row, .composer-run-menu-segments'
+/** A one-line row of choices (speeds): one stop for Up and Down, Left and Right inside. */
+const ROW = '.composer-run-menu-segments'
 
 /**
  * Arrow keys across the run settings: Up and Down move between rows (a one-line row is one stop,
@@ -85,7 +85,7 @@ function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
   const index = active ? items.indexOf(active) : -1
   const row = active?.closest(ROW)
   const focus = (item: HTMLElement | undefined) => { if (item) { event.preventDefault(); item.focus() } }
-  // A stop in the permission row lands on its chosen mode.
+  // A stop in a one-line row lands on its chosen item.
   const stop = (item: HTMLElement | undefined) => {
     const target = item?.closest(ROW)
     return target ? target.querySelector<HTMLElement>('[aria-checked="true"]') ?? item : item
@@ -238,11 +238,10 @@ export function hasReasoningLevels(target: RunSettingsTarget): boolean {
   return resolveReasoning(target.providerId, target.modelId, target.models).levels.length > 0
 }
 
-/** The reasoning column's header: "Reasoning" and, muted and cut short when long, the model's name. */
-function ReasoningHead({ label }: { label?: string }) {
+/** The reasoning column's header. The model it is for is the highlighted row, so it is not named again. */
+function ReasoningHead() {
   return <div className="model-picker-run-head">
     <span className="model-picker-run-title">Reasoning</span>
-    {label ? <span className="model-picker-run-model" title={label}>{label}</span> : null}
   </div>
 }
 
@@ -276,7 +275,7 @@ function ReasoningLevels({ target, label, onSelect, onClose }: {
   const chosen = parseThinkingSuffixFromModelId(target.modelId).effort
   const unsupported = target.dropped ?? reasoning.unsupported
   return <div className="model-picker-run-settings" role="menu" aria-label={`Reasoning for ${label}`} onKeyDown={moveFocus}>
-    <ReasoningHead label={label} />
+    <ReasoningHead />
     {reasoning.levels.length === 0 ? <div className="model-picker-run-empty">None for this model</div> : null}
     {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} title={reasoning.descriptions[value]} className={`composer-mode-menu-item model-picker-level${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!target.selected || value !== chosen) pickEffort(value) }}>
       <span>{reasoningLevelLabel(value)}</span>
@@ -324,8 +323,8 @@ export function SpeedToggle({ target, onSelect, onClose }: {
 
 /**
  * The composer's permission chip: the thread's mode as an icon, left of the model button. One click
- * opens the modes above it, as one row with a line on the chosen or hovered one. Only Full access is
- * tinted (amber). The menu keeps focus inside; Escape closes it back to the chip.
+ * opens the modes above the composer, one row each with its name and what it does. Only Full access
+ * is tinted (amber). The menu keeps focus inside; Escape closes it back to the chip.
  */
 export function PermissionChip({ control }: { control: PermissionControl }) {
   const [open, setOpen] = useState(false)
@@ -337,7 +336,9 @@ export function PermissionChip({ control }: { control: PermissionControl }) {
   const name = describePermissionMode(choice.shown)
   // Why the mode runs or is capped differently: the agent cannot enforce it, or a limit sits below.
   const limit = choice.reason ?? Object.values(choice.blocked)[0]
-  const style = useFloatingPosition({ open, anchorRef: buttonRef, contentRef: menuRef, placement: 'above-start', deps: [control.mode] })
+  // Above the whole composer (left edges lined up), so it never covers the draft.
+  const anchorRef = useClosestAnchor(buttonRef, '.composer')
+  const style = useFloatingPosition({ open, anchorRef, contentRef: menuRef, placement: 'above-start', deps: [control.mode] })
   const close = () => { setOpen(false); buttonRef.current?.focus() }
   useEffect(() => {
     if (!open) return

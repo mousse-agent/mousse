@@ -1,5 +1,6 @@
 import {
   useLayoutEffect,
+  useMemo,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -125,8 +126,10 @@ export function useFloatingPosition({
         top,
         left,
         zIndex: FLOATING_LAYER_Z_INDEX,
-        visibility: 'visible'
-      })
+        visibility: 'visible',
+        // A layer that should be no wider than its anchor reads this in its CSS.
+        '--floating-anchor-width': `${anchorRect.width}px`
+      } as CSSProperties)
     }
 
     update()
@@ -141,4 +144,17 @@ export function useFloatingPosition({
   }, [open, placement, gap, padding, anchorRef, contentRef, ...deps])
 
   return style
+}
+
+/**
+ * A ref to the closest element around `ref`'s that matches `selector`, or `ref`'s own element when
+ * none does; read when used. A composer's menus anchor to the whole composer so they open above it,
+ * off the draft, however deep their button sits.
+ */
+export function useClosestAnchor(ref: RefObject<HTMLElement | null>, selector: string): RefObject<HTMLElement | null> {
+  return useMemo(() => ({
+    get current() {
+      return ref.current?.closest<HTMLElement>(selector) ?? ref.current
+    }
+  }), [ref, selector])
 }
