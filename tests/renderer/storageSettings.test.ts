@@ -145,7 +145,7 @@ const cleanup = (patch: Partial<ComponentProps<typeof StorageCleanupView>> = {})
   report: null, phase: 'idle', plan: undefined, error: '', hasRule: true, onStart: noop, onConfirm: noop, onCancel: noop, ...patch
 }))
 
-describe('Clean up now', () => {
+describe('Preview cleanup', () => {
   it('is disabled, with its sentence, while no rule would act', () => {
     const none = policy({ removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, null)
     expect(storagePolicyHasRule(none, { ...trash, automaticPurge: false })).toBe(false)
@@ -155,6 +155,11 @@ describe('Clean up now', () => {
     const enabled = cleanup()
     expect(tagOf(enabled, 'storage-cleanup-button')).not.toContain('disabled')
     expect(text(enabled)).not.toContain('Turn on a cleanup rule')
+  })
+
+  it('names the dry run as a preview; removing still waits for the confirmation', () => {
+    expect(text(cleanup())).toContain('Preview cleanup')
+    expect(text(cleanup())).not.toContain('Clean up now')
   })
 
   it('is busy, and cannot be pressed again, while it checks or runs', () => {
@@ -221,7 +226,7 @@ describe('Clean up now', () => {
     const page = text(html)
     expect(page).toContain('Removed 1, kept 1, failed 1. 2.00 GB recovered.')
     expect(page).toContain('Last run')
-    expect(page).toContain('(Clean up now)')
+    expect(page).toContain('(manual)')
     const order = ['Failed one', 'Removed one', 'Kept one'].map((label) => page.indexOf(label))
     expect(order.every((position) => position > 0)).toBe(true)
     expect(order).toEqual([...order].sort((a, b) => a - b))

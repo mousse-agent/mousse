@@ -78,7 +78,7 @@ export function StorageCleanupView(props: StorageCleanupViewProps) {
       title="Run the cleanup rules"
       description={hasRule ? undefined : CLEANUP_COPY.noRule}
       control={<button type="button" className="settings-btn" data-testid="storage-cleanup-button" disabled={!hasRule || busy} aria-busy={busy || undefined} onClick={props.onStart}>
-        {phase === 'planning' ? 'Checking…' : phase === 'running' ? 'Cleaning up…' : 'Clean up now'}
+        {phase === 'planning' ? 'Checking…' : phase === 'running' ? 'Cleaning up…' : 'Preview cleanup'}
       </button>}
     />
     {props.error && phase !== 'confirm' && phase !== 'running' && <p className="storage-error" role="alert" data-testid="storage-cleanup-error">{props.error}</p>}
@@ -88,7 +88,7 @@ export function StorageCleanupView(props: StorageCleanupViewProps) {
       {report === null && !props.reportUnreadable && <p className="settings-muted">Cleanup has not run yet.</p>}
       {props.reportUnreadable && <p className="settings-muted" data-testid="storage-report-unreadable">The last cleanup report could not be read.</p>}
       {report && <>
-        <p data-testid="storage-last-run-summary"><strong>Last run {new Date(report.completedAt).toLocaleString()}</strong>{' '}<span className="settings-muted">({report.trigger === 'manual' ? 'Clean up now' : 'scheduled'})</span></p>
+        <p data-testid="storage-last-run-summary"><strong>Last run {new Date(report.completedAt).toLocaleString()}</strong>{' '}<span className="settings-muted">({report.trigger === 'manual' ? 'manual' : 'scheduled'})</span></p>
         {/* A live region, so the result of a run is read out when the dialog closes and focus returns to the button. */}
         <p role="status" aria-live="polite" data-testid="storage-last-run-sentence">{summarizeCleanupReport(report)}</p>
         {report.suspended && <p className="settings-muted">{report.suspended}</p>}
