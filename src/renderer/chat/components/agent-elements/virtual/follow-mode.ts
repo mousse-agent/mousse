@@ -78,6 +78,28 @@ export type FollowEvent =
   | { type: "navigate" }
   | { type: "thread-open"; initial: "bottom" | "top" };
 
+/**
+ * How far from the end (px) the reader must be before the composer folds to
+ * one line. Folding gives back about 30px of list padding, which can pull the
+ * scroll position toward the end; this sits far enough past the 80px follow
+ * threshold that it never lands back within it and unfolds the composer again.
+ */
+export const COMPOSER_FOLD_DISTANCE = 120;
+
+/**
+ * Whether the composer is folded while the reader browses earlier messages.
+ * Following the end always unfolds it; between the follow threshold and
+ * `COMPOSER_FOLD_DISTANCE` it keeps its state, so it never flickers there.
+ */
+export function nextComposerCompact(
+  compact: boolean,
+  input: { mode: FollowMode; distanceFromEnd: number },
+): boolean {
+  if (input.mode === "following-end") return false;
+  if (input.distanceFromEnd > COMPOSER_FOLD_DISTANCE) return true;
+  return compact;
+}
+
 export function reduceFollow(mode: FollowMode, event: FollowEvent): FollowMode {
   switch (event.type) {
     case "intent":

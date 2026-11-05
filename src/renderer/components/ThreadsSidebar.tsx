@@ -18,6 +18,7 @@ import { selectThread } from '../lib/threadActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
+import { Collapse } from './ui/Collapse'
 
 import {
   ThreadsContextMenu,
@@ -351,6 +352,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const searchOpen = useAppStore((s) => s.threadSearchOpen)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  // The project the user last opened or closed. Only that group animates; one revealed for the thread
+  // being opened (or a project just added) appears at once.
+  const toggledProjectRef = useRef<string | null>(null)
 
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
@@ -441,11 +445,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!groupId) return
     setExpandedProjects((prev) => {
       if (prev.has(groupId)) return prev
+      if (toggledProjectRef.current === groupId) toggledProjectRef.current = null
       return new Set(prev).add(groupId)
     })
   }, [activeThreadId, openSubagentParentId, threads, groupOf])
 
   const toggleProject = (projectId: string) => {
+    toggledProjectRef.current = projectId
 
     setExpandedProjects((prev) => {
 
@@ -1296,9 +1302,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                   </div>
 
-                  {expanded && (
-
-                    <div className="threads-sidebar-children">
+                  <Collapse
+                    open={expanded}
+                    animate={toggledProjectRef.current === project.id}
+                    className="threads-sidebar-children"
+                    itemCount={projectThreadCount}
+                  >
 
                       {projectThreadCount === 0 ? (
 
@@ -1312,7 +1321,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                         <>
                           <div
-                            className={`threads-sidebar-thread-list${showAllProjectThreads ? ' expanded' : ''}`}
+                            className={`threads-sidebar-thread-list ui-collapse-items${showAllProjectThreads ? ' expanded' : ''}`}
                             style={{ '--project-thread-count': projectThreadCount } as CSSProperties}
                           >
                             {projectThreads.map((thread) => renderThreadRow(thread))}
@@ -1337,9 +1346,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       )}
 
-                    </div>
-
-                  )}
+                  </Collapse>
 
                 </div>
 
@@ -1405,9 +1412,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             <span className="threads-sidebar-settled-count">{orphanThreads.length}</span>
           </button>
           </div>
-          {recentExpanded && <div className="threads-sidebar-tree">
+          <Collapse open={recentExpanded} className="threads-sidebar-tree" itemCount={orphanThreads.length}>
             {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
-          </div>}
+          </Collapse>
         </section>
 
 
@@ -1435,15 +1442,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         </div>
 
-        {settledExpanded && (
-        <div className="threads-sidebar-tree threads-sidebar-settled-list">
+        <Collapse open={settledExpanded} className="threads-sidebar-tree threads-sidebar-settled-list" itemCount={settledThreads.length}>
           {settledThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No settled threads</div>
           ) : (
             settledThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
           )}
-        </div>
-        )}
+        </Collapse>
 
       </div>
 
