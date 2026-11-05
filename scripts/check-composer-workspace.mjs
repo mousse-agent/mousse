@@ -169,7 +169,7 @@ try {
           assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'false')
           await click('.composer-workspace-worktree')
           assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Build the feature')
-          assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'This computer')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-device-static").textContent'),'This computer')
           await send()
           assert.deepEqual((await calls()).map(c=>c[0]),['create','select','send'])
           assert.deepEqual((await calls())[0],['create','a',{worktreeEnabled:true}])

@@ -17,7 +17,7 @@ const WORKSPACE_OPTIONS: ReadonlyArray<SegmentedOption<'local' | 'worktree'>> = 
   { value: 'worktree', label: 'Worktree', title: 'New worktree' }
 ]
 
-/** What the toolbar needs to offer other computers. Without it, or with no other computer, no computer is shown. */
+/** What the toolbar needs to offer other computers. Without it, or with no other computer, the row reads "This computer". */
 export interface ComposerDeviceProps {
   /** This computer's name. */
   localName: string
@@ -171,10 +171,15 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           </div>
         </FloatingPortal>
       )}
-      {/* The computer shows only when there is another one to pick. */}
-      {device && canPickComputer(device.devices, workspace.node) && (
-        <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
-      )}
+      {/* The computer is always named; it is a menu only when there is another one to pick. */}
+      {device && canPickComputer(device.devices, workspace.node)
+        ? <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
+        : (
+          <div className="composer-workspace-device-static" role="note" aria-label="Runs on this computer">
+            <Laptop size={16} aria-hidden="true" />
+            <span>This computer</span>
+          </div>
+        )}
       {remoteDialog && device && workspace.node && (
         <RemoteProjectDialog
           deviceName={runOnLabel(device.localName, device.devices, workspace.node)}

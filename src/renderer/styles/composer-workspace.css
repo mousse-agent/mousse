@@ -15,7 +15,8 @@
 }
 
 .composer-workspace-project,
-.composer-workspace-device-btn {
+.composer-workspace-device-btn,
+.composer-workspace-device-static {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -35,10 +36,14 @@
   cursor: pointer;
   max-width: 240px;
 }
+/* With only this computer the item is a muted label, not a button. */
+.composer-workspace-device-static { flex: 0 1 auto; height: 28px; padding: 0 8px; color: var(--text-secondary); }
 .composer-workspace-project span,
-.composer-workspace-device-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-workspace-device-btn span,
+.composer-workspace-device-static span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-workspace-project svg,
-.composer-workspace-device-btn svg { flex-shrink: 0; }
+.composer-workspace-device-btn svg,
+.composer-workspace-device-static svg { flex-shrink: 0; }
 .composer-workspace-project { color: var(--text-primary); }
 .composer-workspace-project:hover:not(:disabled),
 .composer-workspace-project.open,

@@ -84,16 +84,22 @@ describe('composer workspace toolbar', () => {
     expect(add!.textContent).toBe('Add project')
   })
 
-  it('names no computer when there is no other one to pick', () => {
-    render({ projectId: 'p1', worktreeEnabled: false })
-    expect(host.textContent).not.toContain('This computer')
-    render({ projectId: 'p1', worktreeEnabled: false }, deviceProps([computer('n-self', 'Studio Mac', true)]))
-    expect(computerButton()).toBeNull()
-    expect(host.textContent).not.toContain('Studio Mac')
+  it('reads "This computer", not a menu, when there is no other one to pick', () => {
+    for (const device of [undefined, deviceProps([computer('n-self', 'Studio Mac', true)])]) {
+      render({ projectId: 'p1', worktreeEnabled: false }, device)
+      const item = host.querySelector<HTMLElement>('[aria-label="Runs on this computer"]')!
+      expect(item.textContent).toBe('This computer')
+      expect(item.tagName).not.toBe('BUTTON')
+      expect(item.querySelector('button')).toBeNull()
+      expect(item.querySelector('svg')).not.toBeNull()
+      expect(computerButton()).toBeNull()
+    }
   })
 
   it('offers the computer when another one is connected', () => {
     render({ projectId: 'p1', worktreeEnabled: false }, deviceProps([computer('n-self', 'Studio Mac', true), computer('n-linux', 'Build Linux')]))
     expect(computerButton()!.textContent).toBe('Studio Mac')
+    expect(computerButton()!.getAttribute('aria-haspopup')).toBe('menu')
+    expect(host.querySelector('[aria-label="Runs on this computer"]')).toBeNull()
   })
 })
