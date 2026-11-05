@@ -1462,6 +1462,15 @@ html[data-theme='high-contrast'] .composer-notice {
   color: var(--text-secondary);
 }
 
+/* The action the notice asks for: a tinted fill, not the solid accent the send button owns. */
+.composer-notice-btn-primary {
+  background: var(--ui-selected);
+}
+
+.composer-notice-btn-primary + .composer-notice-btn {
+  color: var(--text-secondary);
+}
+
 .composer-notice-btn:hover:not(:disabled),
 .composer-notice-icon-btn:hover:not(:disabled) {
   background: var(--ui-hover);
@@ -1471,6 +1480,11 @@ html[data-theme='high-contrast'] .composer-notice {
 .composer-notice-btn:active:not(:disabled),
 .composer-notice-icon-btn:active:not(:disabled) {
   background: var(--ui-pressed);
+}
+
+.composer-notice-btn-primary:hover:not(:disabled),
+.composer-notice-btn-primary:active:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.24);
 }
 
 .composer-notice-btn:focus-visible,

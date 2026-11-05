@@ -20,12 +20,6 @@ export interface PausedRunNoticeInput {
   onResume: () => void
   onEndPause: () => void
   onDismissError: () => void
-  /**
-   * Stops the thread and the subagents it started. The composer has no Stop while a run is paused (a paused
-   * thread is not running), so this is the one Stop in reach; it sits in the "…" menu. Omitted where the shell
-   * has no Stop.
-   */
-  onStop?: () => void
 }
 
 /**
@@ -42,10 +36,9 @@ export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoR
 
 /**
  * A run a usage limit paused, as the composer's notice: "Usage limit reached · resumes 3:40 PM (in 2h 15m)", the
- * limit and what happens next in the tooltip, then Try now, Don't resume and a "…" menu with Stop thread and
- * subagents. A busy button keeps focus (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
+ * limit and what happens next in the tooltip, then the one decision: Try now or Cancel. A busy button keeps focus (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
  */
-export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError, onStop }: PausedRunNoticeInput): ComposerNoticeProps {
+export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError }: PausedRunNoticeInput): ComposerNoticeProps {
   const text = describePausedRun(pause, now)
   const blocked = busy !== null
   const line = pausedRunLine(text, pause)
@@ -56,10 +49,9 @@ export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause,
     title: error ?? line,
     tooltip: error ? `${line}. ${text.detail}` : text.detail,
     actions: [
-      { label: busy === 'resume' ? 'Trying…' : 'Try now', blocked, busy: busy === 'resume', onClick: onResume },
-      { label: busy === 'cancel' ? 'Cancelling…' : "Don't resume", title: 'Drop this run; queued messages still send', blocked, busy: busy === 'cancel', onClick: onEndPause }
+      { label: busy === 'resume' ? 'Trying…' : 'Try now', primary: true, blocked, busy: busy === 'resume', onClick: onResume },
+      { label: busy === 'cancel' ? 'Cancelling…' : 'Cancel', title: 'Drop this run; queued messages still send', blocked, busy: busy === 'cancel', onClick: onEndPause }
     ],
-    ...(onStop ? { menu: [{ label: 'Stop thread and subagents', blocked, onSelect: onStop }] } : {}),
     ...(error ? { onDismiss: onDismissError } : {})
   }
 }
@@ -73,7 +65,7 @@ export function usePausedRun(threadId: string | null | undefined): TurnPause | u
 }
 
 /** The notice for a paused thread. Shows nothing for one that is not paused. */
-export function PausedRunNotice({ threadId, onStop, client }: { threadId?: string | null; onStop?: () => void; client?: PausedRunClient }) {
+export function PausedRunNotice({ threadId, client }: { threadId?: string | null; client?: PausedRunClient }) {
   const pause = usePausedRun(threadId)
   const [now, setNow] = useState(() => Date.now())
   const [busy, setBusy] = useState<PausedAction | null>(null)
@@ -104,8 +96,7 @@ export function PausedRunNotice({ threadId, onStop, client }: { threadId?: strin
     error,
     onResume: () => void run('resume', () => actions.resumeNow(pause.runId, threadId ?? undefined)),
     onEndPause: () => void run('cancel', () => actions.cancel(pause.runId, threadId ?? undefined)),
-    onDismissError: () => setError(null),
-    ...(onStop ? { onStop } : {})
+    onDismissError: () => setError(null)
   }) : null)
   return null
 }

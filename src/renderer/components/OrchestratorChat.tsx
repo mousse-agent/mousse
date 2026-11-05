@@ -1215,7 +1215,7 @@ export function OrchestratorChat() {
               onDismiss={() => { setSendError(null); setSendChanges(null) }} />
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
-        <PausedRunNotice threadId={activeThreadId} onStop={() => void handleStop()} />
+        <PausedRunNotice threadId={activeThreadId} />
         <ServiceLostNotice lost={connectionFailed} onReconnect={retryConnection} onDismiss={() => setConnectionFailed(false)} />
         <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
         <ApprovalNotice
