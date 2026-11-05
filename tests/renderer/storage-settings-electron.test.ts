@@ -112,7 +112,8 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     // A timeout is not a failure: the daemon keeps going and the page says where the result will appear.
     expect(cleanup.timeout).toEqual({ notice: 'Cleanup is still running in the background. The result appears here when it finishes.', error: false, dialog: false })
 
-    // Group by changes the table; each view shows its total once, as the sum of its rows, with no chart or legend.
+    // Group by changes the table; each view shows its total once, as the sum of its rows, and one donut arc per row
+    // whose colour matches the row's swatch; there is no separate legend.
     const { project, thread, kind } = report.usage.byGroup
     expect(project.rows.map((row: any) => row.label)).toEqual(['Mousse', 'Website', 'Other'])
     expect(thread.rows.map((row: any) => [row.label, row.bytes])).toEqual([['Fix storage', 500 * MB], ['Add search', 200 * MB], ['Landing page', 50 * MB], ['Gone thread', 30 * MB], ['Other', 300 * MB]])
@@ -121,7 +122,9 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     for (const view of [project, thread, kind]) {
       const total = view.rows.reduce((sum: number, row: any) => sum + row.bytes, 0)
       expect(view.total).toBe(`${formatBytes(total)} in total`)
-      expect(view.chart).toBe(0)
+      expect(view.arcs).toBe(view.rows.length)
+      expect(view.legend).toBe(0)
+      expect(view.swatchesMatch).toBe(true)
     }
     expect(report.usage.sortedByName).toEqual(['Browser data', 'Logs', 'Threads', 'Worktrees'])
     expect(report.usage.sortedByNameDesc).toEqual(['Worktrees', 'Threads', 'Logs', 'Browser data'])
