@@ -92,6 +92,16 @@
   --hue-4: #f1b560;
   --hue-5: #7fa4f8;
   --hue-6: #f38aa0;
+
+  /* Motion. Settings > Appearance > Advanced > Animation speed sets the scale on
+     <html> (lib/motion.ts): Off 0, Fast 0.6, Normal 1, Slow 1.6. UI motion
+     uses these durations, or calc(<ms> * var(--ui-motion-scale)) for a
+     bespoke one, so every speed and Off apply to it. Loaders and status
+     pulses keep their own speed. */
+  --ui-motion-scale: 1;
+  --ui-dur-fast: calc(120ms * var(--ui-motion-scale));
+  --ui-dur: calc(160ms * var(--ui-motion-scale));
+  --ui-dur-slow: calc(200ms * var(--ui-motion-scale));
 }
 
 html[data-theme='light'] {
@@ -198,7 +208,7 @@ html[data-theme='high-contrast'] {
   width: 36px;
   height: 36px;
   border-radius: 9px;
-  transition: background 0.15s, color 0.15s, transform 0.15s;
+  transition: background 0.15s, color 0.15s, transform var(--ui-dur);
 }
 
 .app .navigation-rail-button:hover:not(:disabled) {
@@ -677,7 +687,7 @@ html .chat-avatar.group[class*='chat-color-'] {
   border-radius: 16px;
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
-  transition: border-color 0.18s, box-shadow 0.18s, background-position 0.45s ease;
+  transition: border-color 0.18s, box-shadow 0.18s, background-position calc(450ms * var(--ui-motion-scale)) ease;
   /* Quieter than the shared specular, only on the main chat bar. */
   --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
   --ui-glint: rgba(255, 255, 255, 0.28);
@@ -857,7 +867,7 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
   border-radius: 16px;
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
-  transition: border-color 0.18s, box-shadow 0.18s, background-position 0.45s ease;
+  transition: border-color 0.18s, box-shadow 0.18s, background-position calc(450ms * var(--ui-motion-scale)) ease;
 }
 
 .app .agent-chat-composer:focus-within {
@@ -978,7 +988,7 @@ textarea:focus {
 /* Focusing the field plays the rim glint once, then leaves it centred. */
 .app .chat-input-area .composer:focus-within,
 .app .agent-chat-composer:focus-within {
-  animation: ui-composer-glint 640ms ease-out 1;
+  animation: ui-composer-glint calc(640ms * var(--ui-motion-scale)) ease-out 1;
 }
 
 @keyframes ui-composer-glint {
@@ -1040,7 +1050,7 @@ html .composer-command-suggestion.selected::before {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
   background-size: 36% 100%;
   background-repeat: no-repeat;
-  animation: ui-edge-glint 680ms ease-out 1 forwards;
+  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1 forwards;
 }
 
 @keyframes ui-edge-glint {
