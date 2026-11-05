@@ -4019,26 +4019,36 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-row {
+/* A row is the entry button plus its "…" button; hover and selection fill the whole row. */
+.file-tree-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 4px 8px 4px 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: left;
   border-radius: 4px;
+  color: var(--text-secondary);
 }
 
-.file-tree-row:hover {
+.file-tree-item:hover,
+.file-tree-item.menu-open {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
-.file-tree-row.selected {
+.file-tree-item.selected {
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--text-primary);
+}
+
+.file-tree-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 8px 4px 0;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  border-radius: 4px;
 }
 
 .file-tree-chevron,
@@ -4058,11 +4068,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-loading {
-  padding: 4px 16px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 
 .git-panel {
   flex-direction: row;

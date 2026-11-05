@@ -1,36 +1,5 @@
-.files-tabs {
-  display: flex;
-  flex: 0 0 auto;
-  min-width: 0;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border-subtle);
-  background: rgba(var(--surface-muted-rgb), 0.4);
-  scrollbar-width: thin;
-}
-
-.files-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 220px;
-  flex: 0 0 auto;
-  padding: 7px 8px 7px 12px;
-  border: 0;
-  border-right: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  background: transparent;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.files-tab > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.files-tab.active { color: var(--text-primary); background: var(--surface-primary); box-shadow: inset 0 2px var(--accent); }
-.files-tab-close { display: grid; place-items: center; padding: 2px; border-radius: 4px; opacity: 0.55; }
-.files-tab-close:hover { opacity: 1; background: rgba(var(--surface-muted-rgb), 0.9); }
 .files-editor-toolbar { flex: 0 0 auto; }
-.files-save-status { white-space: nowrap; font-size: 11px; color: var(--text-muted); }
-.files-save-status.dirty, .files-save-status.saving { color: var(--text-secondary); }
+.files-save-status { white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
 .files-save-status.error, .files-save-status.conflict { color: var(--danger); }
 .files-conflict { display: flex; align-items: center; gap: 8px; }
 .files-conflict-actions { display: flex; gap: 6px; margin-left: auto; }
@@ -120,3 +89,29 @@
 .files-search-snippet mark { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.3); border-radius: 2px; }
 /* A regular-expression match has no known length: a thin inline caret marks where it starts. */
 .files-search-caret { display: inline-block; width: 2px; height: 1em; margin: 0 1px; vertical-align: text-bottom; background: rgba(var(--accent-rgb), 0.8); }
+
+/* Tree rows: the "…" button shows on hover, focus or while its menu is open. Shift+F10 opens the same menu. */
+.file-tree-more {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 2px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-tree-item:hover .file-tree-more,
+.file-tree-item:focus-within .file-tree-more,
+.file-tree-item.menu-open .file-tree-more { opacity: 1; }
+.file-tree-more:hover { color: var(--text-primary); background: var(--ui-hover); }
+.file-tree-loader { display: flex; padding: 4px 16px; justify-content: flex-start; }
+.file-tree-error { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2px 8px 2px 16px; font-size: 12px; color: var(--danger); }
+.file-tree-error > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tree-retry { flex: none; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--text-primary); background: var(--ui-hover); }
+.file-tree-retry:hover { background: color-mix(in srgb, var(--text-primary) 12%, transparent); }
+.files-editor-loader { flex: 1; display: flex; align-items: center; justify-content: center; }
