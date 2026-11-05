@@ -205,7 +205,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Pin', 'Rename', 'Trust Git settings again', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Trust this repository\'s Git settings', 'Remove project…'])
   })
 })
 

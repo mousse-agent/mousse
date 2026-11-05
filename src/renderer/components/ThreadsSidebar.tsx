@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Search, Shield } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Search, Shield } from '../lib/icons'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
@@ -28,9 +28,13 @@ import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
 import {
   ThreadsContextMenu,
 
+  type ProjectOpener,
+
   type ThreadsContextMenuTarget
 
 } from './ThreadsContextMenu'
+import { defaultEditor, loadLastEditorId, openLabel, splitEditors } from './sideCard/openInEditor'
+import { loadEditors, useEditorsStore } from '../stores/editorsStore'
 
 import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { ThreadComputerBadge } from './ComputerBadge'
@@ -63,6 +67,8 @@ interface DraggedSidebarItem {
   type: 'thread' | 'project'
   id: string
   projectId?: string
+  /** A thread drops only among threads of the same kind: pinned ones always list first. */
+  pinned?: boolean
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
@@ -314,6 +320,7 @@ function ThreadCardBody({
       <span className="threads-sidebar-card-body">
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
+          {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
           {status === 'working' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
               <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
@@ -354,7 +361,6 @@ function ThreadCardBody({
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
-            {thread.pinnedAt && <Pin size={11} strokeWidth={2} aria-label="Pinned" />}
             {thread.name}
           </span>
         )}
@@ -484,7 +490,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
   )
-  const { byNode: computers } = useComputers(projects.some((project) => project.node))
+  const hasRemoteProjects = projects.some((project) => project.node)
+  const { byNode: computers, devices } = useComputers(hasRemoteProjects)
+  // With projects of several computers, a project's tooltip names this one too.
+  const selfName = hasRemoteProjects ? devices.find((device) => device.self)?.name : undefined
+  // The editors and file manager this computer has, for the project menu's "Open in" and "Show in" items.
+  const profileId = useAppStore((s) => s.profileId)
+  const editors = useEditorsStore((s) => s.editors)
+  const hasLocalProjects = projects.some((project) => !project.node)
+  useEffect(() => {
+    if (hasLocalProjects) void loadEditors()
+  }, [hasLocalProjects])
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
   // "No project": threads without one, and threads whose project was removed from the sidebar.
   const orphanThreads = availableThreads.filter((thread) => !groupById.has(groupIdOf(thread.projectId) ?? ''))
@@ -675,7 +691,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       dragged &&
         dragged.type === target.type &&
         dragged.id !== target.id &&
-        (dragged.type === 'project' || dragged.projectId === target.projectId)
+        (dragged.type === 'project' || (dragged.projectId === target.projectId && Boolean(dragged.pinned) === Boolean(target.pinned)))
     )
   }
 
@@ -808,6 +824,30 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const projectId = contextMenu.target.id
     closeContextMenu()
     void runWithToast('trust Git settings', () => window.mousse.projects.trustGitSettings(projectId), { retry: true })
+  }
+
+  /** The apps a project of this computer opens in: the editor last chosen (or the first found) and the file manager. */
+  const projectOpeners = (target: ThreadsContextMenuTarget): { openInEditor?: ProjectOpener; reveal?: ProjectOpener } => {
+    const path = target.path
+    if (target.type !== 'project' || target.node || !path || !editors) return {}
+    const { editors: apps, files } = splitEditors(editors)
+    const opener = (editor: (typeof editors)[number] | null | undefined): ProjectOpener | undefined => editor
+      ? {
+          label: openLabel(editor),
+          onSelect: () => {
+            closeContextMenu()
+            void runWithToast('open the folder', () => window.mousse.editors.open(editor.id, path))
+          }
+        }
+      : undefined
+    return { openInEditor: opener(defaultEditor(apps, loadLastEditorId(profileId))), reveal: opener(files[0]) }
+  }
+
+  const handleCopyPath = () => {
+    if (!contextMenu?.target.path) return
+    const { path } = contextMenu.target
+    closeContextMenu()
+    void runWithToast('copy the path', () => navigator.clipboard.writeText(path))
   }
 
   const handleRename = () => {
@@ -982,6 +1022,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const hue = layout === 'card' && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = { type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived }
     const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`
+    const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt) }
     // The tooltip of a title that does not fit. The project is the row's parent or on the card; a row names its
     // computer only by icon, so the tooltip adds the name.
     const computerName = layout === 'row' && thread.node ? computers[thread.node]?.name ?? UNKNOWN_COMPUTER_NAME : undefined
@@ -1032,17 +1073,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onDragStart={(event) => {
           event.stopPropagation()
-          startDrag(event, { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })
+          startDrag(event, dragItem)
         }}
 
         onDragOver={(event) => {
-          if (!inNeedsMe && canDropOn({ type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })) event.preventDefault()
+          if (!inNeedsMe && canDropOn(dragItem)) event.preventDefault()
         }}
 
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
-          if (!inNeedsMe) void reorderBefore({ type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })
+          if (!inNeedsMe) void reorderBefore(dragItem)
         }}
 
         onDragEnd={endDrag}
@@ -1202,7 +1243,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   return (
 
-    <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
+    // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
+    <aside className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-toolbar">
         <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
@@ -1288,10 +1330,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                 id: project.id,
                 name: project.name,
                 pinned: Boolean(project.pinnedAt),
+                path: project.path,
                 // The menu acts on the project that names the group, on the computer that holds it.
                 ...(project.node ? { node: project.node, computerName: computers[project.node]?.name ?? UNKNOWN_COMPUTER_NAME } : {}),
                 ...(alsoOn.length ? { alsoOn: alsoOn.map((node) => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) } : {})
               }
+              // "name · path · computer": the computer only when projects of several computers are listed.
+              const projectTitle = [project.name, project.path, menuTarget.computerName ?? selfName].filter(Boolean).join(' · ')
               const menuKey = `project:${project.id}`
               const treeKey = `project:${project.id}`
               const childrenId = `${tabsId}-project-${project.id}`
@@ -1339,6 +1384,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       data-tree-key={treeKey}
 
+                      title={isRenaming ? undefined : projectTitle}
+
                       onFocus={() => setTreeFocus(treeKey)}
 
                       onClick={() => {
@@ -1364,6 +1411,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       onContextMenu={(event) => openContextMenu(event, menuTarget)}
 
                     >
+
+                      {/* Says the row opens: shown on hover and focus, turned down while open. */}
+                      <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-project-chevron" aria-hidden="true" />
 
                       {expanded ? (
                         <FolderOpen size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
@@ -1405,7 +1455,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                         <span
                           className="threads-sidebar-project-name"
-                          onMouseEnter={tooltipIfTruncated(project.name)}
                           onDoubleClick={(event) => {
                             event.stopPropagation()
                             startRename({ type: 'project', id: project.id, name: project.name, returnFocus: event.currentTarget.closest('button') })
@@ -1478,9 +1527,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       {projectThreadCount === 0 ? (
 
                         <div className="threads-sidebar-empty threads-sidebar-empty-nested" role="none">
-
-                          No threads
-
+                          <span>No threads</span>
+                          <span aria-hidden="true">·</span>
+                          {/* Out of the Tab order like the row's own buttons: the tree is one stop, and the menu has New thread. */}
+                          <button type="button" className="threads-sidebar-inline-action" tabIndex={-1} onClick={() => void createProjectThread(project.id)}>
+                            New thread
+                          </button>
                         </div>
 
                       ) : (
@@ -1566,8 +1618,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               <span>No project · {orphanThreads.length}</span>
             </button>
           </div>
+          {/* The same rows and indent as a project's threads. */}
           {noProjectExpanded && <div className="threads-sidebar-tree">
-            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No threads</div> : orphanThreads.map((thread) => renderThreadRow(thread, { root: true }))}
+            <div className="threads-sidebar-children">
+              {orphanThreads.length === 0
+                ? <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
+                : orphanThreads.map((thread) => renderThreadRow(thread))}
+            </div>
           </div>}
         </section>
 
@@ -1628,6 +1685,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onTrustGitSettings={handleTrustGitSettings}
           onNewThread={handleNewProjectThread}
           onNewThreadFromPullRequest={handleNewThreadFromPullRequest}
+          {...projectOpeners(contextMenu.target)}
+          onCopyPath={contextMenu.target.path ? handleCopyPath : undefined}
 
         />
 

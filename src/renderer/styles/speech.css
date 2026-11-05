@@ -57,6 +57,10 @@
 }
 
 /* Room for the indicator: the row's content and the hover actions sit left of it. */
+.app .threads-sidebar-thread-container.speaking {
+  --thread-actions-room: 114px;
+}
+
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread {
   padding-right: 44px;
 }
