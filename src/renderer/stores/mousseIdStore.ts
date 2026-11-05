@@ -61,6 +61,9 @@ export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): str
 export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin'>): boolean =>
   mousseIdOrigin(state) !== ''
 
+/** Signed in, including while the daemon renews a registration that lapsed during sleep. */
+export const mousseIdSignedIn = (plus?: PlusStatus): boolean => !!plus?.connected || !!plus?.reconnecting
+
 /** Name shown for a signed-in account. Mousse ID has no display name yet, so it comes from the email. */
 export function mousseIdName(plus?: PlusStatus): string {
   const local = plus?.email?.split('@')[0]?.trim()
@@ -70,7 +73,7 @@ export function mousseIdName(plus?: PlusStatus): string {
 /** "3 of 5 devices", or nothing until Mousse ID has reported the count. */
 export function devicesLine(plus?: PlusStatus): string | undefined {
   const devices = plus?.devices
-  if (!plus?.connected || !devices) return undefined
+  if (!mousseIdSignedIn(plus) || !devices) return undefined
   return `${devices.used} of ${devices.limit} ${devices.limit === 1 ? 'device' : 'devices'}`
 }
 

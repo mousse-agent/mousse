@@ -18,9 +18,9 @@ interface EarlierMessagesBarViewProps {
 export function EarlierMessagesBarView({ count, busy, error, onLoad }: EarlierMessagesBarViewProps) {
   return (
     <div className="earlier-messages-bar">
-      <span>{count === 1 ? '1 earlier message is not loaded' : `${count} earlier messages are not loaded`}</span>
+      <span>{count === 1 ? '1 earlier message' : `${count} earlier messages`}</span>
       <button type="button" className="earlier-messages-load" disabled={busy} onClick={onLoad}>
-        {busy ? 'Loading…' : 'Load earlier messages'}
+        {busy ? 'Loading…' : 'Load'}
       </button>
       {error && <span className="earlier-messages-error" role="alert">{error}</span>}
     </div>

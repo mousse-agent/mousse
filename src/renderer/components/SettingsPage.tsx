@@ -1,7 +1,7 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type {
@@ -22,6 +22,7 @@ import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../st
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
+import { AppearanceSettings } from './settings/AppearanceSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
@@ -41,7 +42,8 @@ function SettingsLoader() {
 }
 
 const SETTINGS_SECTIONS = [
-  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['appearance', 'theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
+  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
+  { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'Settings', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
   { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'Settings', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
@@ -61,7 +63,6 @@ const MOUSSE_ID_KEYWORDS = ['mousse id', 'sign in', 'login', 'account', 'phone']
 
 /** Section ids from before the redesign, still sent by links and other surfaces. */
 const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
-  appearance: 'general',
   notifications: 'general',
   updates: 'general',
   context: 'agents',
@@ -376,7 +377,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           <SettingsPageTitle title={activeSectionLabel} />
           {activeSection === 'storage' && <StorageSettings />}
           {activeSection === 'general' && (
-            <GeneralSettings
+            <GeneralSettings settings={settings} onUpdate={updateSettings} />
+          )}
+          {activeSection === 'appearance' && (
+            <AppearanceSettings
               settings={settings}
               options={options}
               onUpdate={updateSettings}
