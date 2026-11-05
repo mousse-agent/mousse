@@ -29,7 +29,7 @@ const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' '
 describe('a turn right after sending', () => {
   it.each(['submitted', 'streaming'] as const)('shows a live Thinking row under the timer while %s', (status) => {
     const html = render([user], status)
-    const working = html.indexOf('Working for')
+    const working = html.indexOf('Working · ')
     const thinking = html.indexOf('Thinking')
     expect(working).toBeGreaterThan(-1)
     expect(thinking).toBeGreaterThan(working)
