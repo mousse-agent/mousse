@@ -48,6 +48,7 @@
         "tests/chatThemeTokens.test.ts",
         "tests/commandPalette.test.ts",
         "tests/composerMentionList.test.ts",
+        "tests/composerQuestions.test.ts",
         "tests/composerRenderingPerformance.test.ts",
         "tests/filesSearch.test.ts",
         "tests/gitBranchActions.test.ts",
