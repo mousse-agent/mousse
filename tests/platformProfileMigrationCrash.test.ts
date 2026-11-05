@@ -15,6 +15,7 @@ import {
 } from '../src/mms/profiles'
 import type { MigrationStepId } from '../src/mms/profiles/migration/types'
 import { FIXTURE_CONTROL_CREDENTIALS, FIXTURE_LEGACY_MOUSSE_CONF } from '../src/shared/profiles'
+import { CRASH_CHILD_REQUIRE } from './fixtures/gitFoundation'
 
 const roots: string[] = []
 afterEach(() => {
@@ -58,7 +59,7 @@ async function crash(root: string, home: string, crashAfter: MigrationStepId): P
   const child = join(bundleDir, 'migration-child.mjs')
   await build({
     entryPoints: [resolve('tests/fixtures/agent-platform/migration-crash/child.ts')],
-    outfile: child, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent'
+    outfile: child, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE }
   })
   const config = join(root, `crash-${crashAfter}.json`)
   writeFileSync(config, JSON.stringify({ home, crashAfter }))
