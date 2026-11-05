@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from '../lib/icons'
+import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
+import { EmptyThreadHeading } from './EmptyThreadHeading'
+import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -24,7 +27,6 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
-import { MousseLogoOutline } from './MousseLogoOutline'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
   ComposerQuestionModal,
@@ -174,6 +176,8 @@ export function OrchestratorChat() {
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
   const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
+  // Picked once per chat, so it holds while typing; another chat may get another line.
+  const emptyHeadline = useMemo(() => emptyThreadHeadline(new Date(), activeThreadId ?? '__blank__'), [activeThreadId])
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -1171,6 +1175,15 @@ export function OrchestratorChat() {
     [projects, workspace.node]
   )
 
+  /** Opens a folder as a project and makes it the new chat's project. */
+  const openProjectForDraft = async () => {
+    const project = await window.mousse.projects.open()
+    const state = useAppStore.getState()
+    if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
+    if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
+    setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
+  }
+
   /** Picks where the new chat runs; the project carries over only if the target lists the same Git repository. */
   const selectRunOnDevice = (node: NodeId | undefined) => {
     if (node === workspace.node) return
@@ -1256,8 +1269,7 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
-        {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
-        {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
+        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
@@ -1380,13 +1392,7 @@ export function OrchestratorChat() {
                   onOpenRemoteProject: openProjectOnRunOnDevice
                 }}
                 onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                onOpenProject={async () => {
-                  const project = await window.mousse.projects.open()
-                  const state = useAppStore.getState()
-                  if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
-                  if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
-                  setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
-                }}
+                onOpenProject={openProjectForDraft}
                 onError={setSendError}
               />
             )}
@@ -1432,6 +1438,9 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
+        {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
+          <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
+        )}
       </div>
         )}
       />
