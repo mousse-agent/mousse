@@ -19,7 +19,7 @@
   border-radius: 1px;
   opacity: 0.22;
   transform: none;
-  transition: width 160ms ease, transform 160ms ease, opacity 160ms ease;
+  transition: width var(--ui-dur) ease, transform var(--ui-dur) ease, opacity var(--ui-dur) ease;
 }
 
 .an-message-list-wrap .chat-prompt-tick[aria-current] span {
