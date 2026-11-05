@@ -107,6 +107,8 @@ html[data-theme='light'] {
   --hue-5: #3f6edb;
   --hue-6: #d34f6c;
   --ui-on-accent: #ffffff;
+  /* Lighter than --text-secondary, still 4.5:1 on every light surface. */
+  --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
 }
 
 @media (prefers-color-scheme: light) {
@@ -131,6 +133,7 @@ html[data-theme='light'] {
     --hue-5: #3f6edb;
     --hue-6: #d34f6c;
     --ui-on-accent: #ffffff;
+    --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
   }
 }
 
