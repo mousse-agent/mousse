@@ -19,7 +19,7 @@ import {
   PinRegular,
   WindowDevToolsRegular
 } from '../lib/icons'
-import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
+import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
@@ -359,6 +359,15 @@ function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onSt
   )
 }
 
+/** Makes an agent's tab its thread's current tab, and opens the browser when that thread is on screen. */
+function showAgentTab(threadId: string, tabId: string) {
+  const store = useAppStore.getState()
+  if (!store.browserTabs.some((tab) => tab.id === tabId)) return
+  store.setActiveBrowserTab(threadId, tabId)
+  if (store.activeThreadId !== threadId || store.sidebarMode !== 'projects') return
+  if (store.mainView !== 'browser' || !store.mainAreaOpen || !store.openedSurfaceKinds.includes('browser')) store.openSurfaceKind('browser')
+}
+
 export function BrowserPanel({ active = true }: { active?: boolean }) {
   const profileId = useAppStore((s) => s.profileId)
   return <ProfileBrowserPanel key={profileId} profileId={profileId} active={active} />
@@ -392,6 +401,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [access, setAccess] = useState<BrowserAccessState>({ allowed: false, pending: [] })
   const accessRevision = useRef(0)
   const provisionedRequests = useRef(new Set<string>())
+  const agentTabByThread = useRef(new Map<string, { tabId: string; sessionId?: string }>())
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
   const [browserBusy, setBrowserBusy] = useState(false)
   const [browserError, setBrowserError] = useState('')
@@ -425,11 +435,10 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       if (provisionedRequests.current.has(request.requestId)) continue
       provisionedRequests.current.add(request.requestId)
       const store = useAppStore.getState()
-      store.openSurfaceKind('browser')
-      // A browser-wide tab is visible even if the requesting thread is not active.
-      // The trusted host registers it on dom-ready, waking the waiting tool call.
-      const tabId = store.addBrowserTab(null)
-      store.setActiveBrowserTab(store.activeThreadId, tabId)
+      // The tab belongs to the requesting thread. Hidden guests still load, so the
+      // trusted host registers it on dom-ready and wakes the waiting tool call.
+      store.addBrowserTab(request.threadId)
+      if (store.activeThreadId === request.threadId) store.openSurfaceKind('browser')
     }
   }, [access.allowed, access.tabRequests])
   useEffect(() => {
@@ -438,8 +447,26 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     store.openSurfaceKind('browser')
   }, [pendingAccess?.requestId])
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
-    if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
+    if (state.profileId !== profileId) return
+    setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
+    const { threadId } = state
+    if (!threadId) return
+    const known = agentTabByThread.current.get(threadId)
+    if (state.owner === 'disconnected') {
+      if (known?.tabId === state.uiTabId) agentTabByThread.current.delete(threadId)
+      return
+    }
+    // Show the tab once per agent session; later navigations and handoffs keep the user's view.
+    if (known?.tabId === state.uiTabId && known.sessionId === state.sessionId) return
+    agentTabByThread.current.set(threadId, { tabId: state.uiTabId, sessionId: state.sessionId })
+    if (state.owner === 'agent') showAgentTab(threadId, state.uiTabId)
   }), [profileId])
+  useEffect(() => {
+    // Returning to a thread whose agent is still working in the browser shows its tab again.
+    const known = activeThreadId ? agentTabByThread.current.get(activeThreadId) : undefined
+    const phase = activeThreadId ? useAppStore.getState().turnStates[activeThreadId]?.phase : undefined
+    if (activeThreadId && known && isTurnActivePhase(phase ?? 'idle')) showAgentTab(activeThreadId, known.tabId)
+  }, [activeThreadId])
 
   // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
@@ -495,11 +522,16 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     if (webview) {
       webviews.current.set(id, webview)
       if (!registrations.current.has(id)) {
-        const registration = window.mousse.inAppBrowser.registerTab({ localTabId: id, webContentsId: webview.getWebContentsId() })
+        // A thread's own tab is offered only to that thread's agent, so it never drives a tab hidden from its thread.
+        const threadId = useAppStore.getState().browserTabs.find((tab) => tab.id === id)?.ownerThreadId
+        const registration = window.mousse.inAppBrowser.registerTab({
+          localTabId: id, webContentsId: webview.getWebContentsId(), ...(threadId ? { threadId } : {})
+        })
         registrations.current.set(id, registration)
         void registration.catch((error) => {
           registrations.current.delete(id)
-          setBrowserError(browserErrorMessage(error))
+          // A kept tab can outlive its thread; a failure there is not this view's to report.
+          if (!threadId || threadId === useAppStore.getState().activeThreadId) setBrowserError(browserErrorMessage(error))
         })
       }
     }
