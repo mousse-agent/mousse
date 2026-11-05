@@ -151,6 +151,16 @@ describe('primary button styles', () => {
     expect(tokens.match(/--btn-primary-bg: color-mix\(in srgb, var\(--accent\) 5%, var\(--btn-primary-surface\)\);/g)).toHaveLength(2)
   })
 
+  it('next to the paused-run Resume now, Cancel and Stop are ghost buttons: no edge or fill at rest, a neutral fill on hover', () => {
+    const banner = allRules.filter((rule) => rule.file === 'chat/components/pausedRunBanner.css')
+    const base = banner.find((rule) => rule.selector === '.chat-run-paused-btn')
+    const hover = banner.find((rule) => rule.selector === '.chat-run-paused-btn:hover')
+    expect(base!.body).toMatch(/border:\s*1px solid transparent/)
+    expect(base!.body).toMatch(/background:\s*transparent/)
+    expect(base!.body).not.toMatch(/box-shadow/)
+    expect(hover!.body).toMatch(/background:\s*var\(--ui-hover\)/)
+  })
+
   it('no component rule repaints a primary with its own fill or text colour', () => {
     const repaint = allRules.filter((rule) =>
       rule.file !== 'styles/polish.css' &&
