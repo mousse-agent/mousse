@@ -29,6 +29,7 @@ vi.mock('../../src/renderer/components/ThreadHoverCard', () => ({
 }))
 
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
+const { TitleBar } = await import('../../src/renderer/components/TitleBar')
 const { ToastHost, TOAST_MS, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
@@ -57,7 +58,7 @@ const projectsApi = {
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = (known: Record<string, unknown> = {}) => new Proxy(known, { get: (target, key: string) => target[key] ?? call(key) })
-  return new Proxy({ threads: group(threadsApi), projects: group(projectsApi) } as Record<string, unknown>, {
+  return new Proxy({ platform: 'win32', threads: group(threadsApi), projects: group(projectsApi) } as Record<string, unknown>, {
     get: (target, key: string) => target[key] ?? group()
   })
 }
@@ -114,8 +115,10 @@ describe('naming', () => {
   it('says thread, Agents, No project and Archived', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests')], threadsSidebarView: 'threads', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    expect(html).toContain('aria-label="New thread"')
-    expect(html).toContain('aria-label="Search threads"')
+    // New thread and Search may live in the sidebar header or in the title bar; either way they say "thread".
+    const shell = renderToStaticMarkup(createElement(TitleBar)) + html
+    expect(shell).toContain('aria-label="New thread"')
+    expect(shell).toContain('aria-label="Search threads"')
     expect(html).toContain('aria-label="Agents"')
     expect(html).toContain('<span>No project</span>')
     expect(html).toContain('<span>Archived</span>')
