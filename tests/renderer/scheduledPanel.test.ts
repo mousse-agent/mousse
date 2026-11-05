@@ -428,13 +428,27 @@ describe('Scheduled page: schedule presets', () => {
     return (h.api.scheduled.create.mock.calls[0][0] as { schedule: unknown }).schedule
   }
 
-  it('a new job starts on Hourly with a plain summary and no custom fields', async () => {
+  it('an untouched new job keeps the 30-minute default, opens on Custom and saves it', async () => {
+    const h = await mount([])
+    await click(button('New job'))
+    expect(control('Schedule').textContent).toBe('Custom')
+    expect(summary()).toBeUndefined()
+    expect(document.querySelector('[role="radiogroup"][aria-label="Custom schedule"]')).not.toBeNull()
+    expect(control<HTMLInputElement>('Minutes between runs').value).toBe('30')
+    expect((await optionsOf('Schedule')).map((option) => option.text)).toEqual(['Hourly', 'Daily at 09:00', 'Weekdays at 09:00', 'Custom'])
+    await setValue(control('Prompt'), 'Check CI')
+    await click(button('Create'))
+    expect((h.api.scheduled.create.mock.calls[0][0] as { schedule: unknown }).schedule).toEqual({ kind: 'interval', minutes: 30 })
+  })
+
+  it('choosing Hourly is explicit, and choosing Custom afterwards keeps what Hourly set', async () => {
     await mount([])
     await click(button('New job'))
-    expect(control('Schedule').textContent).toBe('Hourly')
+    await choose('Schedule', 'Hourly')
     expect(summary()).toBe('Every 60 minutes.')
     expect(document.querySelector('[role="radiogroup"]')).toBeNull()
-    expect((await optionsOf('Schedule')).map((option) => option.text)).toEqual(['Hourly', 'Daily at 09:00', 'Weekdays at 09:00', 'Custom'])
+    await choose('Schedule', 'Custom')
+    expect(control<HTMLInputElement>('Minutes between runs').value).toBe('60')
   })
 
   it.each([
@@ -1197,9 +1211,9 @@ describe('job draft', () => {
     expect(draft).toMatchObject({ modelKey: expect.stringContaining('sonnet'), workspaceKind: 'newWorktree', scheduleKind: 'cron' })
   })
 
-  it('a new draft is an hourly interval job on the default model, mode and project checkout', () => {
-    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '60', modelKey: '', mode: '', permissionMode: '', projectId: '', threadId: '', workspaceKind: 'project' })
-    expect(draftPreset(newDraft())).toBe('hourly')
+  it('a new draft is a 30-minute interval job on the default model, mode and project checkout', () => {
+    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '30', modelKey: '', mode: '', permissionMode: '', projectId: '', threadId: '', workspaceKind: 'project' })
+    expect(draftPreset(newDraft())).toBe('custom')
   })
 
   it('reads a preset only from the exact saved form, so anything else stays custom', () => {

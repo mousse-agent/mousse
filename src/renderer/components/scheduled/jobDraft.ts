@@ -107,8 +107,8 @@ export function newDraft(): JobDraft {
     prompt: '',
     scheduleKind: 'interval',
     runAt: toLocalInput(undefined),
-    // Hourly: the first preset.
-    minutes: '60',
+    // Not a preset, so an untouched new job opens on Custom.
+    minutes: '30',
     expr: '0 9 * * *',
     modelKey: '',
     mode: '',
