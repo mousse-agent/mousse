@@ -231,14 +231,17 @@
   width: 14px;
   height: 14px;
   color: var(--ui-faint);
-  transition: transform 120ms ease;
+  /* A down chevron: open turns it to point up (collapse.css turns it). */
+  --ui-collapse-chevron-turn: 180deg;
 }
 
-.subagent-group-chevron.is-open {
-  transform: rotate(180deg);
+/* The gap under the group's head opens and closes with its rows. */
+.subagent-cards.is-group {
+  gap: 0;
 }
 
 .subagent-group-rows {
+  margin-top: 4px;
   display: flex;
   flex-direction: column;
   gap: 1px;

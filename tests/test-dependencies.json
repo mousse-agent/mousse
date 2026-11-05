@@ -53,6 +53,7 @@
         "tests/filesSearch.test.ts",
         "tests/gitBranchActions.test.ts",
         "tests/gitPanelLogic.test.ts",
+        "tests/lightTextContrast.test.ts",
         "tests/movedShortcuts.test.ts",
         "tests/platformMarkdownEditor.test.ts",
         "tests/ptyLiveness.test.ts",
