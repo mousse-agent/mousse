@@ -176,6 +176,26 @@ describe('the background service notice', () => {
   })
 })
 
+describe('the transcript under a notice', () => {
+  const polish = readFileSync(resolve(process.cwd(), 'src/renderer/styles/polish.css'), 'utf8')
+  const body = (selector: string) => {
+    const start = polish.indexOf(`${selector} {`)
+    expect(start, selector).toBeGreaterThanOrEqual(0)
+    return polish.slice(start, polish.indexOf('}', start))
+  }
+
+  it('keeps its end, fade, Go to latest and prompt rail clear of the notice line', () => {
+    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot)'))
+      .toMatch(/--chat-notice-stack:\s*42px;[\s\S]*--chat-notice-fade:\s*24px;/)
+    expect(body('.chat:not(.chat--empty) .an-message-list > div')).toContain('var(--chat-notice-stack, 0px)')
+    const mask = polish.slice(polish.indexOf('--transcript-mask:'), polish.indexOf('-webkit-mask-image', polish.indexOf('--transcript-mask:')))
+    expect(mask).toMatch(/#000 max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - 32px\)\)/)
+    expect(mask).toMatch(/transparent max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - var\(--chat-notice-fade, 0px\) \+ 24px\)\)/)
+    expect(body('.chat-jump')).toContain('var(--chat-notice-stack, 0px)')
+    expect(body('.chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail')).toContain('var(--chat-notice-stack, 0px)')
+  })
+})
+
 describe('Discard from a notice', () => {
   const details: PendingChangesDetails = { label: 'Thread workspace', path: '/w', files: ['a.ts', 'b.ts', 'c.ts'], count: 3, conflict: true, operation: 'merge', discard: true }
   const dialog = () => document.body.querySelector<HTMLElement>('[role="dialog"]')
