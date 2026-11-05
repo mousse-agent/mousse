@@ -4,7 +4,7 @@ import { LineEditHeatmap } from './LineEditHeatmap'
 import { SettingsGroup } from './settings/SettingsRow'
 import { Activity } from '../lib/icons'
 
-/** Activity heatmap and token usage, shown on the Account page. */
+/** Activity heatmap and token usage, shown on the Activity page. */
 export function ActivitySection() {
   const [stats, setStats] = useState<LineEditStatsSnapshot | null>(null)
   const [usage, setUsage] = useState<UsageStatsSnapshot | null>(null)

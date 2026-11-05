@@ -1,7 +1,7 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type {
@@ -16,8 +16,9 @@ import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
-import { AccountSection } from './AccountSection'
-import { takePendingSettingsSection } from '../lib/settingsNavigation'
+import { ActivitySection } from './ActivitySection'
+import { accountSection, takePendingSettingsSection } from '../lib/settingsNavigation'
+import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
@@ -41,13 +42,13 @@ function SettingsLoader() {
 
 const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['appearance', 'theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
-  { id: 'account', label: 'Account', icon: UserCircle, hue: 5, group: 'Settings', keywords: ['mousse id', 'sign in', 'login', 'profile', 'name', 'avatar', 'environment', 'activity'] },
+  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'Settings', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
-  { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
+  { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
 ] as const
 
@@ -55,9 +56,11 @@ type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
+/** Words that find Devices only when this build has Mousse ID, whose sign-in sits at its top. */
+const MOUSSE_ID_KEYWORDS = ['mousse id', 'sign in', 'login', 'account', 'phone']
+
 /** Section ids from before the redesign, still sent by links and other surfaces. */
 const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
-  profile: 'account',
   appearance: 'general',
   notifications: 'general',
   updates: 'general',
@@ -67,16 +70,20 @@ const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
   skills: 'integrations'
 }
 
-const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
-  SETTINGS_SECTIONS.find((section) => section.id === value)?.id ??
-  (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
+const settingsSectionId = (value: unknown): SettingsSectionId | undefined => {
+  // The Account page is gone: its sign-in is on Devices and the rest is Activity.
+  if (value === 'account' || value === 'profile') return accountSection(mousseIdAvailable(useMousseIdStore.getState()))
+  return SETTINGS_SECTIONS.find((section) => section.id === value)?.id ??
+    (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
+}
 
 const CONTEXT_COMPACTION_HASH = '#settings-context-compaction'
 
-const matchesSettingsQuery = (section: (typeof SETTINGS_SECTIONS)[number], query: string): boolean => {
+const matchesSettingsQuery = (section: (typeof SETTINGS_SECTIONS)[number], query: string, mousseId: boolean): boolean => {
   const q = query.trim().toLowerCase()
   if (!q) return true
-  return section.label.toLowerCase().includes(q) || section.keywords.some((keyword) => keyword.includes(q))
+  const keywords: readonly string[] = section.id === 'connections' && mousseId ? [...section.keywords, ...MOUSSE_ID_KEYWORDS] : section.keywords
+  return section.label.toLowerCase().includes(q) || keywords.some((keyword) => keyword.includes(q))
 }
 
 export function SettingsPage() {
@@ -106,8 +113,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     if (requested === 'context') focusCompaction.current = true
     return settingsSectionId(requested) ?? 'general'
   })
-  // Account always exists: it shows Activity, plus Mousse ID when this build has the service.
   const activeSection: SettingsSectionId = selectedSection
+  const mousseId = useMousseIdAvailable()
   useEffect(() => {
     const openSection = (event: Event) => {
       const requested = (event as CustomEvent).detail
@@ -293,7 +300,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
   const reviewPending = useStorageReviewPending()
   const navSections = VISIBLE_SETTINGS_SECTIONS
-    .filter((section) => matchesSettingsQuery(section, navQuery))
+    .filter((section) => matchesSettingsQuery(section, navQuery, mousseId))
   const activeSectionLabel = SETTINGS_SECTIONS.find((section) => section.id === activeSection)?.label ?? 'Settings'
 
   const settingsNav = (
@@ -391,9 +398,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onUpdate={updateSettings}
             />
           )}
-          {activeSection === 'account' && (
-          <section id="account" className="settings-section">
-            <AccountSection />
+          {activeSection === 'activity' && (
+          <section id="activity" className="settings-section">
+            <ActivitySection />
           </section>
           )}
 

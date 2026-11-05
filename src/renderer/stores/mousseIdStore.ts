@@ -160,11 +160,11 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           busy: false,
           error: conflict ? ''
             : errorCode(cause) === 'keystore_locked'
-              ? 'Mousse can’t use this computer’s keychain to protect network keys. Set a passphrase under Devices, then sign in.'
+              ? 'Mousse can’t use this computer’s keychain to protect network keys. Set a passphrase below, then sign in.'
               : `Couldn’t turn on networking: ${message(cause)}`
         })
         await get().refresh()
-        // A profile waiting to join another device's network is set up under Devices.
+        // A profile waiting to join another device's network is set up under This device.
         return conflict ? 'needs-setup' : 'failed'
       }
       if (get().profileId === profileId) set({ net })

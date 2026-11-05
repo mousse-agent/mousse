@@ -90,7 +90,7 @@ describe('who can approve requests', () => {
 
   it('says why in one line', () => {
     expect(phonesBlocked(net, plus)).toBeUndefined()
-    expect(phonesBlocked({ ...net, keystore: 'locked' } as unknown as NetStatus, plus)).toBe('Unlock this device under Devices to add phones.')
+    expect(phonesBlocked({ ...net, keystore: 'locked' } as unknown as NetStatus, plus)).toBe('Unlock this device below to add phones.')
   })
 })
 

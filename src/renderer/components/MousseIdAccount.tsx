@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
-import { mousseIdName, mousseIdOrigin, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdAvailable, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
+import { mousseIdName, mousseIdOrigin, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdSection } from './MousseIdSection'
-import { ActivitySection } from './ActivitySection'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
 import { ExternalLink, Logout, UserCircle, X } from '../lib/icons'
 import './account-section.css'
@@ -17,21 +16,14 @@ function useNow(active: boolean) {
   return now
 }
 
-/** Settings → Account: Mousse ID sign-in and phones (when this build has the service), then Activity. */
-export function AccountSection() {
-  const available = useMousseIdAvailable()
-  return (
-    <>
-      {available && <MousseIdAccount />}
-      <ActivitySection />
-    </>
-  )
-}
-
-function MousseIdAccount() {
+/**
+ * The top of Settings → Devices: Mousse ID sign-in, then adding phones once signed in. Shown only
+ * when this build has the service. `onSetUp` brings the control this device needs first into view.
+ */
+export function MousseIdAccount({ onSetUp }: { onSetUp: () => void }) {
   const state = useMousseId()
   const { plus, net, pending, busy, error, loaded } = state
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState(''), [needsSetup, setNeedsSetup] = useState('')
   const now = useNow(!!pending)
   const origin = mousseIdOrigin(state)
 
@@ -44,9 +36,10 @@ function MousseIdAccount() {
 
   const start = async () => {
     setNotice('')
+    setNeedsSetup('')
     const result: SignInStart = await state.signIn()
-    // A locked profile needs its passphrase first, which is entered under Devices.
-    if (result === 'needs-setup') setNotice(mousseIdSetupStep(useMousseIdStore.getState().net))
+    // A locked profile needs its passphrase first, which is entered further down this page.
+    if (result === 'needs-setup') setNeedsSetup(mousseIdSetupStep(useMousseIdStore.getState().net))
     if (result === 'no-service') setNotice('This build has no Mousse ID service address. Set MOUSSE_ID_ORIGIN and restart Mousse.')
   }
 
@@ -57,6 +50,9 @@ function MousseIdAccount() {
       : plus?.configured ? 'Disconnected. Sign in again to reconnect.'
         : 'Optional. Sign in to reach this computer from your phone and from your other computers signed in to it.'
   const setupStep = !plus?.connected && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
+  // A step asked for by Sign in goes once this device is ready or signed in.
+  const setupNote = (!plus?.connected && mousseIdPreparation(net) !== 'ready' ? needsSetup : '') || setupStep
+  const locked = !!net?.self && net.keystore !== 'unlocked'
 
   return (
     <>
@@ -95,7 +91,12 @@ function MousseIdAccount() {
           />
         )}
         {error && <p role="alert" className="chat-error account-error">{error}</p>}
-        {(notice || setupStep) && <p role="status" className="settings-muted account-note">{notice || setupStep}</p>}
+        {setupNote ? (
+          <div className="account-note-row">
+            <p role="status" className="settings-muted account-note">{setupNote}</p>
+            <button type="button" className="settings-btn" onClick={onSetUp}>{locked ? 'Unlock' : 'Set up'}</button>
+          </div>
+        ) : notice && <p role="status" className="settings-muted account-note">{notice}</p>}
       </SettingsGroup>
       {plus?.connected && <MousseIdSection status={net} plus={plus} onChanged={state.refresh} />}
     </>
