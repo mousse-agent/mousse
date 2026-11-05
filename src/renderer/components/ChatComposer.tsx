@@ -88,6 +88,8 @@ export interface ChatComposerProps {
   placeholder?: string
   /** What the empty input says while a turn runs; the composer queues the next message unless the parent says otherwise. */
   loadingPlaceholder?: string
+  /** What the send button says instead of Send or Queue (see `ComposerFooter`). */
+  sendLabel?: string
   /** Receives the inline `@skill` token (if any) so the parent can send this
    * prompt in skill mode without flipping the global chat mode. */
   onSend: (skillMode?: SkillChatMode) => void
@@ -169,6 +171,7 @@ export function ChatComposer({
   disabled = false,
   placeholder = 'Describe a task or ask a question',
   loadingPlaceholder = 'Running… send queues next',
+  sendLabel,
   onSend,
   onStop,
   disableSkillsPicker = false,
@@ -858,6 +861,7 @@ export function ChatComposer({
         loading={loading}
         disabled={disabled}
         canSend={canSend}
+        sendLabel={sendLabel}
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}

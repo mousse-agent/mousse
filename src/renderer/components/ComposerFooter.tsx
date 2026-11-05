@@ -58,6 +58,8 @@ export interface ComposerFooterProps {
   loading?: boolean
   disabled?: boolean
   canSend?: boolean
+  /** What the send button says instead of Send or Queue, such as "Deny and send" while an approval waits. */
+  sendLabel?: string
   isRecording?: boolean
   recordingPending?: boolean
   /** A recording is being turned into text; the microphone and send buttons wait. */
@@ -99,6 +101,7 @@ export function ComposerFooter({
   loading = false,
   disabled = false,
   canSend = false,
+  sendLabel,
   isRecording = false,
   recordingPending = false,
   transcribing = false,
@@ -368,8 +371,8 @@ export function ComposerFooter({
           <button
             type="button"
             className="composer-action-btn composer-action-btn-active"
-            title={loading ? 'Queue message' : 'Send message'}
-            aria-label={loading ? 'Queue message' : 'Send message'}
+            title={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
+            aria-label={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled}
           >
