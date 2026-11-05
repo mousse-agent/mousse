@@ -49,6 +49,8 @@ describe('appearance settings', () => {
       acrylic: true,
       acrylicIntensity: 55,
       renderMath: true,
+      interfaceFont: { source: 'default' },
+      codeFont: { source: 'default' },
       threadProjectColors: true
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
