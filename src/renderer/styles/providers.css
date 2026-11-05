@@ -561,7 +561,7 @@
 }
 
 .prov-models-hidden-chevron {
-  transition: transform 0.15s;
+  transition: transform var(--ui-dur);
 }
 
 .prov-models-hidden-toggle[aria-expanded='true'] .prov-models-hidden-chevron {
