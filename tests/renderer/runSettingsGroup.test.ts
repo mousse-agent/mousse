@@ -48,12 +48,17 @@ function show(initial?: Partial<MousseSettings['runs']>) {
 }
 
 const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().runs
-const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Resume after usage limits reset"]')!
 const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new chats in a worktree"]')!
-const capTrigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Automatic resumes in a row"]')!
+const resume = () => host.querySelector<HTMLButtonElement>('[aria-label="Resume after usage limits reset"]')!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
-const pickCap = (label: string) => {
-  click(capTrigger())
+const optionLabels = () => {
+  click(resume())
+  const labels = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).map((entry) => entry.textContent)
+  click(resume())
+  return labels
+}
+const pick = (label: string) => {
+  click(resume())
   const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find((entry) => entry.textContent === label)!
   click(option)
 }
@@ -62,25 +67,35 @@ const pickCap = (label: string) => {
 const tooltips = () => Array.from(host.querySelectorAll('[title]')).map((entry) => entry.getAttribute('title')).join(' ')
 
 describe('Settings > General > Runs', () => {
-  it('is off by default, with the cap of three', () => {
+  it('is off by default, as one select with no second row for the count', () => {
     show()
     expect(host.textContent).toContain('Runs')
-    expect(toggle().getAttribute('aria-checked')).toBe('false')
-    expect(capTrigger().textContent).toContain('3')
+    expect(resume().textContent).toContain('Off')
+    expect(host.querySelector('[role="switch"][aria-label="Resume after usage limits reset"]')).toBeNull()
+    expect(host.textContent).not.toContain('Automatic resumes in a row')
     expect(host.textContent).toContain('Continues a paused run when the limit resets.')
+    expect(tooltips()).toContain('waits until you press Resume now')
+    expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 3 times', 'Up to 5 times'])
+  })
+
+  it('choosing a count turns it on, and the daemon reads it from disk', () => {
+    const { updates } = show()
+    pick('Up to 3 times')
+    // The whole setting travels, so nothing else is dropped.
+    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true } })
+    expect(resume().textContent).toContain('Up to 3 times')
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true })
     expect(tooltips()).toContain('at most 3 times in a row')
     expect(tooltips()).toContain('Runs already paused are not resumed; press Resume now.')
   })
 
-  it('turning it on saves it, and the daemon reads it from disk', () => {
-    const { updates } = show()
-    click(toggle())
-    // The whole setting travels, so the cap is never dropped.
-    expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true } })
-    expect(toggle().getAttribute('aria-checked')).toBe('true')
-    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true })
-    click(toggle())
-    expect(saved().resumeAfterUsageLimit).toBe(false)
+  it('Off keeps the saved count, so turning it back on offers the same one', () => {
+    show({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5 })
+    pick('Off')
+    expect(saved()).toEqual({ resumeAfterUsageLimit: false, usageLimitPauseCap: 5, worktreeByDefault: true })
+    expect(resume().textContent).toContain('Off')
+    pick('Up to 5 times')
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
   })
 
   it('starts new chats in a worktree by default, and turning it off saves it without touching the rest', () => {
@@ -92,28 +107,28 @@ describe('Settings > General > Runs', () => {
     expect(saved()).toEqual({ resumeAfterUsageLimit: false, usageLimitPauseCap: 3, worktreeByDefault: false })
   })
 
-  it('the cap can only be changed while the setting is on', () => {
-    show()
-    expect(capTrigger().disabled).toBe(true)
-    click(toggle())
-    expect(capTrigger().disabled).toBe(false)
-  })
-
-  it('choosing a cap saves it and the description follows', () => {
+  it('choosing another count saves it and the description follows', () => {
     const { updates } = show({ resumeAfterUsageLimit: true })
-    pickCap('5')
+    pick('Up to 5 times')
     expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true } })
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
     expect(tooltips()).toContain('at most 5 times in a row')
-    pickCap('1')
+    pick('Once')
     expect(saved().usageLimitPauseCap).toBe(1)
     expect(tooltips()).toContain('at most 1 time in a row')
   })
 
-  it('choosing the cap that is already saved writes nothing', () => {
+  it('choosing what is already saved writes nothing', () => {
     const { updates } = show({ resumeAfterUsageLimit: true })
-    pickCap('3')
+    pick('Up to 3 times')
     expect(updates).not.toHaveBeenCalled()
+  })
+
+  it('keeps a count saved by hand, even while off', () => {
+    show({ resumeAfterUsageLimit: false, usageLimitPauseCap: 2 })
+    expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 2 times', 'Up to 3 times', 'Up to 5 times'])
+    pick('Up to 2 times')
+    expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 2, worktreeByDefault: true })
   })
 
   it('offers 1, 3 and 5, and keeps a cap saved by hand in the list', () => {
