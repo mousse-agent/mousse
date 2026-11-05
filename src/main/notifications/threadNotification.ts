@@ -18,6 +18,11 @@ const THREAD_NOTIFICATION_BODIES: Record<ThreadNotificationKind, string> = {
 /** Body of a subagent's question, announced under its parent's name. */
 export const SUBAGENT_QUESTION_BODY = 'A subagent has a question for you'
 
+/** A notification body that names the thread's project, so threads with the same title in two projects read apart. */
+export function bodyWithProject(body: string, projectName?: string): string {
+  return projectName ? `${body} · ${projectName}` : body
+}
+
 /**
  * Build platform notification content and apply the completion-sound preference.
  * Any thread that stops doing work and needs the user — finished, asking a

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { NotificationThreadIndex, resolveThreadNotification } from '../src/main/notifications/threadNotificationTarget'
 import type { ThreadLineage } from '../src/shared/types'
+import { bodyWithProject } from '../src/main/notifications/threadNotification'
 
 const subagentOf = (parentThreadId: string, rootThreadId = parentThreadId): ThreadLineage => ({ parentThreadId, rootThreadId, relationship: 'subagent' })
 const rows = (...entries: Array<{ id: string; name?: string; lineage?: ThreadLineage }>) =>
@@ -61,5 +62,46 @@ describe('NotificationThreadIndex', () => {
     expect(index.resolve('a', 'child', 'idle')).toBeNull()
     index.note('a', [{ id: 'parent', name: 'Parent' }])
     expect(index.resolve('a', 'child', 'idle')).toEqual({ threadId: 'child' })
+  })
+})
+
+describe('NotificationThreadIndex names for the banner', () => {
+  const list = [
+    { id: 'fix-a', name: 'Fix tests', projectId: 'p-a' },
+    { id: 'fix-b', name: 'Fix tests', projectId: 'p-b' },
+    { id: 'child', name: 'Reviewer', lineage: subagentOf('fix-a'), projectId: 'p-a' },
+    { id: 'loose', name: 'Loose thread' }
+  ]
+  const projects = [{ id: 'p-a', name: 'Mousse' }, { id: 'p-b', name: 'Website' }]
+
+  it('names the thread and its project, so two threads with one title read apart', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    index.noteProjects('a', projects)
+    expect(index.resolve('a', 'fix-a', 'completed')).toEqual({ threadId: 'fix-a', threadName: 'Fix tests', projectName: 'Mousse' })
+    expect(index.resolve('a', 'fix-b', 'completed')).toEqual({ threadId: 'fix-b', threadName: 'Fix tests', projectName: 'Website' })
+  })
+
+  it('names the parent and its project for a subagent question', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    index.noteProjects('a', { projects })
+    expect(index.resolve('a', 'child', 'question')).toEqual({
+      threadId: 'fix-a', parentName: 'Fix tests', viaThreadId: 'child', threadName: 'Fix tests', projectName: 'Mousse'
+    })
+  })
+
+  it('leaves the project out for a thread without one or a project it has not seen', () => {
+    const index = new NotificationThreadIndex()
+    index.note('a', list)
+    expect(index.resolve('a', 'loose', 'completed')).toEqual({ threadId: 'loose', threadName: 'Loose thread' })
+    expect(index.resolve('a', 'fix-a', 'completed')).toEqual({ threadId: 'fix-a', threadName: 'Fix tests' })
+  })
+})
+
+describe('bodyWithProject', () => {
+  it('adds the project after the body when there is one', () => {
+    expect(bodyWithProject('Agent finished', 'Mousse')).toBe('Agent finished · Mousse')
+    expect(bodyWithProject('Agent finished')).toBe('Agent finished')
   })
 })

@@ -1054,6 +1054,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    },
+    /** How many threads need the person in this window, shown on the dock or taskbar icon. 0 clears it. */
+    setAttentionCount: (count: number): Promise<void> =>
+      ipcRenderer.invoke('app:attentionCount', count),
+    /** A thread the person asked to open from outside the window, such as by clicking its notification. */
+    onOpenThread: (cb: (threadId: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, threadId: string) => cb(threadId)
+      ipcRenderer.on('app:openThread', handler)
+      return () => ipcRenderer.removeListener('app:openThread', handler)
     }
   },
   /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */

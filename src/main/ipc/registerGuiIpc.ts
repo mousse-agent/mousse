@@ -88,11 +88,13 @@ import {
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
   SUBAGENT_QUESTION_BODY,
+  bodyWithProject,
   getThreadNotificationPresentation,
   type ThreadNotificationKind
 } from '../notifications/threadNotification'
 import { NotificationThreadIndex } from '../notifications/threadNotificationTarget'
 import { playThreadCompletionSound } from '../notifications/completionSound'
+import { AttentionCounts, showAttentionCount } from '../attentionBadge'
 import type {
   BrowserBounds,
   CreateScheduledJobInput,
@@ -443,6 +445,8 @@ export function registerGuiIpc(
 
   // Thread rows the main process has seen, so a notification knows whether its thread is a subagent.
   const notificationThreads = new NotificationThreadIndex()
+  // How many threads need the person in each window, for the dock or taskbar badge.
+  const attentionCounts = new AttentionCounts()
 
   const broadcast = (channel: string, data: unknown, profileId?: string): void => {
     const senderId = guiMms.getCurrentSenderId()
@@ -452,6 +456,7 @@ export function registerGuiIpc(
     // activeEventProfileId instead. Installation-wide listeners remain global.
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
+    if (channel === 'projects:updated') notificationThreads.noteProjects(targetProfileId ?? currentProfileKey(), data)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         if (targetProfileId) {
@@ -489,10 +494,11 @@ export function registerGuiIpc(
       return
     }
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
+    // The thread's name, and its project in the body: two projects can each have a "Fix tests" thread.
     const notification = new Notification({
-      title: about.parentName ?? 'Mousse',
+      title: about.threadName ?? about.parentName ?? 'Mousse',
       ...content,
-      ...(about.viaThreadId ? { body: SUBAGENT_QUESTION_BODY } : {}),
+      body: bodyWithProject(about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Play Mousse's softer completion chime below and avoid a double sound.
       silent: useWindowsCompletionSound ? true : content.silent
@@ -502,6 +508,8 @@ export function registerGuiIpc(
         if (win.isMinimized()) win.restore()
         win.show()
         win.focus()
+        // Open the thread the banner is about; the window selects it as if its row were clicked.
+        win.webContents.send('app:openThread', about.threadId)
       }
     })
     notification.show()
@@ -898,6 +906,7 @@ export function registerGuiIpc(
       : undefined
     routeWindowState(event, binding.profileId, target)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
+    if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
@@ -1388,6 +1397,7 @@ export function registerGuiIpc(
     const target = (channel: string, data: unknown): void => {
       if (!isCurrent()) return
       if (channel === 'threads:updated') notificationThreads.note(binding.profileId, data)
+      if (channel === 'projects:updated') notificationThreads.noteProjects(binding.profileId, data)
       event.sender.send(channel, data)
     }
     const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
@@ -2618,6 +2628,16 @@ export function registerGuiIpc(
   })
   registerHandler('app:navigateMainView', (_e, view: MainView) => {
     broadcast('app:navigateMainView', view)
+  })
+  // Each window says how many of its threads need the person; the app icon shows the total.
+  registerHandler('app:attentionCount', (event, count: unknown) => {
+    const sender = event.sender
+    const value = typeof count === 'number' && Number.isFinite(count) ? count : 0
+    const profile = guiMms.getWindowBindingForSender(sender.id)?.profileId ?? currentProfileKey()
+    if (!attentionCounts.has(sender.id)) {
+      sender.once('destroyed', () => showAttentionCount(attentionCounts.drop(sender.id)))
+    }
+    showAttentionCount(attentionCounts.set(sender.id, profile, value))
   })
   registerHandler('window:focusMain', () => {
     const win = getWindow()
