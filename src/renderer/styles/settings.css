@@ -661,6 +661,10 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
   font-size: var(--settings-fs-small);
 }
 
+.copy-announce-status.failed {
+  color: var(--danger);
+}
+
 .copy-announce-status:empty {
   display: none;
 }

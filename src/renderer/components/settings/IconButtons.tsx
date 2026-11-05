@@ -30,32 +30,50 @@ export function ConfirmRemoveButton({
   )
 }
 
+export const COPY_FAILED = "Couldn't copy. Try again."
+export const COPY_FAILED_SELECTED = "Couldn't copy. Copy the selected text instead."
+
 /**
  * Icon-only copy; the glyph turns into a green check for a moment once copied. With `announce`,
  * a "Copied" word also shows beside it and is read out, for copies that matter (an invitation).
+ * A refused copy says so until the next try; `onFailed` can select the text so it can be copied by hand.
  */
-export function CopyButton({ text, label = 'Copy', announce = false }: { text: string; label?: string; announce?: boolean }) {
-  const [copied, setCopied] = useState(false)
+export function CopyButton({ text, label = 'Copy', announce = false, onFailed }: {
+  text: string
+  label?: string
+  announce?: boolean
+  onFailed?: () => void
+}) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   useEffect(() => {
-    if (!copied) return
-    const timer = setTimeout(() => setCopied(false), 1500)
+    if (state !== 'copied') return
+    const timer = setTimeout(() => setState('idle'), 1500)
     return () => clearTimeout(timer)
-  }, [copied])
+  }, [state])
+  const copy = async () => {
+    setState('idle')
+    try {
+      if (!navigator.clipboard) throw new Error('No clipboard')
+      await navigator.clipboard.writeText(text)
+      setState('copied')
+    } catch {
+      setState('failed')
+      onFailed?.()
+    }
+  }
+  const failedText = onFailed ? COPY_FAILED_SELECTED : COPY_FAILED
+  const name = state === 'copied' ? 'Copied' : state === 'failed' && !announce ? failedText : label
   const button = (
-    <button
-      type="button"
-      className="settings-icon-btn primary"
-      title={copied ? 'Copied' : label}
-      aria-label={copied ? 'Copied' : label}
-      onClick={() => void navigator.clipboard?.writeText(text).then(() => setCopied(true)).catch(() => undefined)}
-    >
-      {copied ? <Check size={14} className="settings-status-ok" /> : <Copy size={14} />}
+    <button type="button" className="settings-icon-btn primary" title={name} aria-label={name} onClick={() => void copy()}>
+      {state === 'copied' ? <Check size={14} className="settings-status-ok" /> : <Copy size={14} />}
     </button>
   )
   if (!announce) return button
   return (
     <span className="copy-announce">
-      <span className="copy-announce-status" role="status">{copied ? 'Copied' : ''}</span>
+      <span className={`copy-announce-status${state === 'failed' ? ' failed' : ''}`} role="status">
+        {state === 'copied' ? 'Copied' : state === 'failed' ? failedText : ''}
+      </span>
       {button}
     </span>
   )

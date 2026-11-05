@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ChevronLeft, Laptop, Link2, Server, type LucideIcon } from '../../lib/icons'
 import { formatCountdown, secondsLeft } from '../../lib/plusSignIn'
 import { PAIRING_DISCLOSURE } from '../../lib/netDevices'
@@ -123,6 +123,9 @@ export function InviteComputerDialog({ invitation, ready, busy, error, now: fixe
   const now = fixedNow ?? ticking
   const left = invitation?.expiresAt === undefined ? undefined : secondsLeft(invitation.expiresAt, now)
   const expired = left === 0
+  const invitationRef = useRef<HTMLTextAreaElement>(null)
+  // A refused copy leaves the whole invitation selected, ready to copy by hand.
+  const selectInvitation = () => { invitationRef.current?.focus(); invitationRef.current?.select() }
   const create = (label: string) => (
     <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy || !ready} onClick={onCreate}>{label}</button>
   )
@@ -133,11 +136,11 @@ export function InviteComputerDialog({ invitation, ready, busy, error, now: fixe
     <p className="settings-muted">On the other computer, open Settings → Devices → Add device → Join with invitation and paste this. Share it privately.</p>
     <label className="devices-field">
       <span>Invitation</span>
-      <textarea readOnly value={invitation.text} autoFocus onFocus={(event) => event.currentTarget.select()} aria-label="Device invitation" />
+      <textarea ref={invitationRef} readOnly value={invitation.text} autoFocus onFocus={(event) => event.currentTarget.select()} aria-label="Device invitation" />
     </label>
     <div className="devices-invite-foot">
       {left !== undefined && <span className="settings-muted">Expires in {formatCountdown(left)}</span>}
-      <CopyButton text={invitation.text} label="Copy invitation" announce />
+      <CopyButton text={invitation.text} label="Copy invitation" announce onFailed={selectInvitation} />
     </div>
   </>
   return (
