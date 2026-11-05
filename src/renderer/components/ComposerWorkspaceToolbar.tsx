@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop, Server } from '../lib/icons'
+import { Check, ChevronDown, Folder, FolderPlus, Laptop, Server } from '../lib/icons'
 import type { NodeId } from '../../shared/net'
 import type { Project } from '../../shared/types'
 import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
@@ -8,9 +8,16 @@ import type { Device } from '../lib/netDevices'
 import type { ComposerWorkspace } from '../lib/newThread'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
+import { Segmented, type SegmentedOption } from './settings/SettingsRow'
 import '../styles/composer-workspace.css'
 
-/** What the toolbar needs to offer other computers. Without it the computer is plain text. */
+/** Where a new thread in a project works: the project's own checkout or a new worktree. */
+const WORKSPACE_OPTIONS: ReadonlyArray<SegmentedOption<'local' | 'worktree'>> = [
+  { value: 'local', label: 'Local', title: 'Current checkout' },
+  { value: 'worktree', label: 'Worktree', title: 'New worktree' }
+]
+
+/** What the toolbar needs to offer other computers. Without it, or with no other computer, no computer is shown. */
 export interface ComposerDeviceProps {
   /** This computer's name. */
   localName: string
@@ -164,9 +171,10 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           </div>
         </FloatingPortal>
       )}
-      {device && canPickComputer(device.devices, workspace.node)
-        ? <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
-        : <span className="composer-workspace-device"><Laptop size={16} aria-hidden="true" />{device?.localName ?? 'This computer'}</span>}
+      {/* The computer shows only when there is another one to pick. */}
+      {device && canPickComputer(device.devices, workspace.node) && (
+        <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
+      )}
       {remoteDialog && device && workspace.node && (
         <RemoteProjectDialog
           deviceName={runOnLabel(device.localName, device.devices, workspace.node)}
@@ -175,18 +183,18 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           onClose={() => setRemoteDialog(false)}
         />
       )}
-      {/* A worktree is of a project: with no project picked there is nothing to toggle. */}
-      {workspace.projectId ? <button
-        type="button"
-        className={`composer-icon-btn composer-workspace-worktree${worktreeEnabled ? ' active' : ''}`}
-        title={`Worktree: ${worktreeEnabled ? 'On' : 'Off'}`}
-        aria-label="Start in a worktree"
-        aria-pressed={worktreeEnabled}
-        disabled={disabled || opening}
-        onClick={() => onChange({ ...workspace, worktreeEnabled: !worktreeEnabled })}
-      >
-        <GitBranch size={16} strokeWidth={1.8} aria-hidden="true" />
-      </button> : null}
+      {/* A worktree is of a project: with no project picked there is nothing to choose. */}
+      {workspace.projectId && (
+        <div className="composer-workspace-worktree">
+          <Segmented
+            value={worktreeEnabled ? 'worktree' : 'local'}
+            options={WORKSPACE_OPTIONS}
+            ariaLabel="Where to work"
+            disabled={disabled || opening}
+            onChange={(choice) => onChange({ ...workspace, worktreeEnabled: choice === 'worktree' })}
+          />
+        </div>
+      )}
     </div>
   )
 }
