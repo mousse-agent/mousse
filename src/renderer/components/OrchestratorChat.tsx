@@ -29,7 +29,7 @@ import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOut
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
-import type { TurnActions } from '../chat/components/agent-elements/turn-actions'
+import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -807,7 +807,8 @@ export function OrchestratorChat() {
           ])
         }
         if (result.error) {
-          setSendError(sendErrorLine(result.error))
+          // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
+          if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
           // Admission succeeded: the prompt is already saved in the transcript.
@@ -893,27 +894,14 @@ export function OrchestratorChat() {
   const resendBusy = turnActive || loading
   const turnActions = useMemo<TurnActions | null>(() => {
     if (!activeThreadId) return null
-    const send = (content: string, images?: Awaited<ReturnType<typeof filesToImagePayloads>>) => {
-      if (resendBusy || !useAppStore.getState().workspaceReady) return
-      void sendMessage(content, chatMode, images, activeThreadId)
-    }
-    // Read at use: depending on the transcript would rebuild this on every streamed token.
-    const prompt = (promptId: string) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')
-    return {
-      retryTitle: (promptId) => {
-        const message = prompt(promptId)
-        if (!message || !(message.content || message.images?.length)) return null
-        // An image of another computer's thread may be known by name only; it cannot go out again.
-        return message.images?.some((image) => !image.data) ? 'Retry (images not resent)' : 'Retry'
-      },
-      retry: (promptId) => {
-        const message = prompt(promptId)
-        if (!message) return
-        const images = message.images?.filter((image) => image.data)
-        send(message.content, images?.length ? images : undefined)
-      },
-      continueRun: () => send('Continue')
-    }
+    return createTurnActions({
+      // Read at use: depending on the transcript would rebuild this on every streamed token.
+      prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
+      send: (content, images) => {
+        if (resendBusy || !useAppStore.getState().workspaceReady) return
+        void sendMessage(content, chatMode, images, activeThreadId)
+      }
+    })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
   const handleSend = async (skillMode?: SkillChatMode) => {
