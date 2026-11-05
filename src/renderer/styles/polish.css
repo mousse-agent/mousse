@@ -548,18 +548,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   color: var(--ui-faint);
 }
 
-.app .chats-sidebar-content .chat-network-open {
-  width: 100%;
-  min-height: var(--ui-row-height);
-  padding: 0 var(--ui-row-x);
-  border-radius: var(--ui-row-radius);
-  font-size: 12.5px;
-}
-
-.app .chats-sidebar-content .chat-network-open:hover {
-  background: rgba(var(--accent-rgb), 0.1);
-}
-
 /* ---------- Main pane chrome ---------- */
 .app .main-area > .header {
   border-bottom-color: var(--ui-line);
