@@ -13,34 +13,21 @@ import {
   CircleX,
   ExternalLink,
   GitBranch,
-  GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
   GitPullRequestClosed,
   MoreHorizontal,
   Plus,
-  Search,
-  Upload
+  Search
 } from '../../lib/icons'
 import { openSurface } from '../../lib/surfaces'
 import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
-import {
-  CommitPushError,
-  OpenPullRequestError,
-  commitGitChanges,
-  initGitRepository,
-  pushGitBranch,
-  suggestGitCommitMessage,
-  type CommitPhase,
-  type GitStatusView
-} from '../../stores/gitStatusStore'
-import { closePullRequest, createPullRequestForBranch, mergePullRequest, pullRequestMergeMethod, useGitPullRequestStore } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, PullRequestMergeMethod, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { initGitRepository, type GitStatusView } from '../../stores/gitStatusStore'
+import type { PullRequestDetail, PullRequestPushTarget, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { usePullRequestPushTarget } from './usePullRequestPushTarget'
 import { gitScopeFor } from '../../lib/activeProject'
-import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
-import { Switch } from '../settings/SettingsRow'
+import type { GitPullRequestLookup, GitScope } from '../../../shared/types'
 import {
   CreateBranchDialog,
   DeleteBranchDialog,
@@ -55,10 +42,15 @@ import {
   type BranchResult,
   type CreateBranchInput
 } from './branchActions'
+import { GitActionButtons, useGitActionRunner } from '../git/GitActionButtons'
 import { GitOperationStatus } from '../git/GitOperationStatus'
 import { CardPopover } from './CardPopover'
-import { menuRowLabel } from './deviceMenu'
-import { PullRequestCreateForm } from './PullRequestCreateForm'
+import {
+  PullRequestConfirm,
+  pullRequestActions,
+  type PullRequestChange,
+  type PullRequestMergeMethodRead
+} from './PullRequestConfirm'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import {
   branchActionState,
@@ -67,59 +59,27 @@ import {
   branchRowMenu,
   branchSearchAria,
   canInitRepository,
-  changedFileCount,
   changesSummary,
-  chooseAmend,
-  clearAmendPrefill,
-  commitFlowButtons,
-  commitFormFor,
-  commitHint,
-  commitMenuState,
-  commitTrigger,
-  commitPhaseLabel,
-  commitScope,
   diffStatLabel,
   dirtySwitchChoices,
-  emptyCommitForm,
-  existingPullRequestNotice,
   GIT_BUSY_REASON,
   GIT_CHECKING_LABEL,
-  gitActionAvailability,
   gitActionLock,
+  gitActionRowModel,
   gitCollapsedLabel,
-  gitErrorCode,
   gitErrorMessage,
-  isGitCancelled,
   localBranchNames,
-  openPullRequestFailedMessage,
-  prefillAmendDraft,
-  mergeConfirmation,
-  mergedNotice,
   pullRequestList,
   pullRequestReadThreadId,
   pullRequestRow,
   pullRequestRows,
-  pullRequestScope,
-  pushButtonModel,
-  pushFailedMessage,
   THREAD_BRANCH_SWITCH_REASON,
   untrackedFileCount,
-  type CommitAvailability,
-  type CommitDraft,
-  type CommitFlow,
-  type CommitForm,
   type DirtySwitchChoiceId,
   type GitAction,
   type GitActionLock,
-  type PullRequestFoundRow,
-  type PushButtonModel
+  type PullRequestFoundRow
 } from './gitSectionLogic'
-import {
-  SUGGEST_NO_MODEL_CODE,
-  applySuggestion,
-  suggestButtonState,
-  type SuggestionRequest
-} from './commitSuggestLogic'
 import './gitSection.css'
 
 /** Where the Git section's collapse choice is kept: one for a repository, one for a folder without one. */
@@ -469,293 +429,6 @@ function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, loc
   )
 }
 
-interface CommitButtonProps {
-  path: string
-  /** Tells the daemon which folder to commit in, and which rules apply there. */
-  scope: GitScope
-  branch: string | null
-  fileCount: number
-  commits: GitCommit[]
-  /** The branch has somewhere to push to and is not behind, so the commit can go on to push. */
-  pushable: boolean
-  /**
-   * What "Commit, push and open PR" opens the Create PR form for; null when `gitActionAvailability` does not
-   * offer it (behind, diverged, conflicted, a pull request already there, the default branch).
-   */
-  openPullRequest: PullRequestScope | null
-  /** What a commit would include here, and why none can be made right now. */
-  commitAvailability: CommitAvailability
-  /** Another Git action is running, so nothing here may start. */
-  lock: GitActionLock
-  /** Claims the section's one running action; false when another already runs. */
-  onBegin: () => boolean
-  onEnd: () => void
-  onActionError: (message: string) => void
-  onNotice: (message: string) => void
-}
-
-/** What a running commit is doing: which button started it, and which step it is at. */
-interface CommitWork {
-  flow: CommitFlow
-  phase: CommitPhase
-}
-
-function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pushable, openPullRequest, commitAvailability, lock, onBegin, onEnd, onActionError, onNotice }: CommitButtonProps) {
-  const [open, setOpen] = useState(false)
-  const { branch: scopeBranch, head } = commitScope(branch, commits)
-  const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
-  const [storedForm, setForm] = useState<CommitForm>(() => emptyCommitForm(scope))
-  const [work, setWork] = useState<CommitWork | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const messageRef = useRef<HTMLTextAreaElement>(null)
-  const close = useCallback(() => setOpen(false), [])
-  // Text belongs to one branch, the amend choice to one HEAD on it. The stored form is replaced as soon
-  // as that changes, open or not, so an earlier draft cannot come back with the branch.
-  const form = commitFormFor(storedForm, scope)
-  if (form !== storedForm) setForm(form)
-  const { draft, amendChecked } = form
-  const updateForm = useCallback((change: (form: CommitForm) => CommitForm) => {
-    setForm((previous) => change(commitFormFor(previous, scope)))
-  }, [scope])
-  const setDraft = useCallback((change: (draft: CommitDraft) => CommitDraft) => {
-    updateForm((value) => {
-      const next = change(value.draft)
-      return next === value.draft ? value : { ...value, draft: next }
-    })
-  }, [updateForm])
-  const setAmendChecked = useCallback((checked: boolean) => updateForm((value) => chooseAmend(value, checked)), [updateForm])
-  const menu = commitMenuState(commits, fileCount, amendChecked, gitScope.workspaceThreadId !== null)
-  const trigger = commitTrigger(menu, commitAvailability)
-  const { amend } = menu
-  const trimmed = draft.message.trim()
-  const blocked = lock.reason !== null
-  // With nothing to commit, the buttons wait for the user to turn amend on; nothing turns it on for them.
-  const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null && menu.submitReason === null
-  // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
-  const needsPrefill = amend && open && !work && !trimmed && draft.prefilled === null
-  // The suggestion being written, if any. Typing, committing or another branch ends interest in it, so the
-  // answer is dropped when it arrives and never replaces text the user wrote.
-  const [suggesting, setSuggesting] = useState(false)
-  const [noModel, setNoModel] = useState(false)
-  const pendingSuggestion = useRef<SuggestionRequest | null>(null)
-  const suggest = suggestButtonState({ fileCount, suggesting, committing: Boolean(work), blockedReason: lock.reason, noModel })
-  const dropSuggestion = useCallback(() => {
-    pendingSuggestion.current = null
-    setSuggesting(false)
-  }, [])
-
-  // The changes may be committed elsewhere while the popover is open.
-  useEffect(() => {
-    if (!menu.triggerEnabled) setOpen(false)
-  }, [menu.triggerEnabled])
-
-  // The prefill is the message of the HEAD it was read for; a different HEAD cancels the read.
-  useEffect(() => {
-    if (!needsPrefill) return
-    let current = true
-    window.mousse.git.lastCommitMessage(gitScope).then(
-      (last) => { if (current) setDraft((value) => prefillAmendDraft(value, last)) },
-      () => undefined
-    )
-    return () => { current = false }
-  }, [needsPrefill, gitScope, scope, setDraft])
-
-  useEffect(() => {
-    if (!amend) setDraft(clearAmendPrefill)
-  }, [amend, setDraft])
-
-  const requestSuggestion = async () => {
-    if (suggest.disabled) return
-    // Only the text in the box now is ever replaced, and only on this branch and HEAD.
-    const request: SuggestionRequest = { scope, baseline: draft.message }
-    pendingSuggestion.current = request
-    setSuggesting(true)
-    setError(null)
-    try {
-      const { message } = await suggestGitCommitMessage(path, gitScope)
-      if (pendingSuggestion.current !== request) return
-      updateForm((value) => applySuggestion(value, request, message))
-    } catch (suggestError) {
-      if (pendingSuggestion.current !== request) return
-      if (gitErrorCode(suggestError) === SUGGEST_NO_MODEL_CODE) setNoModel(true)
-      setError(gitErrorMessage(suggestError))
-    } finally {
-      if (pendingSuggestion.current === request) dropSuggestion()
-    }
-  }
-
-  const submit = async (flow: CommitFlow) => {
-    if (!canSubmit || !onBegin()) return
-    dropSuggestion()
-    setWork({ flow, phase: 'committing' })
-    setError(null)
-    const finish = () => {
-      setForm(emptyCommitForm(scope))
-      setOpen(false)
-    }
-    try {
-      const result = await commitGitChanges(path, trimmed, gitScope, {
-        amend,
-        push: flow !== 'commit',
-        ...(flow === 'push-pr' && openPullRequest ? { openPullRequest } : {}),
-        onPhase: (phase) => setWork({ flow, phase })
-      })
-      finish()
-      // The row below shows the pull request the branch already had; a second form would duplicate it.
-      if (result.pullRequest?.kind === 'existing') onNotice(existingPullRequestNotice(result.pullRequest))
-    } catch (commitError) {
-      if (commitError instanceof CommitPushError) {
-        finish()
-        if (!isGitCancelled(commitError.pushError)) onActionError(pushFailedMessage(commitError.pushError))
-      } else if (commitError instanceof OpenPullRequestError) {
-        finish()
-        onActionError(openPullRequestFailedMessage(commitError))
-      } else if (!isGitCancelled(commitError)) {
-        setError(gitErrorMessage(commitError))
-      }
-    } finally {
-      setWork(null)
-      onEnd()
-    }
-  }
-
-  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend })
-  const label = (flow: CommitFlow, idle: string) => (work && work.flow === flow ? commitPhaseLabel(work.phase) : idle)
-
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="side-card-git-commit-button"
-        title={lock.reason ?? trigger.title}
-        aria-label={`${trigger.label}: ${lock.reason ?? trigger.title}`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        disabled={!menu.triggerEnabled || blocked}
-        onClick={() => {
-          setError(null)
-          // A title model may have been chosen since the last time.
-          setNoModel(false)
-          setOpen((value) => !value)
-        }}
-      >
-        <GitCommitHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
-        <span>{trigger.label}</span>
-      </button>
-      <CardPopover
-        open={open}
-        anchorRef={triggerRef}
-        placement="below-end"
-        label={amend ? 'Amend commit' : 'Commit changes'}
-        className="side-card-git-commit-popover"
-        initialFocusRef={messageRef}
-        sizeKey={error}
-        onClose={close}
-      >
-        <textarea
-          ref={messageRef}
-          className="side-card-git-message"
-          value={draft.message}
-          rows={3}
-          placeholder="Commit message"
-          aria-label="Commit message"
-          disabled={Boolean(work)}
-          onChange={(event) => {
-            const message = event.target.value
-            // Writing it by hand takes over from a suggestion that has not arrived.
-            if (pendingSuggestion.current) dropSuggestion()
-            setDraft((value) => ({ message, prefilled: value.prefilled }))
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault()
-              void submit('commit')
-            }
-          }}
-        />
-        <div className="side-card-git-suggest-row">
-          <button
-            type="button"
-            className="side-card-git-submit side-card-git-submit-quiet side-card-git-suggest"
-            title={suggest.title}
-            aria-busy={suggesting}
-            disabled={suggest.disabled}
-            onClick={() => void requestSuggestion()}
-          >
-            {suggest.label}
-          </button>
-        </div>
-        <label className="side-card-git-amend" data-disabled={menu.amendDisabled} title={menu.amendTitle ?? undefined}>
-          <span>Amend last commit</span>
-          <Switch
-            checked={amend}
-            label="Amend last commit"
-            disabled={menu.amendDisabled || Boolean(work)}
-            onChange={setAmendChecked}
-          />
-        </label>
-        {work && <GitOperationStatus path={path} />}
-        {error && (
-          <p className="side-card-git-error" role="alert" title={error}>
-            {error}
-          </p>
-        )}
-        <div className="side-card-git-popover-footer">
-          <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount, commitAvailability)}</span>
-          <div className="side-card-git-popover-actions">
-            {flowButtons.map(({ flow, label: idle, quiet }) => (
-              <button
-                key={flow}
-                type="button"
-                className={quiet ? 'side-card-git-submit side-card-git-submit-quiet' : 'side-card-git-submit'}
-                data-flow={flow}
-                title={menu.submitReason ?? undefined}
-                disabled={!canSubmit}
-                onClick={() => void submit(flow)}
-              >
-                {label(flow, idle)}
-              </button>
-            ))}
-          </div>
-        </div>
-      </CardPopover>
-    </>
-  )
-}
-
-interface PushButtonProps {
-  model: PushButtonModel
-  /** A push is running. */
-  busy: boolean
-  lock: GitActionLock
-  onPush: () => void
-}
-
-function PushButton({ model, busy, lock, onPush }: PushButtonProps) {
-  const name = model.count === null ? undefined : model.title
-  // The running action's own button has no reason of its own; a branch state that rules a push out does.
-  const reason = lock.reason ?? model.disabledReason ?? null
-  return (
-    <button
-      type="button"
-      className="side-card-git-push"
-      title={reason ?? model.title}
-      aria-label={reason ? menuRowLabel(name ?? model.label, reason) : name}
-      aria-busy={busy}
-      disabled={lock.disabled || model.disabledReason !== undefined}
-      onClick={onPush}
-    >
-      <Upload size={14} strokeWidth={1.8} aria-hidden="true" />
-      <span>{busy ? 'Pushing…' : model.label}</span>
-      {!busy && model.count !== null && (
-        <span className="side-card-git-push-count" aria-hidden="true">↑{model.count}</span>
-      )}
-    </button>
-  )
-}
-
 function openWeb(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
@@ -767,14 +440,7 @@ const PULL_REQUEST_ICONS = {
   closed: GitPullRequestClosed
 } as const
 
-/**
- * Merge or close one pull request; resolves with the reason it failed, or null once it is done. `method` is the merge
- * method the confirmation named, which the merge must use; absent when it could not be read.
- */
-export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow, method?: PullRequestMergeMethod) => Promise<string | null>
-
-/** The method Merge will use for a pull request; null when it cannot be read. */
-export type PullRequestMergeMethodRead = (row: PullRequestFoundRow) => Promise<PullRequestMergeMethod | null>
+export type { PullRequestChange, PullRequestMergeMethodRead }
 
 interface PullRequestLinkProps {
   row: PullRequestFoundRow
@@ -794,50 +460,17 @@ interface PullRequestLinkProps {
 export function PullRequestLink({ row, running = null, onChange, readMergeMethod }: PullRequestLinkProps) {
   const Icon = PULL_REQUEST_ICONS[row.state]
   const [confirm, setConfirm] = useState<'merge' | 'close' | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  // Undefined while it is read, null when it could not be.
-  const [mergeMethod, setMergeMethod] = useState<PullRequestMergeMethod | null | undefined>(undefined)
   const mergeRef = useRef<HTMLButtonElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
-  const cancelRef = useRef<HTMLButtonElement>(null)
   const merge = row.merge
   const working = confirm !== null && running === confirm
   const busy = running !== null && !working
-  const ask = (action: 'merge' | 'close') => {
-    setError(null)
-    setMergeMethod(undefined)
-    setConfirm(action)
-  }
-  // The prompt takes focus when it opens, on Cancel: nothing final happens on a stray Enter.
-  useEffect(() => {
-    if (confirm) cancelRef.current?.focus()
-  }, [confirm])
-  // The method is read once per confirmation; a refreshed row does not ask again.
-  const readRef = useRef({ readMergeMethod, row })
-  readRef.current = { readMergeMethod, row }
-  useEffect(() => {
-    const { readMergeMethod: read, row: asked } = readRef.current
-    if (confirm !== 'merge' || !read) return
-    let current = true
-    read(asked).then((method) => { if (current) setMergeMethod(method) }, () => { if (current) setMergeMethod(null) })
-    return () => { current = false }
-  }, [confirm])
-  const mergePrompt = mergeConfirmation(row.number, row.base, readMergeMethod ? mergeMethod : null)
   // The row's buttons come back once the prompt is gone; focus returns to the one that opened it.
   const dismiss = () => {
-    if (working || !confirm) return
+    if (!confirm) return
     const back = confirm === 'close' ? closeRef : mergeRef
     setConfirm(null)
-    setError(null)
     requestAnimationFrame(() => back.current?.focus())
-  }
-  const run = async () => {
-    if (!confirm || !onChange || running !== null) return
-    setError(null)
-    // The merge uses the method the prompt named, never one read again later.
-    const failure = await onChange(confirm, row, confirm === 'merge' ? mergeMethod ?? undefined : undefined)
-    if (failure) setError(failure)
-    else setConfirm(null)
   }
   return (
     <div className="side-card-git-pr-item">
@@ -878,7 +511,7 @@ export function PullRequestLink({ row, running = null, onChange, readMergeMethod
               title={busy ? GIT_BUSY_REASON : `Close ${row.number} without merging`}
               aria-label={`Close pull request ${row.number} without merging`}
               aria-disabled={busy || undefined}
-              onClick={() => { if (!busy) ask('close') }}
+              onClick={() => { if (!busy) setConfirm('close') }}
             >
               <GitPullRequestClosed size={13} strokeWidth={1.8} aria-hidden="true" />
               <span>Close</span>
@@ -891,7 +524,7 @@ export function PullRequestLink({ row, running = null, onChange, readMergeMethod
               title={busy ? GIT_BUSY_REASON : merge.reason ?? `Merge ${row.number}`}
               aria-label={merge.reason ? `Merge pull request ${row.number}: ${merge.reason}` : `Merge pull request ${row.number}`}
               aria-disabled={!merge.enabled || busy || undefined}
-              onClick={() => { if (merge.enabled && !busy) ask('merge') }}
+              onClick={() => { if (merge.enabled && !busy) setConfirm('merge') }}
             >
               <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
               <span>Merge</span>
@@ -900,45 +533,16 @@ export function PullRequestLink({ row, running = null, onChange, readMergeMethod
         )}
       </div>
       {confirm && (
-        <div
-          className="side-card-git-pr-confirm"
-          role="group"
-          aria-label={confirm === 'close' ? `Close ${row.number}` : `Merge ${row.number}`}
-          onKeyDown={(event) => {
-            if (event.key !== 'Escape') return
-            event.preventDefault()
-            event.stopPropagation()
-            dismiss()
-          }}
-        >
-          <p className="side-card-git-pr-confirm-text">
-            {confirm === 'close' ? `Close ${row.number} without merging? Its branch stays.` : mergePrompt.text}
-          </p>
-          {error && <p className="side-card-git-error" role="alert" title={error}>{error}</p>}
-          <div className="side-card-git-pr-confirm-actions">
-            <button ref={cancelRef} type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={working} onClick={dismiss}>
-              Cancel
-            </button>
-            {confirm === 'merge' ? (
-              <button
-                type="button"
-                className="side-card-git-pr-merge"
-                data-ready
-                aria-busy={working}
-                // Not before the method is known: the button names what it does.
-                disabled={running !== null || (readMergeMethod !== undefined && mergeMethod === undefined)}
-                onClick={() => void run()}
-              >
-                <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
-                <span>{working ? 'Merging…' : mergePrompt.action}</span>
-              </button>
-            ) : (
-              <button type="button" className="side-card-git-submit" aria-busy={working} disabled={running !== null} onClick={() => void run()}>
-                {working ? 'Closing…' : 'Close pull request'}
-              </button>
-            )}
-          </div>
-        </div>
+        <PullRequestConfirm
+          key={confirm}
+          row={row}
+          action={confirm}
+          running={running}
+          onChange={onChange}
+          readMergeMethod={readMergeMethod}
+          onDone={() => setConfirm(null)}
+          onDismiss={dismiss}
+        />
       )}
     </div>
   )
@@ -1005,25 +609,10 @@ export function GitSectionView({
   canInitialize = false
 }: GitSectionViewProps) {
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
-  const [running, setRunning] = useState<GitAction | null>(null)
-  const rowRef = useRef<HTMLDivElement>(null)
-  const createForm = useGitPullRequestStore((state) => state.createForm)
-  const runningRef = useRef<GitAction | null>(null)
+  const { running, begin, end } = useGitActionRunner()
   const [actionError, setActionError] = useTransientError()
   // Said once and left for long enough to read, unlike an error it is not a failure.
   const [notice, setNotice] = useTransientError(NOTICE_MS)
-
-  // One Git action at a time: the ref answers a second click before the state has rendered.
-  const begin = (action: GitAction) => {
-    if (runningRef.current) return false
-    runningRef.current = action
-    setRunning(action)
-    return true
-  }
-  const end = () => {
-    runningRef.current = null
-    setRunning(null)
-  }
 
   if (collapsedLabel !== null || !path) {
     const initialize = async () => {
@@ -1071,64 +660,31 @@ export function GitSectionView({
     )
   }
 
-  const push = async () => {
-    if (!begin('push')) return
-    setActionError(null)
-    try {
-      await pushGitBranch(path, scope)
-    } catch (error) {
-      if (!isGitCancelled(error)) setActionError(gitErrorMessage(error))
-    } finally {
-      end()
-    }
-  }
-
   const branch = git.status?.branch ?? null
-  // The folder, thread and branch of this click; the form, its draft and its submit use these, not whatever is active later.
-  const createScope = pullRequestScope({ path, branch, projectId, ownThreadId })
-  const createPullRequest = async () => {
-    if (!createScope || !begin('pullRequest')) return
-    setActionError(null)
-    try {
-      await createPullRequestForBranch(createScope)
-    } catch (error) {
-      setActionError(gitErrorMessage(error))
-    } finally {
-      end()
-    }
-  }
-
   const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
-  const fileCount = changedFileCount(git.status)
-  const pushButton = pushButtonModel(git.status, git.commits.length, scope, pullRequestPushTarget)
-  const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
+  const model = gitActionRowModel({
+    path,
+    scope,
+    projectId,
+    ownThreadId,
+    status: git.status,
+    commitCount: git.commits.length,
+    pullRequest,
+    pullRequestPushTarget
+  })
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
-  const createLock = gitActionLock(running, 'pullRequest')
   const branchActions = branchActionState(scope.workspaceThreadId)
   const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   // Read as the same thread or project the section's lookup was, so a thread on another computer merges there.
-  const readThreadId = pullRequestReadThreadId(ownThreadId, workspaceThreadId)
-  const changePullRequest: PullRequestChange = async (action, row, method) => {
-    if (!begin(action)) return GIT_BUSY_REASON
-    const target = { path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) }
-    try {
-      if (action === 'merge') {
-        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined, method)
-        setNotice(mergedNotice(row.value, result.method))
-      } else {
-        await closePullRequest(target)
-        setNotice(`Closed ${row.number}.`)
-      }
-      return null
-    } catch (error) {
-      return gitErrorMessage(error)
-    } finally {
-      end()
-    }
-  }
-
-  const readMergeMethod: PullRequestMergeMethodRead = (row) =>
-    pullRequestMergeMethod({ path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) })
+  const { change: changePullRequest, readMergeMethod } = pullRequestActions({
+    path,
+    branch,
+    projectId,
+    threadId: pullRequestReadThreadId(ownThreadId, workspaceThreadId),
+    begin,
+    end,
+    onNotice: setNotice
+  })
 
   return (
     <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
@@ -1137,7 +693,7 @@ export function GitSectionView({
         scope={scope}
         status={git.status}
         branches={git.branches}
-        fileCount={fileCount}
+        fileCount={model.fileCount}
         busyLabel={running === 'checkout' ? 'Switching…' : running === 'branch' ? 'Updating branches…' : null}
         lock={gitActionLock(running, running === 'branch' ? 'branch' : 'checkout')}
         disabledReason={branchActions.enabled ? null : THREAD_BRANCH_SWITCH_REASON}
@@ -1146,46 +702,20 @@ export function GitSectionView({
         onActionError={setActionError}
         onNotice={setNotice}
       />
-      <div ref={rowRef} className="side-card-git-row">
-        {pushButton && (
-          <PushButton model={pushButton} busy={running === 'push'} lock={gitActionLock(running, 'push')} onPush={() => void push()} />
-        )}
-        <CommitButton
-          path={path}
-          scope={scope}
-          branch={branch}
-          fileCount={fileCount}
-          commits={git.commits}
-          pushable={availability.offerCommitAndPush}
-          openPullRequest={availability.offerCommitPushAndOpenPr ? createScope : null}
-          commitAvailability={availability.commit}
-          lock={gitActionLock(running, 'commit')}
-          onBegin={() => begin('commit')}
-          onEnd={end}
-          onActionError={setActionError}
-          onNotice={setNotice}
-        />
-        {prRow?.kind === 'create' && (
-          <button
-            type="button"
-            className="side-card-git-pr-create"
-            title={createLock.reason ?? prRow.hint ?? undefined}
-            aria-disabled={!prRow.enabled || createLock.disabled}
-            onClick={() => {
-              if (prRow.enabled && !createLock.disabled) void createPullRequest()
-            }}
-          >
-            <GitPullRequest size={14} strokeWidth={1.8} aria-hidden="true" />
-            <span>{running === 'pullRequest' ? 'Opening…' : 'Create PR'}</span>
-          </button>
-        )}
-      </div>
-      {pushButton?.note && <p className="side-card-git-quiet">{pushButton.note}</p>}
-      <GitOperationStatus path={path} />
-      <PullRequestCreateForm
-        scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
-        anchorRef={rowRef}
+      <GitActionButtons
+        host="side-card"
+        path={path}
+        scope={scope}
+        git={git}
+        model={model}
+        running={running}
+        begin={begin}
+        end={end}
+        onActionError={setActionError}
+        onNotice={setNotice}
       />
+      {model.pushButton?.note && <p className="side-card-git-quiet">{model.pushButton.note}</p>}
+      <GitOperationStatus path={path} />
       <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={rows} running={running} onChange={changePullRequest} readMergeMethod={readMergeMethod} />
       {prRow?.kind === 'found' && prRow.hint && <p className="side-card-git-pr-hint">{prRow.hint}</p>}
       {pullRequestError && (

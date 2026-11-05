@@ -21,7 +21,7 @@ import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
 import { gitOperationOwner, trackGitOperation } from './gitOperationStore'
-import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitPullRequestStore } from './pullRequestStore'
+import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitPullRequestStore, type PullRequestFormHost } from './pullRequestStore'
 
 /**
  * One shared copy of Git state per working folder, read by the Git panel and the
@@ -290,6 +290,8 @@ export interface CommitGitOptions {
    * the one the row would use, captured when the button was pressed; its branch must be the folder's current one.
    */
   openPullRequest?: PullRequestScope
+  /** The surface that shows the Create PR form `openPullRequest` opens; the side card when absent. */
+  pullRequestFormHost?: PullRequestFormHost
   /** Reports each step, so a button can say what is running. */
   onPhase?: (phase: CommitPhase) => void
 }
@@ -331,7 +333,13 @@ async function refreshBranchPullRequest(key: string, projectId: string | undefin
  * report the pull request it already has. Opens nothing for a branch that is not pushed, is not the one the
  * flow started on, or cannot get a pull request, and says why.
  */
-async function openPullRequestAfterPush(key: string, expectedBranch: string, projectId: string | undefined, scope: PullRequestScope): Promise<CommitPullRequestOutcome> {
+async function openPullRequestAfterPush(
+  key: string,
+  expectedBranch: string,
+  projectId: string | undefined,
+  scope: PullRequestScope,
+  host?: PullRequestFormHost
+): Promise<CommitPullRequestOutcome> {
   await refreshPullRequest(key, expectedBranch, { force: true, projectId, threadId: scope.threadId })
   const status = useGitStatusStore.getState().entries[key]?.status
   if (!status) throw new OpenPullRequestError('Could not read the state of the branch.')
@@ -346,7 +354,7 @@ async function openPullRequestAfterPush(key: string, expectedBranch: string, pro
   if (lookup?.state === 'unavailable') throw new OpenPullRequestError(lookup.message)
   if (lookup?.state !== 'none') throw new OpenPullRequestError('Could not look up pull requests for this branch.')
   if (lookup.isDefaultBranch !== false) throw new OpenPullRequestError(lookup.isDefaultBranch ? 'This is the default branch; a pull request needs another branch.' : 'Could not tell whether this is the default branch.')
-  await createPullRequestForBranch(scope)
+  await createPullRequestForBranch(scope, host)
   return { kind: 'form' }
 }
 
@@ -390,7 +398,7 @@ export async function commitGitChanges(
     return { pullRequest: null }
   }
   options.onPhase?.('opening-pr')
-  return { pullRequest: await openPullRequestAfterPush(key, expectedBranch, projectId, pullRequestScope) }
+  return { pullRequest: await openPullRequestAfterPush(key, expectedBranch, projectId, pullRequestScope, options.pullRequestFormHost) }
 }
 
 /**
