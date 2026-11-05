@@ -5467,6 +5467,17 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   outline-offset: 2px;
 }
 
+/* Copy, Details, Undo and Read aloud under a message: a keyboard ring, full strength while focused. */
+.chat-message-toolbar button:focus-visible,
+.chat-user-image:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
+}
+
+/* An attached image is a button; the global button reset would drop its tile fill. */
+button.chat-user-image { background: color-mix(in oklab, var(--color-an-foreground) 4%, transparent); }
+
 .assistant-response-metadata {
   position: absolute;
   z-index: var(--z-floating, 50000);
