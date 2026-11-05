@@ -37,6 +37,7 @@ const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSi
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { worktreeMark } = await import('../../src/renderer/lib/worktreeMark')
+const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
 
 const at = '2026-11-05T10:00:00.000Z'
 const project = (id: string, name: string): Project => ({ id, name, path: `/p/${name}`, createdAt: at, order: 0 })
@@ -162,14 +163,31 @@ describe('tabs', () => {
     expect(labels).toEqual(['Projects', 'Threads', 'Agents'])
   })
 
-  it('show their labels whole or not at all, and hide them below 320px, so the 260px default shows icons', () => {
+  it('show their labels whole or not at all: at the 260px default the open tab keeps its word at a fixed width', () => {
     const label = rule(sidebarCss, '.threads-sidebar-tab-label')
     expect(label).not.toMatch(/text-overflow|overflow:\s*hidden/)
     expect(label).toMatch(/flex-shrink:\s*0/)
-    const hidden = [...sidebarCss.matchAll(/@container threads-sidebar \(max-width: (\d+)px\) \{([^}]*)\}/g)]
-      .filter(([, , body]) => /\.threads-sidebar-tab-label\s*\{\s*display:\s*none/.test(body + '}'))
-    expect(hidden.map(([, width]) => Number(width))).toEqual([319])
-    for (const css of [compactCss, polishCss]) expect(css).not.toMatch(/threads-sidebar-tab-label[^{]*\{[^}]*text-overflow/)
+    const queries = new Map([...sidebarCss.matchAll(/@container threads-sidebar \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/g)]
+      .map(([, width, body]) => [Number(width), body]))
+    expect([...queries.keys()]).toEqual([319, 239])
+    // Under 320px (260px included) only the other two tabs drop their words; the open tab has a fixed minimum
+    // width, so the row does not move when the open tab changes.
+    const narrow = queries.get(319)!
+    expect(narrow).toMatch(/\.threads-sidebar-tab:not\(\.active\) \.threads-sidebar-tab-label \{ display: none; \}/)
+    expect(narrow).toMatch(/\.threads-sidebar-tab\.active \{[^}]*flex: 0 0 auto;[^}]*min-width: 88px/)
+    // Under 240px there is no room for one word beside two icons.
+    expect(queries.get(239)).toMatch(/^\s*\.threads-sidebar-tab-label \{ display: none; \}/m)
+    for (const css of [compactCss, polishCss]) {
+      expect(css).not.toMatch(/threads-sidebar-tab-label[^{]*\{[^}]*text-overflow/)
+      expect(css).not.toMatch(/\.threads-sidebar-tab(?![\w-])[^{]*\{[^}]*\b(flex|min-width|padding)\s*:/)
+    }
+  })
+
+  it('keep their names as tooltips when the words are hidden', () => {
+    show([thread('a', 'Fix tests')])
+    const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
+    expect(tabs.map((tab) => [tab.title, tab.getAttribute('aria-label')])).toEqual([['Projects', 'Projects'], ['Threads', 'Threads'], ['Agents', 'Agents']])
+    expect(tabs.map((tab) => tab.classList.contains('active'))).toEqual([true, false, false])
   })
 
   it('open Automations from the Agents roster with an arrow, not a "+"', async () => {
@@ -197,9 +215,26 @@ describe('the footer', () => {
     expect(archived.querySelector('[data-testid="trash"]')?.getAttribute('data-nested')).toBe('true')
   })
 
-  it('is the one scroll container: it shrinks for the lists, and nothing inside it caps its own height', () => {
+  it('follows the lists, and sticks to the bottom only when they are taller than the sidebar', () => {
+    // The list is as tall as its rows and shrinks (and scrolls) once it outgrows the sidebar; it no longer
+    // grows to push the footer down. The footer's auto bottom margin keeps the profile at the window's edge.
+    const list = rule(sidebarCss, '.threads-sidebar-scroll')
+    expect(list).toMatch(/flex:\s*0 1 auto/)
+    expect(list).toMatch(/min-height:\s*0/)
+    expect(list).toMatch(/overflow-y:\s*auto/)
+    expect(rule(sidebarCss, '.threads-sidebar-footer')).toMatch(/margin-bottom:\s*auto/)
+    for (const css of [compactCss, polishCss]) expect(css).not.toMatch(/\.threads-sidebar-scroll(?![\w-])[^{]*\{[^}]*\bflex(-grow)?\s*:/)
+    // The Agents tab has no footer, so its list fills the sidebar.
+    expect(rule(sidebarCss, ".threads-sidebar-scroll[data-view='chats']")).toMatch(/flex-grow:\s*1/)
+    show([thread('a', 'Fix tests')])
+    const scroller = host.querySelector<HTMLElement>('.threads-sidebar-scroll')!
+    expect(scroller.dataset.view).toBe('projects')
+    expect(scroller.nextElementSibling?.classList.contains('threads-sidebar-footer')).toBe(true)
+  })
+
+  it('is the one scroll container: it keeps its room, and nothing inside it caps its own height', () => {
     const footer = rule(sidebarCss, '.threads-sidebar-footer')
-    expect(footer).toMatch(/flex:\s*0 1 auto/)
+    expect(footer).toMatch(/flex:\s*0 0 auto/)
     expect(footer).toMatch(/min-height:\s*0/)
     expect(footer).toMatch(/overflow-y:\s*auto/)
     expect(footer).toMatch(/max-height:\s*45vh/)
@@ -207,6 +242,78 @@ describe('the footer', () => {
     for (const css of [sidebarCss, compactCss, polishCss]) {
       for (const [, , body] of css.matchAll(inside)) expect(body).not.toMatch(/max-height|overflow-y/)
     }
+  })
+})
+
+/** Gives the list a height, a content height and a scroll position jsdom does not have. */
+function layOut(scroller: HTMLElement, size: { height: number; content: number }) {
+  let top = 0
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, get: () => size.height },
+    scrollHeight: { configurable: true, get: () => size.content },
+    scrollTop: { configurable: true, get: () => top, set: (value: number) => { top = value } }
+  })
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: size.height, height: size.height }) as DOMRect
+}
+
+describe('a list taller than the sidebar', () => {
+  const waiting = { n1: 'awaiting_input', n2: 'awaiting_input' } as const
+  const tall = () => [
+    thread('n1', 'Answer me', { projectId: 'p1' }),
+    thread('n2', 'Approve me', { projectId: 'p1' }),
+    ...many(5),
+    thread('q1', 'Payments fix', { projectId: 'p2' }),
+    thread('q2', 'Payments docs', { projectId: 'p2' })
+  ]
+
+  it('fades its last rows and draws its scrollbar while rows sit below the fold', () => {
+    const scrollCue = rule(sidebarCss, '.threads-sidebar-scroll[data-more-below]')
+    expect(scrollCue).toMatch(/mask-image:\s*linear-gradient\(to bottom/)
+    expect(rule(sidebarCss, '.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-thumb')).toMatch(/background-color/)
+
+    show(tall(), { projects: [project('p1', 'Mousse'), project('p2', 'Payments')] })
+    const scroller = host.querySelector<HTMLElement>('.threads-sidebar-scroll')!
+    expect(scroller.hasAttribute('data-more-below')).toBe(false)
+    layOut(scroller, { height: 200, content: 600 })
+    act(() => { scroller.dispatchEvent(new Event('scroll')) })
+    expect(scroller.hasAttribute('data-more-below')).toBe(true)
+    scroller.scrollTop = 400
+    act(() => { scroller.dispatchEvent(new Event('scroll')) })
+    expect(scroller.hasAttribute('data-more-below')).toBe(false)
+  })
+
+  it('scrolls a project the person opens under a tall "Needs me" until its first rows show', () => {
+    show(tall(), { projects: [project('p1', 'Mousse'), project('p2', 'Payments')] })
+    act(() => useAppStore.setState({ threadActivity: waiting }))
+    expect(host.querySelector('.threads-sidebar-needs-me')?.textContent).toContain('Needs me · 2')
+    const scroller = host.querySelector<HTMLElement>('.threads-sidebar-scroll')!
+    layOut(scroller, { height: 200, content: 700 })
+    const payments = host.querySelector<HTMLElement>('[data-project-id="p2"]')!
+    // Payments' row sits at 180px in a 200px list; open, its rows reach 400px.
+    payments.getBoundingClientRect = () => ({ top: 180, bottom: 400 }) as DOMRect
+    click(projectRow('Payments'))
+    expect(projectRow('Payments').getAttribute('aria-expanded')).toBe('true')
+    expect(scroller.scrollTop).toBe(180)
+
+    // Closing it leaves the list where it is.
+    click(projectRow('Payments'))
+    expect(scroller.scrollTop).toBe(180)
+  })
+})
+
+describe('sidebarScroll', () => {
+  it('knows when rows sit below the fold', () => {
+    expect(hasMoreBelow({ scrollHeight: 600, scrollTop: 0, clientHeight: 200 })).toBe(true)
+    expect(hasMoreBelow({ scrollHeight: 600, scrollTop: 400, clientHeight: 200 })).toBe(false)
+    expect(hasMoreBelow({ scrollHeight: 200, scrollTop: 0, clientHeight: 200 })).toBe(false)
+  })
+
+  it('scrolls only as far as needed and never past the project row', () => {
+    const view = { top: 0, bottom: 200 }
+    expect(revealDelta(view, { top: 20, bottom: 120 })).toBe(0)
+    expect(revealDelta(view, { top: 150, bottom: 260 })).toBe(60)
+    expect(revealDelta(view, { top: 180, bottom: 600 })).toBe(180)
+    expect(revealDelta(view, { top: -40, bottom: 60 })).toBe(-40)
   })
 })
 

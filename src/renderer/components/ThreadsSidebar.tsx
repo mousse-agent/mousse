@@ -14,6 +14,7 @@ import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
 import { needsMeThreads } from '../lib/needsMe'
+import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -405,6 +406,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The Projects tree's one Tab stop (`project:<id>` or `thread:<id>`): the row that last had focus.
   const [treeFocus, setTreeFocus] = useState<string | null>(null)
   const treeRef = useRef<HTMLDivElement>(null)
+  // The list above the footer. `moreBelow` marks it while rows sit below its fold; `revealProject` is the project
+  // just opened by the person, scrolled into view once its rows render.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [moreBelow, setMoreBelow] = useState(false)
+  const revealProject = useRef<string | null>(null)
   // The project whose "start from a pull request" dialog is open.
   const [pullRequestProject, setPullRequestProject] = useState<{ id: string; name: string } | null>(null)
 
@@ -530,6 +536,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       } else {
 
         next.add(projectId)
+        revealProject.current = projectId
 
       }
 
@@ -538,6 +545,33 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     })
 
   }
+
+  // A project opened by the person shows its first rows, even under a tall "Needs me".
+  useEffect(() => {
+    const id = revealProject.current
+    revealProject.current = null
+    const scroller = scrollRef.current
+    const target = id ? [...scroller?.querySelectorAll<HTMLElement>('[data-project-id]') ?? []].find((item) => item.dataset.projectId === id) : undefined
+    if (!scroller || !target) return
+    const delta = revealDelta(scroller.getBoundingClientRect(), target.getBoundingClientRect())
+    if (delta) scroller.scrollTop += delta
+  }, [expandedProjects])
+
+  // Marks the list while rows sit below its fold, for the fade and the drawn scrollbar.
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const update = () => setMoreBelow(hasMoreBelow(scroller))
+    update()
+    scroller.addEventListener('scroll', update, { passive: true })
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    observer?.observe(scroller)
+    for (const section of scroller.children) observer?.observe(section)
+    return () => {
+      scroller.removeEventListener('scroll', update)
+      observer?.disconnect()
+    }
+  }, [])
 
 
 
@@ -1243,7 +1277,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </button>
       </div>
 
-      <div className="threads-sidebar-scroll">
+      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={sidebarView} data-more-below={moreBelow || undefined}>
 
       <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={sidebarView !== 'projects'}>
 
@@ -1303,6 +1337,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                 <div
                   key={project.id}
                   className="threads-sidebar-project"
+                  data-project-id={project.id}
                   draggable={!isRenaming}
                   onDragStart={(event) => startDrag(event, { type: 'project', id: project.id })}
                   onDragOver={(event) => {
