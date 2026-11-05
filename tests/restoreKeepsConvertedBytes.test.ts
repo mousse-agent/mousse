@@ -302,7 +302,8 @@ describe('removing converted files and writing them again leaves the folder as G
   it('a case-only rename between the two trees writes the new spelling on a disk that folds case', async () => {
     git(cwd, 'config', 'core.autocrlf', 'input')
     // Git sets this when it finds the disk folds case, as macOS and Windows disks do by default.
-    if (git(cwd, 'config', '--bool', 'core.ignorecase') !== 'true') return
+    // Unset on a disk that keeps case, where `git config` would exit 1 without the default.
+    if (git(cwd, 'config', '--bool', '--default', 'false', 'core.ignorecase') !== 'true') return
     writeFileSync(join(cwd, 'Readme.md'), 'hello\n')
     git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'readme')
     const to = git(cwd, 'rev-parse', 'HEAD^{tree}')
