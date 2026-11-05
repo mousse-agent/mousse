@@ -65,6 +65,14 @@
   padding-right: 44px;
 }
 
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread:not(.threads-sidebar-card) {
+  padding-right: var(--thread-actions-room);
+}
+
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-trailing {
+  right: 46px;
+}
+
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-actions {
   right: 42px;
 }

@@ -100,52 +100,18 @@ function projectInitials(name: string): string {
   return letters.toUpperCase() || '•'
 }
 
-/** On hover, a title cut off by an ellipsis gets the full text as its native tooltip. */
+/** On hover, a title cut off by an ellipsis gets the full text as its native tooltip; one that fits gets none. */
 const tooltipIfTruncated = (fullTitle: string) => (event: React.MouseEvent<HTMLElement>) => {
   const element = event.currentTarget
-  element.title = element.scrollWidth > element.clientWidth ? fullTitle : ''
+  if (element.scrollWidth > element.clientWidth) element.title = fullTitle
+  else element.removeAttribute('title')
 }
 
-/** A row's title. When it does not fit, `fullTitle` is its native tooltip; a title that fits needs none. */
-function ScrollingThreadTitle({ name, fullTitle, onDoubleClick }: { name: string; fullTitle?: string; onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void }) {
-  const containerRef = useRef<HTMLSpanElement>(null)
-  const textRef = useRef<HTMLSpanElement>(null)
-  const [overflowing, setOverflowing] = useState(false)
-
-  const measure = () => {
-    const container = containerRef.current
-    const text = textRef.current
-    if (!container || !text) return
-
-    const overflow = Math.max(0, text.scrollWidth - container.clientWidth)
-    container.dataset.overflow = overflow > 0 ? 'true' : 'false'
-    setOverflowing(overflow > 0)
-    container.style.setProperty('--thread-title-overflow', `${overflow}px`)
-    container.style.setProperty('--thread-title-duration', `${overflow / 50}s`)
-  }
-
-  useEffect(() => {
-    const container = containerRef.current
-    const text = textRef.current
-    if (!container || !text) return
-
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(container)
-    observer.observe(text)
-    return () => observer.disconnect()
-  }, [name])
-
+/** A row's title: it ends in an ellipsis where it does not fit and stays still on hover, the full text in its tooltip. */
+function ThreadTitle({ name, fullTitle, onDoubleClick }: { name: string; fullTitle?: string; onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void }) {
   return (
-    <span
-      ref={containerRef}
-      className="threads-sidebar-thread-name"
-      data-overflow="false"
-      title={overflowing ? fullTitle ?? name : undefined}
-      onMouseEnter={measure}
-      onDoubleClick={onDoubleClick}
-    >
-      <span ref={textRef} className="threads-sidebar-thread-name-text">{name}</span>
+    <span className="threads-sidebar-thread-name" onMouseEnter={tooltipIfTruncated(fullTitle ?? name)} onDoubleClick={onDoubleClick}>
+      {name}
     </span>
   )
 }
@@ -408,9 +374,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [archivedExpanded, setArchivedExpanded] = useState(false)
   const [noProjectExpanded, setNoProjectExpanded] = useState(false)
-  // The Projects tree's one Tab stop (`project:<id>` or `thread:<id>`): the row that last had focus.
+  // The row of the Projects or "No project" tree that last had focus (`project:<id>` or `thread:<id>`): its tree's Tab stop.
   const [treeFocus, setTreeFocus] = useState<string | null>(null)
-  const treeRef = useRef<HTMLDivElement>(null)
   // The project whose "start from a pull request" dialog is open.
   const [pullRequestProject, setPullRequestProject] = useState<{ id: string; name: string } | null>(null)
 
@@ -607,16 +572,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     return [key, ...visible.map((thread) => `thread:${thread.id}`)]
   })
   const highlightedKey = `thread:${openSubagentParentId ?? activeThreadId}`
-  const treeTabStop = treeFocus && treeKeys.includes(treeFocus)
+  // Each tree is one Tab stop: the row last focused in it, else the open thread's row, else its first row.
+  const tabStopOf = (keys: string[]) => treeFocus && keys.includes(treeFocus)
     ? treeFocus
-    : treeKeys.includes(highlightedKey) ? highlightedKey : treeKeys[0]
+    : keys.includes(highlightedKey) ? highlightedKey : keys[0]
+  const treeTabStop = tabStopOf(treeKeys)
+  // "No project" under the lists is a tree of its own, its threads one level deep, walked with the same keys.
+  const noProjectTabStop = tabStopOf(noProjectExpanded ? orphanThreads.map((thread) => `thread:${thread.id}`) : [])
 
   /** Up and Down move between the tree's shown rows, Home and End to its ends, Right and Left open and close a project. */
   const onTreeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const row = event.target as HTMLElement
     const key = row.dataset.treeKey
-    if (!key || !treeRef.current || event.altKey || event.ctrlKey || event.metaKey) return
-    const rows = [...treeRef.current.querySelectorAll<HTMLElement>('[role="treeitem"]')].filter((item) => !item.closest('[inert]'))
+    if (!key || event.altKey || event.ctrlKey || event.metaKey) return
+    const rows = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="treeitem"]')].filter((item) => !item.closest('[inert]'))
     const index = rows.indexOf(row)
     const isProject = key.startsWith('project:')
     const id = key.slice(key.indexOf(':') + 1)
@@ -653,7 +622,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       case 'ArrowLeft':
         if (isProject) {
           if (expandedProjects.has(id)) toggleProject(id)
-        } else {
+        } else if (row.getAttribute('aria-level') === '2') {
           focusRow(rows.slice(0, index).reverse().find((item) => item.getAttribute('aria-level') === '1'))
         }
         break
@@ -999,14 +968,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   /**
    * `inNeedsMe`: a copy of the row in the "Needs me" group, which filters rows and so does not reorder them.
-   * `inTree`: a thread row of the Projects tree, a tree item with a roving tab stop; `clipped` marks one past
-   * a project's preview of 5 that is not shown, which keyboard and screen readers skip until it is.
+   * `inTree`: a thread row of the Projects tree (or, with `treeLevel` 1 and `treeTabStop` of its own, of the
+   * "No project" tree), a tree item with a roving tab stop; `clipped` marks one past a project's preview of 5
+   * that is not shown, which keyboard and screen readers skip until it is.
    */
-  const renderThreadRow = (thread: (typeof threads)[number], { root = false, layout = 'row', inNeedsMe = false, inTree = false, clipped = false }: {
+  const renderThreadRow = (thread: (typeof threads)[number], { root = false, layout = 'row', inNeedsMe = false, inTree = false, treeLevel = 2, tabStop = treeTabStop, clipped = false }: {
     root?: boolean
     layout?: 'row' | 'card'
     inNeedsMe?: boolean
     inTree?: boolean
+    treeLevel?: 1 | 2
+    tabStop?: string
     clipped?: boolean
   } = {}) => {
 
@@ -1060,9 +1032,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         {...(inTree ? {
           role: 'treeitem',
-          'aria-level': 2,
+          'aria-level': treeLevel,
           'aria-selected': isActive || openSubagentParentId === thread.id,
-          tabIndex: treeTabStop === `thread:${thread.id}` ? 0 : -1,
+          tabIndex: tabStop === `thread:${thread.id}` ? 0 : -1,
           'data-tree-key': `thread:${thread.id}`,
           onFocus: () => setTreeFocus(`thread:${thread.id}`)
         } : {})}
@@ -1156,7 +1128,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ) : (
 
-          <ScrollingThreadTitle name={thread.name} fullTitle={fullTitle} onDoubleClick={renameFromTitle} />
+          <ThreadTitle name={thread.name} fullTitle={fullTitle} onDoubleClick={renameFromTitle} />
 
         )}
 
@@ -1302,7 +1274,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ) : (
 
-        <div ref={treeRef} className="threads-sidebar-tree" role="tree" aria-label="Projects" onKeyDown={onTreeKeyDown}>
+        <div className="threads-sidebar-tree" role="tree" aria-label="Projects" onKeyDown={onTreeKeyDown}>
 
           {projectGroups.map((group) => {
 
@@ -1619,13 +1591,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </button>
           </div>
           {/* The same rows and indent as a project's threads. */}
-          {noProjectExpanded && <div className="threads-sidebar-tree">
-            <div className="threads-sidebar-children">
-              {orphanThreads.length === 0
-                ? <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
-                : orphanThreads.map((thread) => renderThreadRow(thread))}
+          {noProjectExpanded && (orphanThreads.length === 0 ? (
+            <div className="threads-sidebar-tree">
+              <div className="threads-sidebar-children">
+                <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
+              </div>
             </div>
-          </div>}
+          ) : (
+            <div className="threads-sidebar-tree" role="tree" aria-label="No project" onKeyDown={onTreeKeyDown}>
+              <div className="threads-sidebar-children" role="none">
+                {orphanThreads.map((thread) => renderThreadRow(thread, { inTree: true, treeLevel: 1, tabStop: noProjectTabStop }))}
+              </div>
+            </div>
+          ))}
         </section>
 
         <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? '' : ' collapsed'}`} aria-label="Archived">

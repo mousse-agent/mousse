@@ -2,17 +2,17 @@
 /**
  * Sidebar rows show their state: an empty project offers New thread, project rows have a disclosure chevron and a
  * tooltip with their folder, pinned threads list first, pinned cards carry the pin on their meta line, "No project"
- * rows sit at the tree's indent, and the project menu holds every project action. While a menu is open the
- * sidebar is marked so other rows do not light their actions.
+ * rows sit at the tree's indent and form a tree the keyboard walks, thread titles end in an ellipsis and never move
+ * on hover, and the project menu holds every project action, the rare Git one in a submenu. While a menu is open
+ * the sidebar is marked so other rows do not light their actions.
  */
+import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EditorInfo, Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-// Row titles measure themselves; jsdom has no layout.
-globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
 const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
@@ -159,6 +159,51 @@ describe('No project', () => {
     expect(row.closest('.threads-sidebar-children')).not.toBeNull()
     expect(row.classList.contains('threads-sidebar-thread-root')).toBe(false)
   })
+
+  it('is a tree the keyboard walks, with one Tab stop of its own', () => {
+    show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined, order: 0 }), thread('c', 'Stray', { projectId: undefined, order: 1 })])
+    click([...host.querySelectorAll('.threads-sidebar-heading-toggle')].find((item) => item.textContent?.startsWith('No project'))!)
+    const tree = host.querySelector('section[aria-label="No project"] [role="tree"]')!
+    expect(tree.getAttribute('aria-label')).toBe('No project')
+    const items = () => [...tree.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+    expect(items().map((item) => [item.dataset.threadId, item.getAttribute('aria-level'), item.tabIndex])).toEqual([['b', '1', 0], ['c', '1', -1]])
+    // The Projects tree keeps its own Tab stop.
+    expect(projectRow().tabIndex).toBe(0)
+    items()[0].focus()
+    key(items()[0], { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items()[1])
+    expect(items().map((item) => item.tabIndex)).toEqual([-1, 0])
+    key(items()[1], { key: 'Home' })
+    expect(document.activeElement).toBe(items()[0])
+    key(items()[0], { key: 'End' })
+    expect(document.activeElement).toBe(items()[1])
+    // No parent row to go back to: Left stays put.
+    key(items()[1], { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(items()[1])
+    expect(projectRow().tabIndex).toBe(0)
+  })
+})
+
+describe('thread titles', () => {
+  const css = readFileSync('src/renderer/styles/threads-sidebar.css', 'utf8')
+
+  it('keep the hover actions\' room at rest, so nothing moves when the pointer arrives', () => {
+    const rest = /\n\.threads-sidebar-thread-container > \.threads-sidebar-thread:not\(\.threads-sidebar-card\) \{([^}]*)\}/.exec(css)
+    expect(rest?.[1]).toMatch(/padding-right:\s*var\(--thread-actions-room\)/)
+    // No rule changes a row's padding on hover or focus.
+    for (const [, selector, body] of css.matchAll(/([^{}]*):(?:hover|focus-within)[^{}]*\{([^}]*)\}/g)) {
+      if (selector.includes('threads-sidebar-thread')) expect(body).not.toMatch(/padding/)
+    }
+  })
+
+  it('end in an ellipsis instead of scrolling, the full title in the tooltip', () => {
+    expect(css).not.toMatch(/threads-sidebar-title-scroll|thread-title-overflow/)
+    show([thread('a', 'A very long thread title that does not fit')])
+    openProject()
+    const title = host.querySelector('button[data-thread-id="a"] .threads-sidebar-thread-name')!
+    expect(title.children).toHaveLength(0)
+    expect(title.textContent).toBe('A very long thread title that does not fit')
+  })
 })
 
 describe('the project menu', () => {
@@ -168,9 +213,44 @@ describe('the project menu', () => {
     expect(menuEntries()).toEqual([
       'New thread', 'New thread from a pull request', '—',
       'Open in Cursor', 'Show in Finder', 'Copy path', '—',
-      'Pin', 'Rename', 'Trust this repository\'s Git settings', '—',
+      'Pin', 'Rename', 'Git', '—',
       'Remove project…'
     ])
+  })
+
+  it('keeps "Trust this repository\'s Git settings" in a Git submenu, reached by pointer and keyboard', async () => {
+    const trustGitSettings = vi.fn(async () => ({ filters: [] }))
+    ;(window as unknown as { mousse: Record<string, unknown> }).mousse = new Proxy({ projects: { trustGitSettings } } as Record<string, unknown>, {
+      get: (target, name: string) => target[name] ?? (preload() as Record<string, unknown>)[name]
+    })
+    show([])
+    openMenu()
+    const git = menuItem('Git')
+    expect(git.getAttribute('aria-haspopup')).toBe('menu')
+    expect(git.getAttribute('aria-expanded')).toBe('false')
+    expect(document.body.textContent).not.toContain('Trust this repository')
+
+    git.focus()
+    key(git, { key: 'ArrowRight' })
+    const trust = menuItem('Trust this repository\'s Git settings')
+    expect(trust.closest('[role="menu"]')?.getAttribute('aria-label')).toBe('Git')
+    expect(document.activeElement).toBe(trust)
+    // The submenu's arrows stay in it; Left goes back to Git and the menu stays open.
+    key(trust, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(trust)
+    key(trust, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(menuItem('Git'))
+    expect(menuItem('Git').getAttribute('aria-expanded')).toBe('false')
+    expect(menu()).not.toBeNull()
+    // The parent's arrows skip the closed submenu.
+    key(menuItem('Git'), { key: 'ArrowDown' })
+    expect(document.activeElement?.textContent).toBe('Remove project…')
+
+    act(() => { menuItem('Git').parentElement!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body })) })
+    click(menuItem('Trust this repository\'s Git settings'))
+    await flush()
+    expect(trustGitSettings).toHaveBeenCalledWith('p1')
+    expect(menu()).toBeNull()
   })
 
   it('opens the folder in the editor and the file manager, and copies its path', async () => {

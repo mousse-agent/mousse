@@ -348,27 +348,6 @@
   white-space: nowrap;
 }
 
-.threads-sidebar-thread-name-text {
-  display: inline-block;
-  min-width: 100%;
-  will-change: transform;
-}
-
-.threads-sidebar-thread:hover
-  .threads-sidebar-thread-name[data-overflow='true']
-  .threads-sidebar-thread-name-text {
-  animation: threads-sidebar-title-scroll var(--thread-title-duration, 2s) linear 0.08s 1 normal forwards;
-}
-
-@keyframes threads-sidebar-title-scroll {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(calc(-1 * var(--thread-title-overflow, 0px)));
-  }
-}
-
 .threads-sidebar-children {
   margin: 2px 0 8px 17px;
   padding-left: 6px;
@@ -397,11 +376,26 @@
   --thread-actions-room: 76px;
 }
 
-/* A row's hover actions take their own room, so a long title ends in an ellipsis before them, not under them.
-   A card keeps its actions over the age line, clear of the title. */
-.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread:not(.threads-sidebar-card),
-.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread:not(.threads-sidebar-card) {
+/* A row keeps its hover actions' room at rest too, so a long title always ends in an ellipsis before them and
+   nothing moves when the pointer arrives. At rest the room holds the status, computer and worktree marks; the
+   actions take their place on hover. A card keeps its actions over the age line, clear of the title. */
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
+  position: relative;
   padding-right: var(--thread-actions-room);
+}
+
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
+  position: absolute;
+  top: 50%;
+  right: var(--ui-row-x, 9px);
+  margin-left: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
+  opacity: 0;
 }
 
 .threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
@@ -876,6 +870,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-context-menu-item:focus-visible {
   outline: none;
   background: var(--ui-hover);
+}
+
+/* "Git ›": its menu opens beside the row, or on the left when the window has no room on the right. */
+.threads-context-submenu-anchor {
+  position: relative;
+}
+
+.threads-context-submenu-trigger[aria-expanded='true'] {
+  background: var(--ui-hover);
+}
+
+.threads-context-menu-item .threads-context-submenu-chevron {
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+
+.threads-context-menu.threads-context-submenu {
+  position: absolute;
+  top: calc(-1 * var(--ui-menu-pad, 4px) - 1px);
+  left: 100%;
+  white-space: nowrap;
+}
+
+.threads-context-menu.threads-context-submenu.flip {
+  right: 100%;
+  left: auto;
 }
 
 .threads-context-menu-item-danger {

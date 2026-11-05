@@ -572,7 +572,7 @@ export async function noRepoProgramArgsAsync(cwd: string, args: readonly string[
 export function filterRefusal(output: string): string | null {
   const match = /(?:clean|smudge) filter '([^']+)' failed/.exec(output)
   if (!match) return null
-  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example), and it is not the one Mousse recorded when the project was added. Mousse runs only the repository's filters it recorded, so it left these files alone instead of storing them unfiltered. If you set up or changed this filter yourself, right-click the project in the sidebar and choose "Trust this repository's Git settings".`
+  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example), and it is not the one Mousse recorded when the project was added. Mousse runs only the repository's filters it recorded, so it left these files alone instead of storing them unfiltered. If you set up or changed this filter yourself, right-click the project in the sidebar and choose Git > "Trust this repository's Git settings".`
 }
 
 /**

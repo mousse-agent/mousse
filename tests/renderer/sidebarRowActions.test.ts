@@ -11,8 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-// Row titles measure themselves; jsdom has no layout.
-globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
 const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
@@ -205,7 +203,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Trust this repository\'s Git settings', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Git', 'Remove project…'])
   })
 })
 

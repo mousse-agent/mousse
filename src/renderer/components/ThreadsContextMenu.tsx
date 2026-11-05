@@ -1,14 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import {
   ArchiveArrowBackRegular,
   ArchiveRegular,
   ArrowSyncRegular,
+  ChevronRight,
   Code2,
   Copy,
   DeleteRegular,
   EditRegular,
   FolderSearch,
+  GitBranch,
   GitPullRequest,
   MessageSquarePlus,
   PinOffRegular,
@@ -65,6 +67,83 @@ interface ThreadsContextMenuProps {
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
+
+/**
+ * "Git ›": rarely needed project actions, one level down. Opens on hover, click, Enter, Space or the right arrow
+ * (focusing its first item); the left arrow or Escape closes it and returns to "Git".
+ */
+function GitSubmenu({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const [focusFirst, setFocusFirst] = useState(false)
+  const [flip, setFlip] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const submenuRef = useRef<HTMLDivElement>(null)
+  const close = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
+  const onSubmenuKeyDown = useMenuKeyboard(submenuRef, close)
+
+  useLayoutEffect(() => {
+    const submenu = submenuRef.current
+    if (!open || !submenu) return
+    setFlip(submenu.getBoundingClientRect().right > window.innerWidth - 8)
+    if (focusFirst) {
+      focusInitialMenuItem(submenu)
+      setFocusFirst(false)
+    }
+  }, [open, focusFirst])
+
+  const openWithKeyboard = () => {
+    setOpen(true)
+    setFocusFirst(true)
+  }
+
+  return (
+    <div className="threads-context-submenu-anchor" role="none" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="threads-context-menu-item threads-context-submenu-trigger"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={openWithKeyboard}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            event.stopPropagation()
+            openWithKeyboard()
+          } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') setOpen(false)
+        }}
+      >
+        <GitBranch />
+        <span>Git</span>
+        <ChevronRight className="threads-context-submenu-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          ref={submenuRef}
+          className={`threads-context-menu threads-context-submenu${flip ? ' flip' : ''}`}
+          role="menu"
+          aria-label="Git"
+          data-submenu=""
+          onKeyDown={(event) => {
+            event.stopPropagation()
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault()
+              close()
+              return
+            }
+            onSubmenuKeyDown(event)
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function ThreadsContextMenu({
   x,
@@ -210,16 +289,18 @@ export function ThreadsContextMenu({
           <span>Rename</span>
         </button>
         {target.type === 'project' && onTrustGitSettings && !target.node && (
-          <button
-            type="button"
-            className="threads-context-menu-item"
-            role="menuitem"
-            title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
-            onClick={onTrustGitSettings}
-          >
-            <ShieldCheck />
-            <span>Trust this repository's Git settings</span>
-          </button>
+          <GitSubmenu>
+            <button
+              type="button"
+              className="threads-context-menu-item"
+              role="menuitem"
+              title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
+              onClick={onTrustGitSettings}
+            >
+              <ShieldCheck />
+              <span>Trust this repository's Git settings</span>
+            </button>
+          </GitSubmenu>
         )}
         {target.type === 'project' && <Separator />}
         <button
