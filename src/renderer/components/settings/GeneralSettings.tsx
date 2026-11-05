@@ -1,201 +1,29 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import { useEffect, useState, type ReactNode } from 'react'
+import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
-import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { Bell, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
-import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
 import { RunSettingsGroup } from './RunSettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
 const BUILD_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION__ : ''
 
-function themePreviewClass(themeId: ThemeId): string {
-  switch (themeId) {
-    case 'light':
-      return 'preview-light'
-    case 'system':
-      return 'preview-system'
-    case 'blacksphere-plus':
-      return 'preview-blacksphere-plus'
-    case 'solarized-dark':
-      return 'preview-solarized-dark'
-    case 'github-dark':
-      return 'preview-github-dark'
-    case 'high-contrast':
-      return 'preview-high-contrast'
-    case 'dark':
-    default:
-      return 'preview-dark'
-  }
-}
-
-/** A thumbnail in the theme's own fixed swatches (settings.css), whatever theme is active. */
-function ThemePreview({ themeId }: { themeId: ThemeId }) {
-  return (
-    <div className={`theme-preview ${themePreviewClass(themeId)}`} aria-hidden="true">
-      <div className="theme-preview-titlebar" />
-      <div className="theme-preview-body">
-        <div className="theme-preview-sidebar" />
-        <div className="theme-preview-main" />
-      </div>
-    </div>
-  )
-}
-
 export interface GeneralSettingsProps {
   settings: MousseSettings
-  options: SettingsOptions
   onUpdate: (partial: MousseSettingsUpdate) => Promise<void>
-  /** Windows refused a live acrylic change; offer a restart. */
-  restartRequired: boolean
-  onRestart: () => void
-  /** Applies a glass intensity locally while the slider moves. */
-  onPreviewAcrylicIntensity: (value: number) => void
-  /** Saves a glass intensity (debounced by the caller). */
-  onCommitAcrylicIntensity: (value: number) => void
 }
 
-/** Settings → General: appearance, permissions, runs, notifications, privacy and the installed version. */
-export function GeneralSettings({
-  settings,
-  options,
-  onUpdate,
-  restartRequired,
-  onRestart,
-  onPreviewAcrylicIntensity,
-  onCommitAcrylicIntensity
-}: GeneralSettingsProps) {
-  const appearance = settings.appearance
-  const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme) void onUpdate({ appearance: { ...appearance, theme } }) }
-  const themeChosen = options.themes.some((theme) => theme.id === appearance.theme)
-  const accentChosen = options.accentColors.some((color) => color.value === appearance.accentColor)
-
+/** Settings → General: permissions, runs, notifications and the installed version. */
+export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
   return (
     <section id="general" className="settings-section">
-      <SettingsGroup title="Appearance" icon={Palette}>
-        <SettingsRow title="Color theme" anchor="general-theme">
-          <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
-            {options.themes.map((theme, index) => {
-              const selected = appearance.theme === theme.id
-              return (
-                <div
-                  key={theme.id}
-                  className={`theme-card${selected ? ' selected' : ''}`}
-                  onClick={() => setTheme(theme.id)}
-                  onKeyDown={(e) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return
-                    e.preventDefault()
-                    setTheme(theme.id)
-                  }}
-                  role="radio"
-                  aria-checked={selected}
-                  tabIndex={radioTabIndex(selected, index, themeChosen)}
-                >
-                  <ThemePreview themeId={theme.id} />
-                  <span className="theme-card-label">{theme.label}</span>
-                </div>
-              )
-            })}
-          </div>
-        </SettingsRow>
-        <SettingsRow
-          title="Accent color"
-          anchor="general-accent"
-          control={
-            <div className="accent-grid" role="radiogroup" aria-label="Accent color" onKeyDown={onRadioGroupKeyDown}>
-              {options.accentColors.map((color, index) => {
-                const selected = appearance.accentColor === color.value
-                return (
-                  <button
-                    key={color.id}
-                    type="button"
-                    role="radio"
-                    className={`accent-swatch${selected ? ' selected' : ''}`}
-                    style={{ backgroundColor: color.value }}
-                    title={color.label}
-                    aria-label={color.label}
-                    aria-checked={selected}
-                    tabIndex={radioTabIndex(selected, index, accentChosen)}
-                    onClick={() => { if (!selected) void onUpdate({ appearance: { ...appearance, accentColor: color.value } }) }}
-                  />
-                )
-              })}
-            </div>
-          }
-        />
-        <SettingsRow
-          title="Acrylic glass"
-          anchor="general-acrylic"
-          description={<>
-            <span title="The desktop shows blurred through the window on Windows, macOS and KDE Plasma.">Translucent window</span>
-            {restartRequired && (
-              <>
-                {' · '}
-                <button type="button" className="theme-restart-link" onClick={onRestart}>
-                  Restart to apply
-                </button>
-              </>
-            )}
-          </>}
-          control={
-            <Switch
-              label="Acrylic glass"
-              checked={appearance.acrylic}
-              onChange={(acrylic) => void onUpdate({ appearance: { ...appearance, acrylic } })}
-            />
-          }
-        />
-        <SettingsRow
-          title="Glass intensity"
-          anchor="general-glass-intensity"
-          htmlFor="acrylic-intensity"
-          description="Blur and opacity of the glass layers, from solid to glassy."
-          disabled={!appearance.acrylic}
-          control={
-            <>
-              <input
-                id="acrylic-intensity"
-                type="range"
-                className="acrylic-intensity-dial"
-                min={0}
-                max={100}
-                step={1}
-                disabled={!appearance.acrylic}
-                value={appearance.acrylicIntensity}
-                style={{ '--fill': `${appearance.acrylicIntensity}%` } as CSSProperties}
-                onInput={(e) => {
-                  // React maps range onChange → continuous input; use only onInput so we
-                  // do not double-fire IPC and snap the controlled thumb backward.
-                  const acrylicIntensity = Number(e.currentTarget.value)
-                  onPreviewAcrylicIntensity(acrylicIntensity)
-                  onCommitAcrylicIntensity(acrylicIntensity)
-                }}
-              />
-              <span className="acrylic-intensity-value">{appearance.acrylicIntensity}</span>
-            </>
-          }
-        />
-        <SettingsRow
-          title="Render math"
-          anchor="general-render-math"
-          description="Show LaTeX in replies and Markdown previews as formatted equations."
-          control={
-            <Switch
-              label="Render math"
-              checked={appearance.renderMath}
-              onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
-            />
-          }
-        />
-      </SettingsGroup>
-
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"

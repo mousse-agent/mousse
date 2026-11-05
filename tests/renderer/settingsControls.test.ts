@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Segmented } from '../../src/renderer/components/settings/SettingsRow'
 import { GeneralSettings } from '../../src/renderer/components/settings/GeneralSettings'
+import { AppearanceSettings } from '../../src/renderer/components/settings/AppearanceSettings'
 import { AgentsSettings } from '../../src/renderer/components/settings/AgentsSettings'
 import { SettingsModelPicker } from '../../src/renderer/components/settings/SettingsModelPicker'
 import { radioKeyTarget } from '../../src/renderer/lib/radioGroupKeys'
@@ -73,7 +74,7 @@ describe('radio group keys', () => {
   })
 })
 
-describe('Settings > General', () => {
+describe('Settings > Appearance and General', () => {
   let home: string
   let store: SettingsStore
   const OPTIONS: SettingsOptions = {
@@ -90,7 +91,7 @@ describe('Settings > General', () => {
   afterEach(() => rmSync(home, { recursive: true, force: true }))
 
   const show = () => {
-    const draw = () => act(() => root.render(createElement(GeneralSettings, {
+    const draw = () => act(() => root.render(createElement(AppearanceSettings, {
       settings: store.get(),
       options: OPTIONS,
       onUpdate: async (partial) => { store.set(partial); draw() },
@@ -98,6 +99,13 @@ describe('Settings > General', () => {
       onRestart: () => {},
       onPreviewAcrylicIntensity: () => {},
       onCommitAcrylicIntensity: () => {}
+    })))
+    draw()
+  }
+  const showGeneral = () => {
+    const draw = () => act(() => root.render(createElement(GeneralSettings, {
+      settings: store.get(),
+      onUpdate: async (partial) => { store.set(partial); draw() }
     })))
     draw()
   }
@@ -128,14 +136,14 @@ describe('Settings > General', () => {
 
   it('describes the glass in two words', () => {
     show()
-    const row = host.querySelector('[data-settings-anchor="general-acrylic"]')!
+    const row = host.querySelector('[data-settings-anchor="appearance-acrylic"]')!
     expect(row.querySelector('.settings-item-desc')!.textContent).toBe('Translucent window')
     expect(row.textContent).not.toContain('Restart to apply')
   })
 
   it('shows the version without an update button in a build where updates are off', () => {
     act(() => useUpdateStore.setState({ phase: 'disabled', currentVersion: '1.2.3', disabledReason: 'Updates are not available in this build.' }))
-    show()
+    showGeneral()
     const about = host.querySelector('[data-settings-anchor="general-updates"]')!
     expect(about.textContent).toContain('Mousse 1.2.3')
     expect(about.textContent).toContain('Updates are not available in this build.')

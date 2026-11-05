@@ -1,7 +1,7 @@
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'account', 'providers', 'agents', 'integrations', 'speech', 'shortcuts', 'connections', 'storage'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'account', 'providers', 'agents', 'integrations', 'speech', 'shortcuts', 'connections', 'storage'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -24,11 +24,14 @@ export interface SettingsSearchEntry {
 
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
 export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
-  { title: 'Color theme', section: 'general', anchor: 'general-theme', keywords: ['appearance', 'dark', 'light', 'high contrast'] },
-  { title: 'Accent color', section: 'general', anchor: 'general-accent', keywords: ['colour', 'appearance'] },
-  { title: 'Acrylic glass', section: 'general', anchor: 'general-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },
-  { title: 'Glass intensity', section: 'general', anchor: 'general-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
-  { title: 'Render math', section: 'general', anchor: 'general-render-math', keywords: ['latex', 'equations'] },
+  { title: 'Color theme', section: 'appearance', anchor: 'appearance-theme', keywords: ['appearance', 'dark', 'light', 'high contrast'] },
+  { title: 'Accent color', section: 'appearance', anchor: 'appearance-accent', keywords: ['colour', 'appearance'] },
+  { title: 'Acrylic glass', section: 'appearance', anchor: 'appearance-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },
+  { title: 'Glass intensity', section: 'appearance', anchor: 'appearance-glass-intensity', keywords: ['acrylic', 'blur', 'opacity'] },
+  { title: 'Render math', section: 'appearance', anchor: 'appearance-render-math', keywords: ['latex', 'equations'] },
+  { title: 'Interface font', section: 'appearance', anchor: 'appearance-interface-font', keywords: ['typeface', 'text', 'google fonts'] },
+  { title: 'Code font', section: 'appearance', anchor: 'appearance-code-font', keywords: ['monospace', 'typeface', 'terminal', 'editor'] },
+  { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
   { title: 'Start new chats in a worktree', section: 'general', anchor: 'general-worktree-default', keywords: ['branch'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
