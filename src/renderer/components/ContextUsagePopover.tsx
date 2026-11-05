@@ -3,7 +3,7 @@ import { Settings } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { modelLabel } from '../../shared/modelChoice'
 import { resolveModelChoice } from '../lib/modelChoice'
-import type { ContextUsageSnapshot } from '../../shared/types'
+import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 function formatTokenCount(tokens: number): string {
@@ -13,6 +13,32 @@ function formatTokenCount(tokens: number): string {
     return k >= 100 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`
   }
   return String(tokens)
+}
+
+/**
+ * Whether the snapshot says how full the context is: the model's capacity is reported and the
+ * context itself (not the unsent draft) holds tokens. A new chat, a provider that reports no
+ * usage, and a snapshot that has not arrived yet are unknown, never "0%".
+ */
+export function contextUsageKnown(usage: ContextUsageSnapshot): boolean {
+  if (!Number.isFinite(usage.limit) || usage.limit <= 0) return false
+  return usage.categories.some((category) => category.label !== CONTEXT_DRAFT_CATEGORY && category.tokens > 0)
+}
+
+export type ContextUsageLevel = 'normal' | 'warning' | 'danger'
+
+/** Accent below 75%, warning from 75%, danger from 90%. */
+export function contextUsageLevel(percent: number): ContextUsageLevel {
+  if (percent >= 90) return 'danger'
+  if (percent >= 75) return 'warning'
+  return 'normal'
+}
+
+/** "62% · 124K of 200K", with "~" when the count is estimated rather than measured. */
+export function contextUsageSummary(usage: ContextUsageSnapshot): string {
+  const percent = usage.percent === 0 && usage.used > 0 ? '<1%' : `${usage.percent}%`
+  const approximate = usage.source === 'measured' ? '' : '~'
+  return `${percent} · ${approximate}${formatTokenCount(usage.used)} of ${formatTokenCount(usage.limit)}`
 }
 
 interface ContextUsagePopoverProps {
@@ -25,8 +51,9 @@ interface ContextUsagePopoverProps {
 }
 
 /**
- * How full the model's context is: the share as a number and a bar against capacity, what fills
- * it, and a link to the compaction settings.
+ * What fills the model's context: a bar against capacity, the breakdown, and a link to the
+ * compaction settings. The share and totals are on the ring's tooltip, so they are not repeated.
+ * Only opened for a snapshot where `contextUsageKnown` holds.
  */
 export function ContextUsagePopover({
   open,
@@ -72,12 +99,8 @@ export function ContextUsagePopover({
 
   if (!open) return null
 
-  const capacityKnown = Number.isFinite(usage.limit) && usage.limit > 0
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
-  // Against capacity the bar shows how full the context is; without one, only what fills it.
-  const barScale = capacityKnown ? Math.max(usage.limit, segmentTotal) : segmentTotal
-  const percentLabel = !capacityKnown ? '—' : usage.percent === 0 && usage.used > 0 ? '<1%' : `${usage.percent}%`
-  const approximate = usage.source === 'measured' ? '' : '~'
+  const barScale = Math.max(usage.limit, segmentTotal)
   const openSettings = () => {
     onClose()
     window.location.hash = 'settings-context-compaction'
@@ -91,7 +114,7 @@ export function ContextUsagePopover({
         className="context-usage-popover context-usage-popover-floating"
         ref={popoverRef}
         role="dialog"
-        aria-label="Context usage"
+        aria-label={`Context usage: ${contextUsageSummary(usage)} tokens`}
         style={floatingStyle}
       >
         <div className="context-usage-header">
@@ -108,14 +131,6 @@ export function ContextUsagePopover({
           >
             <Settings size={14} />
           </button>
-        </div>
-
-        <div className="context-usage-summary">
-          <span className="context-usage-percent">{percentLabel}</span>
-          <span className="context-usage-total">
-            {approximate}{formatTokenCount(usage.used)}
-            {capacityKnown ? ` of ${formatTokenCount(usage.limit)} tokens` : ' tokens · capacity not reported yet'}
-          </span>
         </div>
 
         <div className="context-usage-bar" aria-hidden="true">
@@ -157,17 +172,19 @@ export function ContextUsagePopover({
 }
 
 interface ContextUsageRingProps {
-  percent: number
-  capacityKnown?: boolean
+  /** A snapshot where `contextUsageKnown` holds; the caller renders no ring otherwise. */
+  usage: ContextUsageSnapshot
   onClick: () => void
   active: boolean
 }
 
 export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingProps>(
-  function ContextUsageRing({ percent, capacityKnown = true, onClick, active }, ref) {
+  function ContextUsageRing({ usage, onClick, active }, ref) {
     const radius = 9
     const circumference = 2 * Math.PI * radius
+    const percent = Math.min(100, Math.max(0, usage.percent))
     const strokeOffset = circumference - (percent / 100) * circumference
+    const summary = contextUsageSummary(usage)
 
     return (
       <button
@@ -175,33 +192,30 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
         type="button"
         className={`composer-icon-btn context-usage-btn${active ? ' active' : ''}`}
         onClick={onClick}
-        title={capacityKnown ? 'Context usage' : 'Context usage: model capacity not reported yet'}
-        aria-label={capacityKnown ? `Context usage ${percent}% full` : 'Context usage, model capacity not reported yet'}
+        title={summary}
+        aria-label={`Context usage: ${summary} tokens`}
         aria-expanded={active}
       >
-        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+        <svg
+          className={`context-usage-ring is-${contextUsageLevel(percent)}`}
+          width="20"
+          height="20"
+          viewBox="0 0 20 20"
+          aria-hidden="true"
+        >
+          <circle className="context-usage-ring-track" cx="10" cy="10" r={radius} fill="none" strokeWidth="2" />
           <circle
+            className="context-usage-ring-arc"
             cx="10"
             cy="10"
             r={radius}
             fill="none"
-            stroke="rgba(var(--accent-rgb), 0.2)"
             strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeOffset}
+            transform="rotate(-90 10 10)"
           />
-          {capacityKnown && (
-            <circle
-              cx="10"
-              cy="10"
-              r={radius}
-              fill="none"
-              stroke="var(--accent-hover)"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeDasharray={circumference}
-              strokeDashoffset={strokeOffset}
-              transform="rotate(-90 10 10)"
-            />
-          )}
         </svg>
       </button>
     )
