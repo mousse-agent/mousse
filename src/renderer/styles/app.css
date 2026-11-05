@@ -1201,53 +1201,6 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-pale-rgb), 0.08);
 }
 
-.steer-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 4px 0;
-  padding: 6px 8px 6px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(var(--accent-rgb, 99, 102, 241), 0.35);
-  background: rgba(var(--accent-pale-rgb), 0.1);
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--text-primary);
-}
-
-.steer-pill-label {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: normal;
-  color: var(--accent-color, var(--text-primary));
-}
-
-.steer-pill-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.steer-pill-dismiss {
-  flex-shrink: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  border-radius: 6px;
-  padding: 2px 6px;
-}
-
-.steer-pill-dismiss:hover {
-  background: rgba(var(--accent-pale-rgb), 0.14);
-  color: var(--text-primary);
-}
-
 .queued-messages-handle {
   display: flex;
   align-items: center;
@@ -1393,65 +1346,133 @@ html.platform-darwin .titlebar-left {
   cursor: not-allowed;
 }
 
-.queued-messages-error {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 8px 2px;
-  padding: 6px 8px 6px 10px;
-  border-radius: 8px;
-  background: rgba(220, 80, 80, 0.12);
-  color: var(--text-primary);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.queued-messages-error-dismiss {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.queued-messages-error-dismiss:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
-}
-
-.connection-failed-pill {
+/* The one notice line above the composer (ComposerNotice). It floats over the transcript's bottom edge, so
+   a notice appearing never moves the composer. Colour is on the tone icon only; the line is a lit surface. */
+.composer-notice-slot {
   position: absolute;
-  right: 20px;
+  left: 16px;
+  right: 16px;
   bottom: calc(100% + 6px);
   z-index: 4;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 9px;
-  border: 1px solid rgba(224, 122, 138, 0.24);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
-  color: var(--text-primary);
-  font-size: 12px;
+  justify-content: center;
+  pointer-events: none;
 }
 
-.connection-failed-pill button {
+.composer-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 4px 4px 4px 12px;
+  border-radius: var(--ui-control-radius, 8px);
+  background: var(--bg-secondary);
+  box-shadow: var(--ui-specular), 0 6px 20px rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.35;
+  pointer-events: auto;
+}
+
+html[data-theme='high-contrast'] .composer-notice {
+  outline: 1px solid var(--ui-line);
+}
+
+.composer-notice-icon {
+  display: inline-flex;
   flex: none;
+  color: var(--text-secondary);
+}
+
+.composer-notice[data-tone='warning'] .composer-notice-icon { color: var(--warning); }
+.composer-notice[data-tone='error'] .composer-notice-icon { color: var(--danger); }
+
+.composer-notice-text {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
   white-space: nowrap;
+}
+
+.composer-notice-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-notice-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.composer-notice-btn,
+.composer-notice-icon-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
   border: 0;
-  border-radius: 6px;
-  padding: 5px 9px;
-  background: rgba(224, 122, 138, 0.16);
-  color: var(--accent-text, white);
-  cursor: pointer;
+  border-radius: var(--ui-control-radius, 8px);
+  background: transparent;
+  color: var(--text-primary);
   font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer-notice-btn {
+  padding: 0 10px;
+  font-weight: 500;
+}
+
+.composer-notice-icon-btn {
+  width: 28px;
+  color: var(--text-secondary);
+}
+
+.composer-notice-btn:hover:not(:disabled),
+.composer-notice-icon-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.composer-notice-btn:active:not(:disabled),
+.composer-notice-icon-btn:active:not(:disabled) {
+  background: var(--ui-pressed);
+}
+
+.composer-notice-btn:focus-visible,
+.composer-notice-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-notice-btn:disabled,
+.composer-notice-icon-btn:disabled,
+.composer-notice-btn[aria-disabled='true'],
+.composer-notice-icon-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* On a new chat the notice takes the place of the logo and the title, which sit where it shows. */
+.chat-input-area:has(> .composer-notice-slot) > .chat-empty-logo,
+.chat-input-area:has(> .composer-notice-slot) > .chat-empty-title {
+  visibility: hidden;
+}
+
+/* Discard, confirmed from a notice: the destructive button says so in red text. */
+.composer-discard-dialog .btn-danger {
+  color: var(--danger);
 }
 
 .composer {
@@ -6088,16 +6109,3 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 
-/* Redo and progress after an Undo: the same pill as other composer notices, without the failure tint. */
-.connection-failed-pill.prompt-undo-notice {
-  border-color: var(--border);
-}
-
-.connection-failed-pill.prompt-undo-notice button {
-  background: var(--ui-raised, rgba(255, 255, 255, 0.06));
-}
-
-.connection-failed-pill.prompt-undo-notice button:disabled {
-  cursor: default;
-  opacity: 0.5;
-}

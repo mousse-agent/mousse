@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Loader2, Mic, X } from '../lib/icons'
+import { Loader2, Mic, RefreshCw, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
 import type { ProviderWithStatus } from '../lib/providerSnapshots'
 import type {
@@ -40,6 +40,7 @@ import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
+import { useComposerNotice } from './ComposerNotice'
 
 export interface AttachedFile {
   id: string
@@ -239,6 +240,16 @@ export function ChatComposer({
   const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
   const [pendingReferences, setPendingReferences] = useState(0)
+  // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
+  useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)
+  useComposerNotice(recordingPending ? { tone: 'info', title: 'Requesting microphone access…' } : null)
+  useComposerNotice(dictation.notice ? { tone: 'info', title: dictation.notice } : null)
+  useComposerNotice(dictation.error ? {
+    tone: 'error',
+    title: dictation.error.message,
+    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: dictation.start }],
+    onDismiss: dictation.dismissError
+  } : null)
   // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
   const skillsPickerDisabled = disableSkillsPicker
   // Inline `@skill` token embedded in the typed text (painted as a pill by
@@ -646,7 +657,6 @@ export function ChatComposer({
   return (
     <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
-      {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
       {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
@@ -831,13 +841,6 @@ export function ChatComposer({
         tabIndex={-1}
       />
 
-      {recordingPending && <p role="status">Requesting microphone access…</p>}
-      {dictation.notice && <p role="status">{dictation.notice}</p>}
-      {dictation.error && <div className="composer-recording-error" role="alert">
-        <p>{dictation.error.message}</p>
-        <button type="button" className="btn btn-ghost btn-sm" disabled={loading || disabled || recordingPending || transcribing} onClick={dictation.start}>Retry microphone</button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={dictation.dismissError}>Dismiss</button>
-      </div>}
       <ComposerFooter
         providers={providers}
         selectedProviderId={selectedProviderId}

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from '../lib/icons'
+import { GripVertical, MoreHorizontal, Pencil, Trash2 } from '../lib/icons'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { noticeSummary } from '../chat/adapters/subagentNotice'
 import { readableError } from '../lib/errorText'
+import { useComposerNotice } from './ComposerNotice'
 
 /** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
@@ -348,32 +349,12 @@ export function QueuedMessages({
     )
   ]
 
-  if (!threadId || displayedItems.length === 0) {
-    return error ? (
-      <div className="queued-messages-error" role="status">
-        {error}
-        <button type="button" className="queued-messages-error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-          <X size={12} strokeWidth={2} />
-        </button>
-      </div>
-    ) : null
-  }
+  useComposerNotice(error ? { tone: 'error', title: error, onDismiss: () => setError(null) } : null)
+
+  if (!threadId || displayedItems.length === 0) return null
 
   return (
     <div className="queued-messages" aria-label="Queued messages">
-      {error && (
-        <div className="queued-messages-error" role="status">
-          {error}
-          <button
-            type="button"
-            className="queued-messages-error-dismiss"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-          >
-            <X size={12} strokeWidth={2} />
-          </button>
-        </div>
-      )}
       <ul id={listId} className="queued-messages-list" role="list">
         {displayedItems.map((item, index) => {
           const optimistic = item.id.startsWith('optimistic:')
