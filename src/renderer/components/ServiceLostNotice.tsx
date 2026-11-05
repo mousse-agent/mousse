@@ -21,6 +21,8 @@ export function ServiceLostNotice({ lost, onReconnect, onDismiss }: {
     title: SERVICE_LOST_TITLE,
     shortTitle: SERVICE_LOST_SHORT_TITLE,
     tooltip: SERVICE_LOST_TOOLTIP,
+    // Nothing reaches the agents, so over a waiting approval it shows on its own line above it.
+    stacksAbove: true,
     actions: [{ label: SERVICE_LOST_RECONNECT, icon: <RefreshCw size={14} strokeWidth={1.8} />, onClick: onReconnect }],
     onDismiss
   } : null)

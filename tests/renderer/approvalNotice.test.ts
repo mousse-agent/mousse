@@ -9,6 +9,7 @@ import { PermissionRequestContext } from '../../src/renderer/chat/components/age
 import { isCommandRegistered, runCommand } from '../../src/renderer/commands/commandRegistry'
 import { APPROVAL_OFFLINE_REASON, ApprovalNotice } from '../../src/renderer/components/ApprovalNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
+import { SERVICE_LOST_TITLE, ServiceLostNotice } from '../../src/renderer/components/ServiceLostNotice'
 import { describeAnswerOutcome } from '../../src/renderer/components/ComposerQuestionModal'
 import { usePermissionRequests } from '../../src/renderer/hooks/usePermissionRequests'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -96,7 +97,12 @@ const setRowInView = (visible: boolean) => act(async () => {
   }
 })
 
-function Chat({ hasText = false, error = false, onRetry }: { hasText?: boolean; error?: boolean; onRetry?: () => void }) {
+function Chat({ hasText = false, error = false, serviceLost = false, onReconnect = () => undefined }: {
+  hasText?: boolean
+  error?: boolean
+  serviceLost?: boolean
+  onReconnect?: () => void
+}) {
   const requests = usePermissionRequests('t1', () => undefined, describeAnswerOutcome)
   const shown = requests.place(base)
   const current = requests.current
@@ -106,13 +112,14 @@ function Chat({ hasText = false, error = false, onRetry }: { hasText?: boolean; 
     createElement('div', { className: 'chat-input-area' },
       createElement(ComposerNoticeSlot),
       createElement('textarea', { className: 'composer-input', defaultValue: hasText ? 'Use pnpm' : '' })),
-    createElement(ComposerNoticeSource, { notice: error ? { tone: 'error', title: 'Connection lost' } : null }),
+    createElement(ComposerNoticeSource, { notice: error ? { tone: 'error', title: 'Could not send' } : null }),
+    createElement(ServiceLostNotice, { lost: serviceLost, onReconnect, onDismiss: () => undefined }),
     createElement(ApprovalNotice, {
       request: current,
       composerHasText: hasText,
       placed: Boolean(current && shown.some((message) => message.id === `permission:${current.requestId}`)),
       isShown: () => true,
-      connectionLost: onRetry ? { onRetry } : null
+      serviceLost
     }))
 }
 
@@ -142,7 +149,9 @@ afterEach(() => {
 })
 
 const notice = () => host.querySelector('.composer-notice')
-const noticeButton = (name: string) => [...(notice()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+const lines = () => [...host.querySelectorAll<HTMLElement>('.composer-notice')]
+const approvalLine = () => host.querySelector('.composer-notice[aria-label="Waiting approval"]')
+const noticeButton = (name: string) => [...(approvalLine()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
   .find((button) => (button.getAttribute('aria-label') ?? button.textContent) === name)
 const rowButtons = () => [...host.querySelectorAll<HTMLButtonElement>('.permission-request-actions button')]
 const rowAnswer = () => host.querySelector('.permission-request-answer')?.textContent
@@ -173,33 +182,51 @@ describe('a waiting approval above the composer', () => {
   it('is not hidden by an error notice, and the error shows again once it is answered or in view', async () => {
     await waiting(false, true)
     await setRowInView(false)
+    expect(lines()).toHaveLength(1)
     expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
     await setRowInView(true)
-    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Connection lost')
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Could not send')
   })
 
-  it('says the connection is lost and waits to answer until it is back', async () => {
+  it('with the background service lost: its own line on top, the approval below with Deny and Approve waiting', async () => {
     const daemon = await waiting()
     await setRowInView(false)
-    const onRetry = vi.fn()
-    await act(async () => root.render(createElement(Chat, { error: true, onRetry })))
-    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
-    expect(notice()!.querySelector('[role="status"]')!.textContent).toContain('Connection lost')
+    const onReconnect = vi.fn()
+    await act(async () => root.render(createElement(Chat, { error: true, serviceLost: true, onReconnect })))
+    const [top, below] = lines()
+    expect(lines()).toHaveLength(2)
+    expect(top.getAttribute('aria-label')).toBe(SERVICE_LOST_TITLE)
+    expect(top.getAttribute('data-tone')).toBe('error')
+    expect(below).toBe(approvalLine())
+    expect(below.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
+    // The approval line itself says nothing about the service.
+    expect(below.textContent).not.toMatch(/service|connection/i)
+    expect(noticeButton('Deny')!.getAttribute('aria-disabled')).toBe('true')
     expect(noticeButton('Approve')!.getAttribute('aria-disabled')).toBe('true')
     expect(noticeButton('Approve')!.title).toBe(APPROVAL_OFFLINE_REASON)
     expect(noticeButton('Deny')!.title).toBe(APPROVAL_OFFLINE_REASON)
+    expect(APPROVAL_OFFLINE_REASON).toBe("Can't answer until Mousse's background service reconnects")
     await act(async () => noticeButton('Approve')!.click())
     expect(runCommand('approval.allow', 'key')).toBe(false)
     expect(daemon.answered).toEqual([])
-    await act(async () => noticeButton('Retry connection')!.click())
-    expect(onRetry).toHaveBeenCalledTimes(1)
+    await act(async () => top.querySelector<HTMLButtonElement>('button[aria-label="Reconnect"]')!.click())
+    expect(onReconnect).toHaveBeenCalledTimes(1)
 
+    // Reconnected: the top line goes and the approval answers again.
     await act(async () => root.render(createElement(Chat)))
-    expect(notice()!.querySelector('.composer-notice-note')).toBeNull()
+    expect(lines()).toEqual([approvalLine()])
     expect(noticeButton('Approve')!.getAttribute('aria-disabled')).toBeNull()
-    expect(noticeButton('Retry connection')).toBeUndefined()
+    expect(noticeButton('Approve')!.title).toBe('Approve (Ctrl+Enter)')
     await act(async () => noticeButton('Approve')!.click())
     expect(daemon.answered).toEqual([['r1', { permission: 'allow' }]])
+  })
+
+  it('with the background service lost and the request in view, only the service line shows', async () => {
+    await waiting()
+    await setRowInView(true)
+    await act(async () => root.render(createElement(Chat, { serviceLost: true })))
+    expect(lines()).toHaveLength(1)
+    expect(notice()!.getAttribute('aria-label')).toBe(SERVICE_LOST_TITLE)
   })
 
   it('says that sending denies it while the box has text, even with the row in view', async () => {

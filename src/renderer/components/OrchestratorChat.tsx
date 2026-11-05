@@ -1223,7 +1223,7 @@ export function OrchestratorChat() {
           composerHasText={composerHasContent}
           placed={approvalPlaced}
           isShown={() => !inputAreaRef.current?.closest('[inert]')}
-          connectionLost={connectionFailed ? { onRetry: retryConnection } : null}
+          serviceLost={connectionFailed}
         />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}

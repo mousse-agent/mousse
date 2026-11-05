@@ -77,6 +77,28 @@ describe('the notice store', () => {
     store.set('gone', null)
     expect(listener).toHaveBeenCalledTimes(1)
   })
+
+  it('stacks only the lost service above a blocking notice; otherwise it is one line like the rest', () => {
+    const store = new ComposerNoticeStore()
+    const service: ComposerNoticeProps = { tone: 'error', title: 'Service lost', stacksAbove: true }
+    const approval: ComposerNoticeProps = { tone: 'warning', title: 'Approval', blocking: true }
+    store.set('send', notice('error', 'Send failed'))
+    store.set('service', service)
+    // No blocking notice: the newest error wins, nothing stacks.
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+    store.set('approval', approval)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()?.title).toBe('Service lost')
+    // An ordinary error still waits behind the approval.
+    store.set('service', null)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()).toBeNull()
+    store.set('service', service)
+    store.set('approval', null)
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+  })
 })
 
 describe('the notice slot', () => {
