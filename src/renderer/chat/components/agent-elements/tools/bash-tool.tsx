@@ -39,6 +39,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Geist Mono's ligatures draw "--" as one dash over the space before it ("test.ts --sequence" reads
+// "test.ts--sequence"), so the command shows its characters as typed.
+const COMMAND_TEXT = "font-mono text-[12.5px] [font-variant-ligatures:none]";
+
 export function BashToolTerminalCard({
   step,
   state,
@@ -52,7 +56,7 @@ export function BashToolTerminalCard({
   const isInterrupted = step.bashInterrupted === true;
   const command = step.bashCommand ?? step.toolDetail;
   // The command (without its shell wrapper) fills the row in mono, cut by the row's width rather than a character count.
-  // Derived from the command as run, with its spacing: a tool's label can differ from it ("test.ts--sequence").
+  // Derived from the command as run, with its spacing: a tool's label can differ from it.
   const summary = command
     ? commandLabel(command)
     : (step.bashLabel ?? "").replace(/\s+/g, " ").trim();
@@ -118,7 +122,7 @@ export function BashToolTerminalCard({
               duration={1.2}
               className={cn(
                 "flex items-center m-0 truncate flex-1 min-w-0",
-                summary ? "font-mono text-[12.5px]" : "text-xs",
+                summary ? COMMAND_TEXT : "text-xs",
               )}
             >
               {hideSummary ? "" : summary ? `Running ${summary}` : "Running command"}
@@ -138,7 +142,7 @@ export function BashToolTerminalCard({
             <span
               className={cn(
                 "truncate flex-1 min-w-0",
-                summary ? "font-mono text-[12.5px]" : "text-xs",
+                summary ? COMMAND_TEXT : "text-xs",
                 isError && !isInterrupted ? "text-red-400" : "text-an-tool-color-muted",
               )}
               title={hideSummary ? undefined : summary || undefined}

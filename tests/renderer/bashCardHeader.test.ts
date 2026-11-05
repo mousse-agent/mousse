@@ -44,6 +44,14 @@ describe('the bash card', () => {
     expect(header.querySelector('.font-mono.truncate')?.textContent).toBe(command)
   })
 
+  it('shows each token of a command with its spacing, ligatures off so "--" keeps the space before it', () => {
+    const multi = 'npx vitest run tests/checkout.test.ts --sequence.shuffle -t "adds  items" --reporter=dot'
+    const text = mount({ bashCommand: multi }).querySelector('button .font-mono.truncate')!
+    expect(text.textContent).toBe('npx vitest run tests/checkout.test.ts --sequence.shuffle -t "adds items" --reporter=dot')
+    expect(text.textContent).toContain('test.ts --sequence')
+    expect(text.className).toContain('[font-variant-ligatures:none]')
+  })
+
   it('does not repeat the command in the header once expanded', () => {
     const host = mount()
     act(() => host.querySelector('button')!.click())
