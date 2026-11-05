@@ -8,7 +8,7 @@ import { LOCATED_CLASS, revealMessage } from '../../src/renderer/chat/components
 import { PermissionRequestContext } from '../../src/renderer/chat/components/agent-elements/tools/permission-request'
 import { isCommandRegistered, runCommand } from '../../src/renderer/commands/commandRegistry'
 import { ApprovalNotice } from '../../src/renderer/components/ApprovalNotice'
-import { ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
 import { describeAnswerOutcome } from '../../src/renderer/components/ComposerQuestionModal'
 import { usePermissionRequests } from '../../src/renderer/hooks/usePermissionRequests'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -96,7 +96,7 @@ const setRowInView = (visible: boolean) => act(async () => {
   }
 })
 
-function Chat({ hasText = false }: { hasText?: boolean }) {
+function Chat({ hasText = false, error = false }: { hasText?: boolean; error?: boolean }) {
   const requests = usePermissionRequests('t1', () => undefined, describeAnswerOutcome)
   const shown = requests.place(base)
   const current = requests.current
@@ -106,6 +106,7 @@ function Chat({ hasText = false }: { hasText?: boolean }) {
     createElement('div', { className: 'chat-input-area' },
       createElement(ComposerNoticeSlot),
       createElement('textarea', { className: 'composer-input', defaultValue: hasText ? 'Use pnpm' : '' })),
+    createElement(ComposerNoticeSource, { notice: error ? { tone: 'error', title: 'Connection lost' } : null }),
     createElement(ApprovalNotice, {
       request: current,
       composerHasText: hasText,
@@ -145,9 +146,9 @@ const noticeButton = (name: string) => [...(notice()?.querySelectorAll<HTMLButto
 const rowButtons = () => [...host.querySelectorAll<HTMLButtonElement>('.permission-request-actions button')]
 const rowAnswer = () => host.querySelector('.permission-request-answer')?.textContent
 
-async function waiting(hasText = false) {
+async function waiting(hasText = false, error = false) {
   const daemon = mockDaemon()
-  await act(async () => root.render(createElement(Chat, { hasText })))
+  await act(async () => root.render(createElement(Chat, { hasText, error })))
   await daemon.ask(pending('r1'))
   return daemon
 }
@@ -166,6 +167,14 @@ describe('a waiting approval above the composer', () => {
     expect(notice()).toBeNull()
     await setRowInView(false)
     expect(notice()).not.toBeNull()
+  })
+
+  it('is not hidden by an error notice, and the error shows again once it is answered or in view', async () => {
+    await waiting(false, true)
+    await setRowInView(false)
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
+    await setRowInView(true)
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Connection lost')
   })
 
   it('says that sending denies it while the box has text, even with the row in view', async () => {

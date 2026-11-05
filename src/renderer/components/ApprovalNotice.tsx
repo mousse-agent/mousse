@@ -59,6 +59,7 @@ export function ApprovalNotice({
     const answer = (optionId: string) => () => controls.onAnswer(optionId)
     notice = {
       tone: 'warning',
+      blocking: true,
       icon: <Icon size={14} strokeWidth={1.8} aria-hidden="true" />,
       title: composerHasText ? 'Sending denies this' : 'Approval',
       detail: `${summary.verb} ${summary.target}`,

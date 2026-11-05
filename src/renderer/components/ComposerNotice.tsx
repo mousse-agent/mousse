@@ -4,7 +4,8 @@ import { AlertTriangle, ArrowDown, CircleAlert, Info, X } from '../lib/icons'
 /**
  * The one notice line above the composer. Every source (a failed send, Undo, the queue, dictation,
  * a paused run, a waiting approval) registers its notice with `useComposerNotice`; the slot shows only
- * the most severe one, newest first within a tone. The others show once it is dismissed or resolves.
+ * one: a blocking notice (a waiting approval) first, then the most severe, newest first within a tone.
+ * The others show once it is dismissed or resolves.
  */
 
 export type ComposerNoticeTone = 'info' | 'warning' | 'error'
@@ -43,6 +44,8 @@ export interface ComposerNoticeProps {
   onDismiss?: () => void
   /** Accessible name of the notice group, when the title alone does not say what it is. */
   label?: string
+  /** The run waits on it (an approval), so no other notice, not even an error, hides it. */
+  blocking?: boolean
 }
 
 const TONE_RANK: Record<ComposerNoticeTone, number> = { info: 0, warning: 1, error: 2 }
@@ -123,7 +126,8 @@ export class ComposerNoticeStore {
     let best: Entry | undefined
     for (const entry of this.entries.values()) {
       if (!best) { best = entry; continue }
-      const rank = TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
+      const rank = Number(Boolean(entry.notice.blocking)) - Number(Boolean(best.notice.blocking))
+        || TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
       if (rank > 0 || (rank === 0 && entry.order > best.order)) best = entry
     }
     return best?.notice ?? null
