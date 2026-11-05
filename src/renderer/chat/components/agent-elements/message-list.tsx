@@ -61,6 +61,7 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
+import { formatDurationLong, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
 import {
   classifyIntent,
   nextComposerCompact,
@@ -181,52 +182,6 @@ function readCreatedAt(message: UIMessage | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function durationParts(milliseconds: number): {
-  hours: number;
-  minutes: number;
-  seconds: number;
-} {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  return {
-    hours: Math.floor(totalSeconds / 3600),
-    minutes: Math.floor((totalSeconds % 3600) / 60),
-    seconds: totalSeconds % 60,
-  };
-}
-
-function countLabel(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
-
-/** Live label while a turn is still running. Seconds tick every second. */
-function formatWorkingFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    return `Working for ${countLabel(hours, "hour")}, ${countLabel(minutes, "minute")}, and ${countLabel(seconds, "second")}`;
-  }
-  if (minutes > 0) {
-    return `Working for ${countLabel(minutes, "minute")} and ${countLabel(seconds, "second")}`;
-  }
-  return `Working for ${countLabel(seconds, "second")}`;
-}
-
-/** Compact "Worked for 2m 6s" from a finished turn. Under a minute stays in seconds. */
-function formatWorkedFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    const parts = [`${hours}h`];
-    if (minutes) parts.push(`${minutes}m`);
-    if (seconds) parts.push(`${seconds}s`);
-    return `Worked for ${parts.join(" ")}`;
-  }
-  if (minutes > 0) {
-    return seconds
-      ? `Worked for ${minutes}m ${seconds}s`
-      : `Worked for ${minutes}m`;
-  }
-  return `Worked for ${seconds}s`;
-}
-
 /** A line Mousse adds to the thread (see `ThreadNotice`); it is not part of a turn's work. */
 function isThreadNotice(message: UIMessage | undefined): boolean {
   return (message?.metadata as { notice?: boolean } | undefined)?.notice === true;
@@ -293,9 +248,13 @@ function TurnWorkStatus({
           ? formatWorkingFor(elapsedMs)
           : formatWorkedFor(elapsedMs);
   if (!label) return null;
+  const longLabel =
+    elapsedMs == null || (active && waitingLabel)
+      ? undefined
+      : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
   return (
     <div className="turn-work" data-find-ignore>
-      <div className="turn-work-label">{label}</div>
+      <div className="turn-work-label" title={longLabel}>{label}</div>
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
@@ -623,6 +582,26 @@ function cappedWords(text: string, limit: number): string {
   return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
 }
 
+/** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
+const PROMPT_RAIL_WIDTH = 40;
+const PROMPT_RAIL_GAP = 8;
+/** The rail is for long threads: shown once the transcript is taller than this many screens. */
+const PROMPT_RAIL_MIN_SCREENS = 3;
+
+/**
+ * Where the rail sits (px from the left of the list), right beside the transcript's text, or null when
+ * the thread is short or the gutter is too narrow for the rail to stay clear of the text.
+ */
+export function promptRailLeft({ textLeft, scrollHeight, clientHeight }: {
+  textLeft: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): number | null {
+  if (clientHeight <= 0 || scrollHeight <= clientHeight * PROMPT_RAIL_MIN_SCREENS) return null;
+  const left = Math.round(textLeft - PROMPT_RAIL_GAP - PROMPT_RAIL_WIDTH);
+  return left >= 4 ? left : null;
+}
+
 /**
  * Conversation ticks. Deliberately isolated with its own state: position
  * recomputes (ResizeObserver + streaming + expand/collapse) must never
@@ -654,6 +633,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [previewId, setPreviewId] = useState<string>();
+  const [railLeft, setRailLeft] = useState<number | null>(null);
   const markerPositionsRef = useRef<PromptMarker[]>([]);
   const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
@@ -722,6 +702,12 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       }
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);
+      const listLeft = (container.parentElement ?? container).getBoundingClientRect().left;
+      setRailLeft(promptRailLeft({
+        textLeft: content.getBoundingClientRect().left - listLeft + (parseFloat(getComputedStyle(content).paddingLeft) || 0),
+        scrollHeight,
+        clientHeight: container.clientHeight,
+      }));
       updateActiveMarker();
       setMarkers((prev) => {
         if (
@@ -848,7 +834,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
     ],
   );
 
-  if (markers.length === 0) return null;
+  if (markers.length === 0 || railLeft === null) return null;
   const previewMarker = markers.find((marker) => marker.id === previewId);
   const highlightedIndex = markers.findIndex((marker) => marker.id === previewId);
 
@@ -857,6 +843,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       data-testid="prompt-markers"
       data-find-ignore
       className={cn("chat-prompt-rail", visible && "is-active", previewId && "is-previewing")}
+      style={{ left: railLeft }}
       onMouseLeave={(event) => {
         const focused = document.activeElement;
         setPreviewId(focused instanceof HTMLButtonElement && event.currentTarget.contains(focused)
@@ -1895,6 +1882,7 @@ export const MessageList = memo(function MessageList({
         type="button"
         onClick={handleJumpToLatest}
         aria-label="Go to latest"
+        title="Go to latest"
         data-find-ignore
         className={cn(
           "chat-jump absolute left-1/2 z-10 -translate-x-1/2",
