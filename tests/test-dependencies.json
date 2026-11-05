@@ -45,6 +45,7 @@
         "tests/harness/boundary.test.ts",
         "tests/chatLayoutStyles.test.ts",
         "tests/chatMarkdown.test.ts",
+        "tests/chatThemeTokens.test.ts",
         "tests/commandPalette.test.ts",
         "tests/composerMentionList.test.ts",
         "tests/composerRenderingPerformance.test.ts",
