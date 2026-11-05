@@ -1,64 +1,102 @@
-import React, { memo } from "react";
+import React, { memo, useContext } from "react";
 import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
-import type { TimelineStep, StepState } from "../types/timeline";
-import { useToolComplete } from "../hooks/use-tool-complete";
-import { IconChevronRight } from "../../../../lib/icons";
-import { FileExtIcon } from "../icons/file-ext-icon";
+import type { TimelineStep } from "../types/timeline";
+import { Eye, FilePlus, FolderOpen, Pencil } from "../../../../lib/icons";
 import { CODE_FONT } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
   mapPartStateToInvocationState,
   mapToolInvocationToStep,
-  mapToolStateToStepState,
 } from "../utils/tool-adapters";
+import { cn } from "../utils/cn";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
 import { openFileInPanel } from "../../../../utils/chatLinks";
+import { openTurnInReview } from "../../../../components/review/openReview";
+import { useAppStore } from "../../../../stores/appStore";
+import { TurnIdContext } from "../turn-context";
 
-export type EditToolDiffCardProps = {
-  step: Extract<TimelineStep, { type: "tool-call" }>;
-  state: StepState;
-  onComplete: () => void;
-  input?: Record<string, unknown>;
-  output?: Record<string, unknown>;
-  isCollapsible?: boolean;
-  approval?: ToolApproval;
-  /** The call failed: the header says so. */
-  isError?: boolean;
-};
+/** What one file's diff is drawn from. */
+type DiffSource =
+  | { kind: "patch"; patch: string }
+  | { kind: "sides"; oldFile: FileContents; newFile: FileContents };
 
-/** One file's change as a typed activity item saves it (`AgentActivityItem` `file_change`). */
-type ChangeSection = {
-  path: string;
-  label: string;
-  /** The stored unified patch, when it has real hunk headers. */
-  patch?: string;
-  oldFile?: FileContents;
-  newFile?: FileContents;
-  added?: number;
-  removed?: number;
+type FileVerb = "edit" | "create" | "delete";
+
+/** One file an edit call changed, the same whether the call came as a typed item or as raw tool input. */
+export type EditedFile = {
+  /** The path the agent wrote: absolute, or relative to the thread's folder. */
+  path?: string;
+  /** The file name shown on the row. */
+  name: string;
+  verb: FileVerb;
+  added: number;
+  removed: number;
+  diff?: DiffSource;
+  /** Why there is no full diff ("Diff truncated", "Diff not available"). */
   note?: string;
+  /** The error this file failed with. */
   error?: string;
 };
+
+type RowStatus = "pending" | "done" | "failed" | "interrupted";
 
 function baseName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
-/** The sections a typed item's `changes` draw as: a diff, or the reason there is none. */
-function changeSections(changes: unknown): ChangeSection[] | undefined {
+function textOf(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Lines added and removed between two texts, counted the way the changed-files line after the turn counts them. */
+function lineDelta(oldText: string, newText: string): { added: number; removed: number } {
+  if (!oldText && !newText) return { added: 0, removed: 0 };
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const max = Math.max(oldLines.length, newLines.length);
+  let added = 0;
+  let removed = 0;
+  for (let i = 0; i < max; i += 1) {
+    if (oldLines[i] !== undefined && newLines[i] !== undefined) {
+      if (oldLines[i] !== newLines[i]) {
+        added += 1;
+        removed += 1;
+      }
+    } else if (oldLines[i] !== undefined) {
+      removed += 1;
+    } else {
+      added += 1;
+    }
+  }
+  return { added, removed };
+}
+
+function parseStats(stats: string | undefined): { added: number; removed: number } {
+  const added = Number(/\+(\d+)/.exec(stats ?? "")?.[1] ?? 0);
+  const removed = Number(/-(\d+)/.exec(stats ?? "")?.[1] ?? 0);
+  return { added, removed };
+}
+
+function verbOf(change: ActivityFileChange["change"] | undefined): FileVerb {
+  return change === "add" ? "create" : change === "delete" ? "delete" : "edit";
+}
+
+/** The files a typed item's `changes` hold, each with its diff or the reason there is none. */
+function filesFromChanges(changes: unknown): EditedFile[] | undefined {
   if (!Array.isArray(changes)) return undefined;
-  return changes.flatMap((entry): ChangeSection[] => {
+  return changes.flatMap((entry): EditedFile[] => {
     if (!entry || typeof entry !== "object") return [];
     const change = entry as ActivityFileChange;
     if (typeof change.path !== "string") return [];
-    const label = baseName(change.path);
-    const section: ChangeSection = {
+    const name = baseName(change.path);
+    const file: EditedFile = {
       path: change.path,
-      label,
-      added: change.added,
-      removed: change.removed,
+      name,
+      verb: verbOf(change.change),
+      added: change.added ?? 0,
+      removed: change.removed ?? 0,
       ...(change.error ? { error: change.error } : {}),
     };
     if (change.diff) {
@@ -66,30 +104,101 @@ function changeSections(changes: unknown): ChangeSection[] | undefined {
       // anything else (a whole added or deleted file's text) is drawn from its two sides.
       const patch = diffAsPatch(change.path, change.diff);
       if (patch) {
-        section.patch = patch;
+        file.diff = { kind: "patch", patch };
       } else {
         const { oldText, newText } = diffSides(change.diff, change.change);
-        section.oldFile = { name: label, contents: oldText };
-        section.newFile = { name: label, contents: newText };
+        file.diff = {
+          kind: "sides",
+          oldFile: { name, contents: oldText },
+          newFile: { name, contents: newText },
+        };
       }
-      if (change.diffTruncated) section.note = "Diff truncated";
+      if (change.diffTruncated) file.note = "Diff truncated";
     } else if (change.diffUnavailable) {
-      section.note =
+      file.note =
         typeof change.linesWritten === "number"
           ? `Diff not available (${change.linesWritten} ${change.linesWritten === 1 ? "line" : "lines"} written)`
           : "Diff not available";
     }
-    return [section];
+    return [file];
   });
 }
 
-function statsFromSections(sections: ChangeSection[]): string | undefined {
-  const added = sections.reduce((sum, section) => sum + (section.added ?? 0), 0);
-  const removed = sections.reduce((sum, section) => sum + (section.removed ?? 0), 0);
-  const parts: string[] = [];
-  if (added > 0) parts.push(`+${added}`);
-  if (removed > 0) parts.push(`-${removed}`);
-  return parts.length > 0 ? parts.join(" ") : undefined;
+/** One edit's text on each side, from whichever shape the tool sent. */
+type EditPair = { oldText: string; newText: string };
+
+function editPairs(input: Record<string, unknown> | undefined): EditPair[] {
+  if (!input) return [];
+  // Several edits in one call: `{ edits: [{ old_string, new_string }] }`, or `{ oldText, newText }` per edit.
+  if (Array.isArray(input.edits)) {
+    return input.edits.flatMap((edit): EditPair[] => {
+      if (!edit || typeof edit !== "object") return [];
+      const row = edit as Record<string, unknown>;
+      return [{ oldText: textOf(row.old_string ?? row.oldText), newText: textOf(row.new_string ?? row.newText) }];
+    });
+  }
+  return [{ oldText: textOf(input.old_string ?? input.oldText), newText: textOf(input.new_string ?? input.newText) }];
+}
+
+/** The one file a raw (untyped) Edit, MultiEdit or Write call changed. */
+function fileFromRawCall(
+  step: Extract<TimelineStep, { type: "tool-call" }>,
+  input: Record<string, unknown> | undefined,
+  output: Record<string, unknown> | undefined,
+): EditedFile {
+  const isWrite = step.toolName === "Write";
+  const path = step.filePath || extractFilePathArg(input) || undefined;
+  const name = path ? baseName(path) : step.toolDetail || "";
+  const label = name || "file";
+
+  const oldFromOutput = typeof output?.old_content === "string" ? output.old_content : undefined;
+  const newFromOutput = typeof output?.content === "string" ? output.content : undefined;
+  const pairs = editPairs(input);
+  const joinedOld = pairs.map((pair) => pair.oldText).join("\n");
+  const joinedNew = pairs.map((pair) => pair.newText).join("\n");
+  const fallbackOld = step.diffLines
+    ?.filter((line) => line.type !== "add")
+    .map((line) => line.content)
+    .join("\n");
+  const fallbackNew = step.diffLines
+    ?.filter((line) => line.type !== "remove")
+    .map((line) => line.content)
+    .join("\n");
+  const oldContents = (joinedOld || undefined) ?? oldFromOutput ?? fallbackOld ?? "";
+  const newContents = (joinedNew || undefined) ?? newFromOutput ?? fallbackNew ?? "";
+
+  let stats: { added: number; removed: number };
+  if (Array.isArray(output?.structuredPatch)) {
+    stats = parseStats(step.diffStats);
+  } else if (isWrite) {
+    const content = textOf(output?.content) || textOf(input?.content);
+    const lines = content ? (content.endsWith("\n") ? content.split("\n").slice(0, -1) : content.split("\n")) : [];
+    stats = { added: lines.length, removed: 0 };
+  } else {
+    stats = pairs.reduce(
+      (sum, pair) => {
+        const delta = lineDelta(pair.oldText, pair.newText);
+        return { added: sum.added + delta.added, removed: sum.removed + delta.removed };
+      },
+      { added: 0, removed: 0 },
+    );
+  }
+
+  return {
+    path,
+    name,
+    verb: isWrite ? "create" : "edit",
+    ...stats,
+    ...(oldContents || newContents
+      ? {
+          diff: {
+            kind: "sides" as const,
+            oldFile: { name: label, contents: oldContents },
+            newFile: { name: label, contents: newContents },
+          },
+        }
+      : {}),
+  };
 }
 
 // The app themes via `html[data-theme="…"]` (+ `color-scheme`), not the
@@ -125,162 +234,41 @@ function resolveEditDiffThemeIsDark(): boolean {
   return true;
 }
 
-export function EditToolDiffCard({
-  step,
-  state,
-  onComplete,
-  input,
-  output,
-  /** Collapse to header-only by default; click the header to expand. */
-  isCollapsible = true,
-  approval,
-  isError = false,
-}: EditToolDiffCardProps) {
-  useToolComplete(state === "animating", step.duration, onComplete);
-  const isPending = state === "animating";
-  const sections = React.useMemo(() => changeSections(output?.changes), [output]);
-  const isInterrupted = output?.interrupted === true;
-  // The one file the card is about, which its name opens; a card about several files names each in its body.
-  const filePath = sections
-    ? sections.length === 1
-      ? sections[0].path
-      : undefined
-    : step.filePath || extractFilePathArg(input) || undefined;
-  const fileName =
-    sections && sections.length > 1
-      ? `${sections.length} files`
-      : sections?.[0]?.label ||
-        (filePath ? baseName(filePath) : "") ||
-        step.toolDetail ||
-        "";
-  const hasFileName = Boolean(fileName);
-  const isWrite = step.toolName === "Write";
-  const diffStats = sections ? statsFromSections(sections) : step.diffStats;
+/** The diff's light or dark syntax theme, following the app theme while the diff is open. */
+function useDiffThemeType(): "light" | "dark" {
   const [themeType, setThemeType] = React.useState<"light" | "dark">(() =>
     resolveEditDiffThemeIsDark() ? "dark" : "light",
   );
-  const [isExpanded, setIsExpanded] = React.useState(false);
-
   React.useEffect(() => {
     if (typeof window === "undefined") return;
-    const updateTheme = () => {
-      setThemeType(resolveEditDiffThemeIsDark() ? "dark" : "light");
-    };
+    const updateTheme = () => setThemeType(resolveEditDiffThemeIsDark() ? "dark" : "light");
     updateTheme();
-
     const observer = new MutationObserver(updateTheme);
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["class", "data-theme", "style"],
     });
     const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-    const onMediaChange = () => updateTheme();
-    media?.addEventListener?.("change", onMediaChange);
-
+    media?.addEventListener?.("change", updateTheme);
     return () => {
       observer.disconnect();
-      media?.removeEventListener?.("change", onMediaChange);
+      media?.removeEventListener?.("change", updateTheme);
     };
   }, []);
+  return themeType;
+}
 
-  React.useEffect(() => {
-    setIsExpanded(!isCollapsible);
-  }, [isCollapsible]);
+const DIFF_CLASS = "an-edit-diff bg-an-tool-background";
 
-  const diffFiles = React.useMemo(() => {
-    // A typed item draws its own sections below, never the legacy single diff.
-    if (sections) return null;
-    const fileLabel = fileName || "file";
-    const oldFromOutput =
-      typeof output?.old_content === "string" ? output.old_content : undefined;
-    const newFromOutput =
-      typeof output?.content === "string" ? output.content : undefined;
-    const oldFromInput =
-      !oldFromOutput && typeof input?.old_string === "string"
-        ? input.old_string
-        : undefined;
-    const newFromInput =
-      !newFromOutput && typeof input?.new_string === "string"
-        ? input.new_string
-        : undefined;
-
-    // Pi edit tool sends `{ path, edits: [{ oldText, newText }] }` instead of
-    // Claude-style old_string/new_string — join each side so the diff renders.
-    const editsOldText =
-      !oldFromInput && !oldFromOutput && Array.isArray(input?.edits)
-        ? input.edits
-            .map((edit) =>
-              edit && typeof edit.oldText === "string" ? edit.oldText : "",
-            )
-            .join("\n")
-        : "";
-    const oldFromEdits = editsOldText ? editsOldText : undefined;
-    const editsNewText =
-      !newFromInput && !newFromOutput && Array.isArray(input?.edits)
-        ? input.edits
-            .map((edit) =>
-              edit && typeof edit.newText === "string" ? edit.newText : "",
-            )
-            .join("\n")
-        : "";
-    const newFromEdits = editsNewText ? editsNewText : undefined;
-
-    const fallbackOld = step.diffLines
-      ?.filter((line) => line.type !== "add")
-      .map((line) => line.content)
-      .join("\n");
-    const fallbackNew = step.diffLines
-      ?.filter((line) => line.type !== "remove")
-      .map((line) => line.content)
-      .join("\n");
-
-    const oldContents =
-      oldFromInput ?? oldFromOutput ?? oldFromEdits ?? fallbackOld ?? "";
-    const newContents =
-      newFromInput ?? newFromOutput ?? newFromEdits ?? fallbackNew ?? "";
-
-    if (!oldContents && !newContents) return null;
-
-    const oldFile: FileContents = {
-      name: fileLabel,
-      contents: oldContents,
-    };
-    const newFile: FileContents = {
-      name: fileLabel,
-      contents: newContents,
-    };
-
-    return { oldFile, newFile };
-  }, [fileName, input, output, sections, step.diffLines]);
-
-  // Something to open: a diff, a note about the diff, or the error the edit failed with.
-  const hasBody = sections
-    ? sections.some((section) => section.patch || section.oldFile || section.note || section.error)
-    : Boolean(diffFiles);
-  const canToggle = hasBody && isCollapsible;
-
-  // Above the header's expand control, so a click on the name opens the file instead of the diff.
-  const nameControl = filePath ? (
-    <button
-      type="button"
-      onClick={() => openFileInPanel({ path: filePath })}
-      title={filePath}
-      aria-label={`Open ${fileName}`}
-      className="pointer-events-auto relative hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color rounded-sm"
-    >
-      {fileName}
-    </button>
-  ) : (
-    fileName
-  );
-
-  // Theme-compliant diff surface: point the library at the app theme tokens
-  // instead of hardcoded black so bg, gutters and separators follow the
-  // active theme in both modes. `colorScheme` keeps the library's
-  // `light-dark()` backgrounds in sync with the shiki `themeType` tokens —
-  // without it dark text lands on a dark background (unreadable).
-  // Font matches the Git tab diff (Monaco `fontFamily`).
-  const diffCssVars = React.useMemo(
+/**
+ * One file's diff. Rendered only while its row is open, so a collapsed row costs no diff and no theme watcher.
+ * The diff points the library at the app theme tokens instead of hardcoded black, and `colorScheme` keeps the
+ * library's `light-dark()` backgrounds in sync with the syntax tokens (without it dark text lands on a dark
+ * background). The font matches the Git tab diff.
+ */
+function EditDiff({ diff }: { diff: DiffSource }) {
+  const themeType = useDiffThemeType();
+  const style = React.useMemo(
     () =>
       ({
         "--diffs-bg": "var(--an-tool-background)",
@@ -293,9 +281,11 @@ export function EditToolDiffCard({
       }) as React.CSSProperties,
     [themeType],
   );
-
-  const diffUnsafeCss = React.useMemo(
-    () => `
+  const options = React.useMemo(
+    () => ({
+      theme: { dark: "github-dark", light: "github-light" } as const,
+      themeType,
+      unsafeCSS: `
 [data-diff],
 [data-file],
 [data-diffs-header],
@@ -310,208 +300,299 @@ export function EditToolDiffCard({
   color-scheme: ${themeType};
 }
 `,
+      diffStyle: "unified" as const,
+      disableFileHeader: true,
+    }),
     [themeType],
   );
+  return diff.kind === "patch" ? (
+    <PatchDiff key={themeType} patch={diff.patch} className={DIFF_CLASS} style={style} options={options} />
+  ) : (
+    <MultiFileDiff
+      key={themeType}
+      oldFile={diff.oldFile}
+      newFile={diff.newFile}
+      className={DIFF_CLASS}
+      style={style}
+      options={options}
+    />
+  );
+}
 
-  const diffClassName = "an-edit-diff bg-an-tool-background";
-
+function Stat({ added, removed }: { added: number; removed: number }) {
+  if (added === 0 && removed === 0) return null;
   return (
-    <div className="an-edit-tool-card rounded-an-tool-border-radius border border-an-tool-border-color bg-an-tool-background overflow-hidden">
-      <div
-        className={
-          // Header keeps the theme tool background so it stays distinct from
-          // the diff body below it.
-          // `an-tool-chrome` lives on the header only: idle chrome dims to
-          // keep contrast, but the diff body below always renders at full
-          // opacity — dimming the code to 0.55 washes it out next to
-          // full-opacity surfaces like the Git tab Monaco diff.
-          "an-tool-chrome relative flex items-center justify-between px-2.5 py-0 h-7 w-full text-left bg-an-tool-background " +
-          (isExpanded || !isCollapsible
-            ? "border-b border-an-tool-border-color"
-            : "")
-        }
-      >
-        {/* The one expand control covers the header; the file name sits above it and opens the file. */}
-        {canToggle && (
-          <button
-            type="button"
-            onClick={() => setIsExpanded((prev) => !prev)}
-            aria-expanded={isExpanded}
-            aria-label={`${isExpanded ? "Collapse" : "Expand"} diff for ${fileName || "file"}`}
-            className="absolute inset-0 w-full cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-an-border-color"
-          />
-        )}
-        <span className="pointer-events-none flex items-center gap-1.5 min-w-0 flex-1">
-          {hasFileName && (
-            <FileExtIcon filename={fileName} className="w-[18px] h-[18px] shrink-0" />
+    <span className="an-edit-row-stat inline-flex shrink-0 gap-1.5 text-[12.5px] tabular-nums">
+      {added > 0 && <span className="turn-edits-add">+{added}</span>}
+      {removed > 0 && <span className="turn-edits-del">−{removed}</span>}
+    </span>
+  );
+}
+
+const VERB_DONE: Record<FileVerb, string> = { edit: "Edited", create: "Created", delete: "Deleted" };
+const VERB_RUNNING: Record<FileVerb, string> = { edit: "Editing", create: "Creating", delete: "Deleting" };
+const VERB_BASE: Record<FileVerb, string> = { edit: "edit", create: "create", delete: "delete" };
+
+function rowLabel(verb: FileVerb, status: RowStatus): string {
+  switch (status) {
+    case "pending":
+      return VERB_RUNNING[verb];
+    case "failed":
+      return `Failed to ${VERB_BASE[verb]}`;
+    case "interrupted":
+      return `${VERB_BASE[verb][0]!.toUpperCase()}${VERB_BASE[verb].slice(1)} interrupted:`;
+    default:
+      return VERB_DONE[verb];
+  }
+}
+
+const ROW_ICON_BUTTON =
+  "inline-flex items-center justify-center size-[22px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color";
+
+/**
+ * The quiet line a tool row draws: an icon, the verb, the name in the foreground colour and mono, and the line
+ * totals. The line is a button that opens what is under it; `actions` show on hover or keyboard focus, on the right.
+ */
+function EditLine({
+  icon,
+  label,
+  name,
+  title,
+  added,
+  removed,
+  status,
+  open,
+  canOpen,
+  onToggle,
+  toggleLabel,
+  actions,
+  children,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  name: string;
+  title?: string;
+  added: number;
+  removed: number;
+  status: RowStatus;
+  open: boolean;
+  canOpen: boolean;
+  onToggle: () => void;
+  toggleLabel: string;
+  actions?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  const isPending = status === "pending";
+  const isFailed = status === "failed";
+  const text = (
+    <>
+      <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && "text-red-400")}>{label}</span>
+      {name && (
+        <span className="an-edit-row-name min-w-0 truncate font-mono text-[13px] text-an-foreground">{name}</span>
+      )}
+    </>
+  );
+  return (
+    <div className="an-edit-row group/edit-row flex flex-col min-w-0" data-status={status}>
+      <div className="an-tool-chrome flex items-center gap-1 min-w-0">
+        <button
+          type="button"
+          className={cn(
+            "an-edit-row-toggle flex flex-1 items-center gap-2 min-w-0 text-left text-[15px] leading-[22px] text-muted-foreground rounded-sm",
+            "focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color",
+            canOpen ? "cursor-pointer" : "cursor-default",
           )}
-          {isPending && !hasBody ? (
-            <TextShimmer as="span" duration={1.2} className="text-xs">
-              Generating...
+          aria-expanded={canOpen ? open : undefined}
+          aria-label={toggleLabel}
+          title={title}
+          onClick={canOpen ? onToggle : undefined}
+        >
+          <span
+            className={cn(
+              "flex items-center justify-center size-[18px] shrink-0",
+              isFailed && "text-red-400",
+            )}
+            aria-hidden="true"
+          >
+            {icon}
+          </span>
+          {isPending ? (
+            <TextShimmer as="span" duration={1.2} className="flex items-center gap-2 min-w-0 m-0">
+              {text}
             </TextShimmer>
-          ) : isPending ? (
-            <TextShimmer as="span" duration={1.2} className="text-xs">
-              {isWrite ? "Creating" : "Editing"} {fileName}
-            </TextShimmer>
-          ) : isInterrupted ? (
-            <span className="text-xs text-an-tool-color-muted truncate">
-              {isWrite ? "Create" : "Edit"} interrupted: {nameControl}
-            </span>
-          ) : isError ? (
-            <span className="text-xs text-red-400 truncate">
-              Failed to {isWrite ? "create" : "edit"} {nameControl}
-            </span>
           ) : (
-            <span className="text-xs text-an-tool-color-muted truncate">
-              {isWrite ? "Created" : "Edited"} {nameControl}
-            </span>
+            text
           )}
-        </span>
-        {diffStats && !isPending && (
-          <span className="pointer-events-none text-[11px] font-sans text-an-tool-color-muted inline-flex gap-2">
-            {diffStats.split(" ").map((token) => (
-              <span
-                key={token}
-                className={
-                  token.startsWith("+")
-                    ? "text-an-diff-added-text"
-                    : token.startsWith("-")
-                      ? "text-an-diff-removed-text"
-                      : undefined
-                }
-              >
-                {token}
-              </span>
-            ))}
+          {!isPending && <Stat added={added} removed={removed} />}
+        </button>
+        {actions && (
+          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-row:opacity-100 group-focus-within/edit-row:opacity-100">
+            {actions}
           </span>
         )}
-        {canToggle && (
-          <IconChevronRight
-            className={
-              "pointer-events-none w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
-              (isExpanded ? "rotate-90" : "rotate-0")
-            }
-          />
-        )}
       </div>
-      {hasBody && (!isCollapsible || isExpanded) ? (
-        <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
-              {sections
-                ? sections.map((section, index) => (
-                    <div key={`${section.path}:${index}`}>
-                      {sections.length > 1 && (
-                        <div className="flex items-center gap-1.5 px-2.5 h-6 text-[11px] text-an-tool-color-muted border-b border-an-tool-border-color">
-                          <FileExtIcon filename={section.label} className="w-4 h-4 shrink-0" />
-                          <button
-                            type="button"
-                            onClick={() => openFileInPanel({ path: section.path })}
-                            aria-label={`Open ${section.path}`}
-                            className="truncate text-left hover:underline hover:text-an-tool-color focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color rounded-sm"
-                          >
-                            {section.path}
-                          </button>
-                        </div>
-                      )}
-                      {section.error && (
-                        <div className="px-2.5 py-1.5 text-[12px] text-red-400 whitespace-pre-wrap break-words">
-                          {section.error}
-                        </div>
-                      )}
-                      {section.patch && (
-                        <PatchDiff
-                          key={themeType}
-                          patch={section.patch}
-                          className={diffClassName}
-                          style={diffCssVars}
-                          options={{
-                            theme: { dark: "github-dark", light: "github-light" },
-                            themeType,
-                            unsafeCSS: diffUnsafeCss,
-                            diffStyle: "unified",
-                            disableFileHeader: true,
-                          }}
-                        />
-                      )}
-                      {section.oldFile && section.newFile && (
-                        <MultiFileDiff
-                          key={themeType}
-                          oldFile={section.oldFile}
-                          newFile={section.newFile}
-                          className={diffClassName}
-                          style={diffCssVars}
-                          options={{
-                            theme: { dark: "github-dark", light: "github-light" },
-                            themeType,
-                            unsafeCSS: diffUnsafeCss,
-                            diffStyle: "unified",
-                            disableFileHeader: true,
-                          }}
-                        />
-                      )}
-                      {section.note && (
-                        <div className="px-2.5 py-1.5 text-[11px] text-an-tool-color-muted">
-                          {section.note}
-                        </div>
-                      )}
-                    </div>
-                  ))
-                : diffFiles && (
-                    <MultiFileDiff
-                      key={themeType}
-                      oldFile={diffFiles.oldFile}
-                      newFile={diffFiles.newFile}
-                      className={diffClassName}
-                      style={diffCssVars}
-                      options={{
-                        theme: { dark: "github-dark", light: "github-light" },
-                        themeType,
-                        unsafeCSS: diffUnsafeCss,
-                        diffStyle: "unified",
-                        disableFileHeader: true,
-                      }}
-                    />
-                  )}
-        </div>
-      ) : null}
-      {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
+      {open && children}
     </div>
+  );
+}
+
+/** Open, collapsed by default; a failure opens it once, when it happens. */
+function useRowOpen(failed: boolean): [boolean, () => void] {
+  const [open, setOpen] = React.useState(failed);
+  const wasFailed = React.useRef(failed);
+  React.useEffect(() => {
+    if (failed && !wasFailed.current) setOpen(true);
+    wasFailed.current = failed;
+  }, [failed]);
+  return [open, () => setOpen((prev) => !prev)];
+}
+
+function fileIcon(verb: FileVerb): React.ReactNode {
+  return verb === "create" ? <FilePlus size={16} /> : <Pencil size={16} />;
+}
+
+/** One file's row: "Edited <name> +N −M", opening to its diff, with Review and Files actions on hover. */
+function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) {
+  const turnId = useContext(TurnIdContext);
+  const rowStatus: RowStatus = status === "done" && file.error ? "failed" : status;
+  const failed = rowStatus === "failed";
+  const [open, toggle] = useRowOpen(failed);
+  const hasBody = Boolean(file.diff || file.note || file.error);
+  const name = file.name || (status === "pending" ? "" : "file");
+  const path = file.path;
+  const actions = path ? (
+    <>
+      <button
+        type="button"
+        className={ROW_ICON_BUTTON}
+        aria-label={`Open ${file.name} in Review`}
+        title="Open in Review"
+        onClick={() => void openTurnInReview(useAppStore.getState().activeThreadId, turnId, path)}
+      >
+        <Eye size={14} />
+      </button>
+      <button
+        type="button"
+        className={ROW_ICON_BUTTON}
+        aria-label={`Open ${file.name}`}
+        title="Open file"
+        onClick={() => openFileInPanel({ path })}
+      >
+        <FolderOpen size={14} />
+      </button>
+    </>
+  ) : undefined;
+  const label = rowLabel(file.verb, rowStatus);
+  return (
+    <EditLine
+      icon={fileIcon(file.verb)}
+      label={label}
+      name={name}
+      title={path}
+      added={file.added}
+      removed={file.removed}
+      status={rowStatus}
+      open={open && hasBody}
+      canOpen={hasBody}
+      onToggle={toggle}
+      toggleLabel={`${label} ${name}`.trim()}
+      actions={actions}
+    >
+      <div className="an-edit-surface mt-1 mb-1 rounded-an-tool-border-radius bg-an-tool-background overflow-hidden text-[12px]">
+        {file.error && (
+          <div className="px-2.5 py-1.5 text-[12px] text-red-400 whitespace-pre-wrap break-words">{file.error}</div>
+        )}
+        {file.diff && <EditDiff diff={file.diff} />}
+        {file.note && <div className="px-2.5 py-1.5 text-[11px] text-an-tool-color-muted">{file.note}</div>}
+      </div>
+    </EditLine>
+  );
+}
+
+/** A call that changed several files: "Edited 3 files +12 −4", opening to one row per file. */
+function EditFilesGroup({ files, status }: { files: EditedFile[]; status: RowStatus }) {
+  const failed = status === "failed" || files.some((file) => file.error);
+  const rowStatus: RowStatus = status === "done" && failed ? "failed" : status;
+  const [open, toggle] = useRowOpen(failed);
+  const verb: FileVerb = files.every((file) => file.verb === "create")
+    ? "create"
+    : files.every((file) => file.verb === "delete")
+      ? "delete"
+      : "edit";
+  const added = files.reduce((sum, file) => sum + file.added, 0);
+  const removed = files.reduce((sum, file) => sum + file.removed, 0);
+  const label = rowLabel(verb, rowStatus);
+  const count = `${files.length} files`;
+  return (
+    <EditLine
+      icon={fileIcon(verb)}
+      label={label}
+      name={count}
+      added={added}
+      removed={removed}
+      status={rowStatus}
+      open={open}
+      canOpen
+      onToggle={toggle}
+      toggleLabel={`${label} ${count}`}
+    >
+      <div className="an-edit-files mt-1 ml-[26px] flex flex-col gap-1">
+        {files.map((file, index) => (
+          <EditFileRow key={`${file.path ?? file.name}:${index}`} file={file} status={status === "failed" ? "done" : status} />
+        ))}
+      </div>
+    </EditLine>
   );
 }
 
 export type EditToolProps = {
   part: any;
-  isCollapsible?: boolean;
 };
 
-export const EditTool = memo(function EditTool({
-  part,
-  isCollapsible = true,
-}: EditToolProps) {
-  const approval = (part.input?.approval ?? part.args?.approval) as
-    | ToolApproval
-    | undefined;
+/** An Edit, MultiEdit or Write call: one quiet row per call, like the other tool rows. */
+export const EditTool = memo(function EditTool({ part }: EditToolProps) {
+  const approval = (part.input?.approval ?? part.args?.approval) as ToolApproval | undefined;
   const toolName = (part.type as string)?.replace("tool-", "") || "Edit";
-  const step = mapToolInvocationToStep(part.toolCallId ?? part.id ?? "edit", {
-    toolName,
-    args: part.input ?? part.args ?? {},
-    state: mapPartStateToInvocationState(part.state),
-    result: part.output ?? part.result,
-  });
-  const stepState = mapToolStateToStepState(
-    mapPartStateToInvocationState(part.state),
-  );
-  const noop = () => {};
+  const input = (part.input ?? part.args) as Record<string, unknown> | undefined;
+  const rawOutput = part.output ?? part.result;
+  const output = rawOutput && typeof rawOutput === "object" ? (rawOutput as Record<string, unknown>) : undefined;
+  const invocationState = mapPartStateToInvocationState(part.state);
+  const isPending = invocationState !== "result";
+  const status: RowStatus = isPending
+    ? "pending"
+    : output?.interrupted === true
+      ? "interrupted"
+      : part.state === "output-error"
+        ? "failed"
+        : "done";
+
+  const files = React.useMemo((): EditedFile[] => {
+    const typed = filesFromChanges(output?.changes);
+    if (typed && typed.length > 0) return typed;
+    const step = mapToolInvocationToStep(part.toolCallId ?? part.id ?? "edit", {
+      toolName: toolName === "MultiEdit" ? "Edit" : toolName,
+      args: input ?? {},
+      state: invocationState,
+      result: rawOutput,
+    });
+    return [fileFromRawCall(step, input, output)];
+  }, [input, output, rawOutput, invocationState, part.toolCallId, part.id, toolName]);
+
+  // A failed call names its error on the row it opens; a typed file keeps its own.
+  const errorText =
+    status === "failed"
+      ? textOf(part.errorText) || (typeof rawOutput === "string" ? rawOutput : textOf(output?.error))
+      : "";
+  const shown = errorText && files.length === 1 && !files[0]!.error ? [{ ...files[0]!, error: errorText }] : files;
 
   return (
-    <EditToolDiffCard
-      step={step}
-      state={stepState}
-      onComplete={noop}
-      input={part.input ?? part.args}
-      output={part.output ?? part.result}
-      isCollapsible={isCollapsible}
-      approval={approval}
-      isError={part.state === "output-error"}
-    />
+    <>
+      {shown.length > 1 ? (
+        <EditFilesGroup files={shown} status={status} />
+      ) : (
+        <EditFileRow file={shown[0]!} status={status} />
+      )}
+      {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
+    </>
   );
 });

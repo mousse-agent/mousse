@@ -76,6 +76,7 @@ import {
   type RowItem,
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
+import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
 import { useThreadFind } from "./find/use-thread-find";
 import "../../../styles/prompt-visibility.css";
@@ -1646,6 +1647,7 @@ export const MessageList = memo(function MessageList({
                           }
                         />
                         <div className="turn-answer flex flex-col gap-3">
+                          <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
                           {(() => {
                             // Consecutive thoughts and tool calls collapse into one
                             // group titled with the latest thought. A run with
@@ -1778,6 +1780,7 @@ export const MessageList = memo(function MessageList({
                               );
                             });
                           })()}
+                          </TurnIdContext.Provider>
                         </div>
                         {!isTurnStreaming && (
                           <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />

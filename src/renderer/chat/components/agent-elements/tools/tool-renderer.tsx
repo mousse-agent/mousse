@@ -47,6 +47,7 @@ export const ToolRenderer = memo(function ToolRenderer({
     case "tool-Bash":
       return <BashTool part={part} />;
     case "tool-Edit":
+    case "tool-MultiEdit":
     case "tool-Write":
       return <EditTool part={part} />;
     case "tool-WebSearch":

@@ -182,7 +182,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
  * Search, Todo, ...). Anything else stays a generic MCP row.
  */
 const RICH_TOOL_TYPES = new Set([
-  'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+  'Read', 'Edit', 'MultiEdit', 'Write', 'Bash', 'Grep', 'Glob',
   'TodoWrite', 'PlanWrite', 'ExitPlanMode',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
   'Question', 'Thinking', 'cloning', 'QuickAction',
