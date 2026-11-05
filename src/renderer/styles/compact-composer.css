@@ -159,6 +159,10 @@
     min-height 200ms ease-out,
     max-height 200ms ease-out;
 }
+/* Mid-animation the input is shorter than its text box: keep its scrollbar from showing. */
+.mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input {
+  overflow-y: hidden;
+}
 @media (prefers-reduced-motion: reduce) {
   .mousse-chat-shell[data-composer-motion] .composer-input,
   .mousse-chat-shell[data-composer-motion] .composer-input-wrap {

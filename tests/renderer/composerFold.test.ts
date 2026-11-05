@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -110,5 +112,36 @@ describe('useComposerFold', () => {
     act(() => api.onCompactChange(true))
     expect(shell().hasAttribute('data-composer-compact')).toBe(true)
     expect(shell().hasAttribute('data-composer-motion')).toBe(false)
+  })
+})
+
+describe('composer fold styles', () => {
+  let style: HTMLStyleElement
+  let chat: HTMLElement
+
+  beforeEach(() => {
+    style = document.createElement('style')
+    style.textContent = readFileSync(join(__dirname, '../../src/renderer/styles/compact-composer.css'), 'utf8')
+    document.head.append(style)
+    chat = document.createElement('div')
+    chat.className = 'mousse-chat-shell'
+    chat.innerHTML = '<div class="chat-input-area"><div class="composer"><div class="composer-input-wrap"><textarea class="composer-input" placeholder="Ask"></textarea></div></div></div>'
+    document.body.append(chat)
+  })
+
+  afterEach(() => {
+    style.remove()
+    chat.remove()
+  })
+
+  const input = () => chat.querySelector<HTMLTextAreaElement>('.composer-input')!
+
+  it('hides the input scrollbar while the height animates', () => {
+    chat.setAttribute('data-composer-motion', 'true')
+    expect(getComputedStyle(input()).overflowY).toBe('hidden')
+  })
+
+  it('leaves the expanded input scrollable when nothing animates', () => {
+    expect(getComputedStyle(input()).overflowY).not.toBe('hidden')
   })
 })
