@@ -9,6 +9,7 @@ import { useAppStore } from '../src/renderer/stores/appStore'
 import { useReviewStore } from '../src/renderer/stores/reviewStore'
 import { setTurnChangedFiles } from '../src/renderer/lib/turnChangedFilesSetting'
 import type { ChatMessage } from '../src/shared/types'
+import type { ActivityFileChange } from '../src/shared/agentActivity'
 
 const editMessage = {
   id: 'a1',
@@ -33,6 +34,40 @@ describe('turn edit summary', () => {
     // A file at the top level has no folder.
     expect(markup).toContain('<span class="turn-edits-file-name">README.md</span><span class="turn-edits-stat">')
     expect(markup).not.toContain('Project root')
+  })
+
+  it('counts every file of typed and raw edits once, sums their lines and leaves out failed edits', () => {
+    setTurnChangedFiles('list')
+    const typed = (id: string, changes: ActivityFileChange[], status: 'done' | 'failed' = 'done'): ChatMessage => ({
+      id, role: 'system', kind: 'mcp_tool_call', content: '', timestamp: '2026-01-01T00:00:00.000Z',
+      toolCall: { title: 'edit', summary: 'edit', details: [], status: 'complete' },
+      activity: { id, callId: id, toolName: 'edit', startedAt: '2026-01-01T00:00:00.000Z', status, kind: 'file_change', changes }
+    })
+    const messages = [
+      ...mousseToUIMessages([
+        // Two edits of one file count once, with both edits' lines.
+        typed('e1', [{ path: 'src/a.ts', change: 'update', added: 1, removed: 1 }]),
+        typed('e2', [{ path: 'src/a.ts', change: 'update', added: 2, removed: 0 }]),
+        // A failed edit changed nothing.
+        typed('e3', [{ path: 'src/broken.ts', change: 'update', error: 'old text not found' }], 'failed'),
+        // A write whose counts come from its diff.
+        typed('w1', [{ path: 'src/new.ts', change: 'add', diff: '--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n' }]),
+        // One call that changed three files, one of whose changes failed.
+        typed('m1', [
+          { path: 'src/x.ts', change: 'update', added: 1, removed: 1 },
+          { path: 'src/y.ts', change: 'update', added: 4, removed: 2 },
+          { path: 'src/z.ts', change: 'update', error: 'file changed on disk' }
+        ])
+      ]),
+      // A raw edit from an older transcript, and a raw edit of a file a typed edit also changed.
+      { id: 'raw', role: 'assistant', parts: [editOf('src/old.ts'), editOf('src/x.ts', 'raw-x')] } as unknown as UIMessage
+    ]
+    const markup = renderToStaticMarkup(createElement(TurnEditSummary, { messages }))
+    const listed = [...markup.matchAll(/aria-label="Review ([^"]+)"/g)].map((match) => match[1])
+    expect(listed).toEqual(['src/a.ts', 'src/new.ts', 'src/x.ts', 'src/y.ts', 'src/old.ts'])
+    expect(markup).toContain('5 files changed')
+    // a 3/1 + new 3/0 + x 2/2 + y 4/2 + old 1/1
+    expect(markup).toContain('<span class="turn-edits-add">+13</span><span class="turn-edits-del">−6</span>')
   })
 
   it('offers to review the turn instead of opening the Git diff', () => {

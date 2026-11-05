@@ -120,6 +120,52 @@ function splitPath(filePath: string): { name: string; folder: string } {
   return { name: filePath.slice(slash + 1), folder: filePath.slice(0, slash) };
 }
 
+/** Lines added and removed in a unified diff, without its file headers. */
+function diffDelta(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) removed += 1;
+  }
+  return { added, removed };
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The files one edit or write call changed, with lines added and removed. A typed call (an
+ * activity item, how Claude and Codex edits arrive) lists every file it touched under
+ * `output.changes`, and a file whose change failed carries an `error` and is left out. A raw
+ * call names one file and its old and new text.
+ */
+function partChanges(
+  kind: "edit" | "write",
+  input: Record<string, unknown>,
+  output: Record<string, unknown> | null,
+): Array<{ filePath: string; added: number; removed: number }> {
+  if (Array.isArray(output?.changes)) {
+    return output.changes.flatMap((entry) => {
+      const change = asRecord(entry);
+      const filePath = change ? textOf(change.path) : "";
+      if (!change || !filePath || change.error) return [];
+      const fromDiff = typeof change.diff === "string" ? diffDelta(change.diff) : null;
+      const written = change.change === "add" ? count(change.linesWritten) : undefined;
+      return [{
+        filePath,
+        added: count(change.added) ?? fromDiff?.added ?? written ?? 0,
+        removed: count(change.removed) ?? fromDiff?.removed ?? 0,
+      }];
+    });
+  }
+  const filePath = extractFilePathArg(input);
+  if (!filePath) return [];
+  return [{ filePath, ...(kind === "write" ? writeDelta(input, output) : editDelta(input, output)) }];
+}
+
 function collectEdits(messages: UIMessage[], root: string | null): { files: FileEdit[]; added: number; removed: number } | null {
   const byPath = new Map<string, FileEdit>();
   for (const message of messages) {
@@ -131,14 +177,13 @@ function collectEdits(messages: UIMessage[], root: string | null): { files: File
       if (!kind) continue;
       const input = asRecord(part.input) ?? {};
       const output = asRecord(part.output) ?? asRecord(part.result);
-      const filePath = extractFilePathArg(input);
-      if (!filePath) continue;
-      const path = relativePath(filePath, root);
-      const delta = kind === "write" ? writeDelta(input, output) : editDelta(input, output);
-      const current = byPath.get(path) ?? { path, source: filePath, added: 0, removed: 0 };
-      current.added += delta.added;
-      current.removed += delta.removed;
-      byPath.set(path, current);
+      for (const { filePath, added, removed } of partChanges(kind, input, output)) {
+        const path = relativePath(filePath, root);
+        const current = byPath.get(path) ?? { path, source: filePath, added: 0, removed: 0 };
+        current.added += added;
+        current.removed += removed;
+        byPath.set(path, current);
+      }
     }
   }
   if (byPath.size === 0) return null;
