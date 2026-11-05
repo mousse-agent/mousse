@@ -34,6 +34,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Background work:** agents and shells a provider started that keep running after the turn that started them ended. Claude keeps one live process per thread so they survive. While a thread has background work it shows Waiting, and a subagent's task waits too.
 - **Continuation run:** a run of a thread that records a turn the provider started on its own, because background work finished and the provider wants to read the report. It opens with a short note and ends at the provider's result.
 - **Workflow:** a published sequence of steps that can run from the canvas, chat, CLI, or schedules.
+- **Scheduled task (task):** a prompt Mousse sends an agent at set times or on demand, with where it runs and what it may do. Each run is a turn on a thread. The Scheduled page calls it a task; the code and CLI call it a job (`ScheduledJob`, `mousse-cli schedule`).
 - **Bot:** an agent a person sets up once to do one job on its own, within permissions they approved. A personal bot runs only for its owner, on the owner's own providers.
 - **Space bot:** a bot a member adds to a Space, which answers in the Space's chat. Its code lives in `bots/space/`, apart from personal bots.
 - **Grant:** what a bot's owner approved: the tools, folders (read-only or writable), skills and MCP tools the bot may use, and its limits. The bot works inside its grant without asking.
