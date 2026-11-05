@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { IconCheck, IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
+import { IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
 import { TextShimmer } from "../text-shimmer";
 import { Collapse } from "../../../../components/ui/Collapse";
 import type { TimelineStep, StepState } from "../types/timeline";
@@ -12,6 +12,7 @@ import {
 } from "../utils/tool-adapters";
 import { extractCommandSummary } from "../utils/format-tool";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
+import { CopyIconButton } from "./copy-icon-button";
 
 export type BashToolTerminalCardProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -120,18 +121,13 @@ export function BashToolTerminalCard({
         ) : (
           <>
             <IconTerminal2 size={18} className="text-an-tool-color-muted shrink-0" />
-            {isInterrupted ? null : isError ? (
-              <IconX className="w-4 h-4 text-red-400 shrink-0" strokeWidth={2.5} />
-            ) : (
-              <IconCheck
-                className="w-4 h-4 text-green-500/70 shrink-0"
-                strokeWidth={2.5}
-              />
+            {isError && !isInterrupted && (
+              <IconX className="w-4 h-4 text-[var(--danger)] shrink-0" strokeWidth={2.5} />
             )}
             <span
               className={cn(
                 "text-xs truncate flex-1 min-w-0",
-                isError && !isInterrupted ? "text-red-400" : "text-an-tool-color-muted",
+                isError && !isInterrupted ? "text-[var(--danger)]" : "text-an-tool-color-muted",
               )}
             >
               {isInterrupted
@@ -144,6 +140,11 @@ export function BashToolTerminalCard({
                     ? "Failed command"
                     : "Ran command"}
             </span>
+            {exitFailed && !expanded && (
+              <span className="text-[11px] text-[var(--danger)] shrink-0">
+                exit {step.bashExitCode}
+              </span>
+            )}
           </>
         )}
         <IconChevronRight
@@ -153,11 +154,14 @@ export function BashToolTerminalCard({
       </button>
       <Collapse open={expanded} className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">
           {command && (
-            <div className="max-h-[160px] overflow-y-auto break-words whitespace-pre-wrap">
-              <span className="text-amber-600 dark:text-amber-400 select-none">
-                ${" "}
-              </span>
-              <span className="text-an-tool-color">{command}</span>
+            <div className="flex items-start gap-1">
+              <div className="flex-1 min-w-0 max-h-[160px] overflow-y-auto break-words whitespace-pre-wrap">
+                <span className="text-amber-600 dark:text-amber-400 select-none">
+                  ${" "}
+                </span>
+                <span className="text-an-tool-color">{command}</span>
+              </div>
+              <CopyIconButton text={command} label="Copy command" />
             </div>
           )}
           {step.bashCwd && (
@@ -175,20 +179,25 @@ export function BashToolTerminalCard({
           )}
           {step.bashOutput && (
             <div
-              ref={outputRef}
-              onScroll={handleOutputScroll}
               className={cn(
-                "text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto",
+                "flex items-start gap-1",
                 (command || step.bashTruncated) && "mt-1",
               )}
             >
-              {step.bashOutput}
+              <div
+                ref={outputRef}
+                onScroll={handleOutputScroll}
+                className="flex-1 min-w-0 text-an-tool-color-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
+              >
+                {step.bashOutput}
+              </div>
+              {!isPending && <CopyIconButton text={step.bashOutput} label="Copy output" />}
             </div>
           )}
           {(meta.length > 0 || isInterrupted) && (
             <div className="mt-1 flex gap-2 text-[11px] text-an-tool-color-muted">
               {hasExitCode && (
-                <span className={cn(exitFailed && "text-red-400")}>exit {step.bashExitCode}</span>
+                <span className={cn(exitFailed && "text-[var(--danger)]")}>exit {step.bashExitCode}</span>
               )}
               {typeof step.bashDurationMs === "number" && (
                 <span>{formatDuration(step.bashDurationMs)}</span>

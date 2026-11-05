@@ -56,6 +56,24 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** Tint each thread in the Threads tab with its project's color. */
   threadProjectColors: boolean
+  /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
+  animationSpeed: AnimationSpeed
+}
+
+export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
+
+export const ANIMATION_SPEEDS: readonly AnimationSpeed[] = ['off', 'fast', 'normal', 'slow']
+
+/** Multiplier on every UI motion duration (`--ui-motion-scale`). */
+export const ANIMATION_SPEED_SCALE: Readonly<Record<AnimationSpeed, number>> = {
+  off: 0,
+  fast: 0.6,
+  normal: 1,
+  slow: 1.6
+}
+
+export function isAnimationSpeed(value: unknown): value is AnimationSpeed {
+  return typeof value === 'string' && (ANIMATION_SPEEDS as readonly string[]).includes(value)
 }
 
 export interface NotificationSettings {
@@ -590,7 +608,8 @@ export function getDefaultSettings(): MousseSettings {
       renderMath: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true
+      threadProjectColors: true,
+      animationSpeed: 'normal'
     },
     notifications: {
       threadCompletionSound: true,
@@ -710,7 +729,8 @@ export function normalizeAppearance(
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors
+      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+    animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed
   }
 }
 

@@ -9,6 +9,7 @@ import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { setAnimationSpeed } from '../lib/motion'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -196,6 +197,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
   applyFontSettings(normalized)
+  setAnimationSpeed(normalized.animationSpeed)
 }
 
 async function syncWindowBackground(): Promise<void> {

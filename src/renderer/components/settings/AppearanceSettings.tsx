@@ -1,9 +1,17 @@
 import type { CSSProperties } from 'react'
-import type { AppearanceSettings as AppearanceValues, MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import { Palette } from '../../lib/icons'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { Select } from '../ui/Select'
+import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
 import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
+
+const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
+  off: 'Off',
+  fast: 'Fast',
+  normal: 'Normal',
+  slow: 'Slow'
+}
 
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
@@ -60,7 +68,7 @@ export interface AppearanceSettingsProps {
   onCommitAcrylicIntensity: (value: number) => void
 }
 
-/** Settings → Appearance: theme, accent, fonts, glass, math and thread colors. */
+/** Settings → Appearance: theme, accent, fonts, glass, math, thread colors and animation speed. */
 export function AppearanceSettings({
   settings,
   options,
@@ -231,6 +239,21 @@ export function AppearanceSettings({
           }
         />
       </SettingsGroup>
+
+      <SettingsAdvanced>
+        <SettingsRow
+          title="Animation speed"
+          description={<span title="Off whenever your system is set to reduce motion.">How fast panels, menus and lists move.</span>}
+          control={
+            <Select
+              ariaLabel="Animation speed"
+              value={appearance.animationSpeed}
+              onChange={(animationSpeed) => void onUpdate({ appearance: { ...appearance, animationSpeed } })}
+              options={ANIMATION_SPEEDS.map((speed) => ({ value: speed, label: ANIMATION_SPEED_LABELS[speed] }))}
+            />
+          }
+        />
+      </SettingsAdvanced>
     </section>
   )
 }
