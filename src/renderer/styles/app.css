@@ -135,6 +135,20 @@ html.platform-darwin .titlebar-left {
   app-region: no-drag;
 }
 
+/* The open thread and its project while the sidebar is closed: centred in the drag area. */
+.titlebar-thread-label {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 12px;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 /* Overlay pages cover the real title bar. This strip uses the same height,
    left inset, word size, and icon box as the main bar. */
 .overlay-titlebar {
