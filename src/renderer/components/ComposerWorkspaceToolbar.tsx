@@ -166,7 +166,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
               }}
             >
               <FolderPlus size={16} aria-hidden="true" />
-              <span>Open project…</span>
+              <span>Add project</span>
             </button>
           </div>
         </FloatingPortal>

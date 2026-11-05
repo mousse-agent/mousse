@@ -77,6 +77,13 @@ describe('composer workspace toolbar', () => {
     expect(onChange).toHaveBeenCalledWith({ projectId: 'p1', worktreeEnabled: false })
   })
 
+  it('ends the project menu with "Add project"', () => {
+    render({ projectId: 'p1', worktreeEnabled: false })
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Project"]')!.click())
+    const add = document.querySelector('[role="menu"][aria-label="Select project"] [data-project-id="__open_project__"]')
+    expect(add!.textContent).toBe('Add project')
+  })
+
   it('names no computer when there is no other one to pick', () => {
     render({ projectId: 'p1', worktreeEnabled: false })
     expect(host.textContent).not.toContain('This computer')
