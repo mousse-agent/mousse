@@ -371,6 +371,29 @@ describe('composer model picker', () => {
     expect(onModelMenuOpenChange).not.toHaveBeenCalled()
   })
 
+  it('after a pointer open, focuses the chosen mode once the menu shows, and Escape closes it back to the chip', () => {
+    render({ mode: 'ask', open: false })
+    // Record whether the menu was visible when a row took focus (a hidden row cannot take focus).
+    const focus = HTMLElement.prototype.focus
+    const visibleAtFocus: boolean[] = []
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      const menu = this.closest<HTMLElement>('.composer-permission-menu')
+      if (menu) visibleAtFocus.push(menu.style.visibility === 'visible')
+      focus.call(this, options)
+    })
+    act(() => { permissionButton().dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    spy.mockRestore()
+    expect(permissionMenu()).not.toBeNull()
+    expect(visibleAtFocus).toEqual([true])
+    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
+    // Escape still closes when focus stayed on the chip.
+    act(() => permissionButton().focus())
+    key(permissionButton(), 'Escape')
+    expect(permissionMenu()).toBeNull()
+    expect(permissionButton().getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(permissionButton())
+  })
+
   it('tints only Full access, and names a limit in the tooltip', () => {
     render({ mode: 'full', open: false })
     expect(permissionButton().classList.contains('is-full')).toBe(true)
