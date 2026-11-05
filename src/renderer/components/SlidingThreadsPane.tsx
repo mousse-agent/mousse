@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from 'react'
+import { scaleMotionMs, useMotionScale } from '../lib/motion'
 import '../styles/sliding-threads-pane.css'
 
 const CLOSE_FALLBACK_MS = 250
@@ -23,15 +24,8 @@ export function SlidingThreadsPane({ open, width, children, resizer, paneRef, ov
   openRef.current = open
   const [present, setPresent] = useState(open)
   const [expanded, setExpanded] = useState(open)
-  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
-
-  useLayoutEffect(() => {
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => setReducedMotion(media.matches)
-    media.addEventListener('change', update)
-    update()
-    return () => media.removeEventListener('change', update)
-  }, [])
+  // Off by the Animation speed setting or the OS reduced-motion setting.
+  const reducedMotion = useMotionScale() === 0
 
   useLayoutEffect(() => {
     let frame: number | undefined
@@ -66,7 +60,7 @@ export function SlidingThreadsPane({ open, width, children, resizer, paneRef, ov
         setPresent(false)
       }
       if (reducedMotion) finish()
-      else timer = window.setTimeout(finish, CLOSE_FALLBACK_MS)
+      else timer = window.setTimeout(finish, Math.max(CLOSE_FALLBACK_MS, scaleMotionMs(CLOSE_FALLBACK_MS)))
     }
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame)
