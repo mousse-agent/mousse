@@ -4,6 +4,7 @@ import { useSubagents } from '../../hooks/useSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
 import { ComputerBadgeView } from '../ComputerBadge'
+import { Collapse } from '../ui/Collapse'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
 import {
@@ -152,12 +153,10 @@ export function LineageList({ subagents, now, inheritedProvider, open, onOpenPar
             </span>
             {!open.finished && <span className="lineage-status">{lineageStatusLabel(finished[0], now)}</span>}
           </button>
-          {open.finished && (
-            <ul id={finishedId} className="lineage-list lineage-sublist">
-              {finishedSlice.visible.map((subagent) => <LineageRow key={subagent.childThreadId} subagent={subagent} {...rowProps} />)}
-              {finishedSlice.hiddenCount > 0 && <ShowMoreRow count={finishedSlice.hiddenCount} onExpand={() => onOpenPart('finishedAll', true)} />}
-            </ul>
-          )}
+          <Collapse open={open.finished} as="ul" id={finishedId} className="lineage-list lineage-sublist" itemCount={finishedSlice.visible.length}>
+            {finishedSlice.visible.map((subagent) => <LineageRow key={subagent.childThreadId} subagent={subagent} {...rowProps} />)}
+            {finishedSlice.hiddenCount > 0 && <ShowMoreRow count={finishedSlice.hiddenCount} onExpand={() => onOpenPart('finishedAll', true)} />}
+          </Collapse>
         </li>
       )}
     </ul>
@@ -206,6 +205,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
       }
     >
       <LineageList
+        // A thread switch starts a fresh list, so the finished group's reset to closed does not animate.
+        key={threadId ?? ''}
         subagents={subagents}
         now={now}
         inheritedProvider={inheritedProvider}
