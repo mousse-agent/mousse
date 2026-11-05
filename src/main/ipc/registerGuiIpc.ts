@@ -1039,12 +1039,14 @@ export function registerGuiIpc(
   ): Promise<unknown> => {
     const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
     if (!targetThreadId) return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(knownAppError({ code: 'thread_not_selected', message: 'Select a thread before sending.' }, { category: 'invalid', retryable: false })) }
+    const previousBusyThreadId = activityTrackerFor().getBusyThreadId()
+    const previousActivity = activityTrackerFor().getState(targetThreadId)
     activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
       const requestId = body.requestId ?? randomUUID()
-      const result = await guiMms.request<{ queued?: boolean; message?: string }>(
+      const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
           threadId: targetThreadId,
@@ -1058,7 +1060,11 @@ export function registerGuiIpc(
           source: 'gui'
         }
       )
-      if (result.queued) {
+      if (result.heldByPause) {
+        // The message waits behind a usage-limit pause: nothing started, so the thread shows what it showed before.
+        activityTrackerFor().setBusyThreadId(previousBusyThreadId)
+        setThreadActivity(targetThreadId, previousActivity ?? 'paused')
+      } else if (result.queued) {
         setThreadActivity(targetThreadId, 'processing')
       }
       return result
