@@ -2,7 +2,7 @@ import React, { memo, useContext } from "react";
 import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
-import { Eye, FilePlus, FolderOpen, Pencil } from "../../../../lib/icons";
+import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
 import { CODE_FONT } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
@@ -79,6 +79,12 @@ function parseStats(stats: string | undefined): { added: number; removed: number
   return { added, removed };
 }
 
+/** Lines in a whole file's text; a final newline does not start another line. */
+function lineCount(content: string): number {
+  if (!content) return 0;
+  return (content.endsWith("\n") ? content.slice(0, -1) : content).split("\n").length;
+}
+
 function verbOf(change: ActivityFileChange["change"] | undefined): FileVerb {
   return change === "add" ? "create" : change === "delete" ? "delete" : "edit";
 }
@@ -107,6 +113,8 @@ function filesFromChanges(changes: unknown): EditedFile[] | undefined {
         file.diff = { kind: "patch", patch };
       } else {
         const { oldText, newText } = diffSides(change.diff, change.change);
+        // A new file recorded without its line count still shows +N: its text is all added lines.
+        if (file.verb === "create" && file.added === 0 && file.removed === 0) file.added = lineCount(newText);
         file.diff = {
           kind: "sides",
           oldFile: { name, contents: oldText },
@@ -171,9 +179,9 @@ function fileFromRawCall(
   if (Array.isArray(output?.structuredPatch)) {
     stats = parseStats(step.diffStats);
   } else if (isWrite) {
-    const content = textOf(output?.content) || textOf(input?.content);
-    const lines = content ? (content.endsWith("\n") ? content.split("\n").slice(0, -1) : content.split("\n")) : [];
-    stats = { added: lines.length, removed: 0 };
+    // The same keys the changed-files line after the turn reads, so the rows add up to it.
+    const content = textOf(output?.content) || textOf(input?.content) || textOf(input?.contents);
+    stats = { added: lineCount(content), removed: 0 };
   } else {
     stats = pairs.reduce(
       (sum, pair) => {
@@ -346,12 +354,14 @@ function rowLabel(verb: FileVerb, status: RowStatus): string {
   }
 }
 
+// 28px targets that overhang the 22px line (negative margin), so showing them does not make the row taller.
 const ROW_ICON_BUTTON =
-  "inline-flex items-center justify-center size-[22px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color";
+  "inline-flex items-center justify-center size-7 -my-[3px] shrink-0 rounded-md text-muted-foreground hover:text-an-foreground hover:bg-an-background-secondary focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color";
 
 /**
- * The quiet line a tool row draws: an icon, the verb, the name in the foreground colour and mono, and the line
- * totals. The line is a button that opens what is under it; `actions` show on hover or keyboard focus, on the right.
+ * The quiet line a tool row draws: an icon, the verb, the file name in the foreground colour (mono, 500), the line
+ * totals and the tool rows' chevron. The line is a button that opens what is under it; `actions` follow the totals
+ * and show on hover or keyboard focus.
  */
 function EditLine({
   icon,
@@ -392,7 +402,7 @@ function EditLine({
       <span className={cn("font-[450] shrink-0 whitespace-nowrap", isFailed && "text-red-400")}>{label}</span>
       {name &&
         (isFileName ? (
-          <span className="an-edit-row-name min-w-0 truncate font-mono text-[13px] text-an-foreground">{name}</span>
+          <span className="an-edit-row-name min-w-0 truncate font-mono font-medium text-[13px] text-an-foreground">{name}</span>
         ) : (
           <span className="an-edit-row-count shrink-0 whitespace-nowrap">{name}</span>
         ))}
@@ -405,7 +415,7 @@ function EditLine({
         <button
           type="button"
           className={cn(
-            "an-edit-row-toggle flex flex-1 items-center gap-2 min-w-0 text-left text-[15px] leading-[22px] text-muted-foreground rounded-sm",
+            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[15px] leading-[22px] text-muted-foreground rounded-sm",
             "focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color",
             canOpen ? "cursor-pointer" : "cursor-default",
           )}
@@ -431,6 +441,15 @@ function EditLine({
             text
           )}
           {!isPending && <Stat added={added} removed={removed} />}
+          {canOpen && (
+            <IconChevronRight
+              aria-hidden="true"
+              className={cn(
+                "an-edit-row-chevron shrink-0 size-[18px] -ml-1 text-muted-foreground transition-transform duration-150 ease-out",
+                open && "rotate-90",
+              )}
+            />
+          )}
         </button>
         {actions && (
           <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100 group-has-[:focus-visible]/edit-line:opacity-100">
@@ -476,7 +495,7 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
         title="Open in Review"
         onClick={() => void openTurnInReview(useAppStore.getState().activeThreadId, turnId, path)}
       >
-        <Eye size={14} />
+        <GitCompare size={16} />
       </button>
       <button
         type="button"
@@ -485,7 +504,7 @@ function EditFileRow({ file, status }: { file: EditedFile; status: RowStatus }) 
         title="Open file"
         onClick={() => openFileInPanel({ path })}
       >
-        <FolderOpen size={14} />
+        <File size={16} />
       </button>
     </>
   ) : undefined;

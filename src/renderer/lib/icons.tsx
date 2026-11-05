@@ -64,6 +64,7 @@ import FolderOpenIcon from '@hugeicons/core-free-icons/FolderOpenIcon'
 import FolderSearchIcon from '@hugeicons/core-free-icons/FolderSearchIcon'
 import GitBranchIcon from '@hugeicons/core-free-icons/GitBranchIcon'
 import GitCommitHorizontalIcon from '@hugeicons/core-free-icons/GitCommitHorizontalIcon'
+import GitCompareIcon from '@hugeicons/core-free-icons/GitCompareIcon'
 import GitForkIcon from '@hugeicons/core-free-icons/GitForkIcon'
 import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
@@ -221,6 +222,7 @@ export const FolderPlus = /* @__PURE__ */ createIcon('FolderPlus', FolderAddIcon
 export const Gauge = /* @__PURE__ */ createIcon('Gauge', DashboardSpeed01Icon)
 export const GitBranch = /* @__PURE__ */ createIcon('GitBranch', GitBranchIcon)
 export const GitCommitHorizontal = /* @__PURE__ */ createIcon('GitCommitHorizontal', GitCommitHorizontalIcon)
+export const GitCompare = /* @__PURE__ */ createIcon('GitCompare', GitCompareIcon)
 export const GitFork = /* @__PURE__ */ createIcon('GitFork', GitForkIcon)
 export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
