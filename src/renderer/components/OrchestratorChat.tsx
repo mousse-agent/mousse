@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, RefreshCw } from '../lib/icons'
+import { ChevronDown, ChevronUp } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -63,6 +63,7 @@ import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
@@ -1190,25 +1191,20 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} onStop={() => void handleStop()} />
-        <ComposerNoticeSource notice={connectionFailed ? {
-          tone: 'error',
-          title: 'Connection lost',
-          actions: [{
-            label: 'Retry',
-            icon: <RefreshCw size={14} strokeWidth={1.8} />,
-            onClick: () => {
-              setConnectionFailed(false)
-              setLoading(true)
-              void window.mousse.orchestrator
-                .retryConnection(activeThreadId ?? undefined)
-                .then((started) => {
-                  if (!started) setLoading(false)
-                  else void refreshTurnActive()
-                })
-            }
-          }],
-          onDismiss: () => setConnectionFailed(false)
-        } : null} />
+        <ServiceLostNotice
+          lost={connectionFailed}
+          onReconnect={() => {
+            setConnectionFailed(false)
+            setLoading(true)
+            void window.mousse.orchestrator
+              .retryConnection(activeThreadId ?? undefined)
+              .then((started) => {
+                if (!started) setLoading(false)
+                else void refreshTurnActive()
+              })
+          }}
+          onDismiss={() => setConnectionFailed(false)}
+        />
         <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
