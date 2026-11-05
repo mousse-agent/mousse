@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -213,6 +215,17 @@ describe('Bots tab: list', () => {
     expect(create.className).toBe('btn')
     expect(create.querySelector('svg')).not.toBeNull()
     expect(create.textContent?.trim()).toBe('New bot')
+  })
+
+  it('keeps the New bot icon and label on one line at any list width', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/components/bots/bots.css'), 'utf8')
+    const button = css.match(/\.bots \.btn\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(button).toMatch(/display:\s*inline-flex/)
+    expect(button).toMatch(/align-items:\s*center/)
+    expect(button).toMatch(/white-space:\s*nowrap/)
+    expect(button).toMatch(/min-height:\s*var\(--settings-control-h, 28px\)/)
+    expect(css).toMatch(/\.bots \.btn svg\s*\{[^}]*flex-shrink:\s*0/)
+    expect(css).toMatch(/\.bots__list-head \.btn\s*\{[^}]*flex-shrink:\s*0/)
   })
 
   it('lists bots with the inbox badge and the open escalations', async () => {
