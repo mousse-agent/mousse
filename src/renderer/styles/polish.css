@@ -62,14 +62,17 @@
   --ui-aura-strength: 0.12;
   --ui-on-accent: #15121b;
 
-  /* Primary buttons are the raised neutral button with accent text: no fill,
-     no gradient, no glow. The text keeps the accent's hue and chroma with a
-     lightness floor (ceiling on light themes) so it stays at 4.5:1 or more on
-     --ui-raised and on the hover tint, for every accent preset. */
+  /* Primary buttons are the neutral button with accent text: no solid fill,
+     no gradient, no glow. They lead their row through an accent edge, a light
+     accent tint on the neutral surface (deeper on hover) and semibold text.
+     The text keeps the accent's hue and chroma with a lightness floor (ceiling
+     on light themes) so it stays at 4.5:1 or more on the rest and hover fills,
+     for every accent preset. */
   --btn-primary-fg: oklch(from var(--accent) max(l, 0.76) c h);
-  --btn-primary-border: color-mix(in srgb, var(--accent) 35%, var(--ui-line-strong));
-  --btn-primary-bg: var(--ui-raised);
-  --btn-primary-hover-bg: color-mix(in srgb, var(--accent) 10%, var(--ui-raised));
+  --btn-primary-border: color-mix(in srgb, var(--accent) 55%, var(--ui-line-strong));
+  --btn-primary-surface: var(--ui-raised);
+  --btn-primary-bg: color-mix(in srgb, var(--accent) 6%, var(--btn-primary-surface));
+  --btn-primary-hover-bg: color-mix(in srgb, var(--accent) 12%, var(--btn-primary-surface));
 
   /* Semantic status colours, vivid enough to read at dot size. */
   --success: #4fd08a;
@@ -111,7 +114,11 @@ html[data-theme='light'] {
   --hue-5: #3f6edb;
   --hue-6: #d34f6c;
   --ui-on-accent: #ffffff;
-  --btn-primary-fg: oklch(from var(--accent) min(l, 0.5) c h);
+  /* Light neutral buttons are see-through, so the primary sits on the same
+     surface as its neighbours rather than on white. */
+  --btn-primary-fg: oklch(from var(--accent) min(l, 0.45) c h);
+  --btn-primary-surface: transparent;
+  --btn-primary-bg: color-mix(in srgb, var(--accent) 5%, var(--btn-primary-surface));
 }
 
 @media (prefers-color-scheme: light) {
@@ -135,7 +142,9 @@ html[data-theme='light'] {
     --hue-5: #3f6edb;
     --hue-6: #d34f6c;
     --ui-on-accent: #ffffff;
-    --btn-primary-fg: oklch(from var(--accent) min(l, 0.5) c h);
+    --btn-primary-fg: oklch(from var(--accent) min(l, 0.45) c h);
+    --btn-primary-surface: transparent;
+    --btn-primary-bg: color-mix(in srgb, var(--accent) 5%, var(--btn-primary-surface));
   }
 }
 
@@ -1088,8 +1097,9 @@ html .chat-send-button:disabled {
   box-shadow: none;
 }
 
-/* Primary buttons: the raised neutral button (surface, specular top light)
-   with accent text and a faint accent edge; hover deepens the tint. Every
+/* Primary buttons: the neutral button (surface, specular top light) with a
+   light accent tint, an accent edge and semibold accent text; hover deepens
+   the tint. Every
    primary uses this one rule: add a component's primary class to the list,
    or give the button `ui-btn-primary`. Components keep their own size and
    radius. :is() lifts every entry to the specificity of the most specific
@@ -1111,6 +1121,7 @@ html :is(
   background: var(--btn-primary-bg);
   box-shadow: var(--ui-specular);
   color: var(--btn-primary-fg);
+  font-weight: 600;
   filter: none;
   transform: none;
 }
@@ -1147,6 +1158,7 @@ html :is(
   .side-card-git-pr-merge[data-ready]
 ):is(:disabled, [aria-disabled='true']) {
   border-color: var(--ui-line-strong);
+  background: var(--btn-primary-surface);
   color: var(--text-primary);
   opacity: 0.5;
   cursor: default;

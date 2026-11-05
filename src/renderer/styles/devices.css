@@ -7,10 +7,6 @@
   font-size: var(--settings-fs-small);
 }
 
-.devices-dialog-btn.primary {
-  font-weight: 500;
-}
-
 .devices-dialog-btn.danger-fill {
   border-color: transparent;
   background-color: var(--danger);
