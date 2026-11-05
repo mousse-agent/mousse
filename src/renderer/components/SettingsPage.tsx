@@ -4,7 +4,8 @@ import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acry
 import { ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
-import { revealSettingsAnchor, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
+import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
+import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import type {
   MousseSettings,
   MousseSettingsUpdate,
@@ -73,8 +74,6 @@ const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
 const CONTEXT_COMPACTION_HASH = '#settings-context-compaction'
 /** Where the old 'context' section and the compaction link land. */
 const CONTEXT_COMPACTION_ANCHOR = 'agents-context-compaction'
-/** How long a search result waits for a page that loads its own data to show the setting. */
-const ANCHOR_WAIT_MS = 3000
 
 /** A setting to bring into view once its page shows it; `seq` makes picking the same result again count. */
 interface PendingAnchor { anchor: string; seq: number }
@@ -105,6 +104,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const anchorSeq = useRef(0)
   const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() =>
     initialRequest === 'context' ? { anchor: CONTEXT_COMPACTION_ANCHOR, seq: 0 } : null)
+  /** Why a search result's setting is not on its page; `focus` when nothing else took focus. */
+  const [anchorNote, setAnchorNote] = useState<{ text: string; focus: boolean } | null>(null)
   // Account always exists: it shows Activity, plus Mousse ID when this build has the service.
   const activeSection: SettingsSectionId = selectedSection
   useEffect(() => {
@@ -113,6 +114,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const section = settingsSectionId(requested)
       if (section) {
         takePendingSettingsSection()
+        setAnchorNote(null)
         if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) {
           setPendingAnchor({ anchor: CONTEXT_COMPACTION_ANCHOR, seq: ++anchorSeq.current })
         }
@@ -123,39 +125,28 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return () => window.removeEventListener('mousse:settings-section', openSection)
   }, [])
 
-  // A search result (or the compaction link) lands on its setting once the page shows it. Pages that
-  // load their own data show it later, so wait for it a little.
+  // A search result (or the compaction link) lands on its setting once the page shows it. A setting
+  // the page does not show (it needs a model, a sign-in…) lands on what it needs, with a line saying why.
   const contentRef = useRef<HTMLDivElement>(null)
+  const noteRef = useRef<HTMLParagraphElement>(null)
   const settingsReady = Boolean(settings && options)
   useEffect(() => {
     const root = contentRef.current
     if (!pendingAnchor || !settingsReady || !root) return
-    const done = () => {
-      setPendingAnchor((current) => (current === pendingAnchor ? null : current))
-      if (pendingAnchor.anchor === CONTEXT_COMPACTION_ANCHOR && window.location.hash === CONTEXT_COMPACTION_HASH) {
-        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    return landOnSettingsAnchor(root, pendingAnchor.anchor, {
+      onMissing: (text, focused) => setAnchorNote({ text, focus: !focused }),
+      onFound: () => setAnchorNote(null),
+      onDone: () => {
+        setPendingAnchor((current) => (current === pendingAnchor ? null : current))
+        if (pendingAnchor.anchor === CONTEXT_COMPACTION_ANCHOR && window.location.hash === CONTEXT_COMPACTION_HASH) {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
       }
-    }
-    if (revealSettingsAnchor(root, pendingAnchor.anchor)) {
-      done()
-      return
-    }
-    const observer = new MutationObserver(() => {
-      if (!revealSettingsAnchor(root, pendingAnchor.anchor)) return
-      observer.disconnect()
-      window.clearTimeout(timer)
-      done()
     })
-    observer.observe(root, { childList: true, subtree: true })
-    const timer = window.setTimeout(() => {
-      observer.disconnect()
-      done()
-    }, ANCHOR_WAIT_MS)
-    return () => {
-      observer.disconnect()
-      window.clearTimeout(timer)
-    }
   }, [pendingAnchor, activeSection, settingsReady])
+  useEffect(() => {
+    if (anchorNote?.focus) noteRef.current?.focus()
+  }, [anchorNote])
 
   const refreshProviderData = useCallback(async () => {
     const opts = await window.mousse.settings.getOptions()
@@ -315,6 +306,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const goToSection = (id: SettingsSectionId, anchor?: string) => {
     const arrive = () => {
       setActiveSection(id)
+      setAnchorNote(null)
       if (anchor) setPendingAnchor({ anchor, seq: ++anchorSeq.current })
     }
     // Only the integrations editors hold unsaved drafts; ask before leaving that section.
@@ -327,7 +319,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor)
   const reviewPending = useStorageReviewPending()
   const searching = navQuery.trim() !== ''
-  const results = useMemo(() => searchSettings(navQuery, VISIBLE_SETTINGS_SECTIONS), [navQuery])
+  const mousseIdAvailable = useMousseIdAvailable()
+  const results = useMemo(() => searchSettings(navQuery, VISIBLE_SETTINGS_SECTIONS, searchIndex(mousseIdAvailable)), [navQuery, mousseIdAvailable])
   const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
   const activeSectionInfo = sectionOf(activeSection)
   const activeSectionLabel = activeSectionInfo.label
@@ -370,15 +363,17 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 key={result.anchor ?? result.section}
                 type="button"
                 className="settings-nav-item settings-nav-result"
-                title={result.anchor ? `${result.title} · ${section.label}` : result.title}
                 aria-label={result.anchor ? `${result.title}, ${section.label}` : result.title}
                 onClick={() => openResult(result)}
               >
                 <span className="settings-nav-item-icon" data-hue={section.hue}>
                   <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
                 </span>
-                <span className="settings-nav-result-title">{result.title}</span>
-                {result.anchor && <span className="settings-nav-result-page">{section.label}</span>}
+                {/* The whole title wraps: results such as the worktree removal rules differ only at the end. */}
+                <span className="settings-nav-result-text">
+                  <span className="settings-nav-result-title">{result.title}</span>
+                  {result.anchor && <span className="settings-nav-result-page">{section.label}</span>}
+                </span>
               </button>
             )
           })}
@@ -444,6 +439,11 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
         <div className="settings-content" key={activeSection} ref={contentRef}>
           <SettingsPageTitle title={activeSectionLabel} />
+          {anchorNote && (
+            <p ref={noteRef} className="settings-page-note" role="status" tabIndex={-1}>
+              {anchorNote.text}
+            </p>
+          )}
           {activeSection === 'storage' && <StorageSettings />}
           {activeSection === 'general' && (
             <GeneralSettings

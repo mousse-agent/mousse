@@ -15,6 +15,11 @@ export interface SettingsSearchEntry {
   anchor: string
   /** Other words people search for it by. */
   keywords?: readonly string[]
+  /**
+   * For a setting the page shows only once something else is set up: the anchor of that prerequisite
+   * (where the search lands instead) and the line that says why the setting is not there.
+   */
+  needs?: { anchor: string; reason: string }
 }
 
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
@@ -32,7 +37,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'account', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
-  { title: 'Phones', section: 'account', anchor: 'account-phones', keywords: ['mobile', 'pair'] },
+  { title: 'Phones', section: 'account', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
   { title: 'Activity', section: 'account', anchor: 'account-activity', keywords: ['heatmap', 'line edits'] },
   { title: 'Token usage', section: 'account', anchor: 'account-token-usage', keywords: ['tokens'] },
 
@@ -59,11 +64,11 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Web search', section: 'integrations', anchor: 'integrations-web-search', keywords: ['search tool'] },
 
   { title: 'Read aloud', section: 'speech', anchor: 'speech-read-aloud', keywords: ['text to speech'] },
-  { title: 'Voice', section: 'speech', anchor: 'speech-voice', keywords: ['read aloud'] },
-  { title: 'Speed', section: 'speech', anchor: 'speech-speed', keywords: ['read aloud', 'rate'] },
+  { title: 'Voice', section: 'speech', anchor: 'speech-voice', keywords: ['read aloud'], needs: { anchor: 'speech-read-aloud', reason: 'Voice appears once you choose a read aloud model that has voices.' } },
+  { title: 'Speed', section: 'speech', anchor: 'speech-speed', keywords: ['read aloud', 'rate'], needs: { anchor: 'speech-read-aloud', reason: 'Speed appears once you choose a read aloud model.' } },
   { title: 'Dictation', section: 'speech', anchor: 'speech-dictation', keywords: ['microphone', 'speech to text'] },
-  { title: 'Reduce background noise', section: 'speech', anchor: 'speech-noise', keywords: ['dictation', 'microphone'] },
-  { title: 'Vocabulary', section: 'speech', anchor: 'speech-vocabulary', keywords: ['dictation', 'names', 'spelling'] },
+  { title: 'Reduce background noise', section: 'speech', anchor: 'speech-noise', keywords: ['dictation', 'microphone'], needs: { anchor: 'speech-dictation', reason: 'Reduce background noise appears once you choose a dictation model.' } },
+  { title: 'Vocabulary', section: 'speech', anchor: 'speech-vocabulary', keywords: ['dictation', 'names', 'spelling'], needs: { anchor: 'speech-dictation', reason: 'Vocabulary appears once you choose a dictation model that uses it, such as Parakeet.' } },
 
   { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
   { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
@@ -84,6 +89,19 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: STORAGE_RULE_COPY.merged.title, section: 'storage', anchor: 'storage-merged', keywords: ['cleanup'] },
   { title: STORAGE_RULE_COPY.captures.title, section: 'storage', anchor: 'storage-captures', keywords: ['browser data', 'screenshots'] }
 ]
+
+/** Settings that exist only when this build has the Mousse ID service. */
+export const MOUSSE_ID_ANCHORS: readonly string[] = ['account-mousse-id', 'account-phones']
+
+/** The settings the search offers: Mousse ID rows only when this build has the service. */
+export function searchIndex(mousseIdAvailable: boolean): readonly SettingsSearchEntry[] {
+  return mousseIdAvailable ? SETTINGS_SEARCH_INDEX : SETTINGS_SEARCH_INDEX.filter((entry) => !MOUSSE_ID_ANCHORS.includes(entry.anchor))
+}
+
+/** The index entry for an anchor, if the search knows it. */
+export function settingsSearchEntry(anchor: string): SettingsSearchEntry | undefined {
+  return SETTINGS_SEARCH_INDEX.find((entry) => entry.anchor === anchor)
+}
 
 /** A page as the search sees it: its name and the words it is found by. */
 export interface SettingsSearchPage {
@@ -164,4 +182,76 @@ export function revealSettingsAnchor(root: ParentNode, anchor: string): boolean 
   target.scrollIntoView?.({ block: 'center' })
   focusable.focus({ preventScroll: true })
   return true
+}
+
+/** What landing on a search result reports back to the page. */
+export interface SettingsAnchorLanding {
+  /**
+   * The setting is not on the page: `note` says why. `focused` is true when focus went to the
+   * prerequisite it needs; otherwise the page should focus the note.
+   */
+  onMissing(note: string, focused: boolean): void
+  /** The setting showed after all, after onMissing: the note can go. */
+  onFound(): void
+  /** The wait is over, either way. Called once. */
+  onDone(): void
+}
+
+/** How long the page must stay unchanged before a missing setting counts as not there. */
+const ANCHOR_QUIET_MS = 800
+/** How long a page that loads its own data may take to show the setting. */
+const ANCHOR_WAIT_MS = 3000
+
+/**
+ * Lands on a search result's setting in `root`. A page that loads its own data shows the setting
+ * later, so this waits for it. Once the page has settled without it, focus goes to what the setting
+ * needs (`needs` in the index) and `onMissing` says why; if the setting then shows within the wait,
+ * focus moves to it. Returns a function that stops waiting.
+ */
+export function landOnSettingsAnchor(
+  root: HTMLElement,
+  anchor: string,
+  landing: SettingsAnchorLanding,
+  { quietMs = ANCHOR_QUIET_MS, waitMs = ANCHOR_WAIT_MS }: { quietMs?: number; waitMs?: number } = {}
+): () => void {
+  if (revealSettingsAnchor(root, anchor)) {
+    landing.onDone()
+    return () => {}
+  }
+  let missing = false
+  let quiet: ReturnType<typeof setTimeout> | undefined
+  let wait: ReturnType<typeof setTimeout> | undefined
+  const observer = new MutationObserver(() => {
+    if (revealSettingsAnchor(root, anchor)) {
+      stop()
+      if (missing) landing.onFound()
+      landing.onDone()
+    } else if (!missing) {
+      settle()
+    }
+  })
+  const stop = (): void => {
+    observer.disconnect()
+    clearTimeout(quiet)
+    clearTimeout(wait)
+  }
+  const explain = (): void => {
+    if (missing) return
+    missing = true
+    const entry = settingsSearchEntry(anchor)
+    const focused = Boolean(entry?.needs && revealSettingsAnchor(root, entry.needs.anchor))
+    landing.onMissing(entry?.needs?.reason ?? `${entry?.title ?? 'This setting'} isn’t on this page right now.`, focused)
+  }
+  const settle = (): void => {
+    clearTimeout(quiet)
+    quiet = setTimeout(explain, quietMs)
+  }
+  observer.observe(root, { childList: true, subtree: true })
+  settle()
+  wait = setTimeout(() => {
+    stop()
+    explain()
+    landing.onDone()
+  }, waitMs)
+  return stop
 }

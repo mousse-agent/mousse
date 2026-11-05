@@ -3,9 +3,10 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { revealSettingsAnchor, searchSettings, SETTINGS_SEARCH_INDEX, SETTINGS_SECTION_IDS, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { landOnSettingsAnchor, revealSettingsAnchor, searchIndex, searchSettings, SETTINGS_SEARCH_INDEX, SETTINGS_SECTION_IDS, type SettingsSearchPage } from '../../src/renderer/lib/settingsSearch'
 import { AgentsSettings } from '../../src/renderer/components/settings/AgentsSettings'
+import { SettingsRow } from '../../src/renderer/components/settings/SettingsRow'
 import { RunSettingsGroup } from '../../src/renderer/components/settings/RunSettingsGroup'
 import { getDefaultSettings, type SettingsOptions } from '../../src/shared/settings'
 
@@ -61,6 +62,7 @@ describe('the settings search', () => {
       expect(SETTINGS_SECTION_IDS).toContain(entry.section)
       expect(entry.anchor).toMatch(/^[a-z][a-z-]*$/)
       expect(sources, entry.anchor).toContain(`anchor="${entry.anchor}"`)
+      if (entry.needs) expect(sources, entry.needs.anchor).toContain(`anchor="${entry.needs.anchor}"`)
     }
   })
 })
@@ -89,10 +91,13 @@ describe('landing on a search result', () => {
   })
 
   it('focuses the row when its control is disabled, and says so when the setting is not on the page', () => {
-    act(() => root.render(createElement(AgentsSettings, { settings: getDefaultSettings(), options: OPTIONS, projects: [], updateSettings: async () => {} })))
-    // With no providers the model pickers are disabled.
-    expect(revealSettingsAnchor(host, 'agents-default-model')).toBe(true)
-    expect(document.activeElement).toBe(host.querySelector('[data-settings-anchor="agents-default-model"]'))
+    act(() => root.render(createElement(SettingsRow, {
+      title: 'Voice',
+      anchor: 'speech-voice',
+      control: createElement('button', { type: 'button', disabled: true }, 'Play sample')
+    })))
+    expect(revealSettingsAnchor(host, 'speech-voice')).toBe(true)
+    expect(document.activeElement).toBe(host.querySelector('[data-settings-anchor="speech-voice"]'))
     expect(revealSettingsAnchor(host, 'providers-telemetry')).toBe(false)
   })
 
@@ -105,5 +110,107 @@ describe('landing on a search result', () => {
     expect(revealSettingsAnchor(host, 'general-resume')).toBe(true)
     expect(details.open).toBe(true)
     expect(document.activeElement).toBe(host.querySelector('[aria-label="Resume after usage limits reset"]'))
+  })
+})
+
+describe('a search result whose setting is not on its page', () => {
+  let host: HTMLElement
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    host = document.createElement('div')
+    document.body.append(host)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    host.remove()
+  })
+
+  const landing = () => ({ onMissing: vi.fn(), onFound: vi.fn(), onDone: vi.fn() })
+  /** The Dictation group with no model chosen: its only control adds a model, and Vocabulary is not shown. */
+  const dictationWithoutModel = () => {
+    host.innerHTML = '<section data-settings-anchor="speech-dictation"><h3>Dictation</h3><button type="button">Add a dictation model</button></section>'
+    return host.querySelector('button')!
+  }
+
+  it('lands on what the setting needs and says why, once the page has settled', () => {
+    const add = dictationWithoutModel()
+    const events = landing()
+    landOnSettingsAnchor(host, 'speech-vocabulary', events, { quietMs: 50, waitMs: 200 })
+    expect(events.onMissing).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(50)
+    expect(events.onMissing).toHaveBeenCalledExactlyOnceWith('Vocabulary appears once you choose a dictation model that uses it, such as Parakeet.', true)
+    expect(document.activeElement).toBe(add)
+    vi.advanceTimersByTime(150)
+    expect(events.onDone).toHaveBeenCalledOnce()
+    expect(events.onFound).not.toHaveBeenCalled()
+  })
+
+  it('moves to the setting when the page shows it after all', async () => {
+    dictationWithoutModel()
+    const events = landing()
+    landOnSettingsAnchor(host, 'speech-vocabulary', events, { quietMs: 50, waitMs: 200 })
+    vi.advanceTimersByTime(50)
+    host.insertAdjacentHTML('beforeend', '<div data-settings-anchor="speech-vocabulary"><div class="settings-item-control"><button type="button">No terms</button></div></div>')
+    await Promise.resolve()
+    expect(events.onFound).toHaveBeenCalledOnce()
+    expect(events.onDone).toHaveBeenCalledOnce()
+    expect(document.activeElement?.textContent).toBe('No terms')
+    vi.advanceTimersByTime(500)
+    expect(events.onMissing).toHaveBeenCalledOnce()
+    expect(events.onDone).toHaveBeenCalledOnce()
+  })
+
+  it('keeps waiting while the page is still changing', async () => {
+    dictationWithoutModel()
+    const events = landing()
+    landOnSettingsAnchor(host, 'speech-noise', events, { quietMs: 50, waitMs: 200 })
+    vi.advanceTimersByTime(40)
+    host.append(document.createElement('p'))
+    await Promise.resolve()
+    vi.advanceTimersByTime(40)
+    expect(events.onMissing).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(10)
+    expect(events.onMissing).toHaveBeenCalledWith('Reduce background noise appears once you choose a dictation model.', true)
+  })
+
+  it('names the setting and leaves focus to the page when nothing it needs is known', () => {
+    const events = landing()
+    landOnSettingsAnchor(host, 'agents-context-compaction', events, { quietMs: 50, waitMs: 200 })
+    vi.advanceTimersByTime(200)
+    expect(events.onMissing).toHaveBeenCalledExactlyOnceWith('Compact context isn’t on this page right now.', false)
+    expect(events.onDone).toHaveBeenCalledOnce()
+  })
+
+  it('lands at once, with no note, when the setting is there', () => {
+    host.innerHTML = '<div data-settings-anchor="speech-noise"><div class="settings-item-control"><button type="button">On</button></div></div>'
+    const events = landing()
+    landOnSettingsAnchor(host, 'speech-noise', events)
+    expect(events.onDone).toHaveBeenCalledOnce()
+    expect(events.onMissing).not.toHaveBeenCalled()
+    expect(document.activeElement?.textContent).toBe('On')
+  })
+})
+
+describe('the search results list', () => {
+  it('leaves Mousse ID out when this build has no Mousse ID service', () => {
+    const titles = (available: boolean) => searchSettings('mousse id', PAGES, searchIndex(available)).map((result) => result.title)
+    expect(titles(true)).toContain('Mousse ID')
+    expect(titles(false)).not.toContain('Mousse ID')
+    expect(searchSettings('phones', PAGES, searchIndex(false))).toEqual([])
+  })
+
+  it('shows each result’s whole title, so results that differ only at the end stay apart', () => {
+    const css = readFileSync(join(__dirname, '../../src/renderer/styles/settings.css'), 'utf8')
+    const rule = css.match(/\.settings-nav-result-title\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rule).not.toBe('')
+    expect(rule).not.toMatch(/nowrap|ellipsis/)
+    const removal = searchSettings('remove worktrees', PAGES).map((result) => result.title)
+    expect(removal).toEqual([
+      'Remove worktrees of deleted threads',
+      'Remove worktrees inactive for',
+      'Remove worktrees whose work is merged into the default branch'
+    ])
   })
 })
