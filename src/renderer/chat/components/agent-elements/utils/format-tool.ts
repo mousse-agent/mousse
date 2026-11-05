@@ -134,17 +134,6 @@ function stripInlineMarkdown(line: string): string {
 }
 
 /**
- * One-line command summary for the Bash card header: collapsed whitespace,
- * truncated. Empty when the command is unknown (old transcripts) so the
- * header falls back to a bare Ran/Failed label instead of a fake command.
- */
-export function extractCommandSummary(cmd: string): string {
-  const collapsed = cmd.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= 64) return collapsed;
-  return `${collapsed.slice(0, 61).trimEnd()}...`;
-}
-
-/**
  * Labels for a SearchTool row. Always names the tool and query — a bare
  * "Found 0 results" doesn't say what ran.
  */
