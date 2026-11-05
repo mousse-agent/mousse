@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent, TelemetrySetting } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
+import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
@@ -203,7 +204,7 @@ export function ModelsEditorSection({
 }) {
   // Collapsed by default, like Advanced; the summary keeps the counts in view while it is closed.
   return (
-    <details className="settings-advanced prov-models-section">
+    <details className={`settings-advanced prov-models-section ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         Models

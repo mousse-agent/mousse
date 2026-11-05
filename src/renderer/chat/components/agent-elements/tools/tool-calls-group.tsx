@@ -48,8 +48,9 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
       onToggleExpand={() => {
         setExpanded((prev) => !prev);
       }}
+      itemCount={count}
     >
-      <div className="an-tool-group-rows flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
+      <div className="an-tool-group-rows ui-collapse-items flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
         {children}
       </div>
     </ToolRowBase>
