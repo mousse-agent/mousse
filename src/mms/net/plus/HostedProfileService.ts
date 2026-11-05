@@ -21,6 +21,18 @@ class RejectedRendezvous extends NetError {
     super('bad_request')
   }
 }
+/**
+ * Mousse ID answered with an error of its own (a 4xx other than 429, with its error body). It runs
+ * each control request in one transaction, so a request answered this way changed nothing.
+ */
+class RefusedRequest extends NetError {
+  constructor(
+    code: ConstructorParameters<typeof NetError>[0],
+    readonly status: number
+  ) {
+    super(code)
+  }
+}
 interface Stored {
   configuration: PlusConfiguration
   registration?: RegistrationResult['registration']
@@ -29,6 +41,11 @@ interface Stored {
   managedSpaceRoutes?: Record<string, { user: UserId; expiresAt: number }>
   /** Display-only account details from the sign-in grant. Never used for authorization. */
   account?: { email?: string; plan?: string; devices?: { used: number; limit: number } }
+  /**
+   * Mousse ID refused this computer's credential on a fresh renewal (the computer was removed, or
+   * the credential ran out). Until a renewal succeeds, only signing in again reconnects it.
+   */
+  refused?: true
   pending?: {
     ticket?: string
     purpose: ChallengeStatement['purpose']
@@ -436,10 +453,16 @@ export class HostedProfileService {
   }
   status(): PlusStatus {
     const stored = this.read()
+    const connected = !!stored?.registration && stored.registration.expiresAt > this.now()
     return stored
       ? {
           configured: true,
-          connected: !!stored.registration && stored.registration.expiresAt > this.now(),
+          connected,
+          // The registration lapsed (the computer slept, or was offline) but its credential still
+          // renews it: the account stays signed in while the next renewal reconnects it.
+          ...(!connected && stored.registration && stored.connectorToken && !stored.refused
+            ? { reconnecting: true }
+            : {}),
           accountId: stored.configuration.accountId,
           audience: stored.configuration.audience,
           ...(stored.account?.email ? { email: stored.account.email } : {}),
@@ -529,7 +552,7 @@ export class HostedProfileService {
         if (response.status === 429)
           throw new NetError('quota_exceeded', 'Too many phone codes are active. Wait for one to expire.')
       }
-      throw new NetError(
+      const code =
         response.status === 401 || response.status === 403
           ? 'forbidden'
           : response.status === 409
@@ -537,7 +560,17 @@ export class HostedProfileService {
             : response.status === 429
               ? 'rate_limited'
               : 'route_unreachable'
-      )
+      let refused = false
+      try {
+        refused =
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 429 &&
+          typeof JSON.parse(text)?.error?.code === 'string'
+      } catch {
+        // A body that is not Mousse ID's error may come from a proxy in front of it.
+      }
+      throw refused ? new RefusedRequest(code, response.status) : new NetError(code)
     }
     if (response.status === 204) return undefined as T
     try {
@@ -660,8 +693,13 @@ export class HostedProfileService {
   async connect(accountToken: string): Promise<PlusStatus> {
     const stored = this.read()
     if (!stored) throw new NetError('not_enrolled')
-    if (stored.pending && stored.pending.purpose !== 'register')
-      throw new NetError('outcome_uncertain')
+    if (stored.pending?.purpose === 'bind') throw new NetError('outcome_uncertain')
+    // A saved renewal, route or rendezvous belongs to the registration this sign-in replaces, which
+    // Mousse ID revokes when it registers this computer again, so its outcome no longer matters.
+    if (stored.pending && stored.pending.purpose !== 'register') {
+      delete stored.pending
+      delete stored.deferredRoute
+    }
     const identity = this.options.identity(),
       intent = {
         roster: identity.roster,
@@ -698,6 +736,7 @@ export class HostedProfileService {
     stored.registration = result.registration
     stored.connectorToken = result.connectorToken
     delete stored.pending
+    delete stored.refused
     this.save(stored)
     await this.recordDevices(stored, accountToken)
     return this.status()
@@ -733,7 +772,15 @@ export class HostedProfileService {
   }
   async renew(): Promise<PlusStatus> {
     const replayed = this.read()?.pending
-    const status = await this.renewOnce()
+    let status: PlusStatus
+    try {
+      status = await this.renewOnce()
+    } catch (error) {
+      // Mousse ID refused a saved renewal, typically because its challenge expired while the
+      // computer slept or was offline. renewOnce dropped it, so sign a fresh one right away.
+      if (!(error instanceof RefusedRequest) || replayed?.purpose !== 'renew') throw error
+      return this.renewOnce()
+    }
     // A replayed request carries the roster inside its signed body, which is what the server
     // received (the saved intent can disagree with it). When the roster changed since (a revoked
     // device), send the current one now instead of at the next scheduled renewal.
@@ -756,6 +803,15 @@ export class HostedProfileService {
       delete stored.pending
       this.save(stored)
     }
+    // Once its ticket has expired, nobody can redeem a rendezvous, so whether it was ever stored no
+    // longer matters. Holding on to it would block every renewal from then on.
+    if (
+      stored.pending?.purpose === 'rendezvous' &&
+      (stored.pending.intent as { recoveryUntil: number }).recoveryUntil <= this.now()
+    ) {
+      delete stored.pending
+      this.save(stored)
+    }
     if (stored.pending && stored.pending.purpose !== 'renew')
       throw new NetError('outcome_uncertain')
     const identity = this.options.identity(),
@@ -764,23 +820,30 @@ export class HostedProfileService {
         generation: stored.registration.generation,
         roster: identity.roster,
         delegation: identity.delegation
-      }
-    // A replayed body keeps the intent it was signed with, so a failed retry cannot make the
-    // saved roster look newer than the request that will eventually be sent.
-    if (!stored.pending)
-      stored.pending = {
-        purpose: 'renew',
-        intent,
-        body: await this.signed(stored.configuration, 'renew', intent, stored.connectorToken)
-      }
-    const body = stored.pending.body
-    this.save(stored)
-    const registration = await this.post<RegistrationResult['registration']>(
-      stored.configuration,
-      `/v1/net/registrations/${stored.registration.id}/renew`,
-      stored.connectorToken,
-      { ...body, connectorToken: stored.connectorToken }
-    )
+      },
+      replaying = !!stored.pending
+    let registration: RegistrationResult['registration']
+    try {
+      // A replayed body keeps the intent it was signed with, so a failed retry cannot make the
+      // saved roster look newer than the request that will eventually be sent.
+      if (!stored.pending)
+        stored.pending = {
+          purpose: 'renew',
+          intent,
+          body: await this.signed(stored.configuration, 'renew', intent, stored.connectorToken)
+        }
+      const body = stored.pending.body
+      this.save(stored)
+      registration = await this.post<RegistrationResult['registration']>(
+        stored.configuration,
+        `/v1/net/registrations/${stored.registration.id}/renew`,
+        stored.connectorToken,
+        { ...body, connectorToken: stored.connectorToken }
+      )
+    } catch (error) {
+      if (error instanceof RefusedRequest) this.renewalRefused(stored.pending, replaying, error)
+      throw error
+    }
     if (
       registration.id !== stored.registration.id ||
       !Number.isSafeInteger(registration.generation) ||
@@ -795,6 +858,7 @@ export class HostedProfileService {
       throw new NetError('forbidden')
     stored.registration = registration
     delete stored.pending
+    delete stored.refused
     if (
       stored.deferredRoute &&
       (stored.deferredRoute.intent as { generation: number; expiresAt: number }).generation ===
@@ -805,6 +869,27 @@ export class HostedProfileService {
     delete stored.deferredRoute
     this.save(stored)
     return this.status()
+  }
+  /**
+   * Mousse ID answered a renewal with an error, so nothing was renewed. The saved body is dropped:
+   * replayed, it can never succeed (its challenge expires within minutes), and the next renewal
+   * signs a fresh one. A fresh renewal refused as unauthorized means the credential itself is gone.
+   */
+  private renewalRefused(
+    sent: Stored['pending'],
+    replayed: boolean,
+    error: RefusedRequest
+  ): void {
+    const current = this.read()
+    if (!current) return
+    if (
+      sent &&
+      current.pending &&
+      Buffer.from(canonicalJson(current.pending)).equals(canonicalJson(sent))
+    )
+      delete current.pending
+    if (!replayed && (error.status === 401 || error.status === 403)) current.refused = true
+    this.save(current)
   }
   private connector(): { stored: Stored; registrationId: string; token: string } {
     const stored = this.read()

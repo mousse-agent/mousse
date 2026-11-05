@@ -128,7 +128,8 @@ export class SettingsStore {
       (rawTheme !== undefined && rawTheme in REMOVED_THEME_IDS) ||
       typeof settings.appearance?.acrylic !== 'boolean' ||
       typeof settings.appearance?.acrylicIntensity !== 'number' ||
-      typeof settings.appearance?.renderMath !== 'boolean'
+      typeof settings.appearance?.renderMath !== 'boolean' ||
+      typeof settings.appearance?.threadProjectColors !== 'boolean'
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true
