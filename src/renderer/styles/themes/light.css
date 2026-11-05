@@ -30,7 +30,9 @@ html[data-theme='light'] {
   --border: rgba(var(--accent-deep-dark-rgb), 0.1);
   --app-window-bg: var(--surface-light-base);
   --text-primary: #1a1a1a;
-  --text-secondary: rgba(0, 0, 0, 0.58);
+  /* 4.5:1 or better on every light surface (page, sidebar, palette, white
+     raised groups, selected rows) for every accent; tests/lightTextContrast. */
+  --text-secondary: rgba(0, 0, 0, 0.68);
   --gradient-surface: linear-gradient(180deg, var(--surface-light-strong) 0%, var(--surface-light-base) 100%);
   --gradient-glow: radial-gradient(ellipse at 20% 0%, rgba(var(--accent-deep-rgb), 0.08) 0%, transparent 55%);
 }
@@ -62,7 +64,7 @@ html[data-theme='light'] {
     --border: rgba(var(--accent-deep-dark-rgb), 0.1);
     --app-window-bg: var(--surface-light-base);
     --text-primary: #1a1a1a;
-    --text-secondary: rgba(0, 0, 0, 0.58);
+    --text-secondary: rgba(0, 0, 0, 0.68);
     --gradient-surface: linear-gradient(180deg, var(--surface-light-strong) 0%, var(--surface-light-base) 100%);
     --gradient-glow: radial-gradient(ellipse at 20% 0%, rgba(var(--accent-deep-rgb), 0.08) 0%, transparent 55%);
   }
