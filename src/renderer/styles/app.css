@@ -39,7 +39,7 @@
   opacity: 0.2;
   transform: scaleX(0.35);
   transform-origin: left;
-  transition: width 150ms ease, transform 150ms ease, opacity 150ms ease;
+  transition: width var(--ui-dur) ease, transform var(--ui-dur) ease, opacity var(--ui-dur) ease;
 }
 .chat-prompt-tick[aria-current] span { opacity: 0.75; }
 .chat-prompt-rail:is(:hover, :focus-within, .is-active) .chat-prompt-tick span { transform: scaleX(1); }
@@ -183,7 +183,7 @@ html.platform-darwin .titlebar-left {
   opacity: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: max-width 0.2s ease, opacity 0.2s ease, margin-left 0.2s ease;
+  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin-left var(--ui-dur-slow) ease;
   margin-left: 0;
 }
 
@@ -398,7 +398,7 @@ html.platform-darwin .titlebar-left {
   min-width: 6px;
   border-radius: inherit;
   width: 0;
-  transition: width .6s cubic-bezier(.22, 1, .36, 1);
+  transition: width calc(600ms * var(--ui-motion-scale)) cubic-bezier(.22, 1, .36, 1);
 }
 .usage-bar-fill::after {
   content: "";
@@ -1642,7 +1642,7 @@ html.platform-darwin .titlebar-left {
   gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s, padding 0.15s, gap 0.15s;
+  transition: background 0.15s, color 0.15s, padding var(--ui-dur), gap var(--ui-dur);
   flex-shrink: 0;
 }
 
@@ -2771,7 +2771,7 @@ html.platform-darwin .titlebar-left {
   flex-shrink: 1;
   min-width: 3px;
   border-radius: 2px;
-  transition: width 0.2s;
+  transition: width var(--ui-dur-slow);
 }
 
 .context-usage-breakdown {
@@ -5654,7 +5654,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .streaming-text {
   white-space: pre-wrap;
   word-break: break-word;
-  animation: streaming-fade-in 0.28s ease;
+  animation: streaming-fade-in calc(280ms * var(--ui-motion-scale)) ease;
 }
 
 .streaming-text::after {
@@ -5887,7 +5887,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  transition: transform 0.12s ease, background 0.12s ease;
+  transition: transform var(--ui-dur-fast) ease, background 0.12s ease;
 }
 
 .composer-action-btn-active {
@@ -6047,7 +6047,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   min-height: 80px;
 }
 .browser-access-toggle { width: 28px; height: 16px; border-radius: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; }
-.browser-access-toggle::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-secondary); transition: transform .15s; }
+.browser-access-toggle::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-secondary); transition: transform var(--ui-dur); }
 .browser-access-toggle.enabled { background: rgba(var(--accent-rgb), .35); }
 .browser-access-toggle.enabled::after { transform: translateX(12px); background: var(--accent); }
 
