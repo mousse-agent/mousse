@@ -20,7 +20,7 @@ import type {
   ScheduleKind,
   Thread
 } from '../../../shared/types'
-import { presetOf, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
+import { nameFromPrompt, parseSimpleCron, presetOf, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
 
 /** What the editor offers to choose from. */
 export interface ScheduledCatalog {
@@ -182,14 +182,14 @@ export function heldPermissionMode(draft: JobDraft, catalog: ScheduledCatalog, j
   return { mode: normalizePermissionMode(thread.permissionMode ?? catalog.defaultPermissionMode), exact: true }
 }
 
-/** The modes a job can run in: "Default" follows the thread up to the job's limit, and none is above what the person holds. */
+/** The modes a job can run in: "Default" follows the thread up to the task's limit, and none is above what the person holds. */
 export function permissionChoices(draft: JobDraft, catalog: ScheduledCatalog, job?: ScheduledJob): Array<{ value: JobDraft['permissionMode']; label: string; disabled: boolean }> {
   const held = heldPermissionMode(draft, catalog, job).mode
   const followsThread = draft.threadId !== '' || (draft.workspaceKind === 'worktree' && draft.projectId !== '')
   return [
     {
       value: '',
-      label: followsThread ? "Default (the thread's mode, up to the job's limit)" : "Default (the mode new threads start in, up to the job's limit)",
+      label: followsThread ? "Default (the thread's mode, up to the task's limit)" : "Default (the mode new threads start in, up to the task's limit)",
       disabled: false
     },
     ...PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode), disabled: isStricter(held, mode) }))
@@ -227,6 +227,44 @@ export function presetFields(preset: Exclude<SchedulePreset, 'custom'>): Partial
   return schedule.kind === 'interval' ? { scheduleKind: 'interval', minutes: String(schedule.minutes) } : { scheduleKind: 'cron', expr: schedule.expr }
 }
 
+/**
+ * A new task from the quick-add line: what was typed, the chosen preset (none keeps the editor's 30-minute default),
+ * the project, and a new worktree per run when the project is a Git repository, else its checkout.
+ */
+export function quickDraft(prompt: string, preset: Exclude<SchedulePreset, 'custom'> | null, projectId: string, gitRepo: boolean): JobDraft {
+  return {
+    ...newDraft(),
+    prompt,
+    ...(preset ? presetFields(preset) : {}),
+    projectId,
+    workspaceKind: projectId && gitRepo ? 'newWorktree' : 'project'
+  }
+}
+
+/** The builder's plain cron forms: a time every day, or one day of the week at a time; anything else is typed as cron. */
+export type CronForm = 'daily' | 'weekly' | 'cron'
+
+export function cronFormOf(expr: string): CronForm {
+  const cron = parseSimpleCron(expr)
+  if (cron?.kind !== 'days') return 'cron'
+  if (cron.days === 'all') return 'daily'
+  return cron.days.length === 1 ? 'weekly' : 'cron'
+}
+
+/** The time ("HH:MM") and weekday ("0"–"6") a daily or weekly expression holds; 09:00 on Monday when it holds none. */
+export function cronParts(expr: string): { time: string; day: string } {
+  const cron = parseSimpleCron(expr)
+  if (cron?.kind !== 'days') return { time: '09:00', day: '1' }
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return { time: `${pad(cron.hour)}:${pad(cron.minute)}`, day: cron.days === 'all' ? '1' : String(cron.days[0] ?? 1) }
+}
+
+/** The cron expression for "Daily at <time>" or "Weekly on <day> at <time>". */
+export function cronOfForm(form: Exclude<CronForm, 'cron'>, time: string, day: string): string {
+  const [hour, minute] = (/^\d{1,2}:\d{2}$/.test(time) ? time : '09:00').split(':').map(Number)
+  return `${minute} ${hour} * * ${form === 'daily' ? '*' : day}`
+}
+
 export function scheduleOf(draft: JobDraft): JobSchedule {
   switch (draft.scheduleKind) {
     case 'once':
@@ -256,8 +294,8 @@ export type DraftField = 'name' | 'prompt' | 'minutes' | 'expr' | 'runAt' | 'sch
  */
 export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; requireName: boolean; held?: PermissionMode }): Partial<Record<DraftField, string>> {
   const errors: Partial<Record<DraftField, string>> = {}
-  if (context.requireName && !draft.name.trim()) errors.name = 'Give the job a name.'
-  if (!draft.prompt.trim()) errors.prompt = 'Write the prompt the job runs.'
+  if (context.requireName && !draft.name.trim()) errors.name = 'Give the task a name.'
+  if (!draft.prompt.trim()) errors.prompt = 'Write what the agent should do.'
   if (draft.scheduleKind === 'interval') {
     const minutes = Number(draft.minutes)
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60 * 24 * 365) errors.minutes = 'Use a whole number of minutes, at least 1.'
@@ -267,14 +305,14 @@ export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; r
   }
   if (draft.scheduleKind === 'once' && Number.isNaN(new Date(draft.runAt).getTime())) errors.runAt = 'Pick the date and time to run.'
   if (draft.scheduleKind === 'once' && context.hasWebhook) {
-    errors.schedule = 'A job with a webhook cannot be one-time. Use a manual schedule, or disable its webhook first.'
+    errors.schedule = 'A task with a webhook cannot be one-time. Use Manual, or turn its webhook off first.'
   }
   if (takesPermissionMode(draft) && draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
-    errors.permission = `A job cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
+    errors.permission = `A task cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
   }
   if (showsWorkspace(draft) || draft.workspaceKind === 'worktree') {
     if (draft.workspaceKind === 'newWorktree' && draft.mode === 'plan') {
-      errors.workspace = 'A plan-mode job never creates a worktree. Choose Agent mode or the project checkout.'
+      errors.workspace = 'A plan-mode task never creates a worktree. Choose Agent mode or the project checkout.'
     }
     if (draft.workspaceKind === 'worktree' && !draft.worktreePath.trim()) errors.worktreePath = 'Enter the path of the worktree.'
   }
@@ -304,7 +342,7 @@ export function createInputOf(draft: JobDraft, catalog: ScheduledCatalog): Creat
   const thread = threadIsChosen(draft)
   const choice = choiceOf(draft, catalog)
   return {
-    name: draft.name.trim() || 'Scheduled job',
+    name: draft.name.trim() || nameFromPrompt(draft.prompt) || 'Scheduled task',
     prompt: draft.prompt.trim(),
     schedule: scheduleOf(draft),
     ...(draft.projectId ? { projectId: draft.projectId } : {}),

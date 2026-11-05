@@ -1,71 +1,141 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { errorText, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { ChevronRight, MessageSquare } from '../../lib/icons'
+import {
+  describeMode,
+  describeModel,
+  describePermission,
+  describeScheduleLong,
+  describeWorkspace,
+  errorText,
+  nameFromPrompt,
+  relativeWhen,
+  RUN_STATUS_LABEL,
+  scheduleCode,
+  SCHEDULE_PRESETS,
+  WEEKDAY_OPTIONS,
+  type SchedulePreset
+} from './scheduledLabels'
 import { modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import { describePermissionMode, isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
-import { PermissionModeLabel } from '../../lib/permissionModeIcon'
-import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
+import { describePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
+import type { ScheduledJob, ScheduledJobRunRecord } from '../../../shared/types'
 import { Select, type SelectOption } from '../ui/Select'
 import {
+  cronFormOf,
+  cronOfForm,
+  cronParts,
   draftPreset,
   heldPermissionMode,
+  isUnchanged,
   loweredPermission,
   modeChoices,
+  patchOf,
   permissionChoices,
   presetFields,
+  scheduleOf,
   takesPermissionMode,
   showsWorkspace,
   validateDraft,
   workspaceChoices,
+  type CronForm,
   type DraftField,
   type JobDraft,
   type ScheduledCatalog,
   type WorkspaceKind
 } from './jobDraft'
 
-const SCHEDULE_KINDS: Array<{ value: ScheduleKind; label: string }> = [
+/** The custom schedule builder's choices. Daily and Weekly are plain forms that save as cron. */
+type BuilderKind = 'interval' | 'daily' | 'weekly' | 'cron' | 'once' | 'manual'
+
+const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
   { value: 'interval', label: 'Every…' },
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
   { value: 'cron', label: 'Cron' },
   { value: 'once', label: 'Once' },
   { value: 'manual', label: 'Manual' }
 ]
 
-const PRESET_OPTIONS: ReadonlyArray<SelectOption<SchedulePreset>> = [
-  ...SCHEDULE_PRESETS.map((preset) => ({ value: preset.value, label: preset.label })),
-  { value: 'custom', label: 'Custom' }
-]
-
 export const MODE_NOTE =
-  "Default uses the thread's own permission settings, and nobody is there to approve anything. Choose Plan for a job that must not change files."
+  "Default uses the thread's own permission settings, and nobody is there to approve anything. Choose Plan for a task that must not change files."
+/** The Mode row's one line; MODE_NOTE is its tooltip. */
+export const MODE_SHORT = "The thread's permissions, with nobody there to approve"
 export const WORKFLOW_PERMISSION_NOTE =
   'A prompt that starts with / runs a workflow. Workflows do not run under a permission mode, so there is nothing to choose here.'
 export const PROJECT_WORKSPACE_WARNING =
   'The run works in your own checkout, unattended, with no checkpoints or undo. For a Git project, a new worktree per run is safer.'
 
+/** Fields that live behind Details: a problem in one opens it. */
+const DETAIL_FIELDS = new Set<DraftField>(['name', 'minutes', 'expr', 'runAt', 'schedule', 'worktreePath', 'workspace', 'permission'])
+const BUILDER_FIELDS = new Set<DraftField>(['minutes', 'expr', 'runAt', 'schedule'])
+const RECENT_RUNS = 3
+const HISTORY_ROWS = 10
+
+/** One row of Details: text left, one control right; anything longer sits under it. */
+function DetailRow({ title, htmlFor, description, descriptionTitle, control, children, field, testId }: {
+  title: string
+  htmlFor?: string
+  description?: ReactNode
+  descriptionTitle?: string
+  control?: ReactNode
+  children?: ReactNode
+  field?: DraftField
+  testId?: string
+}) {
+  return (
+    <div className="scheduled-detail-row" data-field={field} data-testid={testId}>
+      <div className="scheduled-detail-text">
+        {htmlFor ? <label className="scheduled-detail-title" htmlFor={htmlFor}>{title}</label> : <span className="scheduled-detail-title">{title}</span>}
+        {description ? <div className="scheduled-detail-desc" title={descriptionTitle}>{description}</div> : null}
+      </div>
+      {control ? <div className="scheduled-detail-control">{control}</div> : null}
+      {children ? <div className="scheduled-detail-extra">{children}</div> : null}
+    </div>
+  )
+}
+
 /**
- * The form for a scheduled job, for a new job and for editing one. It checks the fields as you go (shown after the
- * first save attempt), saves through `save`, and shows what the profile refuses in words. Escape cancels; Enter in
- * a field saves.
+ * The open task, for a new task and for editing one: the prompt, when it runs and where, then Details with
+ * everything technical (schedule as saved, workspace, thread, model, mode, permissions, webhook, the agent that added
+ * it, runs). It checks the fields after the first save attempt, saves through `save`, and shows what the profile
+ * refuses in words. Escape cancels; Enter in a field saves.
  */
 export function JobEditor({
   job,
   initial,
   catalog,
   save,
-  onCancel
+  onCancel,
+  startCustom = false,
+  extendDays,
+  onExtend,
+  onWebhook,
+  onOpenThread
 }: {
   job?: ScheduledJob
   initial: JobDraft
   catalog: ScheduledCatalog
   save: (draft: JobDraft) => Promise<void>
   onCancel: () => void
+  /** Open on the custom schedule builder (Custom… from the quick-add line). */
+  startCustom?: boolean
+  extendDays?: number
+  onExtend?: () => void
+  onWebhook?: () => void
+  onOpenThread?: (threadId: string) => void
 }) {
   const [draft, setDraft] = useState<JobDraft>(initial)
   // Custom stays chosen even when what is typed happens to match a preset.
-  const [custom, setCustom] = useState(() => draftPreset(initial) === 'custom')
+  const [custom, setCustom] = useState(() => startCustom || draftPreset(initial) === 'custom')
+  const [detailsOpen, setDetailsOpen] = useState(startCustom)
+  const [builderOpen, setBuilderOpen] = useState(startCustom)
+  const [cronForm, setCronForm] = useState<CronForm>(() => cronFormOf(initial.expr))
+  const [allRuns, setAllRuns] = useState(false)
   const [attempted, setAttempted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const [focusTick, setFocusTick] = useState(0)
+  const problemsRef = useRef<DraftField[]>([])
   const formRef = useRef<HTMLFormElement>(null)
   const mounted = useRef(true)
   const ids = useId()
@@ -83,22 +153,51 @@ export function JobEditor({
   const lowered = loweredPermission(draft, initial, catalog, job)
   const shown = attempted ? errors : {}
   const patch = (changes: Partial<JobDraft>) => { setDraft((current) => ({ ...current, ...changes })); setFailure(null) }
+  const unchanged = job ? isUnchanged(patchOf(initial, draft, catalog)) : false
 
   const projectThreads = catalog.threads.filter((thread) => !draft.projectId || thread.projectId === draft.projectId)
   const knownThread = projectThreads.some((thread) => thread.id === draft.threadId)
   const workspaceShown = showsWorkspace(draft) || draft.workspaceKind === 'worktree'
   const threadLocked = draft.workspaceKind === 'worktree' && draft.projectId !== ''
   const preset: SchedulePreset = custom ? 'custom' : draftPreset(draft)
-  const presetSummary = SCHEDULE_PRESETS.find((item) => item.value === preset)?.summary
+  const builderKind: BuilderKind = draft.scheduleKind === 'cron' ? cronForm : draft.scheduleKind
+  const parts = cronParts(draft.expr)
+
+  // After a refused save, focus the first problem in the order the form shows them (Details opens for its own).
+  useEffect(() => {
+    if (focusTick === 0) return
+    const fields = [...(formRef.current?.querySelectorAll<HTMLElement>('[data-field]') ?? [])]
+    const target = fields.find((element) => problemsRef.current.includes(element.dataset.field as DraftField))
+    const focusable = target?.matches('input, textarea, button') ? target : target?.querySelector<HTMLElement>('[aria-checked="true"], [aria-invalid="true"], input, textarea, button')
+    focusable?.focus()
+  }, [focusTick])
 
   const choosePreset = (next: SchedulePreset) => {
     if (next === 'custom') {
-      // The custom fields open on what the preset saves, ready to change.
+      // The custom builder opens on what the preset saves, ready to change.
       setCustom(true)
+      setDetailsOpen(true)
+      setBuilderOpen(true)
       return
     }
     setCustom(false)
+    setBuilderOpen(false)
+    setCronForm(cronFormOf(presetFields(next).expr ?? draft.expr))
     patch(presetFields(next))
+  }
+
+  const chooseBuilderKind = (kind: BuilderKind) => {
+    if (kind === 'daily' || kind === 'weekly') {
+      setCronForm(kind)
+      patch({ scheduleKind: 'cron', expr: cronOfForm(kind, parts.time, parts.day) })
+      return
+    }
+    if (kind === 'cron') {
+      setCronForm('cron')
+      patch({ scheduleKind: 'cron' })
+      return
+    }
+    patch({ scheduleKind: kind })
   }
 
   const modelOptions: SelectOption[] = [
@@ -123,10 +222,10 @@ export function JobEditor({
     setAttempted(true)
     const problems = Object.keys(errors) as DraftField[]
     if (problems.length > 0) {
-      const target = formRef.current?.querySelector<HTMLElement>(`[data-field="${problems[0]}"]`)
-      // A group (the custom schedule) takes focus on its chosen item.
-      const focusable = target?.matches('input, textarea, button') ? target : target?.querySelector<HTMLElement>('[aria-checked="true"], button, input')
-      focusable?.focus()
+      problemsRef.current = problems
+      if (problems.some((field) => DETAIL_FIELDS.has(field))) setDetailsOpen(true)
+      if (problems.some((field) => BUILDER_FIELDS.has(field))) { setCustom(true); setBuilderOpen(true) }
+      setFocusTick((tick) => tick + 1)
       return
     }
     setBusy(true)
@@ -160,199 +259,396 @@ export function JobEditor({
   const fieldError = (name: DraftField) =>
     shown[name] ? <p className="scheduled-field-error" id={id(`${name}-error`)} role="alert">{shown[name]}</p> : null
 
+  // What the saved schedule reads as; the next run is the stored one, shown only while the schedule is unchanged.
+  const savedSchedule = scheduleOf(draft)
+  const scheduleUnchanged = job ? !patchOf(initial, draft, catalog).schedule : false
+  const scheduleText = `${describeScheduleLong(savedSchedule)}${scheduleUnchanged && job?.nextRunAt ? ` · Next ${relativeWhen(job.nextRunAt)}` : ''}`
+  const code = scheduleCode(savedSchedule)
+
+  const permissionNote = held.exact
+    ? `Never more than ${describePermissionMode(held.mode)}${job?.permissionCeiling ? `; this task's limit is ${describePermissionMode(job.permissionCeiling)}` : ''}`
+    : 'Only Ask before acting: the thread that owns the worktree decides'
+  const permissionHelp = `${held.exact
+    ? `A run never does more without asking than ${describePermissionMode(held.mode)}, the mode you hold for this task now.`
+    : 'The thread that owns the worktree sets what you can choose, so only Ask before acting is offered here. Default follows that thread.'}${job?.permissionCeiling ? ` This task's limit is ${describePermissionMode(job.permissionCeiling)}: what its creator held. A run follows its thread, never above that limit.` : ''}`
+
+  const workspaceNote = draft.workspaceKind === 'newWorktree'
+    ? 'A new worktree and a new thread for each run'
+    : draft.workspaceKind === 'worktree'
+      ? 'The worktree at this path, on the thread that owns it'
+      : null
+
+  const records: ScheduledJobRunRecord[] = [...(job?.runHistory ?? [])].reverse().slice(0, allRuns ? HISTORY_ROWS : RECENT_RUNS)
+  const runCount = job?.runHistory?.length ?? 0
+  const creatorThread = job?.createdBy ? catalog.threads.find((thread) => thread.id === job.createdBy!.threadId)?.name : undefined
+  const ended = job?.expiresAt ? job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() : false
+
   return (
     <form
       ref={formRef}
-      className="scheduled-form"
-      aria-label={job ? `Edit ${job.name}` : 'New scheduled job'}
+      className="scheduled-editor"
+      aria-label={job ? `Edit ${job.name}` : 'New scheduled task'}
       noValidate
       onKeyDown={onKeyDown}
       onSubmit={(event) => { event.preventDefault(); void submit() }}
     >
-      <div className="scheduled-field">
-        <label className="scheduled-label" htmlFor={id('name')}>Name</label>
-        <input id={id('name')} className="scheduled-input" placeholder="Job name" value={draft.name} data-first-field="" {...field('name')} onChange={(event) => patch({ name: event.target.value })} />
-        {fieldError('name')}
-      </div>
-      <div className="scheduled-field">
-        <label className="scheduled-label" htmlFor={id('prompt')}>Prompt</label>
-        <textarea id={id('prompt')} className="scheduled-input scheduled-textarea" placeholder="Prompt" rows={4} value={draft.prompt} {...field('prompt')} onChange={(event) => patch({ prompt: event.target.value })} />
-        {fieldError('prompt')}
+      <label className="scheduled-sr-only" htmlFor={id('prompt')}>Prompt</label>
+      <textarea
+        id={id('prompt')}
+        className="scheduled-prompt"
+        placeholder="What should the agent do?"
+        rows={3}
+        value={draft.prompt}
+        data-first-field=""
+        {...field('prompt')}
+        onChange={(event) => patch({ prompt: event.target.value })}
+      />
+      {fieldError('prompt')}
+
+      <div className="scheduled-when">
+        <span className="scheduled-when-label" id={id('when')}>When</span>
+        <div className="scheduled-chips" role="group" aria-labelledby={id('when')}>
+          {SCHEDULE_PRESETS.map((item) => (
+            <button key={item.value} type="button" className="scheduled-chip" aria-pressed={preset === item.value} onClick={() => choosePreset(item.value)}>
+              {item.label}
+            </button>
+          ))}
+          <button type="button" className="scheduled-chip" aria-pressed={preset === 'custom'} onClick={() => choosePreset('custom')}>
+            Custom…
+          </button>
+        </div>
+        <span className="scheduled-when-gap" />
+        <label className="scheduled-when-label" htmlFor={id('project')}>Where</label>
+        <Select
+          id={id('project')}
+          className="scheduled-select where"
+          value={draft.projectId}
+          options={projectOptions}
+          onChange={(projectId) => {
+            const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
+            patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
+          }}
+        />
       </div>
 
-      <div className="scheduled-field">
-        <label className="scheduled-label" htmlFor={id('preset')}>Schedule</label>
-        <Select id={id('preset')} className="scheduled-select narrow" value={preset} options={PRESET_OPTIONS} onChange={choosePreset} />
-        {presetSummary ? <p className="scheduled-note" data-testid="schedule-summary">{presetSummary}</p> : null}
-        {custom ? (
-          <>
-            <div className="scheduled-segmented" role="radiogroup" aria-label="Custom schedule" {...field('schedule')}>
-              {SCHEDULE_KINDS.map((option) => (
+      <button
+        type="button"
+        className="scheduled-disclosure"
+        aria-expanded={detailsOpen}
+        aria-controls={id('details')}
+        onClick={() => setDetailsOpen((open) => !open)}
+      >
+        <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
+        Details
+      </button>
+
+      {detailsOpen ? (
+        <div className="scheduled-details" id={id('details')}>
+          <DetailRow
+            title="Name"
+            htmlFor={id('name')}
+            field="name"
+            control={
+              <input
+                id={id('name')}
+                className="scheduled-input"
+                placeholder={nameFromPrompt(draft.prompt) || 'Task name'}
+                value={draft.name}
+                {...field('name')}
+                onChange={(event) => patch({ name: event.target.value })}
+              />
+            }
+          >
+            {fieldError('name')}
+          </DetailRow>
+
+          <DetailRow
+            title="Schedule"
+            description={<span data-testid="schedule-summary">{scheduleText}</span>}
+            control={
+              <>
+                {code ? <span className="scheduled-mono" title={draft.scheduleKind === 'cron' ? 'Cron: minute, hour, day of month, month, day of week' : 'Interval'}>{code}</span> : null}
                 <button
-                  key={option.value}
                   type="button"
-                  role="radio"
-                  aria-checked={draft.scheduleKind === option.value}
-                  tabIndex={draft.scheduleKind === option.value ? 0 : -1}
-                  className={`scheduled-segment${draft.scheduleKind === option.value ? ' active' : ''}`}
-                  onClick={() => patch({ scheduleKind: option.value })}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
-                    event.preventDefault()
-                    event.stopPropagation()
-                    const index = SCHEDULE_KINDS.findIndex((item) => item.value === draft.scheduleKind)
-                    const next = SCHEDULE_KINDS[(index + (event.key === 'ArrowRight' ? 1 : -1) + SCHEDULE_KINDS.length) % SCHEDULE_KINDS.length]
-                    patch({ scheduleKind: next.value })
-                    const group = event.currentTarget.parentElement
-                    requestAnimationFrame(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus())
-                  }}
+                  className="settings-btn"
+                  aria-expanded={builderOpen}
+                  onClick={() => { setBuilderOpen((open) => !open); setCustom(true) }}
                 >
-                  {option.label}
+                  Change
                 </button>
-              ))}
-            </div>
-            {fieldError('schedule')}
-            {draft.scheduleKind === 'interval' ? (
-              <div className="scheduled-inline">
-                <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
-                <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
+              </>
+            }
+          >
+            {builderOpen ? (
+              <div className="scheduled-builder">
+                <div className="scheduled-segmented" role="radiogroup" aria-label="Custom schedule" {...field('schedule')}>
+                  {BUILDER_KINDS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={builderKind === option.value}
+                      tabIndex={builderKind === option.value ? 0 : -1}
+                      className={`scheduled-segment${builderKind === option.value ? ' active' : ''}`}
+                      onClick={() => chooseBuilderKind(option.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+                        event.preventDefault()
+                        event.stopPropagation()
+                        const index = BUILDER_KINDS.findIndex((item) => item.value === builderKind)
+                        const next = BUILDER_KINDS[(index + (event.key === 'ArrowRight' ? 1 : -1) + BUILDER_KINDS.length) % BUILDER_KINDS.length]
+                        chooseBuilderKind(next.value)
+                        const group = event.currentTarget.parentElement
+                        requestAnimationFrame(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus())
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {fieldError('schedule')}
+                {builderKind === 'interval' ? (
+                  <div className="scheduled-inline">
+                    <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
+                    <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
+                  </div>
+                ) : null}
+                {fieldError('minutes')}
+                {builderKind === 'daily' || builderKind === 'weekly' ? (
+                  <div className="scheduled-inline">
+                    {builderKind === 'weekly' ? (
+                      <>
+                        <label className="scheduled-label" htmlFor={id('day')}>Day</label>
+                        <Select
+                          id={id('day')}
+                          className="scheduled-select narrow"
+                          value={parts.day}
+                          options={WEEKDAY_OPTIONS}
+                          onChange={(day) => patch({ expr: cronOfForm('weekly', parts.time, day) })}
+                        />
+                      </>
+                    ) : null}
+                    <label className="scheduled-label" htmlFor={id('time')}>Time</label>
+                    <input
+                      id={id('time')}
+                      className="scheduled-input narrow"
+                      type="time"
+                      value={parts.time}
+                      onChange={(event) => patch({ expr: cronOfForm(builderKind, event.target.value, parts.day) })}
+                    />
+                  </div>
+                ) : null}
+                {builderKind === 'cron' ? (
+                  <div className="scheduled-inline">
+                    <label className="scheduled-label" htmlFor={id('expr')}>Cron expression</label>
+                    <input
+                      id={id('expr')}
+                      className="scheduled-input mono"
+                      placeholder="0 9 * * *"
+                      title="Minute, hour, day of month, month, day of week"
+                      data-field="expr"
+                      aria-invalid={shown.expr ? true : undefined}
+                      aria-describedby={shown.expr ? id('expr-error') : undefined}
+                      value={draft.expr}
+                      onChange={(event) => patch({ expr: event.target.value })}
+                    />
+                  </div>
+                ) : null}
+                {fieldError('expr')}
+                {builderKind === 'once' ? (
+                  <div className="scheduled-inline">
+                    <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
+                    <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
+                  </div>
+                ) : null}
+                {fieldError('runAt')}
+                {builderKind === 'manual' ? <p className="scheduled-note">Runs only when you press Run now{job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}.</p> : null}
               </div>
             ) : null}
-            {fieldError('minutes')}
-            {draft.scheduleKind === 'cron' ? (
-              <div className="scheduled-inline">
-                <label className="scheduled-label" htmlFor={id('expr')}>Cron expression</label>
-                <input
-                  id={id('expr')}
-                  className="scheduled-input"
-                  placeholder="0 9 * * *"
-                  title="Minute, hour, day of month, month, day of week"
-                  data-field="expr"
-                  aria-invalid={shown.expr ? true : undefined}
-                  aria-describedby={shown.expr ? id('expr-error') : id('expr-hint')}
-                  value={draft.expr}
-                  onChange={(event) => patch({ expr: event.target.value })}
+          </DetailRow>
+
+          {workspaceShown ? (
+            <DetailRow
+              title="Runs in"
+              htmlFor={id('workspace')}
+              field="workspace"
+              description={workspaceNote}
+              control={
+                <Select<WorkspaceKind>
+                  id={id('workspace')}
+                  className="scheduled-select"
+                  value={draft.workspaceKind}
+                  options={workspaceChoices(draft)}
+                  {...selectField('workspace')}
+                  onChange={(workspaceKind) => {
+                    // A task on a worktree runs on the thread that owns it: leaving that drops the owner from the form.
+                    patch({ workspaceKind, ...(draft.workspaceKind === 'worktree' && workspaceKind !== 'worktree' ? { threadId: '' } : {}) })
+                  }}
                 />
-                <p className="scheduled-note" id={id('expr-hint')}>In this computer&apos;s time.</p>
-              </div>
-            ) : null}
-            {fieldError('expr')}
-            {draft.scheduleKind === 'once' ? (
-              <div className="scheduled-inline">
-                <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
-                <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
-              </div>
-            ) : null}
-            {fieldError('runAt')}
-            {draft.scheduleKind === 'manual' ? <p className="scheduled-note">Runs only when you press Run now{job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}.</p> : null}
-          </>
-        ) : null}
-      </div>
-
-      <div className="scheduled-field-grid">
-        <div className="scheduled-field">
-          <label className="scheduled-label" htmlFor={id('model')}>Model</label>
-          <Select id={id('model')} className="scheduled-select" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />
-        </div>
-        <div className="scheduled-field">
-          <label className="scheduled-label" htmlFor={id('mode')}>Mode</label>
-          <Select<JobDraft['mode']>
-            id={id('mode')}
-            className="scheduled-select"
-            value={draft.mode}
-            options={modeChoices(draft)}
-            onChange={(mode) => patch({ mode })}
-          />
-        </div>
-      </div>
-      {draft.mode === '' ? <p className="scheduled-note" data-testid="mode-note">{MODE_NOTE}</p> : null}
-
-      {takesPermissionMode(draft) ? (
-        <div className="scheduled-field" data-field="permission">
-          <label className="scheduled-label" htmlFor={id('permission')}>
-            {isPermissionMode(draft.permissionMode) ? <PermissionModeLabel mode={draft.permissionMode} size={13}>Permissions</PermissionModeLabel> : 'Permissions'}
-          </label>
-          <Select<JobDraft['permissionMode']>
-            id={id('permission')}
-            className="scheduled-select"
-            value={draft.permissionMode}
-            options={permissionChoices(draft, catalog, job)}
-            {...selectField('permission')}
-            onChange={(permissionMode) => patch({ permissionMode })}
-          />
-          {fieldError('permission')}
-          <p className="scheduled-note" data-testid="permission-note">
-            {held.exact
-              ? `A run never does more without asking than ${describePermissionMode(held.mode)}, the mode you hold for this job now.`
-              : 'The thread that owns the worktree sets what you can choose, so only Ask before acting is offered here. Default follows that thread.'}
-            {job?.permissionCeiling ? ` This job's limit is ${describePermissionMode(job.permissionCeiling)}: what its creator held. A run follows its thread, never above that limit.` : ''}
-          </p>
-          {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers this job's mode from {describePermissionMode(draft.permissionMode as PermissionMode)} to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
-        </div>
-      ) : (
-        <p className="scheduled-note" data-testid="workflow-permission-note">{WORKFLOW_PERMISSION_NOTE}</p>
-      )}
-
-      <div className="scheduled-field-grid">
-        <div className="scheduled-field">
-          <label className="scheduled-label" htmlFor={id('project')}>Project</label>
-          <Select
-            id={id('project')}
-            className="scheduled-select"
-            value={draft.projectId}
-            options={projectOptions}
-            onChange={(projectId) => {
-              const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
-              patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
-            }}
-          />
-        </div>
-        <div className="scheduled-field">
-          <label className="scheduled-label" htmlFor={id('thread')}>Target thread</label>
-          <Select
-            id={id('thread')}
-            className="scheduled-select"
-            value={threadLocked ? '' : draft.threadId}
-            options={threadOptions}
-            disabled={threadLocked}
-            onChange={(threadId) => patch({ threadId })}
-          />
-        </div>
-      </div>
-
-      {workspaceShown ? (
-        <div className="scheduled-field" data-field="workspace">
-          <label className="scheduled-label" htmlFor={id('workspace')}>Workspace</label>
-          <Select<WorkspaceKind>
-            id={id('workspace')}
-            className="scheduled-select"
-            value={draft.workspaceKind}
-            options={workspaceChoices(draft)}
-            {...selectField('workspace')}
-            onChange={(workspaceKind) => {
-              // A job on a worktree runs on the thread that owns it: leaving that drops the owner from the form.
-              patch({ workspaceKind, ...(draft.workspaceKind === 'worktree' && workspaceKind !== 'worktree' ? { threadId: '' } : {}) })
-            }}
-          />
-          {fieldError('workspace')}
-          {draft.workspaceKind === 'worktree' ? (
-            <div className="scheduled-inline">
-              <label className="scheduled-label" htmlFor={id('worktreePath')}>Worktree path</label>
-              <input id={id('worktreePath')} className="scheduled-input" placeholder="/path/to/worktree" value={draft.worktreePath} {...field('worktreePath')} onChange={(event) => patch({ worktreePath: event.target.value })} />
-            </div>
+              }
+            >
+              {fieldError('workspace')}
+              {draft.workspaceKind === 'worktree' ? (
+                <div className="scheduled-inline">
+                  <label className="scheduled-label" htmlFor={id('worktreePath')}>Worktree path</label>
+                  <input id={id('worktreePath')} className="scheduled-input" placeholder="/path/to/worktree" value={draft.worktreePath} {...field('worktreePath')} onChange={(event) => patch({ worktreePath: event.target.value })} />
+                </div>
+              ) : null}
+              {fieldError('worktreePath')}
+              {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
+            </DetailRow>
+          ) : draft.threadId ? (
+            <DetailRow title="Runs in" description="The thread's own workspace" />
           ) : null}
-          {fieldError('worktreePath')}
-          {draft.workspaceKind === 'project' && draft.mode !== 'plan' ? <p className="scheduled-note warn" data-testid="workspace-warning">{PROJECT_WORKSPACE_WARNING}</p> : null}
+
+          <DetailRow
+            title="Thread"
+            htmlFor={id('thread')}
+            control={
+              <Select
+                id={id('thread')}
+                className="scheduled-select"
+                value={threadLocked ? '' : draft.threadId}
+                options={threadOptions}
+                disabled={threadLocked}
+                onChange={(threadId) => patch({ threadId })}
+              />
+            }
+          />
+
+          <DetailRow
+            title="Model"
+            htmlFor={id('model')}
+            control={<Select id={id('model')} className="scheduled-select" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />}
+          />
+
+          <DetailRow
+            title="Mode"
+            htmlFor={id('mode')}
+            description={draft.mode === '' ? <span data-testid="mode-note" title={MODE_NOTE}>{MODE_SHORT}</span> : null}
+            control={
+              <Select<JobDraft['mode']>
+                id={id('mode')}
+                className="scheduled-select"
+                value={draft.mode}
+                options={modeChoices(draft)}
+                onChange={(mode) => patch({ mode })}
+              />
+            }
+          />
+
+          {takesPermissionMode(draft) ? (
+            <DetailRow
+              title="Permissions"
+              htmlFor={id('permission')}
+              field="permission"
+              description={<span data-testid="permission-note" title={permissionHelp}>{permissionNote}</span>}
+              control={
+                <Select<JobDraft['permissionMode']>
+                  id={id('permission')}
+                  className="scheduled-select"
+                  value={draft.permissionMode}
+                  options={permissionChoices(draft, catalog, job)}
+                  {...selectField('permission')}
+                  onChange={(permissionMode) => patch({ permissionMode })}
+                />
+              }
+            >
+              {fieldError('permission')}
+              {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers this task's mode from {describePermissionMode(draft.permissionMode as PermissionMode)} to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
+            </DetailRow>
+          ) : (
+            <DetailRow title="Permissions" description={<span data-testid="workflow-permission-note">{WORKFLOW_PERMISSION_NOTE}</span>} />
+          )}
+
+          {job && onWebhook ? (
+            <DetailRow
+              title="Webhook"
+              description={job.trigger?.webhook ? 'On' : 'Off'}
+              control={<button type="button" className="settings-btn" onClick={onWebhook}>{job.trigger?.webhook ? 'Manage' : 'Set up'}</button>}
+            />
+          ) : null}
+
+          {job?.createdBy ? (
+            <DetailRow
+              title="Added by an agent"
+              testId="agent-row"
+              description={
+                <>
+                  {creatorThread ? `From ${creatorThread}` : 'From an agent'}
+                  {job.expiresAt ? <span data-meta="expires">{` · ${ended ? 'Ended' : 'Ends'} ${relativeWhen(job.expiresAt)}`}</span> : null}
+                </>
+              }
+              control={
+                <>
+                  {job.expiresAt && onExtend ? (
+                    <button type="button" className="settings-btn" onClick={onExtend}>{`Extend ${extendDays} ${extendDays === 1 ? 'day' : 'days'}`}</button>
+                  ) : null}
+                  {onOpenThread ? (
+                    <button type="button" className="settings-icon-btn" title="Open the thread that added it" aria-label="Open the thread that added it" onClick={() => onOpenThread(job.createdBy!.threadId)}>
+                      <MessageSquare size={14} />
+                    </button>
+                  ) : null}
+                </>
+              }
+            />
+          ) : null}
+
+          {job ? (
+            <section className="scheduled-history" aria-label={`Runs of ${job.name}`}>
+              <h3 className="scheduled-history-head">
+                Runs{runCount > records.length ? <span className="scheduled-history-sub">{`last ${records.length} of ${runCount}`}</span> : null}
+              </h3>
+              {records.length === 0 ? (
+                <p className="scheduled-note">No runs yet.</p>
+              ) : (
+                <ul>
+                  {records.map((record, index) => (
+                    <RunRow key={`${record.runAt}-${record.runId ?? index}`} job={job} record={record} onOpenThread={onOpenThread} />
+                  ))}
+                </ul>
+              )}
+              {runCount > RECENT_RUNS ? (
+                <button type="button" className="scheduled-link-btn" aria-expanded={allRuns} onClick={() => setAllRuns((all) => !all)}>
+                  {allRuns ? 'Fewer runs' : 'All runs'}
+                </button>
+              ) : null}
+            </section>
+          ) : null}
         </div>
-      ) : draft.threadId ? (
-        <p className="scheduled-note">The run uses the thread's own workspace.</p>
       ) : null}
 
       {failure ? <p className="scheduled-item-error" role="alert" data-testid="save-error">{failure}</p> : null}
       <div className="scheduled-form-actions">
         <button type="button" className="settings-btn" onClick={onCancel}>Cancel</button>
-        <button type="submit" className="settings-btn" disabled={busy}>{job ? 'Save' : 'Create'}</button>
+        <button type="submit" className="settings-btn" disabled={busy || unchanged}>{job ? 'Save' : 'Add'}</button>
       </div>
     </form>
+  )
+}
+
+/** One past run: ✓ or ×, when, what went wrong, and its thread. What it ran with is in the tooltip. */
+function RunRow({ job, record, onOpenThread }: { job: ScheduledJob; record: ScheduledJobRunRecord; onOpenThread?: (threadId: string) => void }) {
+  const workspace = record.workspace ? describeWorkspace(record.workspace, job) : null
+  const used = [
+    record.selection ? describeModel(record.selection) : null,
+    record.mode ? describeMode(record.mode) : null,
+    record.permissionMode ? describePermission(record.permissionMode) : null,
+    workspace,
+    record.agentCreated ? 'Task added by an agent' : null
+  ].filter(Boolean).join(' · ')
+  const tone = record.status === 'ok' ? 'ok' : record.status === 'error' || record.status === 'interrupted' || record.status === 'uncertain' ? 'bad' : 'muted'
+  return (
+    <li className="scheduled-history-row" data-status={record.status} title={used || undefined}>
+      <span className={`scheduled-history-glyph ${tone}`} aria-hidden="true">{tone === 'ok' ? '✓' : tone === 'bad' ? '×' : '•'}</span>
+      <span>{relativeWhen(record.runAt)}</span>
+      {record.status !== 'ok' ? <span className={tone === 'bad' ? 'settings-status-bad' : undefined}>{RUN_STATUS_LABEL[record.status]}</span> : null}
+      {record.error ? <span className="scheduled-history-error">{record.error}</span> : null}
+      {record.missingPlaceholders?.length ? <span data-meta="missing">Missing fields: {record.missingPlaceholders.join(', ')}</span> : null}
+      {record.threadId && onOpenThread ? (
+        <button type="button" className="scheduled-link-btn" onClick={() => onOpenThread(record.threadId!)}>Open thread</button>
+      ) : null}
+      {used ? <span className="scheduled-sr-only">{used}</span> : null}
+    </li>
   )
 }
