@@ -267,21 +267,19 @@ interface AppState {
   clearComposerReferences: (threadId: string | null) => void
 }
 
-/** Stable timestamp ordering â€” prevents out-of-order delivery when IPC channels race. */
+/**
+ * Timestamp ordering that prevents out-of-order delivery when IPC channels race. Messages with the same
+ * timestamp keep the order they arrived in (the sort is stable): a reply's text and the tool call after it
+ * often share a millisecond, and ordering them by id would put the tool call above the text it followed.
+ */
 export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[] {
   // Already sorted fast path.
   let sorted = true
   for (let i = 1; i < messages.length; i += 1) {
     if (messages[i - 1].timestamp > messages[i].timestamp) { sorted = false; break }
-    if (messages[i - 1].timestamp === messages[i].timestamp && messages[i - 1].id > messages[i].id) { sorted = false; break }
   }
   if (sorted) return messages
-  return [...messages].sort((a, b) => {
-    if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? -1 : 1
-    // Stable tie-break: turnId preserves causality, then lexicographic id.
-    if ((a.turnId ?? '') !== (b.turnId ?? '')) return (a.turnId ?? '') < (b.turnId ?? '') ? -1 : 1
-    return a.id < b.id ? -1 : 1
-  })
+  return [...messages].sort((a, b) => (a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1))
 }
 
 /**

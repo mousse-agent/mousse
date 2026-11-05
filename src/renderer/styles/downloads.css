@@ -30,7 +30,7 @@
 .downloads-ring-fill {
   stroke: var(--accent);
   stroke-linecap: round;
-  transition: stroke-dashoffset 0.3s ease;
+  transition: stroke-dashoffset calc(300ms * var(--ui-motion-scale)) ease;
 }
 
 .downloads-ring.indeterminate { animation: downloads-ring-spin 1s linear infinite; }
@@ -148,7 +148,7 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
   background: var(--ui-raised);
   color: var(--text-primary);
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
-  animation: downloads-popover-in 0.12s ease-out;
+  animation: downloads-popover-in var(--ui-dur-fast) ease-out;
   -webkit-app-region: no-drag;
 }
 
