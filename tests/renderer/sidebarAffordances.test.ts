@@ -4,6 +4,7 @@
  * change width, both tabs end with the same "No project" and "Archived" footer, the open thread's row is always
  * shown, and the Projects tab is a tree the keyboard can walk.
  */
+import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -105,6 +106,15 @@ const projectRow = (name = 'Mousse') => [...host.querySelectorAll<HTMLButtonElem
 const byLabel = (label: string) => host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)
 const headings = () => [...host.querySelectorAll<HTMLElement>('.threads-sidebar-footer section:not([hidden]) .threads-sidebar-heading-toggle')].map((item) => item.textContent)
 const menuItem = (label: string) => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === label)!
+const sidebarCss = readFileSync('src/renderer/styles/threads-sidebar.css', 'utf8')
+const compactCss = readFileSync('src/renderer/styles/compact-shell.css', 'utf8')
+const polishCss = readFileSync('src/renderer/styles/polish.css', 'utf8')
+/** The declarations of a selector's top-level rule. */
+const rule = (css: string, selector: string) => {
+  const found = new RegExp(`(^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(css)
+  if (!found) throw new Error(`no rule for ${selector}`)
+  return found[2]
+}
 const many = (count: number) => Array.from({ length: count }, (_, index) => thread(`t${index + 1}`, `Thread ${index + 1}`))
 
 describe('starting work', () => {
@@ -152,6 +162,16 @@ describe('tabs', () => {
     expect(labels).toEqual(['Projects', 'Threads', 'Agents'])
   })
 
+  it('show their labels whole or not at all, and hide them below 320px, so the 260px default shows icons', () => {
+    const label = rule(sidebarCss, '.threads-sidebar-tab-label')
+    expect(label).not.toMatch(/text-overflow|overflow:\s*hidden/)
+    expect(label).toMatch(/flex-shrink:\s*0/)
+    const hidden = [...sidebarCss.matchAll(/@container threads-sidebar \(max-width: (\d+)px\) \{([^}]*)\}/g)]
+      .filter(([, , body]) => /\.threads-sidebar-tab-label\s*\{\s*display:\s*none/.test(body + '}'))
+    expect(hidden.map(([, width]) => Number(width))).toEqual([319])
+    for (const css of [compactCss, polishCss]) expect(css).not.toMatch(/threads-sidebar-tab-label[^{]*\{[^}]*text-overflow/)
+  })
+
   it('open Automations from the Agents roster with an arrow, not a "+"', async () => {
     const { ChatsSidebar } = await vi.importActual<typeof import('../../src/renderer/components/chats/ChatsSidebar')>('../../src/renderer/components/chats/ChatsSidebar')
     const html = renderToStaticMarkup(createElement(ChatsSidebar))
@@ -175,6 +195,18 @@ describe('the footer', () => {
     const archived = host.querySelector('.threads-sidebar-section-settled')!
     expect(archived.querySelector('[data-thread-id="c"]')).not.toBeNull()
     expect(archived.querySelector('[data-testid="trash"]')?.getAttribute('data-nested')).toBe('true')
+  })
+
+  it('is the one scroll container: it shrinks for the lists, and nothing inside it caps its own height', () => {
+    const footer = rule(sidebarCss, '.threads-sidebar-footer')
+    expect(footer).toMatch(/flex:\s*0 1 auto/)
+    expect(footer).toMatch(/min-height:\s*0/)
+    expect(footer).toMatch(/overflow-y:\s*auto/)
+    expect(footer).toMatch(/max-height:\s*45vh/)
+    const inside = /\.threads-sidebar-(bottom-recent|section-settled|settled-list|trash-nested|trash-list)\b[^{]*\{([^}]*)\}/g
+    for (const css of [sidebarCss, compactCss, polishCss]) {
+      for (const [, , body] of css.matchAll(inside)) expect(body).not.toMatch(/max-height|overflow-y/)
+    }
   })
 })
 
