@@ -44,6 +44,7 @@ export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause,
   const line = pausedRunLine(text, pause)
   return {
     tone: error ? 'error' : 'warning',
+    priority: 'paused',
     ...(error ? {} : { icon: <Pause size={14} strokeWidth={2} aria-hidden="true" /> }),
     label: 'Run paused by a usage limit',
     title: error ?? line,

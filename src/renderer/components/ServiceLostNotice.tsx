@@ -18,6 +18,7 @@ export function ServiceLostNotice({ lost, onReconnect, onDismiss }: {
 }) {
   useComposerNotice(lost ? {
     tone: 'error',
+    priority: 'service',
     title: SERVICE_LOST_TITLE,
     shortTitle: SERVICE_LOST_SHORT_TITLE,
     tooltip: SERVICE_LOST_TOOLTIP,
