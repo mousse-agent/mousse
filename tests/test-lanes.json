@@ -37,6 +37,7 @@
     "tests/harness/piSpendReservation.test.ts",
     "tests/harness/piToolBudget.test.ts",
     "tests/mmsOwnerLease.test.ts",
+    "tests/modelCatalogPublishScripts.test.ts",
     "tests/namedAgentProtocol.test.ts",
     "tests/net/bots/local/registration-crash.test.ts",
     "tests/net/bots/runtime/nativeReader.test.ts",
