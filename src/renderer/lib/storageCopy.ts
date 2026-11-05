@@ -98,13 +98,6 @@ export const KIND_POLICY_GROUP: Record<'threads' | 'worktrees' | 'browser' | 'lo
   other: undefined
 }
 
-/** Shown where a thread's workspace is described when a cleanup rule removed its checkout. Empty for an unreadable time. */
-export function retiredWorktreeNote(at: string): string {
-  const time = Date.parse(at)
-  if (!Number.isFinite(time)) return ''
-  return `Worktree removed by cleanup on ${new Date(time).toLocaleDateString()}; it is restored when you use the thread`
-}
-
 /** Where the trash is reviewed and restored: the sidebar's Recently deleted section. */
 export function trashCountSentence(count: number): string {
   if (count === 0) return 'No threads in trash.'
