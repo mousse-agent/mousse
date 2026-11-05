@@ -503,6 +503,13 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-rgb), 0.35);
 }
 
+/* Keyboard focus: the divider itself lights up, one pixel either side. */
+.app .resizer:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.5);
+}
+
 .main-area {
   flex: 1 1 0;
   display: flex;
@@ -655,6 +662,12 @@ html.platform-darwin .titlebar-left {
   opacity: 0.55;
 }
 
+/* One close button in the strip: the selected tab's, plus the hovered or focused one. The others
+   keep their space so the strip does not move. */
+.main-view-tab:not(.active):not(:hover):not(:focus-within) .main-view-tab-close {
+  opacity: 0;
+}
+
 .main-view-tab-close:hover,
 .main-view-tab-add:hover {
   background: rgba(var(--accent-rgb), 0.12);
@@ -727,21 +740,24 @@ html.platform-darwin .titlebar-left {
   color: var(--accent);
 }
 
+/* The empty app panel: one muted line and the list, at the top. */
 .surface-picker {
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 24px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 16px 12px;
 }
 
 .surface-picker-title {
   margin: 0;
-  font-size: 15px;
-  font-weight: 500;
+  /* Lines up with the row labels: list padding plus row padding. */
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 400;
   color: var(--text-secondary);
 }
 
@@ -773,6 +789,17 @@ html.platform-darwin .titlebar-left {
 
 .surface-menu-row:hover {
   background: rgba(var(--accent-rgb), 0.1);
+}
+
+.surface-menu-row:focus-visible {
+  outline: none;
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: var(--ui-focus-ring);
+}
+
+.surface-menu-state {
+  color: var(--ui-faint, var(--text-secondary));
+  font-size: 12px;
 }
 
 .surface-menu-row-label {

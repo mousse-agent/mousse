@@ -70,6 +70,10 @@ html[data-acrylic='true'] .app .resizer.active {
   background: rgba(var(--accent-rgb), 0.35);
 }
 
+html[data-acrylic='true'] .app .resizer:focus-visible {
+  background: var(--accent);
+}
+
 /* Re-enable glass blur on chrome when acrylic is on (themes disable it for solid mode) */
 html[data-acrylic='true'] .sidebar,
 html[data-acrylic='true'] .titlebar,
