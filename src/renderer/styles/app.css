@@ -162,11 +162,12 @@ html.platform-darwin .titlebar-left {
   pointer-events: auto;
 }
 
-/* While the sidebar is closed: how many threads need the person, on the corner of its toggle. */
+/* While the sidebar is closed: how many threads need the person, inside the corner of its toggle,
+   so it never reaches a neighbouring title bar button whatever the layout. */
 .titlebar-attention-badge {
   position: absolute;
-  top: -4px;
-  right: -6px;
+  top: 1px;
+  right: 1px;
   z-index: 2;
   min-width: 14px;
   height: 14px;
