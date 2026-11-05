@@ -6,7 +6,7 @@ import { PausedRunNotice, pausedRunNotice, type PausedRunNoticeInput } from '../
 import { ComposerNotice, ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { createPausedRunClient, type PausedRunClient } from '../../src/renderer/services/pausedRunClient'
-import type { TurnPause, TurnState } from '../../src/shared/types'
+import { isTurnActivePhase, type TurnPause, type TurnState } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -44,7 +44,7 @@ const buttons = () => Array.from(host.querySelectorAll<HTMLButtonElement>('butto
 const names = () => buttons().map((entry) => entry.getAttribute('aria-label') ?? entry.textContent)
 const button = (label: string) => buttons().find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent)?.startsWith(label))!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
-const STOP = 'Stop this thread and the subagents it started'
+const STOP = 'Stop thread'
 
 function view(patch: Partial<PausedRunNoticeInput> = {}) {
   const input: PausedRunNoticeInput = { pause: pause(), now: NOW, busy: null, error: null, onResume: vi.fn(), onEndPause: vi.fn(), onDismissError: vi.fn(), onStop: vi.fn(), ...patch }
@@ -59,6 +59,11 @@ describe('the paused run notice', () => {
     expect(line()!.title).toBe("Claude's 5-hour limit was reached. Continues by itself at reset.")
     expect(notice()!.dataset.tone).toBe('warning')
     expect(names()).toEqual(['Resume now', 'End pause', STOP])
+    expect(button(STOP).title).toBe('Stop this thread and the subagents it started')
+  })
+
+  it('keeps Stop thread: the composer shows no Stop while a run is paused', () => {
+    expect(isTurnActivePhase('paused')).toBe(false)
   })
 
   it('says an estimated time is estimated', () => {

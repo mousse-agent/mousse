@@ -7,8 +7,8 @@ import { MessageList } from '../../src/renderer/chat/components/agent-elements/m
 import { LOCATED_CLASS, revealMessage } from '../../src/renderer/chat/components/agent-elements/reveal-message'
 import { PermissionRequestContext } from '../../src/renderer/chat/components/agent-elements/tools/permission-request'
 import { isCommandRegistered, runCommand } from '../../src/renderer/commands/commandRegistry'
-import { ApprovalNotice } from '../../src/renderer/components/ApprovalNotice'
-import { ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
+import { APPROVAL_OFFLINE_REASON, ApprovalNotice } from '../../src/renderer/components/ApprovalNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
 import { describeAnswerOutcome } from '../../src/renderer/components/ComposerQuestionModal'
 import { usePermissionRequests } from '../../src/renderer/hooks/usePermissionRequests'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -96,7 +96,7 @@ const setRowInView = (visible: boolean) => act(async () => {
   }
 })
 
-function Chat({ hasText = false }: { hasText?: boolean }) {
+function Chat({ hasText = false, error = false, onRetry }: { hasText?: boolean; error?: boolean; onRetry?: () => void }) {
   const requests = usePermissionRequests('t1', () => undefined, describeAnswerOutcome)
   const shown = requests.place(base)
   const current = requests.current
@@ -106,11 +106,13 @@ function Chat({ hasText = false }: { hasText?: boolean }) {
     createElement('div', { className: 'chat-input-area' },
       createElement(ComposerNoticeSlot),
       createElement('textarea', { className: 'composer-input', defaultValue: hasText ? 'Use pnpm' : '' })),
+    createElement(ComposerNoticeSource, { notice: error ? { tone: 'error', title: 'Connection lost' } : null }),
     createElement(ApprovalNotice, {
       request: current,
       composerHasText: hasText,
       placed: Boolean(current && shown.some((message) => message.id === `permission:${current.requestId}`)),
-      isShown: () => true
+      isShown: () => true,
+      connectionLost: onRetry ? { onRetry } : null
     }))
 }
 
@@ -145,9 +147,9 @@ const noticeButton = (name: string) => [...(notice()?.querySelectorAll<HTMLButto
 const rowButtons = () => [...host.querySelectorAll<HTMLButtonElement>('.permission-request-actions button')]
 const rowAnswer = () => host.querySelector('.permission-request-answer')?.textContent
 
-async function waiting(hasText = false) {
+async function waiting(hasText = false, error = false) {
   const daemon = mockDaemon()
-  await act(async () => root.render(createElement(Chat, { hasText })))
+  await act(async () => root.render(createElement(Chat, { hasText, error })))
   await daemon.ask(pending('r1'))
   return daemon
 }
@@ -166,6 +168,38 @@ describe('a waiting approval above the composer', () => {
     expect(notice()).toBeNull()
     await setRowInView(false)
     expect(notice()).not.toBeNull()
+  })
+
+  it('is not hidden by an error notice, and the error shows again once it is answered or in view', async () => {
+    await waiting(false, true)
+    await setRowInView(false)
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
+    await setRowInView(true)
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Connection lost')
+  })
+
+  it('says the connection is lost and waits to answer until it is back', async () => {
+    const daemon = await waiting()
+    await setRowInView(false)
+    const onRetry = vi.fn()
+    await act(async () => root.render(createElement(Chat, { error: true, onRetry })))
+    expect(notice()!.querySelector('.composer-notice-title')!.textContent).toBe('Approval')
+    expect(notice()!.querySelector('[role="status"]')!.textContent).toContain('Connection lost')
+    expect(noticeButton('Approve')!.getAttribute('aria-disabled')).toBe('true')
+    expect(noticeButton('Approve')!.title).toBe(APPROVAL_OFFLINE_REASON)
+    expect(noticeButton('Deny')!.title).toBe(APPROVAL_OFFLINE_REASON)
+    await act(async () => noticeButton('Approve')!.click())
+    expect(runCommand('approval.allow', 'key')).toBe(false)
+    expect(daemon.answered).toEqual([])
+    await act(async () => noticeButton('Retry connection')!.click())
+    expect(onRetry).toHaveBeenCalledTimes(1)
+
+    await act(async () => root.render(createElement(Chat)))
+    expect(notice()!.querySelector('.composer-notice-note')).toBeNull()
+    expect(noticeButton('Approve')!.getAttribute('aria-disabled')).toBeNull()
+    expect(noticeButton('Retry connection')).toBeUndefined()
+    await act(async () => noticeButton('Approve')!.click())
+    expect(daemon.answered).toEqual([['r1', { permission: 'allow' }]])
   })
 
   it('says that sending denies it while the box has text, even with the row in view', async () => {

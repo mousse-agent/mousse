@@ -4,7 +4,8 @@ import { AlertTriangle, ArrowDown, CircleAlert, Info, X } from '../lib/icons'
 /**
  * The one notice line above the composer. Every source (a failed send, Undo, the queue, dictation,
  * a paused run, a waiting approval) registers its notice with `useComposerNotice`; the slot shows only
- * the most severe one, newest first within a tone. The others show once it is dismissed or resolves.
+ * one: a blocking notice (a waiting approval) first, then the most severe, newest first within a tone.
+ * The others show once it is dismissed or resolves.
  */
 
 export type ComposerNoticeTone = 'info' | 'warning' | 'error'
@@ -30,6 +31,8 @@ export interface ComposerNoticeProps {
   title: string
   /** Quieter text after the title on the same line, cut to fit (the steered text, an approval's command). */
   detail?: string
+  /** A muted state after the detail that is never cut ("Connection lost" on a waiting approval). */
+  note?: string
   /** The full wording, shown on hover. */
   tooltip?: string
   /** Replaces the tone icon (a paused run shows a pause glyph). */
@@ -43,6 +46,8 @@ export interface ComposerNoticeProps {
   onDismiss?: () => void
   /** Accessible name of the notice group, when the title alone does not say what it is. */
   label?: string
+  /** The run waits on it (an approval), so no other notice, not even an error, hides it. */
+  blocking?: boolean
 }
 
 const TONE_RANK: Record<ComposerNoticeTone, number> = { info: 0, warning: 1, error: 2 }
@@ -53,13 +58,14 @@ function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
 }
 
 /** One notice: tone icon, one line, its actions, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+export function ComposerNotice({ tone, title, detail, note, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
   return (
     <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
         <span className="composer-notice-title">{title}</span>
         {detail && <span className="composer-notice-detail">{detail}</span>}
+        {note && <span className="composer-notice-note">{note}</span>}
       </span>
       {actions.map((action, index) => (
         <button
@@ -123,7 +129,8 @@ export class ComposerNoticeStore {
     let best: Entry | undefined
     for (const entry of this.entries.values()) {
       if (!best) { best = entry; continue }
-      const rank = TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
+      const rank = Number(Boolean(entry.notice.blocking)) - Number(Boolean(best.notice.blocking))
+        || TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
       if (rank > 0 || (rank === 0 && entry.order > best.order)) best = entry
     }
     return best?.notice ?? null

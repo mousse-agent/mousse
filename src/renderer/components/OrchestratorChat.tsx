@@ -1169,7 +1169,18 @@ export function OrchestratorChat() {
   const approvalWaiting = permissionRequests.waiting || Boolean(pendingQuestions?.approval)
   const composerHasContent = input.trim().length > 0 || attachedFiles.length > 0
 
-  const emptyThread = shownMessages.length === 0 &&!turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  const retryConnection = () => {
+    setConnectionFailed(false)
+    setLoading(true)
+    void window.mousse.orchestrator
+      .retryConnection(activeThreadId ?? undefined)
+      .then((started) => {
+        if (!started) setLoading(false)
+        else void refreshTurnActive()
+      })
+  }
+
+  const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
 
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -1210,16 +1221,7 @@ export function OrchestratorChat() {
           actions: [{
             label: 'Retry',
             icon: <RefreshCw size={14} strokeWidth={1.8} />,
-            onClick: () => {
-              setConnectionFailed(false)
-              setLoading(true)
-              void window.mousse.orchestrator
-                .retryConnection(activeThreadId ?? undefined)
-                .then((started) => {
-                  if (!started) setLoading(false)
-                  else void refreshTurnActive()
-                })
-            }
+            onClick: retryConnection
           }],
           onDismiss: () => setConnectionFailed(false)
         } : null} />
@@ -1229,6 +1231,7 @@ export function OrchestratorChat() {
           composerHasText={composerHasContent}
           placed={approvalPlaced}
           isShown={() => !inputAreaRef.current?.closest('[inert]')}
+          connectionLost={connectionFailed ? { onRetry: retryConnection } : null}
         />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
