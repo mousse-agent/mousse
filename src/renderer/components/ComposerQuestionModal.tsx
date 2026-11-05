@@ -1,5 +1,5 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
-import { Check, X } from '../lib/icons'
+import { Check, IconMessageCircleQuestion, X } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
 import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
 
@@ -72,6 +72,11 @@ export function approvalNotes(approval: PendingApprovalInfo): string[] {
   return notes
 }
 
+/** The dialog's title: "Question", or the position among several ("Questions · 2 of 3"). */
+export function questionDialogTitle(step: number, total: number): string {
+  return total > 1 ? `Questions · ${step + 1} of ${total}` : 'Question'
+}
+
 function initAnswers(questions: UserQuestion[]): UserQuestionAnswers {
   const initial: UserQuestionAnswers = {}
   for (const question of questions) {
@@ -139,6 +144,8 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
   const answered = (question: UserQuestion): boolean =>
     isQuestionAnswered(question, answers[question.id], customs[question.id])
   const isLast = clampedStep >= total - 1
+  // An empty answer is never sent: Submit waits until every question has one.
+  const allAnswered = pending.questions.every(answered)
 
   const toggleOption = (questionId: string, optionId: string, allowMultiple?: boolean) => {
     if (allowMultiple) {
@@ -175,6 +182,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
 
   const handleNext = () => {
     if (isLast) {
+      if (!allAnswered) return
       onSubmit(resolveQuestionAnswers(pending.questions, answers, customs))
       return
     }
@@ -182,12 +190,17 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
   }
 
   const value = answers[active.id]
+  const title = questionDialogTitle(clampedStep, total)
+  const skipLabel = total > 1 ? 'Skip questions' : 'Skip question'
   const customValue = customs[active.id] ?? ''
 
   return (
-    <div className="composer-question-modal" role="dialog" aria-label="Assistant questions">
+    <div className="composer-question-modal" role="dialog" aria-label={title}>
       <div className="composer-question-modal-header">
-        <span className="composer-question-modal-title">Q:</span>
+        <span className="composer-question-modal-title">
+          <IconMessageCircleQuestion size={14} aria-hidden="true" />
+          {title}
+        </span>
         {total > 1 && (
           <div className="composer-question-steps" role="tablist" aria-label="Question navigator">
             {pending.questions.map((question, index) => {
@@ -211,7 +224,8 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
         <button
           type="button"
           className="composer-question-modal-close"
-          aria-label="Dismiss questions"
+          aria-label={skipLabel}
+          title={skipLabel}
           onClick={onDismiss}
         >
           <X size={14} strokeWidth={2} />
@@ -249,17 +263,20 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
         </div>
       </div>
       <div className="composer-question-modal-footer">
-        <button
-          type="button"
-          className="composer-question-dismiss"
-          disabled={clampedStep === 0}
-          onClick={() => goTo(clampedStep - 1)}
-        >
-          Back
-        </button>
+        {total > 1 && (
+          <button
+            type="button"
+            className="composer-question-dismiss"
+            disabled={clampedStep === 0}
+            onClick={() => goTo(clampedStep - 1)}
+          >
+            Back
+          </button>
+        )}
         <button
           type="button"
           className="composer-question-submit"
+          disabled={isLast && !allAnswered}
           onClick={handleNext}
         >
           {isLast ? 'Submit' : 'Next'}

@@ -2,8 +2,10 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
+  ComposerQuestionModal,
   QuestionOptionList,
   isQuestionAnswered,
+  questionDialogTitle,
   resolveQuestionAnswers
 } from '../src/renderer/components/ComposerQuestionModal'
 import type { UserQuestion } from '../src/shared/types'
@@ -77,5 +79,37 @@ describe('QuestionOptionList selection state', () => {
     expect(pressed(render(['ui', 'db'], true))).toEqual(['UI', 'Database'])
     expect(pressed(render([], true))).toEqual([])
     expect(pressed(render(''))).toEqual([])
+  })
+})
+
+describe('ComposerQuestionModal', () => {
+  const render = (questions: UserQuestion[]) =>
+    renderToStaticMarkup(createElement(ComposerQuestionModal, {
+      pending: { requestId: 'r1', questions },
+      onSubmit: () => undefined,
+      onDismiss: () => undefined
+    }))
+
+  it('titles the dialog in words', () => {
+    expect(questionDialogTitle(0, 1)).toBe('Question')
+    expect(questionDialogTitle(1, 3)).toBe('Questions · 2 of 3')
+    const html = render([single])
+    expect(html).toContain('aria-label="Question"')
+    expect(html).not.toContain('Q:')
+    expect(render([single, multi])).toContain('Questions · 1 of 2')
+  })
+
+  it('shows no Back with one question and dims Submit until it has an answer', () => {
+    const html = render([single])
+    expect(html).not.toContain('>Back<')
+    expect(html).toMatch(/<button type="button" class="composer-question-submit" disabled="">Submit<\/button>/)
+    expect(html).toContain('title="Skip question"')
+  })
+
+  it('keeps Back and Next with several questions', () => {
+    const html = render([single, multi])
+    expect(html).toContain('>Back<')
+    expect(html).toMatch(/<button type="button" class="composer-question-submit">Next<\/button>/)
+    expect(html).toContain('title="Skip questions"')
   })
 })

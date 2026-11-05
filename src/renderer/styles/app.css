@@ -5000,6 +5000,9 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .composer-question-modal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -5007,6 +5010,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .composer-question-modal-close {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
