@@ -51,9 +51,8 @@ interface ContextUsagePopoverProps {
 }
 
 /**
- * What fills the model's context: a bar against capacity, the breakdown, and a link to the
- * compaction settings. The share and totals are on the ring's tooltip, so they are not repeated.
- * Only opened for a snapshot where `contextUsageKnown` holds.
+ * What fills the model's context: the share and totals, a bar against capacity, the breakdown, and a
+ * link to the compaction settings. Only opened for a snapshot where `contextUsageKnown` holds.
  */
 export function ContextUsagePopover({
   open,
@@ -132,6 +131,8 @@ export function ContextUsagePopover({
             <Settings size={14} />
           </button>
         </div>
+
+        <div className="context-usage-summary">{contextUsageSummary(usage)}</div>
 
         <div className="context-usage-bar" aria-hidden="true">
           {usage.categories.map((category) => (

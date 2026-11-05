@@ -2769,6 +2769,14 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
+/* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
+.context-usage-summary {
+  margin-bottom: -4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-faint);
+}
+
 /* Filled against the model's capacity; the empty track is the room left. */
 .context-usage-bar {
   display: flex;
