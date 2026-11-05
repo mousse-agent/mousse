@@ -202,6 +202,7 @@ export function LineEditHeatmap({ stats: loadedStats, statsFailed = false, usage
   return (
     <>
       <SettingsGroup
+        anchor="account-activity"
         title="Activity"
         icon={Activity}
         className="activity-group"
@@ -278,6 +279,7 @@ export function LineEditHeatmap({ stats: loadedStats, statsFailed = false, usage
       </SettingsGroup>
 
       <SettingsGroup
+        anchor="account-token-usage"
         title="Token usage"
         icon={Coins}
         className="activity-group"
