@@ -15,7 +15,33 @@ const editMessage = {
   parts: [{ type: 'tool-Edit', toolCallId: 'c1', state: 'output-available', input: { file_path: 'src/a.ts', old_string: 'a', new_string: 'b' } }]
 } as unknown as UIMessage
 
+function editOf(path: string, id = path) {
+  return { type: 'tool-Edit', toolCallId: id, state: 'output-available', input: { file_path: path, old_string: 'a', new_string: 'b' } }
+}
+
 describe('turn edit summary', () => {
+  it('lists each changed file by name, with its folder', () => {
+    const markup = renderToStaticMarkup(createElement(TurnEditSummary, {
+      messages: [{ id: 'a2', role: 'assistant', parts: [editOf('src/lib/app.ts'), editOf('README.md')] } as unknown as UIMessage]
+    }))
+    expect(markup).toContain('aria-label="Review src/lib/app.ts"')
+    expect(markup).toContain('<span class="turn-edits-file-name">app.ts</span><span class="turn-edits-file-folder">src/lib</span>')
+    // A file at the top level has no folder.
+    expect(markup).toContain('<span class="turn-edits-file-name">README.md</span><span class="turn-edits-stat">')
+    expect(markup).not.toContain('Project root')
+  })
+
+  it('starts collapsed when more than five files changed', () => {
+    const parts = (count: number) => Array.from({ length: count }, (_, index) => editOf(`src/f${index}.ts`))
+    const render = (count: number) => renderToStaticMarkup(createElement(TurnEditSummary, {
+      messages: [{ id: 'a3', role: 'assistant', parts: parts(count) } as unknown as UIMessage]
+    }))
+    expect(render(5)).toContain('aria-expanded="true"')
+    expect(render(5)).toContain('turn-edits-files')
+    expect(render(6)).toContain('aria-expanded="false"')
+    expect(render(6)).not.toContain('turn-edits-files')
+  })
+
   it('offers to review the turn instead of opening the Git diff', () => {
     const markup = renderToStaticMarkup(createElement(TurnEditSummary, { messages: [editMessage], turnId: 'run:thread:t1:ordinal:1' }))
     expect(markup).toContain('1 changed file')
@@ -55,6 +81,16 @@ describe('opening a turn in Review', () => {
     await openTurnInReview('t1', 'run:thread:t1:ordinal:3')
     expect(useReviewStore.getState().byThread.t1.scope).toEqual({ kind: 'turn', turnId: 'run:thread:t1:ordinal:3' })
     expect(useAppStore.getState()).toMatchObject({ mainView: 'review', mainAreaOpen: true, openedSurfaceKinds: ['review'] })
+  })
+
+  it('opens the turn at the clicked file', async () => {
+    getStatus.mockResolvedValue(ownWorktree)
+    await openTurnInReview('t1', 'run:thread:t1:ordinal:3', '/wt/t1/src/app.ts')
+    expect(useReviewStore.getState().byThread.t1).toMatchObject({
+      scope: { kind: 'turn', turnId: 'run:thread:t1:ordinal:3' },
+      pendingFile: { path: '/wt/t1/src/app.ts' }
+    })
+    expect(useAppStore.getState().mainView).toBe('review')
   })
 
   it('falls back to the whole thread when the row has no turn id', async () => {

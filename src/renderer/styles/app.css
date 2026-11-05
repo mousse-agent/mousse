@@ -883,23 +883,23 @@ html.platform-darwin .titlebar-left {
 .turn-edits-open {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   flex-shrink: 0;
-  padding: 6px 10px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
-  font: inherit;
-  font-size: 13px;
 }
 
 .turn-edits-open:hover {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-primary);
 }
 
-.turn-edits-folders {
+.turn-edits-files {
   list-style: none;
   margin: 0;
   padding: 0 8px 8px;
@@ -908,20 +908,54 @@ html.platform-darwin .titlebar-left {
   gap: 2px;
 }
 
-.turn-edits-folder {
+.turn-edits-file {
+  width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 28px;
-  color: var(--text-secondary);
+  padding: 4px 8px 4px 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
   font-size: 13px;
+  text-align: left;
 }
 
-.turn-edits-folder-name {
+.turn-edits-file:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.turn-edits-file:focus-visible,
+.turn-edits-open:focus-visible,
+.turn-edits-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.turn-edits-file-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.turn-edits-file-name {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-edits-file-folder {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 .placeholder-view {
