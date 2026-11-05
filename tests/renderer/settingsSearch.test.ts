@@ -13,7 +13,8 @@ import { getDefaultSettings, type SettingsOptions } from '../../src/shared/setti
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const PAGES: SettingsSearchPage[] = [
-  { id: 'general', label: 'General', keywords: ['appearance', 'notification'] },
+  { id: 'general', label: 'General', keywords: ['notification'] },
+  { id: 'appearance', label: 'Appearance', keywords: ['theme'] },
   { id: 'account', label: 'Account', keywords: ['mousse id'] },
   { id: 'providers', label: 'Providers', keywords: ['api key', 'subscription'] },
   { id: 'agents', label: 'Agents', keywords: ['context'] },
@@ -38,7 +39,7 @@ describe('the settings search', () => {
     expect(searchSettings('telemetry', PAGES)[0]).toEqual({ title: 'Telemetry', section: 'providers', anchor: 'providers-telemetry' })
     expect(searchSettings('compact context', PAGES)[0]).toEqual({ title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction' })
     expect(searchSettings('worktree folder', PAGES)[0]).toEqual({ title: 'Worktree folder', section: 'storage', anchor: 'storage-worktree-folder' })
-    expect(searchSettings('Glass', PAGES)[0]).toMatchObject({ title: 'Glass intensity', section: 'general' })
+    expect(searchSettings('Glass', PAGES)[0]).toMatchObject({ title: 'Glass intensity', section: 'appearance' })
   })
 
   it('finds a setting by another word for it, and every word must match', () => {
