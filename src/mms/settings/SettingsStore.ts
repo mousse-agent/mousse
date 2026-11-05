@@ -1,5 +1,5 @@
-import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
+import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
@@ -132,6 +132,14 @@ export class SettingsStore {
       typeof settings.appearance?.threadProjectColors !== 'boolean'
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
+      this.shouldPersistUsername = true
+    }
+    // Once: the stored 128k every install wrote as the old default becomes the model's maximum.
+    const storedContext = settings.context as (ContextSettings & Record<string, unknown>) | undefined
+    if (storedContext?.[CONTEXT_COMPACTION_DEFAULT_MARKER] !== true) {
+      const context = { ...normalized.context, [CONTEXT_COMPACTION_DEFAULT_MARKER]: true }
+      if (storedContext?.compactionTokens === 128000) context.compactionTokens = DEFAULT_CONTEXT_COMPACTION_TOKENS
+      this.config.applySettingsPatch({ context })
       this.shouldPersistUsername = true
     }
     if (this.shouldPersistUsername) {
