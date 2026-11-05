@@ -1,12 +1,13 @@
-import { createContext, useContext, useId, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useId, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { AlertTriangle, ArrowDown, CircleAlert, Info, X } from '../lib/icons'
 
 /**
- * The one notice line above the composer. Every source (a failed send, Undo, the queue, dictation,
- * a paused run, a waiting approval) registers its notice with `useComposerNotice`; the slot shows only
- * one: a blocking notice (a waiting approval) first, then the most severe, newest first within a tone.
- * The others show once it is dismissed or resolves. One exception: a notice that stops everything
- * (`stacksAbove`, the lost background service) shows on its own line above a blocking notice.
+ * The dock on the composer's top edge, which shows one thing at a time. Every source (a failed send,
+ * Undo, dictation, a paused run, the lost background service) registers its notice with
+ * `useComposerNotice`, and the queued-messages strip takes part with `useComposerDockStrip`. The dock
+ * shows the highest priority (`ComposerDockPriority`), newest first within one; the others show once it
+ * is dismissed or resolves. One exception: the lost background service over a waiting approval shows as
+ * two rows, the service on top, since the approval cannot be answered until it reconnects.
  */
 
 export type ComposerNoticeTone = 'info' | 'warning' | 'error'
@@ -49,16 +50,22 @@ export interface ComposerNoticeProps {
   onDismiss?: () => void
   /** Accessible name of the notice group, when the title alone does not say what it is. */
   label?: string
-  /** The run waits on it (an approval), so no other notice, not even an error, hides it. */
-  blocking?: boolean
-  /**
-   * It stops everything (the lost background service), so it is not hidden behind a blocking notice
-   * either: it gets its own line above it. Without a blocking notice it takes part in the one-line rule.
-   */
-  stacksAbove?: boolean
+  /** Its place in the dock's order, when the tone alone does not say it (the lost service, a paused run). */
+  priority?: ComposerDockPriority
 }
 
-const TONE_RANK: Record<ComposerNoticeTone, number> = { info: 0, warning: 1, error: 2 }
+/**
+ * What the dock shows, highest first; one thing at a time. A notice without `priority` ranks by its tone
+ * (an error with the errors, a warning just under them, info last), so the queue sits under any error.
+ */
+export type ComposerDockPriority = 'service' | 'paused' | 'approval' | 'error' | 'warning' | 'queue' | 'info'
+
+const PRIORITY_RANK: Record<ComposerDockPriority, number> = { info: 0, queue: 1, warning: 2, error: 3, approval: 4, paused: 5, service: 6 }
+
+/** How long a message queued behind a higher notice shows the queue before the notice comes back. */
+export const QUEUE_REVEAL_MS = 2500
+/** The dock's fade out; `--composer-dock-fade` in app.css is the same. */
+export const DOCK_FADE_MS = 160
 
 function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
   const Icon = tone === 'error' ? CircleAlert : tone === 'warning' ? AlertTriangle : Info
@@ -108,52 +115,117 @@ export function ComposerNotice({ tone, title, shortTitle, detail, tooltip, icon,
   )
 }
 
-interface Entry { notice: ComposerNoticeProps; order: number }
+/** A notice, or a strip that draws itself in the dock (the queue: `notice` is null). */
+interface Entry { notice: ComposerNoticeProps | null; rank: number; order: number }
 
-/** The notices registered under one composer, the one on top, and the line stacked above it. */
+/** What a strip shows: drawn, fading out after a reveal, or hidden behind a higher entry. */
+export type ComposerDockStripState = 'shown' | 'leaving' | 'hidden'
+
+/**
+ * Everything that wants the dock above one composer, and the one entry it shows: the highest priority,
+ * the newest within a priority. A revealed strip (`reveal`) shows over all of them for a moment.
+ */
 export class ComposerNoticeStore {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Set<() => void>()
   private counter = 0
+  private currentId: string | null = null
   private current: ComposerNoticeProps | null = null
-  private stacked: ComposerNoticeProps | null = null
+  private revealed: string | null = null
+  private leaving: string | null = null
+  private revealTimer: ReturnType<typeof setTimeout> | null = null
 
   /** Registers, updates (`notice`) or removes (`null`) the notice of one source. */
   set(id: string, notice: ComposerNoticeProps | null): void {
-    const entry = this.entries.get(id)
-    if (notice) this.entries.set(id, { notice, order: entry?.order ?? ++this.counter })
-    else if (entry) this.entries.delete(id)
-    else return
-    const entries = [...this.entries.values()]
-    const next = pick(entries)
-    // Only over a blocking notice does a `stacksAbove` one get a line of its own; otherwise the pick above covers it.
-    const above = next?.blocking ? pick(entries.filter((candidate) => candidate.notice.stacksAbove)) : null
-    if (next === this.current && above === this.stacked) return
-    this.current = next
-    this.stacked = above
-    for (const listener of this.listeners) listener()
+    this.put(id, notice ? { notice, rank: PRIORITY_RANK[notice.priority ?? notice.tone] } : null)
+  }
+
+  /** Registers (`present`) or removes a strip that draws itself when it is on top (the queue). */
+  setStrip(id: string, present: boolean, priority: ComposerDockPriority = 'queue'): void {
+    this.put(id, present ? { notice: null, rank: PRIORITY_RANK[priority] } : null)
+  }
+
+  /**
+   * Shows the strip `id` over everything for `ms` (a message just queued behind a paused run), then
+   * fades it out and gives the dock back. Nothing happens when it is already on top by priority.
+   */
+  reveal(id: string, ms = QUEUE_REVEAL_MS): void {
+    if (!this.entries.has(id) || (this.revealed !== id && this.pickId() === id)) return
+    this.clearReveal()
+    this.revealed = id
+    this.revealTimer = setTimeout(() => {
+      this.leaving = id
+      this.update()
+      this.revealTimer = setTimeout(() => { this.clearReveal(); this.update() }, DOCK_FADE_MS)
+    }, ms)
+    this.update()
   }
 
   readonly top = (): ComposerNoticeProps | null => this.current
 
-  /** The line above `top`: a `stacksAbove` notice while `top` is blocking, else null. */
+  /** The row above `top`: the lost service while `top` is a waiting approval, else null. */
   readonly above = (): ComposerNoticeProps | null => this.stacked
+
+  readonly stripState = (id: string): ComposerDockStripState =>
+    this.currentId !== id ? 'hidden' : this.leaving === id ? 'leaving' : 'shown'
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
   }
-}
 
-function pick(entries: Entry[]): ComposerNoticeProps | null {
-  let best: Entry | undefined
-  for (const entry of entries) {
-    if (!best) { best = entry; continue }
-    const rank = Number(Boolean(entry.notice.blocking)) - Number(Boolean(best.notice.blocking))
-      || TONE_RANK[entry.notice.tone] - TONE_RANK[best.notice.tone]
-    if (rank > 0 || (rank === 0 && entry.order > best.order)) best = entry
+  private put(id: string, next: Omit<Entry, 'order'> | null): void {
+    const entry = this.entries.get(id)
+    if (next) this.entries.set(id, { ...next, order: entry?.order ?? ++this.counter })
+    else if (entry) {
+      this.entries.delete(id)
+      if (this.revealed === id) this.clearReveal()
+    } else return
+    this.update()
   }
-  return best?.notice ?? null
+
+  private clearReveal(): void {
+    if (this.revealTimer) clearTimeout(this.revealTimer)
+    this.revealTimer = null
+    this.revealed = null
+    this.leaving = null
+  }
+
+  private update(): void {
+    let id = this.revealed ?? this.pickId()
+    let stacked: ComposerNoticeProps | null = null
+    // The lost service over a waiting approval: the approval stays, with the service on a row above it.
+    if (!this.revealed && id && this.entries.get(id)?.rank === PRIORITY_RANK.service) {
+      const under = this.pickId((entry) => entry.rank !== PRIORITY_RANK.service)
+      if (under && this.entries.get(under)?.rank === PRIORITY_RANK.approval) {
+        stacked = this.entries.get(id)?.notice ?? null
+        id = under
+      }
+    }
+    const notice = id ? this.entries.get(id)?.notice ?? null : null
+    const leaving = this.leaving
+    if (id === this.currentId && notice === this.current && stacked === this.stacked && leaving === this.shownLeaving) return
+    this.currentId = id
+    this.current = notice
+    this.stacked = stacked
+    this.shownLeaving = leaving
+    for (const listener of this.listeners) listener()
+  }
+
+  private stacked: ComposerNoticeProps | null = null
+  private shownLeaving: string | null = null
+
+  private pickId(include: (entry: Entry) => boolean = () => true): string | null {
+    let best: [string, Entry] | undefined
+    for (const candidate of this.entries) {
+      const [, entry] = candidate
+      if (!include(entry)) continue
+      if (!best) { best = candidate; continue }
+      const rank = entry.rank - best[1].rank
+      if (rank > 0 || (rank === 0 && entry.order > best[1].order)) best = candidate
+    }
+    return best?.[0] ?? null
+  }
 }
 
 const ComposerNoticeContext = createContext<ComposerNoticeStore | null>(null)
@@ -182,10 +254,25 @@ export function ComposerNoticeSource({ notice }: { notice: ComposerNoticeProps |
 }
 
 const NO_STORE = { subscribe: () => () => undefined, top: () => null, above: () => null }
+const ALWAYS_SHOWN = (): ComposerDockStripState => 'shown'
 
 /**
- * The line above the composer: the top notice, or nothing; with a stacked notice, that one's line sits
- * directly above it. It floats, so the composer never moves.
+ * Takes part in the dock as a strip that draws itself (the queue). Returns whether to draw it now, and
+ * `reveal`, which shows it over a higher notice for a moment. Without a provider it is always shown.
+ */
+export function useComposerDockStrip(present: boolean): { state: ComposerDockStripState; reveal: () => void } {
+  const store = useContext(ComposerNoticeContext)
+  const id = useId()
+  useLayoutEffect(() => { store?.setStrip(id, present) }, [store, id, present])
+  useLayoutEffect(() => () => { store?.setStrip(id, false) }, [store, id])
+  const state = useSyncExternalStore(store?.subscribe ?? NO_STORE.subscribe, store ? () => store.stripState(id) : ALWAYS_SHOWN)
+  const reveal = useCallback(() => { store?.reveal(id) }, [store, id])
+  return { state, reveal }
+}
+
+/**
+ * The dock on the composer's top edge: the top notice, or nothing (also when a strip such as the queue
+ * is on top; it draws itself in the same place). It sits in the composer stack, joined to the composer.
  */
 export function ComposerNoticeSlot() {
   const store = useContext(ComposerNoticeContext) ?? NO_STORE
