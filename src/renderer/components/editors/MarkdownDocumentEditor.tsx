@@ -3,7 +3,7 @@ import type { Monaco } from '@monaco-editor/react'
 import type { editor, IDisposable, languages } from 'monaco-editor'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
-import { CODE_FONT } from '../../lib/typography'
+import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
 import { MarkdownPreview } from './MarkdownPreview'
 import { MarkdownViewTabs } from './MarkdownViewTabs'
 import {
@@ -58,6 +58,7 @@ export function MarkdownDocumentEditor({
   className,
   'aria-label': ariaLabel = 'Markdown document'
 }: MarkdownDocumentEditorProps) {
+  const codeFont = useMonacoCodeFont()
   const reactId = useId()
   const sourceTabId = `${reactId}-source-tab`
   const previewTabId = `${reactId}-preview-tab`
@@ -268,7 +269,7 @@ export function MarkdownDocumentEditor({
               minimap: { enabled: true },
               lineNumbers: 'on',
               scrollBeyondLastLine: false,
-              fontFamily: CODE_FONT,
+              fontFamily: codeFont,
               fontSize: 13,
               tabSize: 2,
               detectIndentation: true,
