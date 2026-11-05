@@ -51,10 +51,11 @@ it('offers one add action instead of a dead select when no model is ready', () =
   expect(html).toMatch(/<button[^>]*aria-label="Add a dictation model"[^>]*>.*Add model<\/button>/)
 })
 
-it('keeps the select while provider models are still loading', () => {
+it('keeps the select while provider models are still loading, with no loading words', () => {
   const html = render(null, null)
   expect(html).toMatch(/<select[^>]*disabled=""/)
-  expect(html).toContain('Loading models')
+  // The loader appears only after a short delay (tests/renderer/speechModelsPending.test.ts).
+  expect(html).not.toContain('Loading models')
   expect(html).not.toContain('Add model')
 })
 

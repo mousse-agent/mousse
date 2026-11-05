@@ -4,6 +4,7 @@ import { Modal } from '../components/ui/Modal'
 import { ChevronLeft, ChevronRight, Download, Plus, RotateCcw, Trash2, X } from '../lib/icons'
 import { SettingsGroup, SettingsRow } from '../components/settings/SettingsRow'
 import { Select } from '../components/ui/Select'
+import { Spinner } from '../components/ui/Spinner'
 import { isBestValue, pickModels, type ModelComparison, type ModelMetric, type ModelPick } from './modelComparison'
 import {
   downloadPercent,
@@ -35,6 +36,19 @@ export interface SpeechModelSettingProps<S extends SpeechSelection, M extends Lo
   localApi: LocalModelApi
   /** The figures the dialog compares and how it picks its columns. */
   comparison: ModelComparison<M>
+}
+
+/** How long the models may take before the select shows its loader, so a quick load never flashes one. */
+export const MODELS_PENDING_DELAY_MS = 160
+
+/** The select's content while models load: empty at first, then a small spinner read as "Loading models". */
+function PendingModels() {
+  const [shown, setShown] = useState(false)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShown(true), MODELS_PENDING_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
+  return shown ? <span className="speech-models-pending" role="status" aria-label="Loading models"><Spinner size={14} /></span> : null
 }
 
 const optionKey = (selection: SpeechSelection): string =>
@@ -112,7 +126,7 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
                 id={selectId}
                 value={valueKey}
                 disabled={empty}
-                placeholder={empty ? 'Loading models' : 'Choose a model'}
+                placeholder={empty ? <PendingModels /> : 'Choose a model'}
                 onChange={(key) => {
                   const selection = options.get(key)
                   if (selection) onSelect(selection)
