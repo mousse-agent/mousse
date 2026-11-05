@@ -36,12 +36,6 @@
   background: color-mix(in srgb, var(--wf-fg) 12%, var(--wf-bg));
 }
 
-.wf-root .btn-primary {
-  border-color: transparent;
-  background: var(--gradient-accent, #536aa4);
-  color: #fff;
-}
-
 .wf-root .btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;

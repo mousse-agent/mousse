@@ -198,19 +198,6 @@
   cursor: not-allowed;
 }
 
-.scheduled-btn.primary {
-  background: var(--gradient-accent);
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(var(--accent-deep-rgb), 0.35);
-}
-
-.scheduled-btn.primary:hover:not(:disabled) {
-  filter: brightness(1.1);
-  transform: translateY(-1px);
-  color: #fff;
-}
-
 .scheduled-btn.ghost {
   background: transparent;
 }

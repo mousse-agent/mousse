@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrations'
 import { ChevronDown, ChevronUp } from '../../lib/icons'
 import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
+import { Collapse } from '../ui/Collapse'
 import { isManagedSource } from './integrationUi'
 import { itemId, type IntegrationKind } from './itemState'
 
@@ -88,16 +89,18 @@ export function OtherAppsGroup({ kind, rows, defaultOpen = false }: { kind: Inte
         {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>}
     >
-      {open ? rows.map((row) => {
-        const description = `${row.sources.join(', ')} · ${row.detail}`
-        return <SettingsRow
-          key={row.id}
-          className="skills-mcp-row"
-          {...{ [cardAttr]: row.id }}
-          title={row.name}
-          description={<span className="skills-mcp-line" title={description}>{description}</span>}
-        />
-      }) : null}
+      <Collapse open={open} itemCount={rows.length}>
+        {rows.map((row) => {
+          const description = `${row.sources.join(', ')} · ${row.detail}`
+          return <SettingsRow
+            key={row.id}
+            className="skills-mcp-row"
+            {...{ [cardAttr]: row.id }}
+            title={row.name}
+            description={<span className="skills-mcp-line" title={description}>{description}</span>}
+          />
+        })}
+      </Collapse>
     </SettingsGroup>
   )
 }

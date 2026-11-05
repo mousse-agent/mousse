@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from 'react'
 import { ChevronRight, type IconComponent } from '../../lib/icons'
+import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 
 /**
  * Settings primitives. Layout rules live at the top of styles/settings.css:
@@ -215,7 +216,7 @@ export function Switch({
 /** The one "Advanced" disclosure a page may have, for rarely changed settings. */
 export function SettingsAdvanced({ label = 'Advanced', children }: { label?: string; children: ReactNode }) {
   return (
-    <details className="settings-advanced">
+    <details className={`settings-advanced ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         {label}

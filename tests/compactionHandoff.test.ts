@@ -43,6 +43,8 @@ describe('compaction before a handoff to a prompt runtime', () => {
     process.env.MOUSSE_HOME = home
     adapter = new FittingAdapter()
     daemon = phase6Daemon(home, [adapter])
+    // A fixed size: the scripted runtime reports no window, and the model-maximum default waits for one.
+    daemon.settings.context = { compactionEnabled: true, compactionTokens: 128000 }
   })
 
   afterEach(async () => {
