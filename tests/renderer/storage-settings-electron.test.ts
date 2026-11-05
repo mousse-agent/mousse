@@ -5,9 +5,9 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { build } from 'esbuild'
 import electron from 'electron'
 import { expect, it } from 'vitest'
+import { formatBytes } from '../../src/shared/storage'
 
 const MB = 1024 * 1024
-const CIRCUMFERENCE = 2 * Math.PI * 64
 
 it('edits policies, shows usage across machines, and cleans up only after the plan is confirmed, in the real page', async () => {
   const temporaryRoot = realpathSync(tmpdir())
@@ -39,13 +39,15 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(review.legacy).toMatchObject({ inactive: 'off', captures: 'off', merged: 'false', deleted: 'true', configureCalls: 0 })
     expect(review.legacy.notice).toContain('Recommended cleanup rules are available')
     expect(review.legacy.notice).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
+    // The notice comes first; then disk usage and cleanup, before the rules.
+    expect(review.legacy.order).toEqual(['storage-review-notice', 'storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'])
     for (const text of ['Remove worktrees inactive for 30 days', 'Remove worktrees whose work is merged into the default branch', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
     expect(review.notNow).toEqual({ configureCalls: 0, notice: true })
     expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
     expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })
 
     // The saved values reach the controls, and every rule is a title and one short line.
-    expect(report.initial).toMatchObject({ trash: 'never', inactive: '30', captures: '30', deleted: 'true', merged: 'true', groups: [true, true, true, true, true], machineSelect: true, measuredAt: 'Measured 5m ago', projectArcs: 3 })
+    expect(report.initial).toMatchObject({ trash: 'never', inactive: '30', captures: '30', deleted: 'true', merged: 'true', groups: [true, true, true, true, true], machineSelect: true, measuredAt: 'Measured 5m ago', order: ['storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'] })
     for (const row of report.initial.ruleRows) {
       expect(row.text, row.id).not.toContain('Never deletes')
     }
@@ -110,22 +112,17 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     // A timeout is not a failure: the daemon keeps going and the page says where the result will appear.
     expect(cleanup.timeout).toEqual({ notice: 'Cleanup is still running in the background. The result appears here when it finishes.', error: false, dialog: false })
 
-    // Group by changes both the table and the chart; the arcs together fill the ring.
+    // Group by changes the table; each view shows its total once, as the sum of its rows, with no chart or legend.
     const { project, thread, kind } = report.usage.byGroup
     expect(project.rows.map((row: any) => row.label)).toEqual(['Mousse', 'Website', 'Other'])
     expect(thread.rows.map((row: any) => [row.label, row.bytes])).toEqual([['Fix storage', 500 * MB], ['Add search', 200 * MB], ['Landing page', 50 * MB], ['Gone thread', 30 * MB], ['Other', 300 * MB]])
     expect(kind.rows.map((row: any) => row.label)).toEqual(['Worktrees', 'Browser data', 'Logs', 'Threads'])
-    expect([project.arcs.length, thread.arcs.length, kind.arcs.length]).toEqual([3, 5, 4])
-    expect(thread.arcs.map((arc: any) => arc.key)).not.toEqual(project.arcs.map((arc: any) => arc.key))
+    expect([project.rows.length, thread.rows.length, kind.rows.length]).toEqual([3, 5, 4])
     for (const view of [project, thread, kind]) {
-      expect(view.arcs.length).toBe(view.rows.length)
-      const drawn = view.arcs.reduce((sum: number, arc: any) => sum + arc.length, 0) + view.arcs.length * 1.5
-      expect(Math.abs(drawn - CIRCUMFERENCE)).toBeLessThan(0.2)
       const total = view.rows.reduce((sum: number, row: any) => sum + row.bytes, 0)
-      view.rows.forEach((row: any, index: number) => expect(Math.abs((view.arcs[index].length + 1.5) / CIRCUMFERENCE - row.bytes / total), row.label).toBeLessThan(0.002))
+      expect(view.total).toBe(`${formatBytes(total)} in total`)
+      expect(view.chart).toBe(0)
     }
-    expect(project.arcs.map((arc: any) => arc.stroke)).toEqual(['var(--hue-1)', 'var(--hue-2)', 'var(--text-secondary)'])
-    expect(report.usage.legend).toBe(4)
     expect(report.usage.sortedByName).toEqual(['Browser data', 'Logs', 'Threads', 'Worktrees'])
     expect(report.usage.sortedByNameDesc).toEqual(['Worktrees', 'Threads', 'Logs', 'Browser data'])
 
@@ -137,7 +134,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.usage.laptopRefresh).toEqual({ localCallsAdded: 0, hubCallsAdded: 1, hubParams: { target: 'nod_laptop' } })
 
     // A machine that refuses or is offline is Unavailable with the reason, never a zero.
-    expect(report.usage.server.chart).toBe(false)
+    expect(report.usage.server.table).toBe(false)
     expect(report.usage.server.text).toBe('Server: Unavailable · Older version or no permission')
     expect(report.usage.server.none).toBe('No usage to show.')
     expect(report.usage.phone).toEqual({ text: 'Phone: Unavailable · Offline', asked: 0 })
@@ -151,7 +148,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(all.kind.rows.find((row: any) => row.label === 'Worktrees').bytes).toBe(980 * MB)
 
     // A reply that fails validation is refused before anything is drawn.
-    expect(report.usage.malformed).toMatchObject({ chart: false, rows: 0, none: 'No usage to show.' })
+    expect(report.usage.malformed).toMatchObject({ table: false, rows: 0, none: 'No usage to show.' })
     expect(report.usage.malformed.text).toBe('This computer: Unavailable · Sent an unreadable reply')
 
     // Selecting a row goes somewhere.

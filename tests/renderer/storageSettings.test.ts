@@ -7,7 +7,7 @@ import { STORAGE_POLICY_DEFAULTS, storagePolicyHasRule, type StorageCleanupItem,
 import { RecommendedRulesNotice, recommendedPolicy } from '../../src/renderer/components/storage/RecommendedRules'
 import { setStorageReviewPending, useStorageReviewPending } from '../../src/renderer/lib/storageReview'
 import { StorageCleanupView } from '../../src/renderer/components/storage/StorageCleanupSection'
-import { sliceArcs } from '../../src/renderer/components/storage/StorageDonut'
+import { StorageSettings } from '../../src/renderer/components/StorageSettings'
 import { DaysSelect, StoragePolicyRows, parseCustomDays } from '../../src/renderer/components/storage/StoragePolicyRows'
 import { StorageUsageView } from '../../src/renderer/components/storage/StorageUsageSection'
 import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, trashCountSentence, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
@@ -246,7 +246,10 @@ describe('Clean up now', () => {
   it('shows a paused clock and an unrun state', () => {
     expect(text(cleanup({ report: reportOf([], { suspended: 'Paused after the system clock moved backwards; save the storage policy to resume' }) }))).toContain('Paused after the system clock moved backwards')
     expect(text(cleanup({ report: null }))).toContain('Cleanup has not run yet.')
-    expect(text(cleanup({ report: undefined }))).toContain('Loading the last run…')
+    // While the last run loads, only the delayed loader's slot is there: no placeholder words.
+    const loading = cleanup({ report: undefined })
+    expect(loading).toContain('data-testid="storage-last-run-loading"')
+    expect(text(loading)).not.toMatch(/Loading/)
   })
 
   it('shows an error outside the dialog', () => {
@@ -271,13 +274,12 @@ const usageView = (results: MachineUsage[] | undefined, patch: Partial<Component
 const ready = (value: StorageUsageSnapshot): MachineUsage => ({ machine: SELF_MACHINE, status: 'ready', snapshot: value })
 
 describe('disk usage view', () => {
-  it('draws one arc and one table row per group, with the same numbers', () => {
+  it('shows the total once and one table row per group, with no chart or legend repeating it', () => {
     const html = usageView([ready(snapshot())])
-    const arcs = [...html.matchAll(/data-testid="storage-donut-arc"[^>]*data-key="([^"]+)"/g)].map((match) => match[1])
     const bodies = [...html.matchAll(/data-testid="storage-usage-row" data-key="([^"]+)" data-bytes="(\d+)"/g)].map((match) => [match[1], Number(match[2])] as const)
-    expect(arcs).toEqual(['self:p1', 'self:p2', 'self:\u0000other'])
-    expect(bodies.map(([key]) => key).sort()).toEqual([...arcs].sort())
     expect(Object.fromEntries(bodies)).toEqual({ 'self:p1': 700 * 1024 ** 2, 'self:p2': 200 * 1024 ** 2, 'self:\u0000other': 100 * 1024 ** 2 })
+    expect(html).not.toMatch(/storage-donut|storage-legend|<svg[^>]*class="storage/)
+    expect(html.match(/data-testid="storage-usage-total"/g)).toHaveLength(1)
     const page = text(html)
     expect(page).toContain('Mousse')
     expect(page).toContain('700.0 MB')
@@ -286,20 +288,20 @@ describe('disk usage view', () => {
     expect(page).toContain('Measured 5m ago')
   })
 
-  it('sizes the arcs by share and lays them end to end', () => {
-    const arcs = sliceArcs([{ key: 'a', label: 'A', bytes: 3, share: 0.75 }, { key: 'b', label: 'B', bytes: 1, share: 0.25 }])
-    expect(arcs[0]!.offset).toBe(0)
-    expect(arcs[1]!.offset).toBeCloseTo(arcs[0]!.length + 1.5, 5)
-    expect(arcs[0]!.length / (arcs[0]!.length + arcs[1]!.length + 3)).toBeCloseTo(0.75, 1)
-    expect(sliceArcs([{ key: 'a', label: 'A', bytes: 3, share: 1 }])[0]!.length).toBeGreaterThan(0)
-  })
-
-  it('hides the chart from assistive tech and keeps the numbers in a table with a caption', () => {
+  it('keeps the numbers in a sortable table with a caption', () => {
     const html = usageView([ready(snapshot())])
-    expect(html).toMatch(/<svg[^>]*aria-hidden="true"[^>]*data-testid="storage-donut"/)
     expect(html).toContain('<caption class="sr-only">Disk usage by project</caption>')
     expect(html).toContain('aria-sort="descending"')
+    for (const key of ['name', 'size', 'share']) expect(html).toContain(`data-testid="storage-sort-${key}"`)
     expect(usageView([ready(snapshot())], { by: 'thread' })).toContain('Disk usage by thread')
+  })
+
+  it('puts the total and the grouping in one toolbar above the table', () => {
+    const html = usageView([ready(snapshot())])
+    const toolbar = html.slice(html.indexOf('class="storage-usage-toolbar"'), html.indexOf('data-testid="storage-usage-table"'))
+    expect(toolbar).toContain('data-testid="storage-usage-total"')
+    expect(toolbar).toContain('data-testid="storage-groupby-select"')
+    expect(tagOf(html, 'storage-groupby-select')).toContain('aria-label="Group by"')
   })
 
   it('marks a row by its background only, never by a side or edge bar', () => {
@@ -327,9 +329,10 @@ describe('disk usage view', () => {
 
   it('says it is measuring before the first answer, and nothing to show when none answered', () => {
     expect(usageView(undefined)).toContain('data-testid="storage-usage-loading"')
-    expect(usageView(undefined)).not.toContain('data-testid="storage-donut"')
+    expect(text(usageView(undefined))).not.toContain('Measuring')
+    expect(usageView(undefined)).not.toContain('data-testid="storage-usage-table"')
     const none = usageView([offlineUsage({ node: 'nod_a', name: 'Laptop' })])
-    expect(none).not.toContain('data-testid="storage-donut"')
+    expect(none).not.toContain('data-testid="storage-usage-table"')
     expect(none).toContain('data-testid="storage-usage-none"')
   })
 
@@ -349,7 +352,7 @@ describe('disk usage view', () => {
     const keys = [...html.matchAll(/data-testid="storage-usage-row" data-key="([^"]+)"/g)].map((match) => match[1])
     expect(keys).toContain('self:p1')
     expect(keys).toContain('nod_a:p1')
-    expect(text(html)).toContain('Machine')
+    expect(text(html)).toContain('Computer')
     expect(text(html)).toContain('Laptop')
     // The kind view sums across machines and has no machine column.
     const kinds = usageView([ready(snapshot()), laptop], { machine: 'all', by: 'kind', machines: [{ node: 'nod_a' as never, name: 'Laptop', online: true }] })
@@ -364,11 +367,11 @@ describe('disk usage view', () => {
     expect(html).toContain('data-testid="storage-groupby-select"')
   })
 
-  it('turns Refresh into Measuring while it works', () => {
-    expect(text(usageView([ready(snapshot())]))).toContain('Refresh')
+  it('is an icon button that says, in its label, that it is measuring', () => {
+    expect(tagOf(usageView([ready(snapshot())]), 'storage-usage-refresh')).toContain('aria-label="Measure disk usage again"')
     const busy = usageView([ready(snapshot())], { loading: true })
     expect(tagOf(busy, 'storage-usage-refresh')).toContain('disabled')
-    expect(text(busy)).toContain('Measuring…')
+    expect(tagOf(busy, 'storage-usage-refresh')).toContain('aria-label="Measuring disk usage"')
   })
 
   it('draws a link only where a row has somewhere to go', () => {
@@ -473,6 +476,20 @@ describe('the notice about the recommended rules', () => {
     setStorageReviewPending(true)
     expect(renderToStaticMarkup(createElement(Probe))).toContain('dot')
     setStorageReviewPending(false)
+  })
+})
+
+describe('the order of the Storage page', () => {
+  it('shows disk usage, then cleanup, then the rule groups', () => {
+    const html = renderToStaticMarkup(createElement(StorageSettings))
+    const at = (id: string) => html.indexOf(`id="${id}"`)
+    const order = ['storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'].map(at)
+    expect(order.every((index) => index >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+  })
+
+  it('points cleanup at the rules below it', () => {
+    expect(text(cleanup())).toContain('Runs the rules below now.')
   })
 })
 

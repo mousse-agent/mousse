@@ -52,72 +52,46 @@
   font-size: var(--settings-fs-small);
 }
 
-.storage-usage {
+/* The total on the left, the grouping (and the computer, when there is a choice) on the right. */
+.storage-usage-toolbar {
   display: flex;
-  align-items: flex-start;
-  gap: var(--space-24);
-  padding: var(--settings-row-y) var(--settings-surface-x);
-}
-
-.storage-usage-chart {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
   align-items: center;
-  gap: var(--space-8);
-  width: 176px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-8) var(--space-12);
+  padding: var(--settings-row-y) 0 var(--space-8);
 }
 
-.storage-donut-track,
-.storage-donut-arc {
-  fill: none;
-}
-
-.storage-donut-track {
-  stroke: var(--ui-line);
+.storage-usage-summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: var(--settings-control-h);
+  font-size: var(--settings-fs-small);
 }
 
 .storage-usage-total {
   margin: 0;
-  font-size: var(--settings-fs-small);
+  font-size: var(--settings-fs-row);
   font-variant-numeric: tabular-nums;
 }
 
-.storage-legend {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: var(--settings-fs-small);
+.storage-usage-total strong {
+  font-size: var(--settings-fs-heading);
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
-.storage-legend li {
+.storage-usage-filters {
   display: flex;
   align-items: center;
   gap: var(--space-8);
 }
 
-.storage-legend-label {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.storage-swatch {
-  flex: 0 0 auto;
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-}
-
 .storage-table {
-  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
+  margin-bottom: var(--space-8);
   border-collapse: collapse;
   font-size: var(--settings-fs-small);
 }
@@ -129,6 +103,15 @@
   font-weight: 400;
   vertical-align: middle;
   overflow-wrap: anywhere;
+}
+
+/* Text edges line up with the total and the rows of the other groups. */
+.storage-table :is(th, td):first-child {
+  padding-left: 0;
+}
+
+.storage-table :is(th, td):last-child {
+  padding-right: 0;
 }
 
 .storage-table thead th {
@@ -181,7 +164,7 @@
 .storage-notes,
 .storage-unavailable {
   margin: 0;
-  padding: var(--space-8) var(--settings-surface-x);
+  padding: var(--space-8) 0;
   list-style: none;
   font-size: var(--settings-fs-small);
 }
@@ -189,17 +172,6 @@
 .storage-notes li + li,
 .storage-unavailable li + li {
   margin-top: var(--space-4);
-}
-
-@media (max-width: 720px) {
-  .storage-usage {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .storage-usage-chart {
-    align-self: center;
-  }
 }
 
 /* Cleanup */

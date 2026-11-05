@@ -63,7 +63,7 @@ export const WORKTREE_GROUP_DESCRIPTION = 'Worktrees with ignored files, unpubli
 export const WORKTREE_GROUP_TOOLTIP = 'Ignored files (such as .env or node_modules) keep a worktree, as do commits that are not in the default branch, staged changes, a merge or rebase in progress, and a thread that is running or waiting. Uncommitted and untracked files do not: they are saved when the worktree is removed and come back with it. Delete the thread to remove a worktree that is kept; you review what is discarded.'
 
 export const CLEANUP_COPY = {
-  idle: 'Runs the rules above now. You see what would be removed, and confirm, before anything is deleted.',
+  idle: 'Runs the rules below now. Nothing is deleted until you confirm what would be removed.',
   noRule: 'Turn on a cleanup rule to use this.',
   trashWarning: 'Threads removed from the trash cannot be restored.',
   dispatchWarning: 'A dispatch worktree is deleted for good, with its ignored files.',

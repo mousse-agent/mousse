@@ -5,6 +5,7 @@ import { Sparkles } from '../../lib/icons'
 import { CLEANUP_COPY, ruleLabel } from '../../lib/storageCopy'
 import { itemSize, orderReportItems, summarizePlan } from '../../lib/storageCleanup'
 import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Modal } from '../ui/Modal'
 
 export type CleanupPhase = 'idle' | 'planning' | 'confirm' | 'running'
@@ -83,7 +84,7 @@ export function StorageCleanupView(props: StorageCleanupViewProps) {
     {props.error && phase !== 'confirm' && phase !== 'running' && <p className="storage-error" role="alert" data-testid="storage-cleanup-error">{props.error}</p>}
     {props.notice && <p className="settings-muted storage-notice" role="status" data-testid="storage-cleanup-notice">{props.notice}</p>}
     <div className="storage-last-run" data-testid="storage-last-run">
-      {report === undefined && !props.reportUnreadable && <p className="settings-muted">Loading the last run…</p>}
+      {report === undefined && !props.reportUnreadable && <DelayedLoader size="small" label="Loading the last cleanup" data-testid="storage-last-run-loading" />}
       {report === null && !props.reportUnreadable && <p className="settings-muted">Cleanup has not run yet.</p>}
       {props.reportUnreadable && <p className="settings-muted" data-testid="storage-report-unreadable">The last cleanup report could not be read.</p>}
       {report && <>

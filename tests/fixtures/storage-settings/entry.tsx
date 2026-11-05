@@ -186,8 +186,10 @@ function type(input: HTMLInputElement, value: string): void {
 const press = (element: HTMLElement, key: string) => element.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
 const callsOf = (method: string) => calls.filter((call) => call.method === method)
 const rowsOf = () => $$(tid('storage-usage-row')).map((row) => ({ key: row.dataset.key!, label: (row.querySelector('th')?.textContent ?? '').trim(), bytes: Number(row.dataset.bytes) }))
-// Read from the drawn circles, not from the data the chart was given.
-const arcsOf = () => $$(tid('storage-donut-arc')).map((arc) => ({ key: arc.dataset.key!, length: Number((arc.getAttribute('stroke-dasharray') ?? '').split(' ')[0]), stroke: arc.getAttribute('stroke') }))
+// What one view draws: the total once, the table rows, and no chart or legend repeating them.
+const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), chart: $$('[data-testid^="storage-donut"], [data-testid="storage-legend-item"]').length })
+// The page's sections in document order; the rule-review notice, when shown, is part of it.
+const pageOrder = () => $$('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-trash, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
 const valueOf = (testId: string) => $(tid(testId))?.dataset.value
 const unavailable = () => text(tid('storage-usage-unavailable'))
 
@@ -208,7 +210,7 @@ async function run() {
   // A profile that was already in use sees its own rules, a notice, and nothing turned on for it.
   const review: Record<string, unknown> = {}
   await until(() => $(tid('storage-review-notice')), 'review notice')
-  review.legacy = { notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
+  review.legacy = { order: pageOrder(), notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
   $<HTMLButtonElement>(tid('storage-review-open'))!.click()
   await until(() => $(tid('storage-review-rules')), 'review dialog')
   review.dialog = text(tid('storage-review-rules'))
@@ -239,7 +241,7 @@ async function run() {
     groups: ['storage-trash', 'storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
     machineSelect: Boolean($(tid('storage-machine-select'))),
     measuredAt: text(tid('storage-measured-at')),
-    projectRows: rowsOf(), projectArcs: arcsOf().length
+    projectRows: rowsOf(), order: pageOrder()
   }
 
   // The worktree folder: the picker's folder is saved by the daemon and read back; Use default goes back, and the
@@ -359,17 +361,16 @@ async function run() {
   daemon.runMode = 'ok'
   evidence.cleanup = cleanup
 
-  // Disk usage: Group by changes both the table and the chart.
+  // Disk usage: Group by changes the table; the total stays the sum of its rows.
   const usage: Record<string, unknown> = {}
-  const project = { rows: rowsOf(), arcs: arcsOf() }
+  const project = viewOf()
   await pick('storage-groupby-select', 'thread')
   await until(() => rowsOf().some((row) => row.label === 'Fix storage'), 'thread rows')
-  const thread = { rows: rowsOf(), arcs: arcsOf() }
+  const thread = viewOf()
   await pick('storage-groupby-select', 'kind')
   await until(() => rowsOf().some((row) => row.label === 'Worktrees'), 'kind rows')
-  const kind = { rows: rowsOf(), arcs: arcsOf() }
+  const kind = viewOf()
   usage.byGroup = { project, thread, kind }
-  usage.legend = $$(tid('storage-legend-item')).length
   usage.sortedBy = ''
   $<HTMLButtonElement>(tid('storage-sort-name'))!.click()
   await sleep(40)
@@ -402,7 +403,7 @@ async function run() {
   // A remote machine that refuses is Unavailable, never zero.
   await pick('storage-machine-select', 'nod_server')
   await until(() => $(tid('storage-usage-none')), 'server unavailable')
-  usage.server = { text: unavailable(), chart: Boolean($(tid('storage-donut'))), none: text(tid('storage-usage-none')) }
+  usage.server = { text: unavailable(), table: Boolean($(tid('storage-usage-table'))), none: text(tid('storage-usage-none')) }
   // One that is offline is not even asked.
   const phoneBefore = callsOf('bridge.hub.storage').filter((call) => (call.args[0] as { target: string }).target === 'nod_phone').length
   await pick('storage-machine-select', 'nod_phone')
@@ -411,7 +412,7 @@ async function run() {
   // All machines: sums what answered and lists what did not.
   await pick('storage-machine-select', 'all')
   await until(() => unavailable().includes('Server') && unavailable().includes('Phone'), 'all machines answered')
-  const allProject = { rows: rowsOf(), arcs: arcsOf(), unavailable: unavailable(), total: text(tid('storage-usage-total')), machineColumn: Boolean($(tid('storage-sort-machine'))) }
+  const allProject = { rows: rowsOf(), unavailable: unavailable(), total: text(tid('storage-usage-total')), machineColumn: Boolean($(tid('storage-sort-machine'))) }
   await pick('storage-groupby-select', 'kind')
   await until(() => rowsOf().some((row) => row.label === 'Worktrees'), 'all by kind')
   usage.all = { project: allProject, kind: { rows: rowsOf(), machineColumn: Boolean($(tid('storage-sort-machine'))) } }
@@ -422,10 +423,10 @@ async function run() {
   daemon.usageMode = 'malformed'
   $<HTMLButtonElement>(tid('storage-usage-refresh'))!.click()
   await until(() => $(tid('storage-usage-none')), 'malformed refused')
-  usage.malformed = { chart: Boolean($(tid('storage-donut'))), rows: rowsOf().length, text: unavailable(), none: text(tid('storage-usage-none')) }
+  usage.malformed = { table: Boolean($(tid('storage-usage-table'))), rows: rowsOf().length, text: unavailable(), none: text(tid('storage-usage-none')) }
   daemon.usageMode = 'ok'
   $<HTMLButtonElement>(tid('storage-usage-refresh'))!.click()
-  await until(() => $(tid('storage-donut')), 'recovered')
+  await until(() => $(tid('storage-usage-table')), 'recovered')
   await settled()
 
   // Selecting a row goes somewhere.
