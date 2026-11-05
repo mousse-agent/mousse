@@ -411,7 +411,7 @@ export function OrchestratorChat() {
     const timer = window.setTimeout(() => {
       inputAreaRef.current
         ?.querySelector<HTMLElement>(
-          '.composer-question-modal button:not([disabled]), .composer-question-modal input'
+          '.composer-question-modal .composer-question-choice[tabindex="0"]'
         )
         ?.focus()
     }, 320)

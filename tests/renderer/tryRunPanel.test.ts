@@ -82,7 +82,7 @@ describe('the Try Run panel', () => {
   it('a dismissed question is sent as dismissed; a run with no question just runs', async () => {
     const { client, answers } = fakeClient(() => ({ runs: [{ runId: 'run-1', threadId: 'thread-try', threadTitle: 'Try Agent: Tester', questions: [question] }] }))
     await start(client)
-    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Skip question"]')!.click())
+    act(() => button('Skip').click())
     await flush()
     expect(answers).toEqual([{ profileId: 'p1', id: 'agent-1', requestId: 'req-1', dismiss: true }])
 
