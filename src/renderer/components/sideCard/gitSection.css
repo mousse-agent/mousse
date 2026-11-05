@@ -222,7 +222,8 @@
   color: var(--text-primary);
 }
 
-/* Neutral until GitHub would merge it; then it is the section's one accent-filled action. */
+/* Neutral until GitHub would merge it; then it takes the shared primary
+   button look (polish.css). */
 .side-card-git-pr-merge {
   gap: 5px;
   padding: 0 10px 0 8px;
@@ -231,16 +232,6 @@
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-}
-
-.side-card-git-pr-merge[data-ready] {
-  background-image: var(--ui-sheen-accent), var(--gradient-accent);
-  box-shadow: var(--ui-specular-accent);
-  color: white;
-}
-
-.side-card-git-pr-merge[data-ready]:hover:not(:disabled) {
-  filter: brightness(1.08);
 }
 
 .side-card-git-pr-merge[aria-disabled='true'],
