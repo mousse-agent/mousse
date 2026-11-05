@@ -1439,6 +1439,12 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   min-width: 0;
 }
 
+/* Shortcut rows are one short line each: a smaller step of the spacing scale
+   keeps them scannable while text and controls keep their sizes. */
+.shortcuts-group {
+  --settings-row-y: var(--space-8);
+}
+
 .shortcuts-toolbar .settings-btn {
   height: var(--settings-control-h);
   border-radius: var(--ui-control-radius);
