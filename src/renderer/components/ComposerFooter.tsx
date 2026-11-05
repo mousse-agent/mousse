@@ -71,6 +71,8 @@ export interface ComposerFooterProps {
   /** A recording is being turned into text; the microphone and send buttons wait. */
   transcribing?: boolean
   onSend?: () => void
+  /** What the send button says it does, when not "Send message" / "Queue message" (such as answering open questions). */
+  sendLabel?: string
   onStop?: () => void
   onStartRecording?: () => void
   onStopRecording?: () => void
@@ -119,7 +121,8 @@ export function ComposerFooter({
   onImplementPlan,
   implementPlanDisabled = false,
   allowAttachWhileLoading = false,
-  permission
+  permission,
+  sendLabel
 }: ComposerFooterProps) {
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
@@ -385,8 +388,8 @@ export function ComposerFooter({
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={loading ? queueTitle : 'Send'}
-            aria-label={loading ? 'Queue message' : 'Send message'}
+            title={sendLabel ?? (loading ? queueTitle : 'Send')}
+            aria-label={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}
           >

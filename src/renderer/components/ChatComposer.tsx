@@ -95,6 +95,8 @@ export interface ChatComposerProps {
    * when Alt+Enter sent the text during a run: it goes into the running turn.
    */
   onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
+  sendLabel?: string
   onStop?: () => void
   /** The thread's last sent prompt, which Up in an empty box brings back. */
   lastPrompt?: () => string | undefined
@@ -176,6 +178,7 @@ export function ChatComposer({
   disabled = false,
   placeholder,
   onSend,
+  sendLabel,
   onStop,
   lastPrompt,
   disableSkillsPicker = false,
@@ -893,6 +896,7 @@ export function ChatComposer({
         recordingPending={recordingPending}
         transcribing={transcribing}
         onSend={() => submit()}
+        sendLabel={sendLabel}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}
