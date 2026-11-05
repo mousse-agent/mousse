@@ -1134,8 +1134,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   bottom: calc(var(--chat-composer-stack, 0px) + 4px);
 }
 
+/* Centred on the composer's top edge, so it never covers transcript text. */
 .chat-jump {
-  bottom: calc(var(--chat-composer-stack, 16px) + 10px);
+  bottom: calc(var(--chat-composer-stack, 32px) - 16px);
   width: 32px;
   height: 32px;
   border: 1px solid var(--ui-line-strong);
