@@ -272,7 +272,9 @@ describe('what the panel shows', () => {
     expect(pullRequestPanelState(base)).toEqual({ kind: 'loading' })
     expect(pullRequestPanelState({ ...base, lookup: { state: 'none', isDefaultBranch: false } })).toEqual({ kind: 'none', branch: 'feature/retry' })
     expect(pullRequestPanelState({ ...base, lookup: { state: 'unavailable', reason: 'unauthenticated', message: 'Sign in to GitHub first.' } }))
-      .toEqual({ kind: 'unavailable', message: 'Sign in to GitHub first.' })
+      .toEqual({ kind: 'signed-out', message: 'Sign in to GitHub first.' })
+    expect(pullRequestPanelState({ ...base, lookup: { state: 'unavailable', reason: 'not-github', message: 'Not a GitHub repository.' } }))
+      .toEqual({ kind: 'unavailable', message: 'Not a GitHub repository.' })
     expect(pullRequestPanelState({ ...base, lookup: found, entry: null })).toEqual({ kind: 'loading' })
     expect(pullRequestPanelState({ ...base, lookup: found, entry: { detail: null, error: null } })).toEqual({ kind: 'loading' })
     expect(pullRequestPanelState({ ...base, lookup: found, entry: { detail: null, error: 'HTTP 502' } })).toEqual({ kind: 'error', message: 'HTTP 502', number: 7 })
@@ -303,6 +305,33 @@ describe('what the panel shows', () => {
     const failed = render({ kind: 'error', message: 'Signed in to example.test as ada; it cannot see acme/app.', number: 7 })
     expect(failed).toContain('role="alert"')
     expect(failed).toContain('Signed in to example.test as ada; it cannot see acme/app.')
+  })
+
+  it('treats a signed-out GitHub CLI as a step to take, from the daemon\'s reason first', () => {
+    const base = { hasBranch: true, branch: 'feature/retry', lookup: found, entry: null }
+    const raw = 'HTTP 401: Bad credentials\nTo get started with GitHub CLI, please run:  gh auth login — not signed in to github.com for /Users/ada/app.'
+    expect(pullRequestPanelState({ ...base, entry: { detail: null, error: raw, errorReason: 'unauthenticated' } })).toEqual({ kind: 'signed-out', message: raw })
+    // An older read without a reason falls back to the CLI's own sign-in words.
+    expect(pullRequestPanelState({ ...base, entry: { detail: null, error: raw } })).toEqual({ kind: 'signed-out', message: raw })
+    // A reason that says otherwise wins over words that mention signing in.
+    expect(pullRequestPanelState({ ...base, entry: { detail: null, error: raw, errorReason: 'not-found' } })).toMatchObject({ kind: 'error' })
+    expect(pullRequestPanelState({ ...base, lookup: { state: 'unavailable', reason: 'error', message: 'Run gh auth login' } })).toMatchObject({ kind: 'unavailable' })
+  })
+
+  it('says to sign in, offers the command and Try again, and keeps the CLI\'s words under Details', () => {
+    const message = 'To get started with GitHub CLI, please run:  gh auth login\n/Users/ada/app'
+    const html = render({ kind: 'signed-out', message })
+    expect(html).toContain('role="status"')
+    expect(html).not.toContain('role="alert"')
+    expect(html).toContain('>Sign in to GitHub CLI<')
+    expect(html).toContain('<code class="pr-panel-signin-command" title="Run it in a terminal">gh auth login</code>')
+    expect(html).toContain('Copy command')
+    expect(html).toContain('Try again')
+    // The raw text stays out of the line and sits in a closed Details.
+    expect(html).toMatch(/<details class="pr-panel-details"><summary>Details<\/summary><pre>To get started[^<]*\/Users\/ada\/app<\/pre><\/details>/)
+    const remote = render({ kind: 'signed-out', message }, { computerName: 'Mac mini' })
+    expect(remote).toContain('>Sign in to GitHub CLI on Mac mini<')
+    expect(remote).toContain('title="Run it in a terminal on Mac mini"')
   })
 
   it('escapes a host message instead of rendering it', () => {

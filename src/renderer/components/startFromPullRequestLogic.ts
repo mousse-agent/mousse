@@ -1,5 +1,6 @@
 import { parsePullRequestReference, type PullRequestListItem, type PullRequestSummary } from '../../shared/pullRequests'
 import { ipcErrorLine } from '../lib/errorText'
+import { GITHUB_SIGN_IN_COMMAND, isGitHubSignedOutError } from '../lib/githubSignIn'
 
 /** The open pull requests whose number, title, author or branch contains every word of the query. */
 export function filterPullRequests(items: readonly PullRequestListItem[], query: string): PullRequestListItem[] {
@@ -29,6 +30,20 @@ export function startErrorCode(error: unknown): string | null {
 export function startErrorMessage(error: unknown): string {
   const line = ipcErrorLine(error)
   return !line || line === '[object Object]' ? 'The thread could not be started.' : line
+}
+
+/** What the dialog says in place of the list, and of a typed pull request, while GitHub CLI is signed out. */
+export const SIGNED_OUT_LIST = 'Sign in to GitHub CLI to search pull requests'
+export const SIGNED_OUT_READ = 'Sign in to GitHub CLI to read this pull request'
+
+/** The tooltip of a signed-out line: the command, and where to run it when that is another computer. */
+export function signInHint(computerName: string | null): string {
+  return `Run ${GITHUB_SIGN_IN_COMMAND} in a terminal${computerName ? ` on ${computerName}` : ''}`
+}
+
+/** A failed read as the dialog keeps it: signed out (said in one muted line, without the CLI's text), or the failure's own message. */
+export function readFailure(error: unknown): { signedOut: true } | { signedOut: false; message: string } {
+  return isGitHubSignedOutError(error) ? { signedOut: true } : { signedOut: false, message: startErrorMessage(error) }
 }
 
 export interface StartButtonModel {

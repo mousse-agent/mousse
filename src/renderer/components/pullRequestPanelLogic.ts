@@ -7,6 +7,7 @@ import type {
 } from '../../shared/pullRequests'
 import { formatMousseFileLink } from '../../shared/chatReferences'
 import { stripHtmlComments } from '../../shared/pullRequestText'
+import { isGitHubSignedOut } from '../lib/githubSignIn'
 
 /** Pure helpers for the pull request panel. No React or store imports, so tests can load it. */
 
@@ -387,6 +388,8 @@ export type PullRequestPanelState =
   | { kind: 'none'; branch: string | null }
   /** The host could not be asked (GitHub CLI missing or not signed in, not a GitHub repository); `message` is the host's. */
   | { kind: 'unavailable'; message: string }
+  /** GitHub CLI is not signed in, so nothing could be read; `message` is the CLI's own, kept for Details. */
+  | { kind: 'signed-out'; message: string }
   /** The pull request exists but could not be read, and nothing was read before; `message` is the host's. */
   | { kind: 'error'; message: string; number: number }
   /** `staleError` is the host's message when a refresh failed and the earlier read stays on screen. */
@@ -398,15 +401,23 @@ export function pullRequestPanelState(input: {
   branch: string | null
   lookup: GitPullRequestLookup | null
   /** The read of the pull request the lookup found. */
-  entry: { detail: PullRequestDetail | null; error: string | null } | null
+  entry: { detail: PullRequestDetail | null; error: string | null; errorReason?: string | null } | null
 }): PullRequestPanelState {
   if (!input.hasBranch) return { kind: 'no-branch' }
   const { lookup, entry } = input
   if (entry?.detail) return { kind: 'ready', detail: entry.detail, staleError: entry.error }
   if (!lookup) return { kind: 'loading' }
-  if (lookup.state === 'unavailable') return { kind: 'unavailable', message: lookup.message }
+  if (lookup.state === 'unavailable') {
+    return isGitHubSignedOut({ reason: lookup.reason, message: lookup.message })
+      ? { kind: 'signed-out', message: lookup.message }
+      : { kind: 'unavailable', message: lookup.message }
+  }
   if (lookup.state === 'none') return { kind: 'none', branch: input.branch }
-  if (entry?.error) return { kind: 'error', message: entry.error, number: lookup.pullRequest.number }
+  if (entry?.error) {
+    return isGitHubSignedOut({ reason: entry.errorReason, message: entry.error })
+      ? { kind: 'signed-out', message: entry.error }
+      : { kind: 'error', message: entry.error, number: lookup.pullRequest.number }
+  }
   return { kind: 'loading' }
 }
 
