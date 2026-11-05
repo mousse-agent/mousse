@@ -70,7 +70,7 @@ export function pausedStatusLabel(pause: Pick<TurnPause, 'until' | 'estimated'> 
 
 export type PausedAction = 'resume' | 'cancel' | 'stop'
 
-/** What the paused notice says when a button press fails. A run that is no longer paused is the usual cause (the notice lagged a hand-over or a Don't resume). */
+/** What the paused notice says when a button press fails. A run that is no longer paused is the usual cause (the notice lagged a hand-over or a Cancel). */
 export function pausedActionError(error: unknown, action: PausedAction): string {
   const code = error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : ''
   if (code === 'conflict') return 'This run is no longer paused.'
