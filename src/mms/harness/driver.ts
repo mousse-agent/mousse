@@ -189,6 +189,16 @@ export interface OneShotSpec {
 /** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
 export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 
+/**
+ * Whether a runtime still offers a model (`DriverRuntime.modelStanding`). `not_offered` lists the
+ * listed models a thread on it moves to, best first: the same family's newest first, then the
+ * newest of the others that are not older. Empty: the runtime offers none.
+ */
+export type ModelStanding =
+  | { standing: 'offered' }
+  | { standing: 'unknown' }
+  | { standing: 'not_offered'; instead: string[] }
+
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
@@ -271,6 +281,12 @@ export interface DriverRuntime {
    * the same id (Claude Code: `claude-sonnet-4-5` → `sonnet`). Undefined: the agent's default.
    */
   movedModel?(model: string): string | undefined
+  /**
+   * Whether the runtime still offers `model` (`ModelStanding`). `not_offered` only when its listing
+   * was refreshed in this run, for the program and account there now, and says the model is gone;
+   * anything it cannot tell yet is `unknown`. Without it every model reads as offered.
+   */
+  modelStanding?(model: string): ModelStanding
   /**
    * Installs (or updates) the runtime. A result's `config` is merged into the instance's stored
    * config, which moves its revision on (a registry agent records the install it was made with).

@@ -17,7 +17,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../shared/setti
 import type { CredentialKind } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
-import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
+import { modelVariantOf, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
@@ -64,6 +64,7 @@ import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
+import type { ModelStanding } from '../../driver'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
@@ -923,6 +924,54 @@ export class ClaudeSubscriptionProviderService {
     const models = this.settings.models
     return Boolean(models && (models.length || this.settings.modelsRefreshedAt))
   }
+  /**
+   * What the last refresh of this run listed: the live model ids (each alias and the model it
+   * resolves to) and the model each alias resolves to. Cleared when a refresh starts, so a refresh
+   * that fails (offline, signed out) leaves none.
+   */
+  private listing: { live: ReadonlySet<string>; resolved: ReadonlyMap<string, string> } | undefined
+  /**
+   * Whether Claude Code still offers `model`. Offered: listed live, or the older-model check found it
+   * runs. Not offered, only on a listing refreshed in this run whose check results belong to the
+   * Claude Code program and account there now: the check found it refused or remapped, or it is a
+   * full Claude model id that is neither listed nor in the catalog (or needs a newer Mousse).
+   * Everything else is unknown: no refresh yet, a check that has not reached the model (a Claude Code
+   * update starts it over), an alias such as `default`.
+   */
+  modelStanding(model: string): ModelStanding {
+    const base = modelVariantOf(model).baseId
+    const listed = this.listedByClaude() ? this.models() : []
+    if (listed.some((entry) => modelVariantOf(entry.id).baseId === base) || this.listing?.live.has(base)) return { standing: 'offered' }
+    if (!this.listing || !this.listedByClaude()) return { standing: 'unknown' }
+    const catalog = catalogModelsOnRoute(this.catalog(), 'claude')
+    const state = this.settings.olderModels
+    const candidates = claudeOlderCandidates(this.catalog(), this.listing.live)
+    if (!state || state.key !== claudeOlderCheckKey(cliFingerprint(this.launchTarget()), this.accountSubject(), candidates)) return { standing: 'unknown' }
+    const known = catalog.find((entry) => entry.route.id === base)
+    const outcome = state.results[base]?.outcome
+    if (outcome === 'runs') return { standing: 'offered' }
+    const gone = outcome === 'refused' || outcome === 'remapped' || (!outcome && !known && base.startsWith('claude-'))
+    if (!gone) return { standing: 'unknown' }
+    return { standing: 'not_offered', instead: this.replacements(listed, catalog, known?.family) }
+  }
+  /**
+   * The listed models a thread moves to, best first: those of `family`, newest first, then the
+   * newest of the others that are not older. A model is dated by its catalog entry (an alias by the
+   * model it resolved to); an undated one comes after the dated ones, in listing order.
+   */
+  private replacements(listed: readonly LlmModelOption[], catalog: readonly ClaudeOlderCandidate[], family: string | undefined): string[] {
+    const entryOf = (id: string) => {
+      const base = modelVariantOf(id).baseId
+      const route = this.listing?.resolved.get(id) ?? this.listing?.resolved.get(base) ?? base
+      return catalog.find((entry) => entry.route.id === route)
+    }
+    const dated = listed.map((model, index) => ({ model, index, entry: entryOf(model.id) }))
+    const newest = (a: (typeof dated)[number], b: (typeof dated)[number]) =>
+      (b.entry?.released ?? '').localeCompare(a.entry?.released ?? '') || a.index - b.index
+    const same = family ? dated.filter((item) => item.entry?.family === family).sort(newest) : []
+    const others = dated.filter((item) => !same.includes(item) && !item.model.older).sort(newest)
+    return [...same, ...others].map((item) => item.model.id)
+  }
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     // Offer the CLI aliases until model discovery runs.
@@ -1207,6 +1256,8 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   async refreshModels(cwd: string, signal?: AbortSignal): Promise<void> {
+    // Until this refresh saves a listing, no model reads as gone (`modelStanding`).
+    this.listing = undefined
     // A refresh before the first sign-in check (or after it went stale) checks first.
     if (this.checkDue()) await this.status()
     if (!this.configured()) return
@@ -1248,6 +1299,10 @@ export class ClaudeSubscriptionProviderService {
           handedOver = this.startOlderCheck(query, controller, listed)
         } catch {
           // The live list is saved; the older models wait for the next refresh.
+        }
+        this.listing = {
+          live: claudeLiveModelIds(listed),
+          resolved: new Map(listed.flatMap((model) => (model.resolvedModel ? [[model.value, bareModelId(model.resolvedModel)] as const] : [])))
         }
       }
     } finally {

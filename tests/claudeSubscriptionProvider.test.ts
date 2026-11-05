@@ -1147,6 +1147,109 @@ describe('older Claude models', () => {
     await service.chat({ ...chatInput(home), model: 'ember-runs:low' })
     expect(captured[0]).toMatchObject({ model: 'ember-runs', effort: 'low' })
   })
+
+  describe('a model no longer offered', () => {
+    // Two families with live models (behind aliases, one with a `[1m]` variant) and older ones of each outcome.
+    const model = (id: string, family: string, released: string, extra: Record<string, unknown> = {}) => ({
+      id, name: `Claude ${id}`, short: id, maker: 'anthropic', family, released, routes: { claude: { id } }, ...extra
+    })
+    const families = parseModelCatalog({
+      format: 1,
+      revision: 1,
+      models: [
+        model('ember-9', 'ember', '2031-01-01'),
+        model('spark-3', 'spark', '2031-02-01'),
+        model('ember-8-6', 'ember', '2030-06-01', { older: true }),
+        model('ember-8-2', 'ember', '2030-02-01', { older: true }),
+        model('ember-8-1', 'ember', '2030-01-01', { older: true }),
+        model('ember-8-0', 'ember', '2029-12-01', { older: true }),
+        model('cinder-2', 'cinder', '2029-01-01', { older: true })
+      ]
+    })
+    const listed = [
+      { value: 'ember', resolvedModel: 'ember-9', displayName: 'Ember', description: 'Ember 9 · test model' },
+      { value: 'ember[1m]', resolvedModel: 'ember-9[1m]', displayName: 'Ember 1M', description: 'Ember 9 · test model' },
+      { value: 'spark', resolvedModel: 'spark-3', displayName: 'Spark', description: 'Spark 3 · test model' }
+    ]
+    const outcomes: Record<string, Behaviour> = {
+      'ember-8-2': { applied: 'ember-9' },
+      'ember-8-1': { refuse: true },
+      'ember-8-0': { applied: null },
+      'cinder-2': { refuse: true }
+    }
+    const sameFamily = ['ember', 'ember[1m]', 'ember-8-6', 'spark']
+
+    async function checked(behaviour = outcomes) {
+      const check = olderQuery(behaviour, listed)
+      const made = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => families })
+      await made.service.refreshModels(made.home)
+      await made.service.olderCheck
+      return made
+    }
+
+    it('moves a refused or remapped model to the newest of its family, then the newest others', async () => {
+      const { service } = await checked()
+      expect(service.modelStanding('ember-8-1')).toEqual({ standing: 'not_offered', instead: sameFamily })
+      expect(service.modelStanding('ember-8-2')).toEqual({ standing: 'not_offered', instead: sameFamily })
+      // Its context variant is the same model.
+      expect(service.modelStanding('ember-8-1[1m]')).toEqual({ standing: 'not_offered', instead: sameFamily })
+      // No offered model of its family: the newest models that are not older.
+      expect(service.modelStanding('cinder-2')).toEqual({ standing: 'not_offered', instead: ['spark', 'ember', 'ember[1m]'] })
+      // A full Claude id neither listed nor in the catalog is gone too.
+      expect(service.modelStanding('claude-ancient-1')).toEqual({ standing: 'not_offered', instead: ['spark', 'ember', 'ember[1m]'] })
+    })
+
+    it('leaves offered models, models with no verdict and aliases alone', async () => {
+      const { service } = await checked()
+      for (const offered of ['ember', 'ember[1m]', 'ember-9', 'spark-3', 'ember-8-6']) expect(service.modelStanding(offered)).toEqual({ standing: 'offered' })
+      expect(service.modelStanding('ember-8-0')).toEqual({ standing: 'unknown' })
+      expect(service.modelStanding('default')).toEqual({ standing: 'unknown' })
+    })
+
+    it('leaves every model alone until a listing is refreshed in this run', async () => {
+      const { service, home, binary } = await checked()
+      expect(service.modelStanding('ember-8-1').standing).toBe('not_offered')
+      // A restart keeps the saved results, but nothing is refreshed yet.
+      const restarted = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+        query: () => olderQuery(outcomes, listed).query, runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+        live: false, launchConfig: () => ({ binaryPath: binary }), modelCatalog: () => families
+      })
+      expect(restarted.modelStanding('ember-8-1')).toEqual({ standing: 'unknown' })
+      expect(restarted.modelStanding('ember-8-6')).toEqual({ standing: 'offered' })
+    })
+
+    it('leaves a model alone when a refresh fails', async () => {
+      let failing = false
+      const check = olderQuery(outcomes, listed)
+      const offline = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => { throw new Error('getaddrinfo ENOTFOUND api.anthropic.com') }) }) as unknown as Query
+      const { service, home } = fixture(() => (failing ? offline : check.query), true, undefined, undefined, { modelCatalog: () => families })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.modelStanding('ember-8-1').standing).toBe('not_offered')
+      failing = true
+      await expect(service.refreshModels(home)).rejects.toThrow('ENOTFOUND')
+      expect(service.modelStanding('ember-8-1')).toEqual({ standing: 'unknown' })
+    })
+
+    it('leaves a model alone after a Claude Code update, until the check reaches it again', async () => {
+      // The check after the update waits on the newest older model, before it reaches the others.
+      const held = olderQuery({ ...outcomes, 'ember-8-6': { hang: true } }, listed)
+      const queries = [olderQuery(outcomes, listed), held]
+      let index = 0
+      const { service, home, binary } = fixture(() => queries[index++]!.query, true, undefined, undefined, { modelCatalog: () => families })
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(service.modelStanding('ember-8-1').standing).toBe('not_offered')
+      // Another program file: the results were for the old one.
+      writeFileSync(binary, 'fixture, updated')
+      expect(service.modelStanding('ember-8-1')).toEqual({ standing: 'unknown' })
+      // The refresh starts the check over; until it reaches the model, it stays unknown.
+      await service.refreshModels(home)
+      await vi.waitFor(() => expect(held.setModel.mock.calls.map(([id]) => id)).toContain('ember-8-6'))
+      for (const id of ['ember-8-1', 'ember-8-2', 'ember-8-6']) expect(service.modelStanding(id)).toEqual({ standing: 'unknown' })
+      service.stop()
+    })
+  })
 })
 
 it('keeps standalone workspaces profile-owned even for non-path thread IDs', () => {

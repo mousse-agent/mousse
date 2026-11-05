@@ -253,3 +253,72 @@ it('admits a model handoff only on send, retains history and persists one marker
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+describe('a thread whose model Claude Code no longer offers', () => {
+  async function moving(instead: string[]) {
+    const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-model-gone-'))
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+    await main.start()
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'sonnet' } })
+    vi.spyOn(main.claudeSubscription, 'models').mockReturnValue([
+      { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high'] },
+      { id: 'sonnet', label: 'Sonnet 5.5', efforts: ['low', 'high'] }
+    ])
+    // The older model runs for the first turn; then the check finds it refused.
+    let gone = false
+    vi.spyOn(main.claudeSubscription, 'modelStanding').mockImplementation((model) =>
+      gone && model === 'claude-opus-4-6' ? { standing: 'not_offered', instead } : { standing: 'offered' })
+    const models: string[] = []
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      models.push(input.model)
+      input.onText('ok')
+      return 'ok'
+    })
+    const thread = main.threads.createThread('Older model')
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'claude-opus-4-6', effort: 'max' })
+    const cleanup = async () => {
+      await main.stop()
+      vi.restoreAllMocks()
+      rmSync(home, { recursive: true, force: true })
+    }
+    return { main, thread, models, cleanup, goes: () => { gone = true } }
+  }
+  const markers = (main: MousseMainService, threadId: string) => main.threads.loadThreadData(threadId).messages.filter((message) => message.kind === 'context_handoff')
+
+  it('runs the next turn on the replacement, marks the switch once and saves the new model', async () => {
+    const { main, thread, models, cleanup, goes } = await moving(['opus', 'sonnet'])
+    try {
+      await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+      goes()
+      await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id })
+      await main.orchestrator.send({ content: 'third', mode: 'agent' }, false, { threadId: thread.id })
+      // Opus 5.5 does not take Max: the level is dropped.
+      expect(models).toEqual(['claude-opus-4-6:max', 'opus', 'opus'])
+      const found = markers(main, thread.id)
+      expect(found).toHaveLength(1)
+      expect(found[0]!.contextHandoff).toMatchObject({ from: { provider: 'claude-subscription', model: 'claude-opus-4-6', effort: 'max' }, to: { provider: 'claude-subscription', model: 'opus', name: 'Claude Opus 5.5' } })
+      expect(found[0]!.content).toBe('Claude Opus 4.6 → Claude Opus 5.5')
+      // No other notice in the transcript.
+      expect(main.threads.loadThreadData(thread.id).messages.filter((message) => message.role === 'assistant' && message.kind !== 'context_handoff').map((message) => message.content)).toEqual(['ok', 'ok', 'ok'])
+      expect(main.threads.getThread(thread.id)?.modelOverride).toMatchObject({ instanceId: 'claude', model: 'opus', name: 'Claude Opus 5.5' })
+      expect(main.threads.getThread(thread.id)?.modelOverride?.effort).toBeUndefined()
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('moves to the default model when Claude Code offers none', async () => {
+    const { main, thread, models, cleanup, goes } = await moving([])
+    try {
+      await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+      goes()
+      await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id })
+      expect(models).toEqual(['claude-opus-4-6:max', 'sonnet'])
+      expect(markers(main, thread.id)).toHaveLength(1)
+      expect(main.threads.getThread(thread.id)?.modelOverride).toMatchObject({ model: 'sonnet' })
+    } finally {
+      await cleanup()
+    }
+  })
+})

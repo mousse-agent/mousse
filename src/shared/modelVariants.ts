@@ -126,6 +126,17 @@ export function parseIdSuffixes(id: string): {
   return { baseId, context, effort, speed }
 }
 
+/**
+ * A listed model id apart from its context and speed variant, in either form an agent lists them:
+ * `fable-5@1m:fast`, or Claude Code's `sonnet[1m]`. A reasoning level suffix is dropped.
+ */
+export function modelVariantOf(id: string): { baseId: string; context?: string; speed?: string } {
+  const parsed = parseIdSuffixes(id)
+  const bracket = parsed.context === undefined ? /^(.+)\[([^\]]+)\]$/.exec(parsed.baseId) : null
+  const context = parsed.context ?? bracket?.[2]
+  return { baseId: bracket ? bracket[1]! : parsed.baseId, ...(context ? { context } : {}), ...(parsed.speed ? { speed: parsed.speed } : {}) }
+}
+
 export function parseModelVariant(model: LlmModelOption): ParsedModelVariant {
   const parsedId = parseIdSuffixes(model.id)
   // Families are named in Mousse's one style whatever style the listing used.
