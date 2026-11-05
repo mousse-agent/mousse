@@ -160,7 +160,7 @@ export function AgentAccessSettings({
         />
       )}
       <SettingsRow
-        title="Allow agents to create Subagents on other Devices"
+        title="Let agents start subagents on your other devices"
         htmlFor="agent-access-remote-subagents"
         description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
           ? 'No other computers are connected yet. Pair them in Settings → Devices, then turn on the ones agents may use.'
@@ -175,7 +175,7 @@ export function AgentAccessSettings({
         control={
           <Switch
             id="agent-access-remote-subagents"
-            label="Allow agents to create Subagents on other Devices"
+            label="Let agents start subagents on your other devices"
             checked={access.remoteSubagents}
             onChange={(remoteSubagents) => save({ remoteSubagents })}
           />

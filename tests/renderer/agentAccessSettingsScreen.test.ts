@@ -232,7 +232,10 @@ describe('Settings > Agents > Agent access', () => {
         expect(remoteSwitch(), level).not.toBeNull()
         expect(on(), level).toBe(false)
       }
-      expect(text()).toContain('Allow agents to create Subagents on other Devices')
+      expect(text()).toContain('Let agents start subagents on your other devices')
+      expect(text()).not.toContain('Allow agents to create Subagents on other Devices')
+      expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Let agents start subagents on your other devices')
+      expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Let agents start subagents on your other devices')
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).remoteSubagents).toBe(false)
     })
 
