@@ -1,6 +1,7 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { NetStatus } from '../shared/net/local'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
@@ -169,6 +170,8 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
+  /** This computer's home folder, for showing paths as `~/…`. */
+  homeFolder: readHomeFolderArgument(process.argv),
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest

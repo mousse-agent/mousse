@@ -102,12 +102,18 @@ const menuItem = (label: string) => [...document.querySelectorAll<HTMLElement>('
 const openMenu = (name = 'Mousse') => click(host.querySelector(`[aria-label="More actions for ${name}"]`)!)
 
 describe('project rows', () => {
-  it('say "No threads · New thread" when empty, and New thread starts one in the project', () => {
+  it('say "No threads" when empty, with a New thread icon button in the Tab order that starts one in the project', () => {
     show([])
     openProject()
     const empty = host.querySelector('.threads-sidebar-empty-nested')!
-    expect(empty.textContent).toBe('No threads·New thread')
-    click(empty.querySelector('button')!)
+    expect(empty.textContent).toBe('No threads')
+    const button = empty.querySelector('button')!
+    expect(button.getAttribute('aria-label')).toBe('New thread in Mousse')
+    expect(button.title).toBe('New thread in Mousse')
+    expect(button.querySelector('svg')).not.toBeNull()
+    expect(button.tabIndex).toBe(0)
+    expect(button.classList.contains('threads-sidebar-inline-action')).toBe(false)
+    click(button)
     expect(actions.createAndSelectProjectThread).toHaveBeenCalledWith('p1')
   })
 
@@ -126,6 +132,22 @@ describe('project rows', () => {
   it('name the project and its folder in their tooltip', () => {
     show([])
     expect(projectRow().title).toBe('Mousse · /p/Mousse')
+  })
+
+  it('show the folder under home as ~ on one line, beside the sidebar, with the whole path for screen readers', () => {
+    const mousse = (window as unknown as { mousse: Record<string, unknown> }).mousse
+    ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ homeFolder: '/Users/ada' }, {
+      get: (target, key: string) => (key in target ? target[key as keyof typeof target] : mousse[key])
+    })
+    const deep = '/Users/ada/ux-audit/tour/fixtures/workspaces/a-very-long-folder-name/another-long-folder/Mousse'
+    show([], { projects: [project('p1', 'Mousse', { path: deep })] })
+    const row = projectRow()
+    expect(row.title.startsWith('Mousse · ~/ux-audit/…/')).toBe(true)
+    expect(row.title.endsWith('/Mousse')).toBe(true)
+    expect(row.title.length).toBeLessThanOrEqual(72)
+    expect(row.getAttribute('aria-description')).toBe(`Mousse · ~${deep.slice('/Users/ada'.length)}`)
+    expect(row.hasAttribute('data-tooltip-one-line')).toBe(true)
+    expect(row.closest('[data-tooltip-placement="outside-left"]')).toBe(row.closest('.threads-sidebar-project-row'))
   })
 })
 

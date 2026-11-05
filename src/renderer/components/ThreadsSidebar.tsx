@@ -42,6 +42,7 @@ import { ThreadComputerBadge } from './ComputerBadge'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { projectHues } from '../lib/projectHues'
+import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
@@ -465,6 +466,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const { byNode: computers, devices } = useComputers(hasRemoteProjects)
   // With projects of several computers, a project's tooltip names this one too.
   const selfName = hasRemoteProjects ? devices.find((device) => device.self)?.name : undefined
+  // This computer's home folder: its projects' paths read `~/…` in their tooltip.
+  const homeFolder = thisHomeFolder()
   // The editors and file manager this computer has, for the project menu's "Open in" and "Show in" items.
   const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
@@ -1341,8 +1344,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                 ...(project.node ? { node: project.node, computerName: computers[project.node]?.name ?? UNKNOWN_COMPUTER_NAME } : {}),
                 ...(alsoOn.length ? { alsoOn: alsoOn.map((node) => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) } : {})
               }
-              // "name · path · computer": the computer only when projects of several computers are listed.
-              const projectTitle = [project.name, project.path, menuTarget.computerName ?? selfName].filter(Boolean).join(' · ')
+              // "name · ~/path · computer" on one line: the computer only when projects of several computers are listed.
+              const projectTitle = projectTooltip({
+                name: project.name,
+                path: project.path,
+                computerName: menuTarget.computerName,
+                selfName,
+                home: homeFolder
+              })
               const menuKey = `project:${project.id}`
               const treeKey = `project:${project.id}`
               const childrenId = `${tabsId}-project-${project.id}`
@@ -1370,6 +1379,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                   <div
 
                     className={`threads-sidebar-project-row${expanded ? ' expanded' : ''}${project.pinnedAt ? ' pinned' : ''}`}
+                    // The row's tooltips sit beside the sidebar, level with the row, never over the rows around it.
+                    data-tooltip-placement="outside-left"
 
                   >
 
@@ -1391,7 +1402,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       data-tree-key={treeKey}
 
-                      title={isRenaming ? undefined : projectTitle}
+                      title={isRenaming ? undefined : projectTitle.text}
+                      data-tooltip-one-line=""
+                      aria-description={isRenaming ? undefined : projectTitle.full}
 
                       onFocus={() => setTreeFocus(treeKey)}
 
@@ -1535,10 +1548,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                         <div className="threads-sidebar-empty threads-sidebar-empty-nested" role="none">
                           <span>No threads</span>
-                          <span aria-hidden="true">·</span>
-                          {/* Out of the Tab order like the row's own buttons: the tree is one stop, and the menu has New thread. */}
-                          <button type="button" className="threads-sidebar-inline-action" tabIndex={-1} onClick={() => void createProjectThread(project.id)}>
-                            New thread
+                          <button
+                            type="button"
+                            className="threads-sidebar-icon-btn threads-sidebar-empty-new-thread"
+                            title={`New thread in ${project.name}`}
+                            aria-label={`New thread in ${project.name}`}
+                            onClick={() => void createProjectThread(project.id)}
+                          >
+                            <MessageSquarePlus size={14} strokeWidth={2} aria-hidden="true" />
                           </button>
                         </div>
 

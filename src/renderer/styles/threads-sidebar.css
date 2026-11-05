@@ -798,7 +798,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   text-decoration: underline;
 }
 
-/* A project with no threads: "No threads · New thread" on one line. */
+/* A project with no threads: muted "No threads", then a small New thread button. */
 .threads-sidebar-empty-nested {
   display: flex;
   align-items: center;
@@ -806,12 +806,26 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   padding-left: 11px;
 }
 
-.threads-sidebar-empty-nested:has(.threads-sidebar-inline-action) {
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) {
   opacity: 1;
 }
 
-.threads-sidebar-empty-nested:has(.threads-sidebar-inline-action) > span {
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) > span {
   opacity: 0.7;
+}
+
+/* Neutral, like the row's own New thread: no accent at rest or on hover. */
+.threads-sidebar-empty-new-thread {
+  flex-shrink: 0;
+}
+
+.threads-sidebar-empty-new-thread:hover {
+  background: var(--ui-hover);
+}
+
+.threads-sidebar-empty-new-thread:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: -2px;
 }
 
 .threads-sidebar-show-more {
