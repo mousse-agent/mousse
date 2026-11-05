@@ -100,6 +100,13 @@ html[data-theme='light'] {
   margin-block: 2px;
   transition: opacity 0.15s ease-out;
 }
+/* The spacing scale (see settings.css) for the turn's meta lines: "Worked
+   for …" above the reply and the changed-files line after it. */
+.an-message-list {
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-16: 16px;
+}
 /* Quiet status under each prompt: "Working" while the turn runs, then
    "Worked for …", a hairline, and a gap before the reply. */
 .an-message-list .turn-work {
@@ -120,7 +127,7 @@ html[data-theme='light'] {
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);
 }
 .an-message-list .turn-work + .turn-answer {
-  margin-top: 16px;
+  margin-top: var(--space-16);
 }
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
   opacity: 1;

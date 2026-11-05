@@ -7,6 +7,7 @@ import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { openTurnInReview } from '../src/renderer/components/review/openReview'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { useReviewStore } from '../src/renderer/stores/reviewStore'
+import { setTurnChangedFiles } from '../src/renderer/lib/turnChangedFilesSetting'
 import type { ChatMessage } from '../src/shared/types'
 
 const editMessage = {
@@ -20,7 +21,10 @@ function editOf(path: string, id = path) {
 }
 
 describe('turn edit summary', () => {
+  afterEach(() => setTurnChangedFiles('summary'))
+
   it('lists each changed file by name, with its folder', () => {
+    setTurnChangedFiles('list')
     const markup = renderToStaticMarkup(createElement(TurnEditSummary, {
       messages: [{ id: 'a2', role: 'assistant', parts: [editOf('src/lib/app.ts'), editOf('README.md')] } as unknown as UIMessage]
     }))
@@ -31,26 +35,15 @@ describe('turn edit summary', () => {
     expect(markup).not.toContain('Project root')
   })
 
-  it('starts collapsed when more than five files changed', () => {
-    const parts = (count: number) => Array.from({ length: count }, (_, index) => editOf(`src/f${index}.ts`))
-    const render = (count: number) => renderToStaticMarkup(createElement(TurnEditSummary, {
-      messages: [{ id: 'a3', role: 'assistant', parts: parts(count) } as unknown as UIMessage]
-    }))
-    expect(render(5)).toContain('aria-expanded="true"')
-    expect(render(5)).toContain('turn-edits-files')
-    expect(render(6)).toContain('aria-expanded="false"')
-    expect(render(6)).not.toContain('turn-edits-files')
-  })
-
   it('offers to review the turn instead of opening the Git diff', () => {
     const markup = renderToStaticMarkup(createElement(TurnEditSummary, { messages: [editMessage], turnId: 'run:thread:t1:ordinal:1' }))
-    expect(markup).toContain('1 changed file')
-    expect(markup).toContain('Review changes')
+    expect(markup).toContain('1 file changed')
+    expect(markup).toContain('>Review</button>')
     expect(markup).not.toContain('Open diff')
   })
 
   it('renders without a turn id, for a transcript from before turns were recorded', () => {
-    expect(renderToStaticMarkup(createElement(TurnEditSummary, { messages: [editMessage] }))).toContain('Review changes')
+    expect(renderToStaticMarkup(createElement(TurnEditSummary, { messages: [editMessage] }))).toContain('>Review</button>')
   })
 
   it('carries the turn id from a chat message to the user message the row reads it from', () => {

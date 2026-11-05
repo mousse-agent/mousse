@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import type { UIMessage } from "ai";
-import { ChevronRight, FileText } from "../../../lib/icons";
+import { ChevronDown, FileText } from "../../../lib/icons";
 import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
+import { useTurnChangedFiles } from "../../../lib/turnChangedFilesSetting";
 import { useAppStore } from "../../../stores/appStore";
 import { openTurnInReview } from "../../../components/review/openReview";
 import { FileExtIcon } from "./icons/file-ext-icon";
@@ -16,9 +17,6 @@ interface FileEdit {
   added: number;
   removed: number;
 }
-
-/** More changed files than this start collapsed. */
-const OPEN_FILE_LIMIT = 5;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;
@@ -163,37 +161,42 @@ function Stat({ added, removed }: { added: number; removed: number }) {
   );
 }
 
+/**
+ * The quiet line at the end of a turn that changed files: "8 files changed +12 −4", a Review
+ * action for the turn, and a chevron that lists the files (each opens in Review). Settings >
+ * General > "Changed files after each turn" picks the line (default), the list already open, or
+ * nothing.
+ */
 export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; turnId?: string }) {
+  const mode = useTurnChangedFiles();
   const root = useActiveProjectPath();
-  const summary = useMemo(() => collectEdits(messages, root), [messages, root]);
-  // Null until the user toggles it: a long list starts collapsed, and stays as the user left it.
+  const summary = useMemo(() => (mode === "off" ? null : collectEdits(messages, root)), [mode, messages, root]);
+  // Null until the user toggles it: the setting decides, then the list stays as the user left it.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   if (!summary) return null;
-  const open = userOpen ?? summary.files.length <= OPEN_FILE_LIMIT;
-  const countLabel = `${summary.files.length} changed file${summary.files.length === 1 ? "" : "s"}`;
+  const open = userOpen ?? mode === "list";
+  const countLabel = `${summary.files.length} file${summary.files.length === 1 ? "" : "s"} changed`;
   const review = (file?: string) => void openTurnInReview(useAppStore.getState().activeThreadId, turnId, file);
+  const toggleLabel = open ? "Hide changed files" : "Show changed files";
 
   return (
     <section className="turn-edits" aria-label={countLabel} data-find-ignore>
-      <div className="turn-edits-head">
+      <div className="turn-edits-line">
+        <FileText size={14} strokeWidth={1.8} className="turn-edits-icon" aria-hidden="true" />
+        <span className="turn-edits-count">{countLabel}</span>
+        <Stat added={summary.added} removed={summary.removed} />
+        <button type="button" className="turn-edits-review" title="Review this turn's changes" onClick={() => review()}>
+          Review
+        </button>
         <button
           type="button"
           className="turn-edits-toggle"
           aria-expanded={open}
+          aria-label={toggleLabel}
+          title={toggleLabel}
           onClick={() => setUserOpen(!open)}
         >
-          <ChevronRight size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
-          <span className="turn-edits-count">{countLabel}</span>
-          <Stat added={summary.added} removed={summary.removed} />
-        </button>
-        <button
-          type="button"
-          className="turn-edits-open"
-          aria-label="Review changes"
-          title="Review changes"
-          onClick={() => review()}
-        >
-          <FileText size={14} strokeWidth={1.8} />
+          <ChevronDown size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
         </button>
       </div>
       {open && (

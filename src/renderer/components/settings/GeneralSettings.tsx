@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId, TurnChangedFilesMode } from '../../../shared/settings'
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
@@ -7,9 +7,15 @@ import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
 import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
-import { Select } from '../ui/Select'
+import { Select, type SelectOption } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
+
+const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
+  { value: 'summary', label: 'Summary line' },
+  { value: 'list', label: 'Full list' },
+  { value: 'off', label: 'Off' }
+]
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -177,6 +183,17 @@ export function GeneralSettings({
               label="Render math"
               checked={appearance.renderMath}
               onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Changed files after each turn"
+          control={
+            <Select
+              ariaLabel="Changed files after each turn"
+              value={appearance.turnChangedFiles}
+              onChange={(turnChangedFiles) => void onUpdate({ appearance: { ...appearance, turnChangedFiles } })}
+              options={TURN_CHANGED_FILES_OPTIONS}
             />
           }
         />

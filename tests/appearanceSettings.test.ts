@@ -36,13 +36,23 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ renderMath: 'no' as never }).renderMath).toBe(true)
   })
 
+  it('shows a summary line of changed files by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.turnChangedFiles).toBe('summary')
+    // Settings saved before the option existed read as the default; nothing is migrated.
+    expect(normalizeAppearance({}).turnChangedFiles).toBe('summary')
+    expect(normalizeAppearance({ turnChangedFiles: 'list' }).turnChangedFiles).toBe('list')
+    expect(normalizeAppearance({ turnChangedFiles: 'off' }).turnChangedFiles).toBe('off')
+    expect(normalizeAppearance({ turnChangedFiles: 'cards' as never }).turnChangedFiles).toBe('summary')
+  })
+
   it('migrates legacy acrylic theme ids', () => {
     expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toEqual({
       theme: 'system',
       accentColor: '#a785c7',
       acrylic: true,
       acrylicIntensity: 55,
-      renderMath: true
+      renderMath: true,
+      turnChangedFiles: 'summary'
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',

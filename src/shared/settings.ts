@@ -49,6 +49,17 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** What a turn that changed files shows at its end. */
+  turnChangedFiles: TurnChangedFilesMode
+}
+
+/** One summary line (file list collapsed), the full list expanded, or nothing. */
+export type TurnChangedFilesMode = 'summary' | 'list' | 'off'
+
+export const TURN_CHANGED_FILES_MODES: readonly TurnChangedFilesMode[] = ['summary', 'list', 'off']
+
+export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode {
+  return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
 }
 
 export interface NotificationSettings {
@@ -571,7 +582,8 @@ export function getDefaultSettings(): MousseSettings {
       accentColor: '#a785c7',
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
-      renderMath: true
+      renderMath: true,
+      turnChangedFiles: 'summary'
     },
     notifications: {
       threadCompletionSound: true,
@@ -687,7 +699,8 @@ export function normalizeAppearance(
     acrylicIntensity: clampAcrylicIntensity(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
-    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath
+    renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles)
   }
 }
 
