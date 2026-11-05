@@ -148,7 +148,7 @@ export function FontPicker({ role, value, onChange, ariaLabel }: FontPickerProps
     }
   }, [active, open])
 
-  const floatingStyle = useFloatingPosition({ open, anchorRef: triggerRef, contentRef: popRef, placement: 'below-end', gap: 4 })
+  const floatingStyle = useFloatingPosition({ open, anchorRef: triggerRef, contentRef: popRef, placement: 'below-end', gap: 4, deps: [entries.length, error] })
 
   const choose = async (entry: FontEntry | undefined) => {
     if (!entry || busy) return

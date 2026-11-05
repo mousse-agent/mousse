@@ -9,6 +9,9 @@ interface LocalFontData {
   family: string
 }
 
+/** Symbol and picture fonts draw letters as pictures; they are never a text font. */
+const SYMBOL_FONT = /dings|symbol|emoji|ornament|dingbat|^webdings$|^zapf/i
+
 let families: Promise<string[]> | undefined
 const monospace = new Map<string, boolean>()
 
@@ -25,12 +28,12 @@ export function listInstalledFontFamilies(): Promise<string[]> {
   return families
 }
 
-/** Sorted, de-duplicated families, without hidden system families (a leading dot) or unsafe names. */
+/** Sorted, de-duplicated families, without hidden system families (a leading dot), symbol fonts or unsafe names. */
 export function uniqueFamilies(names: readonly string[]): string[] {
   const seen = new Map<string, string>()
   for (const name of names) {
     const family = typeof name === 'string' ? name.trim() : ''
-    if (!family || family.startsWith('.') || !isSafeFontFamily(family)) continue
+    if (!family || family.startsWith('.') || SYMBOL_FONT.test(family) || !isSafeFontFamily(family)) continue
     const key = family.toLowerCase()
     if (!seen.has(key)) seen.set(key, family)
   }

@@ -1,6 +1,7 @@
 /* Font picker (components/settings/FontPicker.tsx). Same dropdown material as
    select.css. Hover and keyboard highlight are the neutral --ui-hover fill;
-   the chosen font is a --ui-selected fill. No checkmarks, edge or side bars. */
+   the chosen font is a neutral raised fill with the specular top light.
+   No checkmarks, accent tints, edge or side bars. */
 
 .font-picker-pop {
   box-sizing: border-box;
@@ -78,8 +79,14 @@
 }
 
 .font-picker-option.selected {
-  background: var(--ui-selected);
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
   color: var(--text-primary);
+}
+
+html[data-theme='high-contrast'] .font-picker-option.selected {
+  background: var(--ui-selected);
+  box-shadow: none;
 }
 
 .font-picker-option-label {

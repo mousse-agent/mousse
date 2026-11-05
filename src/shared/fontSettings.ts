@@ -135,10 +135,15 @@ export function findGoogleFont(family: string): GoogleFontFamily | undefined {
   return catalogIndex.get(family.toLowerCase())
 }
 
+/** Families Mousse ships; the picker offers them as the default instead of as downloads. */
+const BUNDLED_FAMILIES = new Set(['geist', 'geist mono'])
+
 /** Interface text offers sans serif and serif families; code offers monospace ones. */
 export function googleFontsForRole(role: FontRole): GoogleFontFamily[] {
-  return googleFontCatalog().filter((entry) =>
-    role === 'code' ? entry.category === 'monospace' : entry.category !== 'monospace'
+  return googleFontCatalog().filter(
+    (entry) =>
+      !BUNDLED_FAMILIES.has(entry.family.toLowerCase()) &&
+      (role === 'code' ? entry.category === 'monospace' : entry.category !== 'monospace')
   )
 }
 

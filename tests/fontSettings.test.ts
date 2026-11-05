@@ -79,6 +79,9 @@ describe('font settings', () => {
     expect(code.every((entry) => entry.category === 'monospace')).toBe(true)
     expect(ui.some((entry) => entry.category === 'serif')).toBe(true)
     expect(ui.some((entry) => entry.category === 'monospace')).toBe(false)
+    // The bundled default is not offered again as a download.
+    expect(code.some((entry) => entry.family === 'Geist Mono')).toBe(false)
+    expect(ui.some((entry) => entry.family === 'Geist')).toBe(false)
     expect(findGoogleFont('jetbrains mono')?.family).toBe('JetBrains Mono')
     expect(findGoogleFont('Inter')?.weights).toContain(500)
   })

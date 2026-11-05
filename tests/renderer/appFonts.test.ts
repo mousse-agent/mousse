@@ -87,6 +87,6 @@ describe('app fonts', () => {
 
   it('lists installed families once each, sorted, without hidden or unsafe names', async () => {
     const { uniqueFamilies } = await import('../../src/renderer/lib/localFonts')
-    expect(uniqueFamilies(['Menlo', 'Avenir Next', 'menlo', '.SF NS', 'Bad"Name', 'Menlo', 'avenir'])).toEqual(['avenir', 'Avenir Next', 'Menlo'])
+    expect(uniqueFamilies(['Menlo', 'Avenir Next', 'menlo', '.SF NS', 'Bad"Name', 'Menlo', 'avenir', 'Wingdings 2', 'Apple Color Emoji', 'Symbol'])).toEqual(['avenir', 'Avenir Next', 'Menlo'])
   })
 })
