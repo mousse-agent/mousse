@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   acknowledgementOf,
   BOT_SCHEDULE_SKIP_TEXT,
@@ -8,8 +8,13 @@ import {
   type BotActivationSummary,
   type BotApprovalView,
   type BotDefinition,
+  type BotPermissionLine,
   type BotSummary
 } from '../../../shared/bots/personal/definition'
+import { ChevronRight } from '../../lib/icons'
+import { Modal } from '../ui/Modal'
+import { Select } from '../ui/Select'
+import { Switch } from '../settings/SettingsRow'
 import type { BotEscalationAnswer, BotEscalationSummary } from '../../../shared/bots/personal/escalation'
 import { NEUTRAL_TOOLS, type NeutralTool } from '../../../shared/harness/tools'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -184,7 +189,7 @@ export function BotsWorkspace({ client, providers, skills, active = true }: Bots
         onPublish={() => run(() => client.publish(entry.id, entry.draftHash))}
         onReview={() => setApproving(true)}
         onRevoke={() => run(() => client.revoke(entry.id))}
-        onDelete={() => { if (window.confirm(`Delete the bot ${entry.summary.name}? Its runs stop and its threads go to the trash.`)) run(() => client.remove(entry.id)) }}
+        onDelete={() => run(() => client.remove(entry.id))}
         onActivate={(input) => run(() => client.activate(entry.id, input, requestId()))}
         onStop={(id) => run(() => client.stop(id))}
         onContinue={(id, ack) => run(() => client.continue(id, ack))}
@@ -219,6 +224,7 @@ function BotDetail(props: {
 }) {
   const { entry, busy } = props
   const [input, setInput] = useState('')
+  const [confirming, setConfirming] = useState<{ kind: 'delete' } | { kind: 'reset'; key: string; title: string } | null>(null)
   const summary = entry.summary
   // A revision is named by its content hash: a draft that differs from it is unpublished.
   const unpublished = !entry.published || entry.published.revision !== entry.draftHash
@@ -231,7 +237,7 @@ function BotDetail(props: {
         {(!summary.revision || unpublished) && <button type="button" className="btn btn-sm" disabled={busy} onClick={props.onPublish}>Publish</button>}
         {summary.revision && (summary.needsApproval.length > 0 || !summary.grant) && <button type="button" className="btn btn-sm btn-primary" disabled={busy || !entry.approval} onClick={props.onReview}>Review and approve</button>}
         {summary.grant && <button type="button" className="btn btn-sm" disabled={busy} onClick={props.onRevoke}>Revoke</button>}
-        <button type="button" className="btn btn-sm" disabled={busy} onClick={props.onDelete}>Delete</button>
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setConfirming({ kind: 'delete' })}>Delete</button>
       </div>
     </header>
     {summary.role && <p className="bots__role">{summary.role}</p>}
@@ -260,7 +266,7 @@ function BotDetail(props: {
       <h3>Context threads</h3>
       <ul>{entry.published!.context.map((thread) => <li key={thread.key}>
         <span>{thread.title}</span>
-        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { if (window.confirm(`Start a new "${thread.title}" context? The bot's next consult starts with no history.`)) props.onResetContext(thread.key) }}>Reset context</button>
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setConfirming({ kind: 'reset', key: thread.key, title: thread.title })}>Reset context</button>
       </li>)}</ul>
     </section>}
     <h3>Activity</h3>
@@ -271,6 +277,20 @@ function BotDetail(props: {
         onContinue={(ack) => props.onContinue(activation.id, ack)}
         onMarkDone={(ack) => props.onMarkDone(activation.id, ack)} />)}
     </ul>
+    {confirming?.kind === 'delete' && <BotConfirmDialog
+      title={`Delete “${summary.name}”?`}
+      body="Its runs stop and its threads go to the trash."
+      confirmLabel="Delete"
+      onCancel={() => setConfirming(null)}
+      onConfirm={() => { setConfirming(null); props.onDelete() }}
+    />}
+    {confirming?.kind === 'reset' && <BotConfirmDialog
+      title={`Reset “${confirming.title}”?`}
+      body="The bot's next consult in this context starts with no history."
+      confirmLabel="Reset context"
+      onCancel={() => setConfirming(null)}
+      onConfirm={() => { const key = confirming.key; setConfirming(null); props.onResetContext(key) }}
+    />}
   </section>
 }
 
@@ -304,7 +324,7 @@ export function ActivationRow({ activation, busy, onStop, onContinue, onMarkDone
     {needsCheck && !ended && <div className="bots__unknown">
       <p>{activation.uncertain ? 'Mousse stopped while this bot was working, so the outcome of its last tool calls is unknown.' : 'These tool calls were cut off, so their outcome is unknown:'}</p>
       {pending.length > 0 && <ul>{pending.map((call) => <li key={call.invocationId}><code>{call.tool}</code> ({call.role === 'main' ? 'main thread' : 'context thread'}, run {call.runId.slice(0, 8)})</li>)}</ul>}
-      <label><input type="checkbox" checked={checked} onChange={(event) => setCheckedFor(event.target.checked ? shownKey : null)} /> I've checked what these calls did</label>
+      <label className="bots__ack"><input type="checkbox" checked={checked} onChange={(event) => setCheckedFor(event.target.checked ? shownKey : null)} /> I've checked what these calls did</label>
     </div>}
     <div className="bots__actions">
       {activation.threadId && <button type="button" className="btn btn-sm" onClick={() => void openThread(activation.threadId!)}>Open thread</button>}
@@ -324,6 +344,17 @@ export function EscalationRow({ escalation, botName, busy, onAnswer }: {
   const budget = 'budget' in escalation.permission ? escalation.permission.budget : null
   const isTime = budget?.key === 'maxActiveMs'
   const [more, setMore] = useState(() => budget?.amount !== undefined ? (isTime ? Math.max(1, Math.round(budget.amount / 60_000)) : budget.amount) : (isTime ? 15 : 10))
+  const [showMore, setShowMore] = useState(false)
+  const optionsId = useId()
+  // A limit that names no amount has no "once" answer: the owner says how much, so the amount shows at once.
+  const canAllowOnce = !budget || budget.amount !== undefined
+  const allowMore = budget ? <>
+    <label className="bots__more">
+      <input type="number" min={1} value={more} onChange={(event) => setMore(Math.max(1, Number(event.target.value) || 1))} aria-label={isTime ? 'Minutes' : 'Amount'} />
+      {isTime ? 'minutes' : ''}
+    </label>
+    <button type="button" className={`btn btn-sm${canAllowOnce ? '' : ' btn-primary'}`} disabled={busy} title="Only for this run" onClick={() => onAnswer('allow_more', isTime ? more * 60_000 : more)}>Allow {more}{isTime ? ' min' : ''} more this time</button>
+  </> : null
   return <div className="bots__escalation">
     <div>
       <strong>{botName ?? escalation.botId}</strong> asks: {escalation.permissionText}
@@ -331,20 +362,28 @@ export function EscalationRow({ escalation, botName, busy, onAnswer }: {
     {escalation.reason && <p className="bots__muted">{escalation.reason}</p>}
     <p className="bots__muted">Waits until {new Date(escalation.expiresAt).toLocaleString()}</p>
     <div className="bots__actions">
-      {budget ? <>
-        <label className="bots__more">
-          <input type="number" min={1} value={more} onChange={(event) => setMore(Math.max(1, Number(event.target.value) || 1))} aria-label={isTime ? 'Minutes' : 'Amount'} />
-          {isTime ? 'minutes' : ''}
-        </label>
-        <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => onAnswer('allow_more', isTime ? more * 60_000 : more)}>Allow {more}{isTime ? ' min' : ''} more this time</button>
-      </> : <>
-        <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => onAnswer('allow_bot')}>Allow for this bot</button>
-        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onAnswer('allow_once')}>Allow this time</button>
-      </>}
+      {canAllowOnce
+        ? <button type="button" className="btn btn-sm btn-primary" disabled={busy} title={`Only for this run: ${escalation.permissionText}`} onClick={() => budget ? onAnswer('allow_once', budget.amount) : onAnswer('allow_once')}>Allow once</button>
+        : allowMore}
       <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onAnswer('deny')}>Deny</button>
+      {canAllowOnce && <button type="button" className="bots__disclosure" aria-expanded={showMore} aria-controls={optionsId} onClick={() => setShowMore((open) => !open)}>
+        <ChevronRight size={12} aria-hidden="true" className="bots__disclosure-chevron" />More options
+      </button>}
     </div>
+    {canAllowOnce && showMore && <div className="bots__actions" id={optionsId}>
+      {budget
+        ? allowMore
+        : <button type="button" className="btn btn-sm" disabled={busy} title={`Adds “${escalation.permissionText}” to what this bot may always do`} onClick={() => onAnswer('allow_bot')}>Allow for this bot</button>}
+    </div>}
   </div>
 }
+
+/** The approval's lines by what they cover, so tools, folders (with read or edit access) and limits read apart. */
+const APPROVAL_GROUPS: Array<{ title: string; kinds: BotPermissionLine['kind'][] }> = [
+  { title: 'Tools', kinds: ['tool', 'app_tool', 'mcp', 'skill'] },
+  { title: 'Folders', kinds: ['workspace'] },
+  { title: 'Limits per run', kinds: ['budget'] }
+]
 
 export function ApprovalDialog({ name, approval, busy, onApprove, onClose }: {
   name: string
@@ -354,22 +393,57 @@ export function ApprovalDialog({ name, approval, busy, onApprove, onClose }: {
   onClose(): void
 }) {
   const allPass = approval.threads.every((thread) => thread.ok)
-  return <div className="bots__dialog-backdrop" role="presentation">
-    <div className="bots__dialog" role="dialog" aria-modal="true" aria-label={`Approve ${name}`}>
-      <h2>Approve {name}</h2>
+  return <Modal
+    open
+    title={`Approve ${name}`}
+    className="bots-dialog"
+    onClose={onClose}
+    footer={<>
+      <button type="button" className="btn btn-sm" onClick={onClose}>Cancel</button>
+      <button type="button" className="btn btn-sm btn-primary" disabled={busy || !allPass} onClick={onApprove}>Approve</button>
+    </>}
+  >
+    <div className="bots__approval">
       <p>Once approved, the bot works inside these permissions without asking. It asks again only when it needs more.</p>
-      {approval.added.length > 0 ? <ul>{approval.added.map((line) => <li key={line.text}>{line.text}</li>)}</ul> : <p className="bots__muted">Nothing new to approve.</p>}
-      <h3>Where it runs</h3>
-      <ul>{approval.threads.map((thread) => <li key={thread.key}>
-        {thread.instanceId} · {modelLabel(resolveModelChoice({ instanceId: thread.instanceId, provider: thread.instanceId, model: thread.model }))}: {thread.ok ? 'can hold these permissions' : thread.reason ?? 'cannot hold these permissions'}
-      </li>)}</ul>
+      {approval.added.length === 0 && <p className="bots__muted">Nothing new to approve.</p>}
+      {APPROVAL_GROUPS.map((group) => {
+        const lines = approval.added.filter((line) => group.kinds.includes(line.kind))
+        return lines.length > 0 && <section key={group.title} aria-label={group.title}>
+          <h4>{group.title}</h4>
+          <ul>{lines.map((line) => <li key={line.text}>{line.text}</li>)}</ul>
+        </section>
+      })}
+      <section aria-label="Where it runs">
+        <h4>Where it runs</h4>
+        <ul>{approval.threads.map((thread) => <li key={thread.key} data-ok={thread.ok ? 'true' : 'false'}>
+          {thread.instanceId} · {modelLabel(resolveModelChoice({ instanceId: thread.instanceId, provider: thread.instanceId, model: thread.model }))}: {thread.ok ? 'can hold these permissions' : thread.reason ?? 'cannot hold these permissions'}
+        </li>)}</ul>
+      </section>
       {!allPass && <p className="bots__error">Every thread's runtime must be able to hold these permissions before you can approve.</p>}
-      <div className="bots__actions">
-        <button type="button" className="btn btn-sm" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn btn-sm btn-primary" disabled={busy || !allPass} onClick={onApprove}>Approve</button>
-      </div>
     </div>
-  </div>
+  </Modal>
+}
+
+/** Delete and Reset context ask in the app's dialog; Escape and Cancel change nothing. */
+function BotConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }: {
+  title: string
+  body: string
+  confirmLabel: string
+  onCancel(): void
+  onConfirm(): void
+}) {
+  return <Modal
+    open
+    title={title}
+    className="bots-dialog"
+    onClose={onCancel}
+    footer={<>
+      <button type="button" className="btn btn-sm" onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn btn-sm btn-danger" data-action="confirm" onClick={onConfirm}>{confirmLabel}</button>
+    </>}
+  >
+    <p>{body}</p>
+  </Modal>
 }
 
 /** The note the editor shows next to the shell permission (PR 6 §3). */
@@ -390,6 +464,7 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
 }) {
   const [draft, setDraft] = useState<BotDefinition>(definition)
   const [roots, setRoots] = useState((definition.permissions.workspace?.roots ?? []).join('\n'))
+  const fieldId = useId()
   const instructions = 'instructions' in draft.main.agent ? draft.main.agent.instructions : ''
   const permissions = draft.permissions
   const providerKey = draft.main.selection.instanceId
@@ -428,45 +503,69 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
       <label>Name<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
       <label>Role<textarea rows={2} value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })} placeholder="What this bot is for" /></label>
       <label>Instructions<textarea rows={5} value={instructions} onChange={(event) => setDraft({ ...draft, main: { ...draft.main, agent: { instructions: event.target.value } } })} /></label>
-      <label>Runs on
-        <select value={providerKey} onChange={(event) => {
-          const next = providers.find((option) => (option.instanceId ?? option.id) === event.target.value)
-          setDraft({ ...draft, main: { ...draft.main, selection: { instanceId: event.target.value, model: next?.models[0]?.id ?? '' } } })
-        }}>
-          {!provider && <option value={providerKey}>{providerKey || 'Choose a provider'}</option>}
-          {providers.map((option) => <option key={option.instanceId ?? option.id} value={option.instanceId ?? option.id}>{option.label}</option>)}
-        </select>
-      </label>
-      <label>Model
-        <select value={draft.main.selection.model} onChange={(event) => setDraft({ ...draft, main: { ...draft.main, selection: { ...draft.main.selection, model: event.target.value } } })}>
-          {!provider?.models.some((model) => model.id === draft.main.selection.model) && <option value={draft.main.selection.model}>{draft.main.selection.model ? modelLabel(resolveModelChoice({ instanceId: draft.main.selection.instanceId, provider: draft.main.selection.instanceId, model: draft.main.selection.model })) : 'Choose a model'}</option>}
-          {provider?.models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-        </select>
-      </label>
+      <div className="bots__field">
+        <span id={`${fieldId}-provider`}>Runs on</span>
+        <Select
+          ariaLabelledBy={`${fieldId}-provider`}
+          value={providerKey}
+          placeholder="Choose a provider"
+          onChange={(value) => {
+            const next = providers.find((option) => (option.instanceId ?? option.id) === value)
+            setDraft({ ...draft, main: { ...draft.main, selection: { instanceId: value, model: next?.models[0]?.id ?? '' } } })
+          }}
+          options={[
+            // A provider that is no longer listed stays visible as the current value.
+            ...(!provider && providerKey ? [{ value: providerKey, label: providerKey }] : []),
+            ...providers.map((option) => ({ value: option.instanceId ?? option.id, label: option.label }))
+          ]}
+        />
+      </div>
+      <div className="bots__field">
+        <span id={`${fieldId}-model`}>Model</span>
+        <Select
+          ariaLabelledBy={`${fieldId}-model`}
+          value={draft.main.selection.model}
+          placeholder="Choose a model"
+          onChange={(model) => setDraft({ ...draft, main: { ...draft.main, selection: { ...draft.main.selection, model } } })}
+          options={[
+            ...(draft.main.selection.model && !provider?.models.some((model) => model.id === draft.main.selection.model)
+              ? [{ value: draft.main.selection.model, label: modelLabel(resolveModelChoice({ instanceId: draft.main.selection.instanceId, provider: draft.main.selection.instanceId, model: draft.main.selection.model })) }]
+              : []),
+            ...(provider?.models.map((model) => ({ value: model.id, label: model.label })) ?? [])
+          ]}
+        />
+      </div>
       <fieldset>
         <legend>Tools</legend>
-        {NEUTRAL_TOOLS.map((tool) => <label key={tool} className="bots__check">
-          <input type="checkbox" checked={permissions.tools.includes(tool)} onChange={(event) => setPermissions({ tools: event.target.checked ? [...permissions.tools, tool] : permissions.tools.filter((item) => item !== tool) })} />
-          {TOOL_LABELS[tool]}
-        </label>)}
+        {NEUTRAL_TOOLS.map((tool) => <SwitchRow
+          key={tool}
+          label={TOOL_LABELS[tool]}
+          checked={permissions.tools.includes(tool)}
+          onChange={(on) => setPermissions({ tools: on ? [...permissions.tools, tool] : permissions.tools.filter((item) => item !== tool) })}
+        />)}
         {permissions.tools.includes('shell') && <p className="bots__note">{shellNote(rootList)}</p>}
       </fieldset>
       <fieldset>
         <legend>Folders</legend>
         <label>One folder per line (absolute paths)<textarea rows={3} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
-        <label>Access
-          <select value={permissions.workspace?.access ?? 'read'} onChange={(event) => setPermissions({ workspace: keepFolderAccess(rootList, { roots: rootList, access: event.target.value as 'read' | 'write', ...(permissions.workspace?.rootAccess ? { rootAccess: permissions.workspace.rootAccess } : {}) }) })}>
-            <option value="read">Read only</option>
-            <option value="write">Read and edit</option>
-          </select>
-        </label>
+        <div className="bots__field">
+          <span id={`${fieldId}-access`}>Access</span>
+          <Select<'read' | 'write'>
+            ariaLabelledBy={`${fieldId}-access`}
+            value={permissions.workspace?.access ?? 'read'}
+            onChange={(access) => setPermissions({ workspace: keepFolderAccess(rootList, { roots: rootList, access, ...(permissions.workspace?.rootAccess ? { rootAccess: permissions.workspace.rootAccess } : {}) }) })}
+            options={[{ value: 'read', label: 'Read only' }, { value: 'write', label: 'Read and edit' }]}
+          />
+        </div>
       </fieldset>
       {skills.length > 0 && <fieldset>
         <legend>Skills</legend>
-        {skills.filter((skill) => skill.available || permissions.skills.includes(skill.id)).map((skill) => <label key={skill.id} className="bots__check">
-          <input type="checkbox" checked={permissions.skills.includes(skill.id)} onChange={(event) => setPermissions({ skills: event.target.checked ? [...permissions.skills, skill.id] : permissions.skills.filter((item) => item !== skill.id) })} />
-          {skill.name}
-        </label>)}
+        {skills.filter((skill) => skill.available || permissions.skills.includes(skill.id)).map((skill) => <SwitchRow
+          key={skill.id}
+          label={skill.name}
+          checked={permissions.skills.includes(skill.id)}
+          onChange={(on) => setPermissions({ skills: on ? [...permissions.skills, skill.id] : permissions.skills.filter((item) => item !== skill.id) })}
+        />)}
       </fieldset>}
       <fieldset>
         <legend>Limits per run</legend>
@@ -476,6 +575,14 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
       </fieldset>
     </div>
   </form>
+}
+
+/** One permission as a row: its name, and the shared switch on the right. */
+function SwitchRow({ label, checked, onChange }: { label: string; checked: boolean; onChange(on: boolean): void }) {
+  return <div className="bots__switch-row">
+    <span>{label}</span>
+    <Switch checked={checked} onChange={onChange} label={label} />
+  </div>
 }
 
 /** The folders as edited, keeping each remaining folder's own access (an answer may have set it). */

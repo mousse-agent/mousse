@@ -33,15 +33,28 @@
 .bots__escalation p { margin: 0; }
 .bots__more { display: inline-flex; align-items: center; gap: 4px; }
 .bots__more input { width: 64px; }
-.bots__dialog-backdrop { position: fixed; inset: 0; background: #0008; display: flex; align-items: center; justify-content: center; z-index: 50; }
-.bots__dialog { width: min(520px, calc(100vw - 48px)); max-height: calc(100vh - 80px); overflow: auto; padding: 18px 20px; border-radius: 12px; background: var(--bg-secondary, #1a1d24); border: 1px solid var(--border-color, #ffffff18); display: flex; flex-direction: column; gap: 8px; }
-.bots__dialog h2 { margin: 0; font-size: 15px; }
-.bots__dialog h3 { margin: 4px 0 0; font-size: 13px; }
-.bots__dialog ul { margin: 0; padding-left: 18px; }
+.bots__disclosure { display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.bots__disclosure:hover { color: var(--text-primary); background: var(--ui-hover); }
+.bots__disclosure-chevron { transition: transform 140ms ease-out; }
+.bots__disclosure[aria-expanded="true"] .bots__disclosure-chevron { transform: rotate(90deg); }
+.bots-dialog .btn-danger { color: var(--danger, #e07a8a); }
+/* The approval dialog: what it may do, by kind, then where it runs. */
+.bots__approval { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.bots__approval p { margin: 0; }
+.bots__approval h4 { margin: 4px 0 2px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.bots__approval ul { margin: 0; padding-left: 18px; }
+.bots__approval li[data-ok="false"] { color: var(--danger, #e07a8a); }
+/* The acknowledgement: a themed box, still a real checkbox so its gating is unchanged. */
+.bots__ack { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.bots__ack input { appearance: none; margin: 0; width: 14px; height: 14px; flex-shrink: 0; border-radius: 4px; background: var(--ui-line-strong); display: grid; place-items: center; cursor: pointer; }
+.bots__ack input::after { content: ''; width: 7px; height: 4px; border: solid #fff; border-width: 0 0 1.5px 1.5px; transform: translateY(-1px) rotate(-45deg); opacity: 0; }
+.bots__ack input:checked { background: color-mix(in srgb, var(--accent) 86%, #6b6b78); }
+.bots__ack input:checked::after { opacity: 1; }
+.bots__ack input:focus-visible { outline: 1px solid var(--ui-line-strong); outline-offset: 2px; }
 .bots--editor { flex-direction: column; overflow: auto; padding: 14px 18px; gap: 12px; }
 .bots__fields { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
-.bots__fields > label, .bots__fields fieldset > label:not(.bots__check) { display: flex; flex-direction: column; gap: 4px; }
+.bots__fields > label, .bots__fields fieldset > label, .bots__field { display: flex; flex-direction: column; gap: 4px; }
 .bots__fields fieldset { border: 1px solid var(--border-color, #ffffff18); border-radius: 10px; padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
 .bots__fields legend { padding: 0 4px; color: var(--text-secondary); }
-.bots__check { display: flex; align-items: center; gap: 8px; }
+.bots__switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; }
 .bots__note { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }
