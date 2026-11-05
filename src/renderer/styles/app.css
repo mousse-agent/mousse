@@ -3440,33 +3440,49 @@ html[data-theme='high-contrast'] {
 .modal-footer > button { height: var(--settings-control-h, 28px); min-height: 0; padding-block: 0; border-radius: var(--ui-control-radius); }
 .modal-footer > .settings-btn { font-size: var(--settings-fs-small, 12.5px); }
 
-.modal-body {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0 var(--modal-inset, 16px) var(--modal-inset, 16px);
-}
-
-/* Above a footer the body keeps only room for a focus ring: the footer's own
-   gap is the space. While more content is below, the last rows fade out over
-   --modal-fade instead of being cut at the edge; the fade is gone at the end of
-   the list, and never drawn when the body does not scroll (no divider either). */
-@property --modal-body-fade {
+/* A scrolling body fades its edges over --modal-fade instead of cutting rows
+   at the header or the footer: the top edge once the body is scrolled away
+   from the top, the bottom edge while more content is below. One mask, driven
+   by the body's own scroll position: each fade grows over the first (or
+   shrinks over the last) --modal-fade of scrolling, and a body that fits has
+   no scroll timeline, so both stay at 0 and nothing is drawn (no divider either). */
+@property --modal-body-fade-top {
   syntax: '<length>';
   inherits: false;
   initial-value: 0px;
 }
 
-@keyframes modal-body-fade {
-  0%, 90% { --modal-body-fade: var(--modal-fade, 18px); }
-  100% { --modal-body-fade: 0px; }
+@property --modal-body-fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
 }
 
+@keyframes modal-body-fade-top {
+  from { --modal-body-fade-top: 0px; }
+  to { --modal-body-fade-top: var(--modal-fade, 18px); }
+}
+
+@keyframes modal-body-fade-bottom {
+  from { --modal-body-fade-bottom: var(--modal-fade, 18px); }
+  to { --modal-body-fade-bottom: 0px; }
+}
+
+.modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--modal-inset, 16px) var(--modal-inset, 16px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  animation: modal-body-fade-top linear both, modal-body-fade-bottom linear both;
+  animation-timeline: scroll(self);
+  animation-range: 0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%;
+}
+
+/* Above a footer the body keeps only room for a focus ring: the footer's own
+   gap is the space. */
 .modal-body:has(+ .modal-footer) {
   padding-bottom: 4px;
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--modal-body-fade)), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--modal-body-fade)), transparent);
-  animation: modal-body-fade linear both;
-  animation-timeline: scroll(self);
 }
 
 .modal-section {

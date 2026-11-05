@@ -59,26 +59,36 @@ describe('dialog footer', () => {
     expect(button['min-height']).toBe('0')
   })
 
-  it('fades the last rows of a scrolling body instead of cutting them at the footer', () => {
-    const body = block('.modal-body:has(+ .modal-footer)')
-    const mask = 'linear-gradient(to bottom, #000 calc(100% - var(--modal-body-fade)), transparent)'
+  it('fades the edges of a scrolling body by scroll position instead of cutting rows at the header or footer', () => {
+    const body = block('.modal-body')
+    const mask =
+      'linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent)'
     expect(body['mask-image']).toBe(mask)
     expect(body['-webkit-mask-image']).toBe(mask)
+    expect(body.animation).toBe('modal-body-fade-top linear both, modal-body-fade-bottom linear both')
     expect(body['animation-timeline']).toBe('scroll(self)')
-    expect(body.animation).toMatch(/^modal-body-fade\b/)
-    expect(px(body['padding-bottom'], tokens)).toBeLessThan(px(splitPadding(block('.modal-footer').padding)[0], tokens))
+    // Top fade grows over the first --modal-fade of scrolling; bottom fade shrinks over the last.
+    expect(body['animation-range']).toBe('0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%')
+    expect(px(block('.modal-body:has(+ .modal-footer)')['padding-bottom'], tokens)).toBeLessThan(
+      px(splitPadding(block('.modal-footer').padding)[0], tokens)
+    )
 
-    // 16-20px while more is below, none at the end of the list.
     const fade = px('var(--modal-fade)', tokens)
-    expect(fade).toBeGreaterThanOrEqual(16)
-    expect(fade).toBeLessThanOrEqual(20)
-    const keyframes = /@keyframes modal-body-fade\s*\{((?:[^{}]*\{[^{}]*\})*)\s*\}/.exec(css)?.[1] ?? ''
-    expect(block('0%, 90%', keyframes)['--modal-body-fade']).toMatch(/^var\(--modal-fade/)
-    expect(block('100%', keyframes)['--modal-body-fade']).toBe('0px')
+    expect(fade).toBe(18)
+    const keyframes = (name: string) => new RegExp(`@keyframes ${name}\\s*\\{((?:[^{}]*\\{[^{}]*\\})*)\\s*\\}`).exec(css)?.[1] ?? ''
+    // At the top of the list no top fade; once scrolled away, the full fade.
+    expect(block('from', keyframes('modal-body-fade-top'))['--modal-body-fade-top']).toBe('0px')
+    expect(block('to', keyframes('modal-body-fade-top'))['--modal-body-fade-top']).toMatch(/^var\(--modal-fade/)
+    // While more is below the full fade; none at the end of the list.
+    expect(block('from', keyframes('modal-body-fade-bottom'))['--modal-body-fade-bottom']).toMatch(/^var\(--modal-fade/)
+    expect(block('to', keyframes('modal-body-fade-bottom'))['--modal-body-fade-bottom']).toBe('0px')
 
-    // A body that does not scroll has no active scroll timeline, so the fade falls back to none.
-    const property = block('@property --modal-body-fade')
-    expect(property['initial-value']).toBe('0px')
-    expect(property.syntax).toBe("'<length>'")
+    // A body that fits has no active scroll timeline, so both fades fall back to none.
+    for (const edge of ['top', 'bottom']) {
+      const property = block(`@property --modal-body-fade-${edge}`)
+      expect(property['initial-value']).toBe('0px')
+      expect(property.syntax).toBe("'<length>'")
+      expect(property.inherits).toBe('false')
+    }
   })
 })
