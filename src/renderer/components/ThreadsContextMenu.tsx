@@ -4,8 +4,11 @@ import {
   ArchiveArrowBackRegular,
   ArchiveRegular,
   ArrowSyncRegular,
+  Code2,
+  Copy,
   DeleteRegular,
   EditRegular,
+  FolderSearch,
   GitPullRequest,
   MessageSquarePlus,
   PinOffRegular,
@@ -26,6 +29,14 @@ export interface ThreadsContextMenuTarget {
   computerName?: string
   /** On a project of this computer: the other computers that hold the same repository. Removing leaves their projects. */
   alsoOn?: readonly string[]
+  /** A project's folder, on the computer that holds it. */
+  path?: string
+}
+
+/** An app the project's folder opens in: its menu label ("Open in Cursor", "Show in Finder") and how to open it. */
+export interface ProjectOpener {
+  label: string
+  onSelect: () => void
 }
 
 interface ThreadsContextMenuProps {
@@ -46,7 +57,14 @@ interface ThreadsContextMenuProps {
   onNewThread?: () => void
   /** Projects only: start a thread from one of the project's pull requests. */
   onNewThreadFromPullRequest?: () => void
+  /** Projects of this computer only: the editor the folder opens in, and the file manager. */
+  openInEditor?: ProjectOpener
+  reveal?: ProjectOpener
+  /** Projects only: copy the folder's path. */
+  onCopyPath?: () => void
 }
+
+const Separator = () => <div className="threads-context-menu-separator" role="separator" />
 
 export function ThreadsContextMenu({
   x,
@@ -60,7 +78,10 @@ export function ThreadsContextMenu({
   onRemove,
   onTrustGitSettings,
   onNewThread,
-  onNewThreadFromPullRequest
+  onNewThreadFromPullRequest,
+  openInEditor,
+  reveal,
+  onCopyPath
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
@@ -126,17 +147,45 @@ export function ThreadsContextMenu({
         {target.type === 'project' && target.computerName && (
           <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
         )}
-        {target.type === 'project' && onNewThread && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
-            <MessageSquarePlus />
-            <span>New thread</span>
-          </button>
+        {target.type === 'project' && (onNewThread || onNewThreadFromPullRequest) && (
+          <>
+            {onNewThread && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
+                <MessageSquarePlus />
+                <span>New thread</span>
+              </button>
+            )}
+            {onNewThreadFromPullRequest && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
+                <GitPullRequest />
+                <span>New thread from a pull request</span>
+              </button>
+            )}
+            <Separator />
+          </>
         )}
-        {target.type === 'project' && onNewThreadFromPullRequest && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
-            <GitPullRequest />
-            <span>New thread from a pull request</span>
-          </button>
+        {target.type === 'project' && (openInEditor || reveal || onCopyPath) && (
+          <>
+            {openInEditor && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={openInEditor.onSelect}>
+                <Code2 />
+                <span>{openInEditor.label}</span>
+              </button>
+            )}
+            {reveal && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={reveal.onSelect}>
+                <FolderSearch />
+                <span>{reveal.label}</span>
+              </button>
+            )}
+            {onCopyPath && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" title={target.path} onClick={onCopyPath}>
+                <Copy />
+                <span>Copy path</span>
+              </button>
+            )}
+            <Separator />
+          </>
         )}
         {!target.settled && (
           <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
@@ -169,9 +218,10 @@ export function ThreadsContextMenu({
             onClick={onTrustGitSettings}
           >
             <ShieldCheck />
-            <span>Trust Git settings again</span>
+            <span>Trust this repository's Git settings</span>
           </button>
         )}
+        {target.type === 'project' && <Separator />}
         <button
           type="button"
           className="threads-context-menu-item threads-context-menu-item-danger"

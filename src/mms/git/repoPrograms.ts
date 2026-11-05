@@ -572,13 +572,13 @@ export async function noRepoProgramArgsAsync(cwd: string, args: readonly string[
 export function filterRefusal(output: string): string | null {
   const match = /(?:clean|smudge) filter '([^']+)' failed/.exec(output)
   if (!match) return null
-  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example), and it is not the one Mousse recorded when the project was added. Mousse runs only the repository's filters it recorded, so it left these files alone instead of storing them unfiltered. If you set up or changed this filter yourself, right-click the project in the sidebar and choose "Trust Git settings again".`
+  return `This repository's own config defines the "${match[1]}" filter (git-crypt or a local Git LFS install, for example), and it is not the one Mousse recorded when the project was added. Mousse runs only the repository's filters it recorded, so it left these files alone instead of storing them unfiltered. If you set up or changed this filter yourself, right-click the project in the sidebar and choose "Trust this repository's Git settings".`
 }
 
 /**
  * Records the filter drivers the repository at `path` defines in its own config as the user's, so
  * Mousse's own commands run them while they stay as they are now. Called when the user adds a
- * project and when they choose "Trust Git settings again". Null when `path` is not in a repository.
+ * project and when they choose "Trust this repository's Git settings". Null when `path` is not in a repository.
  */
 export function trustRepositoryPrograms(path: string): RepoTrustRecord | null {
   const where = bareGit(resolve(path), ['rev-parse', '--path-format=absolute', '--git-common-dir'])
