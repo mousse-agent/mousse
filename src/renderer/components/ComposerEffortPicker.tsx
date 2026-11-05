@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react'
-import type { LlmModelOption } from '../../shared/settings'
-import { applyEffortToModelId, findModelFamily, formatEffortLabel, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
-import { Brain, Check, ChevronDown, ChevronUp, Zap } from '../lib/icons'
+import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
+import { shortModelName } from '../../shared/modelNames'
+import { listingServes } from '../../shared/providerInstances'
+import type { ModelPickTarget } from './ModelFamilyMenu'
+import { applyEffortToModelId, findModelFamily, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
+import { Check, ChevronUp, Zap } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { describePermissionMode } from '../../shared/permissionMode'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
@@ -47,25 +50,6 @@ function useRunOptions({ providerId, modelId, models }: Selection, onSelect: (pr
   const pickSpeed = (targetModelId: string) =>
     onSelect(providerId, effort === 'off' ? `${parseThinkingSuffixFromModelId(targetModelId).baseId}:off` : targetModelId)
   return { reasoning, speeds, effort, pickEffort, pickSpeed }
-}
-
-/** The speed after the level, when it is not the standard one ("Fast"). */
-function speedText(speeds: { current: string } | undefined): string {
-  return speeds && speeds.current !== 'standard' ? speedLabel(speeds.current) : ''
-}
-
-/** Closes the menu on a press outside it or Escape (focus back on the trigger). */
-function useDismiss(open: boolean, setOpen: (open: boolean) => void, anchorRef: RefObject<HTMLElement | null>, contentRef: RefObject<HTMLElement | null>) {
-  useEffect(() => {
-    if (!open) return
-    const dismiss = (event: MouseEvent) => {
-      if (!anchorRef.current?.contains(event.target as Node) && !contentRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { setOpen(false); anchorRef.current?.focus() } }
-    document.addEventListener('mousedown', dismiss)
-    document.addEventListener('keydown', escape)
-    return () => { document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
-  }, [open, setOpen, anchorRef, contentRef])
 }
 
 /** A one-line row of choices (speeds, permission modes): one stop for Up and Down, Left and Right inside. */
@@ -175,10 +159,7 @@ function runSections({ selection, onSelect, permission, readOnly, onClose, dropp
   return sections.map((section, index) => index === 0 ? section : <div key={`group-${index}`} className="composer-mode-menu-group">{section}</div>)
 }
 
-/**
- * The run settings as their own menu: Settings' reasoning picker, and the composer when the model is
- * assigned (a subagent's), where only the permission mode can change.
- */
+/** The run settings as their own menu: the composer's when the model is assigned (a subagent's), where only the permission mode can change. */
 function RunMenu({ selection, onSelect, permission, readOnly, contentRef, style, onClose }: {
   selection: Selection
   onSelect: (providerId: string, modelId: string) => void
@@ -195,28 +176,6 @@ function RunMenu({ selection, onSelect, permission, readOnly, contentRef, style,
   return <FloatingPortal><div ref={contentRef} style={style} className={`composer-mode-menu composer-mode-menu-floating composer-run-menu${permission ? ' has-permissions' : ''}`} role="menu" aria-label="Run options" onKeyDown={moveFocus}>
     {sections}
   </div></FloatingPortal>
-}
-
-/** Settings' reasoning picker: a pill beside the model picker, opening the run settings without permissions. */
-export function ComposerEffortPicker({ providerId, modelId, models, readOnly, onSelect }: Selection & {
-  readOnly: boolean
-  onSelect: (providerId: string, modelId: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const anchorRef = useRef<HTMLButtonElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
-  const { reasoning, speeds, effort } = useRunOptions({ providerId, modelId, models }, onSelect)
-  const style = useFloatingPosition({ open, anchorRef, contentRef, placement: 'above-start', deps: [modelId] })
-  useDismiss(open, setOpen, anchorRef, contentRef)
-  const close = () => { setOpen(false); anchorRef.current?.focus() }
-  const speed = speedText(speeds)
-  if (!reasoning.levels.length && !speeds) return null
-  return <div className="composer-effort-picker">
-    <button ref={anchorRef} type="button" className={`composer-pill-btn${open ? ' open' : ''}`} disabled={readOnly} aria-label="Reasoning effort and speed" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <Brain size={14} aria-hidden="true" /><span>{effort ? formatEffortLabel(effort) : 'Effort'}{speed ? ` · ${speed}` : ''}</span><ChevronDown size={12} />
-    </button>
-    {open && !readOnly && <RunMenu selection={{ providerId, modelId, models }} onSelect={onSelect} readOnly={readOnly} contentRef={contentRef} style={style} onClose={close} />}
-  </div>
 }
 
 /** The level as the composer shows it after the model name ("High"). */
@@ -405,4 +364,51 @@ export function PermissionMenuButton({ control, onClose }: { control: Permission
       <ChevronUp size={12} aria-hidden="true" />
     </button>
   </div>
+}
+
+/**
+ * The model picker's run settings (`ModelFamilyMenu`'s `runSettings`), so one menu chooses the model, its
+ * reasoning level and its speed: the highlighted model's levels beside the list and its speeds under it.
+ * A level chosen for the selection carries to the next model picked when that model offers it; with none
+ * chosen (or one it does not offer) the next model runs at its own default. `footerEnd` sits at the right
+ * of the footer (the composer's permission mode).
+ */
+export function modelPickerRunSettings({ providers, selection, onSelect, onClose, footerEnd }: {
+  providers: readonly LlmProviderOption[]
+  /** The selected model, as the menu offers it (the level is part of the id). */
+  selection: Selection
+  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
+  onClose: () => void
+  footerEnd?: ReactNode
+}) {
+  const chosen = parseThinkingSuffixFromModelId(selection.modelId).effort
+  const carried = chosen && chosen === shownReasoningLevel(selection) ? chosen : undefined
+  const listingOf = (target: ModelPickTarget) => providers.find((entry) => listingServes(entry, { instanceId: target.instanceId, llmProvider: target.providerId }))
+  const resolveTarget = (target: ModelPickTarget): RunSettingsTarget => {
+    const pick = { providerId: target.providerId, modelId: target.modelId, models: listingOf(target)?.models ?? [] }
+    if (target.selected) return { ...pick, instanceId: target.instanceId, selected: true }
+    const { modelId, dropped } = carryReasoningLevel(pick, carried)
+    return { ...pick, modelId, instanceId: target.instanceId, selected: false, ...(dropped ? { dropped } : {}) }
+  }
+  return {
+    pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
+    // Beside the list: the highlighted model's reasoning levels, whenever any model the picker lists has
+    // levels, so the column stays in place while you search or switch providers.
+    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
+      if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
+      return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onSelect} onClose={onClose} />
+    },
+    // Under the picker: the highlighted model's speed on the left, `footerEnd` on the right.
+    footer: (target: ModelPickTarget | undefined) => {
+      const resolved = target ? resolveTarget(target) : undefined
+      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
+      if (!speeds && !footerEnd) return null
+      return <>
+        <div className="model-picker-footer-start">
+          {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onSelect} onClose={onClose} /> : null}
+        </div>
+        {footerEnd}
+      </>
+    }
+  }
 }

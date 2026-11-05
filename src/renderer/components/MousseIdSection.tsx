@@ -112,6 +112,7 @@ export function MousseIdSection({
 
   return (
     <SettingsGroup
+      anchor="account-phones"
       title="Phones"
       icon={Smartphone}
       className="account-group"

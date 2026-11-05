@@ -10,6 +10,9 @@ import { Select } from '../ui/Select'
 import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 
+/** The compact-context select's value for Off. */
+const COMPACTION_OFF = 'off'
+
 /**
  * Settings > Agents: the default model and thread title model, plus context
  * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
@@ -44,6 +47,7 @@ export function AgentsSettings({
     Boolean(findListedModel(provider.models, titleModel)))
 
   const context = normalizeContextSettings(settings.context)
+  const compactionValue = context.compactionEnabled ? String(context.compactionTokens) : COMPACTION_OFF
   const experimental = normalizeExperimentalSettings(settings.experimental)
 
   return (
@@ -51,6 +55,7 @@ export function AgentsSettings({
       <SettingsGroup title="Models" icon={Brain}>
         <SettingsRow
           title="Default model"
+          anchor="agents-default-model"
           titleId="agents-default-model-title"
           description={hasProviders ? 'New threads start with this model.' : 'Add a provider to choose a model.'}
           control={!hasProviders ? (
@@ -75,6 +80,7 @@ export function AgentsSettings({
         />
         <SettingsRow
           title="Thread titles"
+          anchor="agents-title-model"
           titleId="agents-title-model-title"
           description={titleUnavailable
             ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`
@@ -112,31 +118,35 @@ export function AgentsSettings({
       <SettingsGroup title="Context" icon={Layers}>
         <SettingsRow
           title="Compact context"
+          anchor="agents-context-compaction"
           htmlFor="agents-context-compaction"
           description="Summarizes earlier messages when the active context reaches this size."
-          control={<>
+          control={
+            // One select: Off, or the size. Off keeps the saved size, so turning it back on offers the same one.
             <Select
-              ariaLabel="Compact context at"
-              value={String(context.compactionTokens)}
-              disabled={!context.compactionEnabled}
+              id="agents-context-compaction"
+              ariaLabel="Compact context"
+              value={compactionValue}
               onChange={(next) => {
+                if (next === compactionValue) return
+                if (next === COMPACTION_OFF) {
+                  void updateSettings({ context: { ...context, compactionEnabled: false } })
+                  return
+                }
                 const compactionTokens = next === 'model-max'
                   ? 'model-max'
                   : Number(next) as ContextCompactionTokens
-                void updateSettings({ context: { ...context, compactionTokens } })
+                void updateSettings({ context: { compactionEnabled: true, compactionTokens } })
               }}
-              options={CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => ({
-                value: String(value),
-                label: value === 'model-max' ? 'Model maximum' : `${label} tokens`
-              }))}
+              options={[
+                { value: COMPACTION_OFF, label: 'Off' },
+                ...CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => ({
+                  value: String(value),
+                  label: value === 'model-max' ? 'At model maximum' : `At ${label} tokens`
+                }))
+              ]}
             />
-            <Switch
-              id="agents-context-compaction"
-              label="Compact context"
-              checked={context.compactionEnabled}
-              onChange={(compactionEnabled) => void updateSettings({ context: { ...context, compactionEnabled } })}
-            />
-          </>}
+          }
         />
       </SettingsGroup>
 
@@ -145,6 +155,7 @@ export function AgentsSettings({
       <SettingsGroup title="Experimental" icon={FlaskConical}>
         <SettingsRow
           title="Give each subagent its own worktree"
+          anchor="agents-subagent-worktrees"
           htmlFor="agents-subagent-worktrees"
           description="Each subagent starts on its own branch from the main agent's current commit. Off: the main agent decides."
           control={

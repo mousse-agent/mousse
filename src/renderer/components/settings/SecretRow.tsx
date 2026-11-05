@@ -18,6 +18,7 @@ function failureText(error: unknown): string {
  */
 export function SecretRow({
   title,
+  anchor,
   inputId,
   fieldLabel,
   placeholder,
@@ -32,6 +33,8 @@ export function SecretRow({
   busy = false
 }: {
   title: ReactNode
+  /** The settings search anchor (`anchor` on SettingsRow). */
+  anchor?: string
   inputId: string
   /** The field's accessible name: "OpenRouter API key". */
   fieldLabel: string
@@ -129,6 +132,7 @@ export function SecretRow({
 
   return (
     <SettingsRow
+      anchor={anchor}
       title={title}
       htmlFor={editing ? inputId : undefined}
       description={

@@ -99,6 +99,7 @@ export function AgentAccessSettings({
     <SettingsGroup title="Agent access" icon={ShieldCheck}>
       <SettingsRow
         title="Reach beyond their own threads"
+        anchor="agents-access"
         titleId="agent-access-level-title"
         description={<>
           <span id="agent-access-level-summary">{level.summary}</span>
@@ -138,6 +139,7 @@ export function AgentAccessSettings({
       {access.level === 'manage' && (
         <SettingsRow
           title="Agents may answer approvals on other threads"
+          anchor="agents-access-approvals"
           htmlFor="agent-access-answer-approvals"
           description={<>
             <strong>Use with care.</strong> Agents approve what other threads in these projects ask for, within their own permission mode.
@@ -161,6 +163,7 @@ export function AgentAccessSettings({
       )}
       <SettingsRow
         title="Let agents start subagents on your other devices"
+        anchor="agents-remote-subagents"
         htmlFor="agent-access-remote-subagents"
         description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
           ? 'No other computers are connected yet. Pair them in Settings → Devices, then turn on the ones agents may use.'

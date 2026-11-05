@@ -66,6 +66,7 @@ export function ApiSetupRow({
   return (
     <SecretRow
       title="API key"
+      anchor="providers-api-key"
       inputId={`${inputId}-api-key`}
       fieldLabel={`New ${label} API key`}
       placeholder={`New ${label} key`}
