@@ -58,6 +58,7 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
+import { formatDurationLong, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
 import {
   classifyIntent,
   reduceFollow,
@@ -175,52 +176,6 @@ function readCreatedAt(message: UIMessage | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function durationParts(milliseconds: number): {
-  hours: number;
-  minutes: number;
-  seconds: number;
-} {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  return {
-    hours: Math.floor(totalSeconds / 3600),
-    minutes: Math.floor((totalSeconds % 3600) / 60),
-    seconds: totalSeconds % 60,
-  };
-}
-
-function countLabel(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
-
-/** Live label while a turn is still running. Seconds tick every second. */
-function formatWorkingFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    return `Working for ${countLabel(hours, "hour")}, ${countLabel(minutes, "minute")}, and ${countLabel(seconds, "second")}`;
-  }
-  if (minutes > 0) {
-    return `Working for ${countLabel(minutes, "minute")} and ${countLabel(seconds, "second")}`;
-  }
-  return `Working for ${countLabel(seconds, "second")}`;
-}
-
-/** Compact "Worked for 2m 6s" from a finished turn. Under a minute stays in seconds. */
-function formatWorkedFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    const parts = [`${hours}h`];
-    if (minutes) parts.push(`${minutes}m`);
-    if (seconds) parts.push(`${seconds}s`);
-    return `Worked for ${parts.join(" ")}`;
-  }
-  if (minutes > 0) {
-    return seconds
-      ? `Worked for ${minutes}m ${seconds}s`
-      : `Worked for ${minutes}m`;
-  }
-  return `Worked for ${seconds}s`;
-}
-
 /** A line Mousse adds to the thread (see `ThreadNotice`); it is not part of a turn's work. */
 function isThreadNotice(message: UIMessage | undefined): boolean {
   return (message?.metadata as { notice?: boolean } | undefined)?.notice === true;
@@ -287,9 +242,13 @@ function TurnWorkStatus({
           ? formatWorkingFor(elapsedMs)
           : formatWorkedFor(elapsedMs);
   if (!label) return null;
+  const longLabel =
+    elapsedMs == null || (active && waitingLabel)
+      ? undefined
+      : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
   return (
     <div className="turn-work" data-find-ignore>
-      <div className="turn-work-label">{label}</div>
+      <div className="turn-work-label" title={longLabel}>{label}</div>
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
