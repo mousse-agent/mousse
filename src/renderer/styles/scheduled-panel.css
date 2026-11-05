@@ -227,6 +227,11 @@
   cursor: not-allowed;
 }
 
+/* New job is a neutral button like New agent and New workflow; full-strength text keeps it easy to find. */
+.scheduled-btn[data-action='new-job'] {
+  color: var(--text-primary);
+}
+
 .scheduled-btn.primary {
   background: var(--gradient-accent);
   border-color: transparent;

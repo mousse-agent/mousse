@@ -369,6 +369,17 @@ describe('Scheduled page: validation', () => {
 })
 
 describe('Scheduled page: creating a job', () => {
+  it('New job is a neutral button with a plus icon, like New agent and New workflow', async () => {
+    await mount([])
+    const create = button('New job')
+    expect(create.className).toBe('scheduled-btn')
+    expect(create.querySelector('svg')).not.toBeNull()
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/scheduled-panel.css'), 'utf8')
+    const rule = must(css.match(/\.scheduled-btn\[data-action='new-job'\]\s*\{([^}]*)\}/), 'new job rule')[1]
+    expect(rule).toMatch(/color:\s*var\(--text-primary\)/)
+    expect(rule).not.toMatch(/gradient|box-shadow|background/)
+  })
+
   it('sends model, mode, project and a new worktree; a job without a target thread gets a thread per run', async () => {
     const h = await mount([])
     await click(button('New job'))

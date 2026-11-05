@@ -338,7 +338,8 @@ export function ScheduledPanel() {
           <button
             ref={newButton}
             type="button"
-            className="scheduled-btn primary"
+            className="scheduled-btn"
+            data-action="new-job"
             aria-expanded={creating}
             onClick={() => (creating ? closeEditor() : openCreate())}
           >
