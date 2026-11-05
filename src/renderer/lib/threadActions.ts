@@ -20,10 +20,9 @@ export async function selectThread(threadId: string): Promise<void> {
   await window.mousse.threads.select(threadId)
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. */
+/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
-  store.setThreadsSidebarView('threads')
   const thread = findUnstartedThread(visibleThreads(store.threads)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
@@ -45,7 +44,6 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
 export async function openThreadFromPullRequest(input: StartPullRequestThreadInput): Promise<void> {
   const store = useAppStore.getState()
   const result = await window.mousse.pullRequests.startThread(input)
-  store.setThreadsSidebarView('threads')
   // The daemon's threads:updated broadcast can arrive after the thread is selected.
   store.upsertThread(result.thread)
   store.setComposerDraft(result.thread.id, result.seed)
