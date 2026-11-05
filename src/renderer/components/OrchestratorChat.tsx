@@ -36,6 +36,7 @@ import {
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile, isImageMimeType } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
+import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -837,7 +838,8 @@ export function OrchestratorChat() {
           ])
         }
         if (result.error) {
-          setSendError(sendErrorLine(result.error))
+          // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
+          if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
           // Admission succeeded: the prompt is already saved in the transcript.
@@ -918,6 +920,20 @@ export function OrchestratorChat() {
   }, [activeThreadId, refreshTurnActive])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
+
+  // Retry and Continue on the last turn send through the normal path, never while a run is going.
+  const resendBusy = turnActive || loading
+  const turnActions = useMemo<TurnActions | null>(() => {
+    if (!activeThreadId) return null
+    return createTurnActions({
+      // Read at use: depending on the transcript would rebuild this on every streamed token.
+      prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
+      send: (content, images) => {
+        if (resendBusy || !useAppStore.getState().workspaceReady) return
+        void sendMessage(content, chatMode, images, activeThreadId)
+      }
+    })
+  }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return
@@ -1233,6 +1249,7 @@ export function OrchestratorChat() {
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
         permissionRequests={permissionRequests.controls}
+        turnActions={turnActions}
         composer={(
       <div
         ref={inputAreaRef}

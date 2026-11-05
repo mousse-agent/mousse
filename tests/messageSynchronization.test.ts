@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reconcileMessageSnapshot, upsertMessage, useAppStore } from '../src/renderer/stores/appStore'
+import { reconcileMessageSnapshot, sortMessagesDeterministic, upsertMessage, useAppStore } from '../src/renderer/stores/appStore'
 import type { ChatMessage } from '../src/shared/types'
 
 const stopped: ChatMessage = {
@@ -12,6 +12,19 @@ const stopped: ChatMessage = {
 }
 
 describe('renderer message synchronization', () => {
+  it('keeps the arrival order of messages that share a timestamp, whatever their ids', () => {
+    const at = '2026-07-15T12:00:00.000Z'
+    // The id of the tool call sorts before the id of the text it followed.
+    const text: ChatMessage = { id: 'f0-text', role: 'assistant', content: 'Looking at the code first.', timestamp: at, turnId: 't1' }
+    const tool: ChatMessage = { id: '0a-tool', role: 'assistant', content: 'Read checkout.ts', timestamp: at, turnId: 't1' }
+    const user: ChatMessage = { id: 'u1', role: 'user', content: 'Fix it', timestamp: '2026-07-15T11:59:59.000Z', turnId: 't1' }
+    expect(upsertMessage(upsertMessage([user], text), tool).map((message) => message.id)).toEqual(['u1', 'f0-text', '0a-tool'])
+    // A late, older message still sorts by time; the tie keeps its order.
+    const late: ChatMessage = { ...user, id: 'u0', timestamp: '2026-07-15T11:59:58.000Z' }
+    expect(sortMessagesDeterministic([user, text, tool, late]).map((message) => message.id)).toEqual(['u0', 'u1', 'f0-text', '0a-tool'])
+    expect(reconcileMessageSnapshot([user, text, tool], [user, text, tool]).map((message) => message.id)).toEqual(['u1', 'f0-text', '0a-tool'])
+  })
+
   it('retains a completion update even if the initial message event is delayed', () => {
     expect(upsertMessage([], stopped)).toEqual([stopped])
   })
