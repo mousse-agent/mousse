@@ -97,6 +97,12 @@ export type RunCommand =
        * queues it; the queue holds it until the continue turn has run or the pause is cancelled.
        */
       queueBehindPause?: boolean
+      /**
+       * A follow-up a parent thread on another computer sends to a subagent here: a paused thread refuses it
+       * (`thread_paused`), as it refuses a follow-up from a parent on the same computer, instead of ending the
+       * pause or waiting behind it.
+       */
+      refuseWhilePaused?: boolean
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
   | {
@@ -1850,7 +1856,7 @@ export class RunEngine extends EventEmitter {
       if (paused && (isFencedSource(command.source) || isPauseHeldSource(command.source)) && !resuming) return refuse('thread_paused')
       // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
       // paused run first (`thread_interrupt`), and send once that is done.
-      if (paused && command.actor && !resuming) return refuse('thread_paused')
+      if (paused && (command.actor || command.refuseWhilePaused) && !resuming) return refuse('thread_paused')
       if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.

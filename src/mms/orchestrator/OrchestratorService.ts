@@ -520,6 +520,11 @@ export interface OrchestratorSendOptions {
    * never read for `/skill` mentions.
    */
   agent?: AgentActor
+  /**
+   * A follow-up a parent thread on another computer sends to a subagent here: a thread paused by a usage limit
+   * refuses it (`thread_paused`), as it refuses a follow-up from a parent on the same computer.
+   */
+  refuseWhilePaused?: boolean
   /** Carried by the queue item when the send queues, so the item drains with the same model and origin. */
   queueOrigin?: QueuedMessage['origin']
   /** The scheduled occurrence this send is; the turn's end reports to the scheduler. */
@@ -4201,8 +4206,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * An automatic timer or continue item that is more than a day past the reset does not continue the run
-   * (Mousse was off over it): the run stays paused with auto-resume off, still shown as paused, and a message or
-   * Resume now continues it. Only the first call writes the line. A continue item already written is removed.
+   * (Mousse was off over it): the run stays paused with auto-resume off, still shown as paused, and Resume now
+   * continues it (a message a person sends waits in the queue behind it; Cancel lets it go). Only the first call writes the line. A continue item already written is removed.
    */
   private markPauseStale(runId: string, threadId: string): void {
     const engine = this.runEngine
@@ -8874,8 +8879,10 @@ export class OrchestratorService extends EventEmitter {
 
     // A person's new message on a thread paused by a usage limit joins the queue and the pause stays: it runs after
     // the continue turn (at the reset or Resume now), or at once when the pause is cancelled. Agents' messages,
-    // follow-ups from a parent, wakes and continue turns keep their own rules.
-    const queueBehindPause = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake' && !opts?.agent && !opts?.delegation && !opts?.bindDelivery
+    // follow-ups from a parent (on this or another computer), wakes and continue turns keep their own rules; a
+    // retry, the restart note's Continue and an approval continuation are explicit actions and still end the pause.
+    const queueBehindPause =
+      !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake' && !opts?.agent && !opts?.delegation && !opts?.bindDelivery && !opts?.refuseWhilePaused
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
     if (opts?.forceQueue || session.isTurnRunning() || (queueBehindPause && this.hasPausedRun(threadId))) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
@@ -8916,7 +8923,8 @@ export class OrchestratorService extends EventEmitter {
           ? { settleApprovals: { ...(opts?.continuationOfRunId || opts?.source === 'wake' || !text.trim() ? {} : { feedback: text }), answeredBy: opts?.actor ?? { kind: 'user' as const } } }
           : {}),
         ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
-        ...(queueBehindPause ? { queueBehindPause: true } : {})
+        ...(queueBehindPause ? { queueBehindPause: true } : {}),
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -8924,6 +8932,12 @@ export class OrchestratorService extends EventEmitter {
       if (result.status !== 'accepted') throw new DomainRpcError(result.reason, `Send refused: ${result.reason}.`)
       if (result.replayed) {
         const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
+        // A replay of a message that waits behind a pause answers as the first send did: queued and held, so the
+        // window keeps it out of the transcript and the thread keeps showing as paused.
+        if (result.heldByPause && this.runEngine.getRun(result.runId)?.status === 'queued' && this.threadStore) {
+          const queueItem = readDurableQueue(this.threadStore, threadId).find((item) => item.runId === result.runId)
+          if (queueItem) return { message: '', actions: [], queued: true, queueItem, heldByPause: true, ...replayed }
+        }
         // A replay of a send whose turn is still live waits for the same result (SPEC §12.7).
         const live = this.turnResults.get(result.runId)
         const run = live ? this.runEngine.getRun(result.runId) : null

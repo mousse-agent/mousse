@@ -1763,10 +1763,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain'
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused'
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
+      // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
+      const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
@@ -1799,6 +1801,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
         ...(sentFrom ? { sentFrom } : {}),
+        ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }

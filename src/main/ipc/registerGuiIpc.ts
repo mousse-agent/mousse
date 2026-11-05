@@ -1062,7 +1062,8 @@ export function registerGuiIpc(
       )
       if (result.heldByPause) {
         // The message waits behind a usage-limit pause: nothing started, so the thread shows what it showed before.
-        activityTrackerFor().setBusyThreadId(previousBusyThreadId)
+        // Only this send's own marking is undone: another thread's turn may have started or ended meanwhile.
+        if (activityTrackerFor().getBusyThreadId() === targetThreadId) activityTrackerFor().setBusyThreadId(previousBusyThreadId)
         setThreadActivity(targetThreadId, previousActivity ?? 'paused')
       } else if (result.queued) {
         setThreadActivity(targetThreadId, 'processing')

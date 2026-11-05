@@ -794,6 +794,19 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(later).toEqual({ status: 'accepted', runId: 'run:thread:t1:ordinal:3', sequence: expect.any(Number), replayed: false })
     })
 
+    it("a parent's follow-up from another computer is refused thread_paused and writes nothing", async () => {
+      fixture()
+      const run = await paused()
+
+      const sent = await f!.engine.dispatch({ kind: 'send', threadId: 't1', clientRequestId: 'follow-up-1', source: 'gui', refuseWhilePaused: true })
+
+      expect(sent).toMatchObject({ status: 'rejected', reason: 'thread_paused' })
+      expect(f!.store.getRun(run.runId)!.status).toBe('paused')
+      expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['pending'])
+      expect(f!.store.getReceipt('follow-up-1')).toBeNull()
+      expect(f!.store.listRuns('t1')).toHaveLength(1)
+    })
+
     it('a scheduled send is refused thread_paused and writes nothing: the pause, its timer and its chain stay', async () => {
       fixture()
       const run = await paused()
