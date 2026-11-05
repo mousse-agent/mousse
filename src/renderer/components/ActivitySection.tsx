@@ -8,6 +8,7 @@ import { Activity } from '../lib/icons'
 export function ActivitySection() {
   const [stats, setStats] = useState<LineEditStatsSnapshot | null>(null)
   const [usage, setUsage] = useState<UsageStatsSnapshot | null>(null)
+  const [usageFailed, setUsageFailed] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
 
   useEffect(() => {
@@ -22,7 +23,10 @@ export function ActivitySection() {
   }, [])
 
   useEffect(() => {
-    void window.mousse.usageStats.getStats().then(setUsage, (error) => console.error('Loading token usage failed', error))
+    void window.mousse.usageStats.getStats().then(setUsage, (error) => {
+      console.error('Loading token usage failed', error)
+      setUsageFailed(true)
+    })
   }, [])
 
   if (!stats) {
@@ -32,5 +36,5 @@ export function ActivitySection() {
       </SettingsGroup>
     )
   }
-  return <LineEditHeatmap stats={stats} usage={usage} />
+  return <LineEditHeatmap stats={stats} usage={usage} usageFailed={usageFailed} />
 }

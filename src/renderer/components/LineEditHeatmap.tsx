@@ -109,8 +109,15 @@ function computeStreaks(stats: LineEditStatsSnapshot, filter: LineEditFilter): {
 
 interface LineEditHeatmapProps {
   stats: LineEditStatsSnapshot
+  /** Null while token usage loads, and after it failed to load (`usageFailed`). */
   usage?: UsageStatsSnapshot | null
+  usageFailed?: boolean
 }
+
+const USAGE_UNAVAILABLE = 'Token usage unavailable'
+// Usage is recorded only when a runtime reports it, so an empty record is "none recorded", never "0 used".
+const NO_USAGE = 'No token usage recorded yet'
+const NO_USAGE_MATCH = 'No token usage matches the filters'
 
 type Metric = 'lines' | 'tokens'
 
@@ -123,7 +130,7 @@ const METRIC_OPTIONS: ReadonlyArray<SegmentedOption<Metric>> = [
  * Activity on the Account page: the yearly heatmap and token usage, laid flat on the page in two
  * settings groups (no cards, no nested panels).
  */
-export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
+export function LineEditHeatmap({ stats, usage = null, usageFailed = false }: LineEditHeatmapProps) {
   const filter: LineEditFilter = 'all'
   const [metric, setMetric] = useState<Metric>('lines')
   const [provider, setProvider] = useState('all')
@@ -151,6 +158,23 @@ export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
   const hasUsage = filteredUsage.turns.length > 0
   // Cache ratio = cache reads / (uncached input + cache reads); undefined when nothing was read or sent.
   const cacheEligible = filteredUsage.totals.input + filteredUsage.totals.cacheRead
+  /** Why the usage figures are absent, or null when there are some. */
+  const usageGap = !usage ? (usageFailed ? USAGE_UNAVAILABLE : null) : !usage.turns.length ? NO_USAGE : !hasUsage ? NO_USAGE_MATCH : null
+  // The heatmap's line for an empty history: '' while token usage is still loading, null when there is history.
+  const historyGap = metric === 'tokens'
+    ? (!usage && !usageFailed ? '' : usageGap)
+    : stats.total === 0 ? 'No edits recorded yet' : null
+  const highlights = [
+    { label: 'Most active month', value: activeMonth },
+    { label: 'Most active day', value: activeDay },
+    { label: 'Longest streak', value: streaks.longest > 0 ? `${streaks.longest}d` : null },
+    { label: 'Current streak', value: streaks.current > 0 ? `${streaks.current}d` : null }
+  ].filter((item): item is { label: string; value: string } => item.value !== null)
+  // A filter appears when it offers a choice, and stays while it is set so the selection can be cleared.
+  const providers = usage?.providers ?? []
+  const models = usage?.models ?? []
+  const showProviderFilter = providers.length > 1 || provider !== 'all'
+  const showModelFilter = models.length > 1 || model !== 'all'
 
   return (
     <>
@@ -160,97 +184,113 @@ export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
         className="activity-group"
         action={<Segmented value={metric} options={METRIC_OPTIONS} onChange={setMetric} ariaLabel="Heatmap metric" />}
       >
-        <p className="activity-total">
-          <span className="activity-total-value">{formatTotal(total)}</span>
-          <span className="settings-muted">{metric === 'lines' ? 'lines edited' : 'tokens used'}</span>
-        </p>
+        {historyGap !== null ? (
+          historyGap && <p className="settings-muted activity-empty" role="status">{historyGap}</p>
+        ) : (
+          <>
+            <p className="activity-total">
+              <span className="activity-total-value">{formatTotal(total)}</span>
+              <span className="settings-muted">{metric === 'lines' ? 'lines edited' : 'tokens used'}</span>
+            </p>
 
-        <div className="activity-heatmap">
-          <div className="line-edit-months" aria-hidden="true">
-            {weeks.map((week, index) => (
-              <span key={`month-${index}`} className="line-edit-month-label">
-                {week.monthLabel ?? ''}
-              </span>
-            ))}
-          </div>
-          <div className="line-edit-heatmap-body">
-            <div className="line-edit-weekdays" aria-hidden="true">
-              <span>M</span>
-              <span />
-              <span>W</span>
-              <span />
-              <span>F</span>
-              <span />
-              <span />
-            </div>
-            <div className="line-edit-grid">
-              {weeks.map((week, weekIndex) => (
-                <div key={`week-${weekIndex}`} className="line-edit-week">
-                  {week.days.map((cell, dayIndex) =>
-                    cell ? (
-                      <span
-                        key={cell.date}
-                        className={`line-edit-cell level-${cell.level}`}
-                        title={`${cell.count.toLocaleString()} ${unit} on ${cell.date}`}
-                      />
-                    ) : (
-                      <span key={`empty-${weekIndex}-${dayIndex}`} className="line-edit-cell empty" />
-                    )
-                  )}
+            <div className="activity-heatmap">
+              <div className="line-edit-months" aria-hidden="true">
+                {weeks.map((week, index) => (
+                  <span key={`month-${index}`} className="line-edit-month-label">
+                    {week.monthLabel ?? ''}
+                  </span>
+                ))}
+              </div>
+              <div className="line-edit-heatmap-body">
+                <div className="line-edit-weekdays" aria-hidden="true">
+                  <span>M</span>
+                  <span />
+                  <span>W</span>
+                  <span />
+                  <span>F</span>
+                  <span />
+                  <span />
                 </div>
-              ))}
+                <div className="line-edit-grid">
+                  {weeks.map((week, weekIndex) => (
+                    <div key={`week-${weekIndex}`} className="line-edit-week">
+                      {week.days.map((cell, dayIndex) =>
+                        cell ? (
+                          <span
+                            key={cell.date}
+                            className={`line-edit-cell level-${cell.level}`}
+                            title={`${cell.count.toLocaleString()} ${unit} on ${cell.date}`}
+                          />
+                        ) : (
+                          <span key={`empty-${weekIndex}-${dayIndex}`} className="line-edit-cell empty" />
+                        )
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="line-edit-legend">
+                <span className="line-edit-legend-label">Fewer</span>
+                <span className="line-edit-cell level-0" />
+                <span className="line-edit-cell level-1" />
+                <span className="line-edit-cell level-2" />
+                <span className="line-edit-cell level-3" />
+                <span className="line-edit-cell level-4" />
+                <span className="line-edit-legend-label">More</span>
+                {peakDay > 0 && (
+                  <span className="line-edit-legend-peak">Peak day: {peakDay.toLocaleString()} {unit}</span>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="line-edit-legend">
-            <span className="line-edit-legend-label">Fewer</span>
-            <span className="line-edit-cell level-0" />
-            <span className="line-edit-cell level-1" />
-            <span className="line-edit-cell level-2" />
-            <span className="line-edit-cell level-3" />
-            <span className="line-edit-cell level-4" />
-            <span className="line-edit-legend-label">More</span>
-            {peakDay > 0 && (
-              <span className="line-edit-legend-peak">Peak day: {peakDay.toLocaleString()} {unit}</span>
+
+            {highlights.length > 0 && (
+              <dl className="activity-stats">
+                {highlights.map((item) => <Stat key={item.label} label={item.label} value={item.value} />)}
+              </dl>
             )}
-          </div>
-        </div>
-
-        <dl className="activity-stats">
-          <Stat label="Most active month" value={activeMonth ?? '—'} />
-          <Stat label="Most active day" value={activeDay ?? '—'} />
-          <Stat label="Longest streak" value={streaks.longest > 0 ? `${streaks.longest}d` : '—'} />
-          <Stat label="Current streak" value={streaks.current > 0 ? `${streaks.current}d` : '—'} />
-        </dl>
+          </>
+        )}
       </SettingsGroup>
 
-      <SettingsGroup
-        title="Token usage"
-        icon={Coins}
-        className="activity-group"
-        action={
-          <span className="activity-filters">
-            <Select
-              ariaLabel="Provider filter"
-              value={provider}
-              onChange={setProvider}
-              options={[{ value: 'all', label: 'All providers' }, ...(usage?.providers ?? []).map((item) => ({ value: item, label: item }))]}
-            />
-            <Select
-              ariaLabel="Model filter"
-              value={model}
-              onChange={setModel}
-              options={[{ value: 'all', label: 'All models' }, ...(usage?.models ?? []).map((item) => ({ value: item, label: modelLabel(resolveModelChoice({ provider: '', model: item })) }))]}
-            />
-          </span>
-        }
-      >
-        <dl className="activity-stats usage-stats">
-          <UsageCount label="Tokens in" value={hasUsage ? filteredUsage.totals.input : null} />
-          <UsageCount label="Tokens out" value={hasUsage ? filteredUsage.totals.output : null} />
-          <UsageCount label="Cached" value={hasUsage ? filteredUsage.totals.cacheRead + filteredUsage.totals.cacheWrite : null} />
-          <UsageRatio label="Cache ratio" ratio={cacheEligible > 0 ? filteredUsage.totals.cacheRatio : null} />
-        </dl>
-      </SettingsGroup>
+      {/* Shown once token usage has loaded or failed to; there is nothing to say before that. */}
+      {(usage || usageFailed) && (
+        <SettingsGroup
+          title="Token usage"
+          icon={Coins}
+          className="activity-group"
+          action={(showProviderFilter || showModelFilter) && (
+            <span className="activity-filters">
+              {showProviderFilter && (
+                <Select
+                  ariaLabel="Provider filter"
+                  value={provider}
+                  onChange={setProvider}
+                  options={[{ value: 'all', label: 'All providers' }, ...providers.map((item) => ({ value: item, label: item }))]}
+                />
+              )}
+              {showModelFilter && (
+                <Select
+                  ariaLabel="Model filter"
+                  value={model}
+                  onChange={setModel}
+                  options={[{ value: 'all', label: 'All models' }, ...models.map((item) => ({ value: item, label: modelLabel(resolveModelChoice({ provider: '', model: item })) }))]}
+                />
+              )}
+            </span>
+          )}
+        >
+          {usageGap ? (
+            <p className="settings-muted activity-empty" role="status">{usageGap}</p>
+          ) : (
+            <dl className="activity-stats usage-stats">
+              <UsageCount label="Tokens in" value={filteredUsage.totals.input} />
+              <UsageCount label="Tokens out" value={filteredUsage.totals.output} />
+              <UsageCount label="Cached" value={filteredUsage.totals.cacheRead + filteredUsage.totals.cacheWrite} />
+              {cacheEligible > 0 && <UsageRatio label="Cache ratio" ratio={filteredUsage.totals.cacheRatio} />}
+            </dl>
+          )}
+        </SettingsGroup>
+      )}
     </>
   )
 }
@@ -267,10 +307,10 @@ function formatCount(value: number): string {
 }
 
 /** Token counts have no maximum, so they get a plain figure: number on top, label under it, no bar. */
-function UsageCount({ label, value }: { label: string; value: number | null }) {
+function UsageCount({ label, value }: { label: string; value: number }) {
   return <div className="activity-stat usage-stat">
     <dt>{label}</dt>
-    <dd title={value === null ? undefined : `${value.toLocaleString()} tokens`}>{value === null ? '—' : formatCount(value)}</dd>
+    <dd title={`${value.toLocaleString()} tokens`}>{formatCount(value)}</dd>
   </div>
 }
 
@@ -279,14 +319,14 @@ const GAUGE_STROKE = 3
 const GAUGE_RADIUS = (GAUGE_SIZE - GAUGE_STROKE) / 2
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS
 
-/** A true 0–1 ratio: small ring gauge beside the figure. No ring at 0 or without data. */
-function UsageRatio({ label, ratio }: { label: string; ratio: number | null }) {
-  const percent = ratio === null ? null : Math.min(100, Math.max(0, ratio * 100))
-  const text = percent === null ? '—' : `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`
+/** A true 0–1 ratio: small ring gauge beside the figure. No ring at 0. */
+function UsageRatio({ label, ratio }: { label: string; ratio: number }) {
+  const percent = Math.min(100, Math.max(0, ratio * 100))
+  const text = `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`
   return <div className="activity-stat usage-stat usage-stat-ratio">
     <dt>{label}</dt>
     <dd>
-      {percent !== null && percent > 0 && (
+      {percent > 0 && (
         <svg className="usage-gauge" width={GAUGE_SIZE} height={GAUGE_SIZE} viewBox={`0 0 ${GAUGE_SIZE} ${GAUGE_SIZE}`} aria-hidden="true">
           <circle className="usage-gauge-track" cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={GAUGE_RADIUS} strokeWidth={GAUGE_STROKE} />
           <circle
