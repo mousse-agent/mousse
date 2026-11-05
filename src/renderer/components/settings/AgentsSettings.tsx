@@ -52,7 +52,7 @@ export function AgentsSettings({
           title="Default model"
           titleId="agents-default-model-title"
           description={hasProviders
-            ? 'New chats start with this model.'
+            ? 'New threads start with this model.'
             : 'Add a provider under Providers to choose a model.'}
           control={
             <SettingsModelPicker

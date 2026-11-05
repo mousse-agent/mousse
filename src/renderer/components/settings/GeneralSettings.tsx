@@ -185,7 +185,7 @@ export function GeneralSettings({
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"
-          description={<span title="What an agent may do in a new chat without asking. Each chat can change it from the composer.">What an agent may do without asking in new chats.</span>}
+          description={<span title="What an agent may do in a new thread without asking. Each thread can change it from the composer.">What an agent may do without asking in new threads.</span>}
           control={
             <Select
               ariaLabel="Default permission mode"

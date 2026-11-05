@@ -187,7 +187,7 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** The profile's "Start new chats in a worktree" setting: the worktree choice of a draft that has not made one. */
+  /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
   worktreeByDefault: boolean
   setWorktreeByDefault: (worktreeByDefault: boolean) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void

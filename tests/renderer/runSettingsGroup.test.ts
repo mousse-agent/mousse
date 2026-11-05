@@ -49,7 +49,7 @@ function show(initial?: Partial<MousseSettings['runs']>) {
 
 const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().runs
 const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Resume after usage limits reset"]')!
-const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new chats in a worktree"]')!
+const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new threads in a worktree"]')!
 const capTrigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Automatic resumes in a row"]')!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
 const pickCap = (label: string) => {
