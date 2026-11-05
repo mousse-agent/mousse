@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore'
 import { ipcErrorMessage } from '../utils/voiceErrors'
 import type { AudioLevels } from '../speech/audioLevels'
 import { currentSpeechPreferences, voiceFor } from '../speech/speechPreferences'
-import { disposeLocalEngine, speakWithLocalModel } from './localEngine'
+import { disposeLocalEngine, speakWithLocalModel, warmLocalEngine } from './localEngine'
 import { PauseGate, type SpeakOptions } from './playback'
 import { speakWithProvider } from './providerEngine'
 import { loadReadAloudSelection, saveReadAloudSelection } from './selection'
@@ -39,6 +39,11 @@ interface ReadAloudState {
   pending: PendingRead | null
   syncProfile: (profileId: string) => void
   toggle: (key: string, markdown: string, options?: ReadAloudOptions) => void
+  /**
+   * Loads the chosen local voice model ahead of a likely read, e.g. when the pointer reaches a Read
+   * aloud button, so the click does not wait for loading. Does nothing for provider voices.
+   */
+  warm: () => void
   stop: () => void
   /** Pauses or resumes the message that is playing. */
   togglePause: () => void
@@ -141,6 +146,12 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
         return
       }
       start(read, selection)
+    },
+
+    warm: () => {
+      get().syncProfile(useAppStore.getState().profileId)
+      const { selection } = get()
+      if (selection?.source === 'local') warmLocalEngine(selection.modelId)
     },
 
     stop: endSession,

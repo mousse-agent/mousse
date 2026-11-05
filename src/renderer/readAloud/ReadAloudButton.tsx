@@ -11,6 +11,7 @@ export function ReadAloudButton({ speechKey, markdown }: { speechKey: string; ma
   const status = useReadAloudStore((state) => (state.activeKey === speechKey ? state.status : 'idle'))
   const error = useReadAloudStore((state) => (state.error?.key === speechKey ? state.error.message : null))
   const toggle = useReadAloudStore((state) => state.toggle)
+  const warm = useReadAloudStore((state) => state.warm)
   const active = status !== 'idle'
   const label = active ? 'Stop reading' : 'Read aloud'
   const iconClass = 'w-3.5 h-3.5 text-an-foreground-muted'
@@ -24,6 +25,8 @@ export function ReadAloudButton({ speechKey, markdown }: { speechKey: string; ma
       aria-busy={status === 'loading' || undefined}
       data-read-aloud={status}
       onClick={() => toggle(speechKey, markdown)}
+      onPointerEnter={warm}
+      onFocus={warm}
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
       className={cn(
