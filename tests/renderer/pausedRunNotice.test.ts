@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PausedRunBanner, PausedRunBannerView, type PausedRunBannerViewProps } from '../../src/renderer/chat/components/PausedRunBanner'
+import { PausedRunNotice, pausedRunNotice, type PausedRunNoticeInput } from '../../src/renderer/chat/components/PausedRunNotice'
+import { ComposerNotice, ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { createPausedRunClient, type PausedRunClient } from '../../src/renderer/services/pausedRunClient'
 import type { TurnPause, TurnState } from '../../src/shared/types'
@@ -37,157 +38,139 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-const text = () => host.textContent ?? ''
-const banner = () => host.querySelector<HTMLElement>('.chat-run-paused')
+const notice = () => host.querySelector<HTMLElement>('.composer-notice')
+const line = () => host.querySelector<HTMLElement>('.composer-notice-text')
 const buttons = () => Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
-const button = (label: string) => buttons().find((entry) => entry.textContent?.startsWith(label))!
+const names = () => buttons().map((entry) => entry.getAttribute('aria-label') ?? entry.textContent)
+const button = (label: string) => buttons().find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent)?.startsWith(label))!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
+const STOP = 'Stop this thread and the subagents it started'
 
-function view(patch: Partial<PausedRunBannerViewProps> = {}) {
-  const props: PausedRunBannerViewProps = { pause: pause(), now: NOW, busy: null, error: null, onResume: vi.fn(), onCancel: vi.fn(), onStop: vi.fn(), ...patch }
-  act(() => root.render(createElement(PausedRunBannerView, props)))
-  return props
+function view(patch: Partial<PausedRunNoticeInput> = {}) {
+  const input: PausedRunNoticeInput = { pause: pause(), now: NOW, busy: null, error: null, onResume: vi.fn(), onEndPause: vi.fn(), onDismissError: vi.fn(), onStop: vi.fn(), ...patch }
+  act(() => root.render(createElement(ComposerNotice, pausedRunNotice(input))))
+  return input
 }
 
-describe('the paused run banner', () => {
-  it('a timer is armed: the reset time, the time left, the limit, and that it continues by itself', () => {
+describe('the paused run notice', () => {
+  it('one line: the reset time and the time left, the limit in the tooltip, then Resume now, End pause and Stop', () => {
     view()
-    expect(text()).toContain('Paused until')
-    expect(text()).toContain('Resets in 2h 15m')
-    expect(text()).toContain("Claude's 5-hour limit was reached. Continues by itself at reset.")
-    expect(banner()!.dataset.pausedState).toBe('waiting')
-    expect(buttons().map((entry) => entry.textContent)).toEqual(['Resume now', 'Cancel', 'Stop'])
+    expect(line()!.textContent).toMatch(/^Paused until .+ · in 2h 15m$/)
+    expect(line()!.title).toBe("Claude's 5-hour limit was reached. Continues by itself at reset.")
+    expect(notice()!.dataset.tone).toBe('warning')
+    expect(names()).toEqual(['Resume now', 'End pause', STOP])
   })
 
   it('says an estimated time is estimated', () => {
     view({ pause: pause({ estimated: true }) })
-    expect(host.querySelector('.chat-run-paused-until')!.textContent).toMatch(/^Paused until .+ \(estimated\)$/)
+    expect(line()!.textContent).toMatch(/^Paused until .+ \(estimated\) · in /)
   })
 
-  it('with no timer it says it will not continue by itself', () => {
+  it('with no timer the tooltip says it will not continue by itself', () => {
     view({ pause: pause({ autoResume: false }) })
-    expect(text()).toContain("It won't continue by itself. Press Resume now once it resets.")
+    expect(line()!.title).toContain("It won't continue by itself. Press Resume now once it resets.")
   })
 
-  it('a stale pause says it will not auto-continue, and still offers Resume now', () => {
+  it('past the reset time it shows no time left, and still offers Resume now', () => {
     view({ pause: pause({ autoResume: false, stale: true }), now: at(9, 0, 29) })
-    expect(banner()!.dataset.pausedState).toBe('stale')
-    expect(text()).toContain("won't continue by itself")
-    expect(text()).not.toContain('Resets in')
-    expect(buttons().map((entry) => entry.textContent)).toContain('Resume now')
+    expect(line()!.textContent).not.toContain(' · in ')
+    expect(line()!.title).toContain("won't continue by itself")
+    expect(names()).toContain('Resume now')
   })
 
-  it('past the reset time, an armed pause says it continues shortly', () => {
-    view({ now: at(16, 10) })
-    expect(banner()!.dataset.pausedState).toBe('due')
-    expect(text()).toContain('continues shortly')
-  })
-
-  it('Resume now, Cancel and Stop each call their own handler once', () => {
-    const props = view()
+  it('Resume now, End pause and Stop each call their own handler once', () => {
+    const input = view()
+    const calls = () => [input.onResume, input.onEndPause, input.onStop!].map((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.length)
     click(button('Resume now'))
-    expect([props.onResume, props.onCancel, props.onStop].map((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.length)).toEqual([1, 0, 0])
-    click(button('Cancel'))
-    click(button('Stop'))
-    expect([props.onResume, props.onCancel, props.onStop].map((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.length)).toEqual([1, 1, 1])
+    expect(calls()).toEqual([1, 0, 0])
+    click(button('End pause'))
+    click(button(STOP))
+    expect(calls()).toEqual([1, 1, 1])
   })
 
   it('has no Stop where the shell has none', () => {
     view({ onStop: undefined })
-    expect(buttons().map((entry) => entry.textContent)).toEqual(['Resume now', 'Cancel'])
+    expect(names()).toEqual(['Resume now', 'End pause'])
+  })
+
+  it('has no dismiss: it resolves when the run continues or the pause ends', () => {
+    view()
+    expect(names()).not.toContain('Dismiss')
   })
 
   it('while a press is in flight every button ignores presses and the pressed one says so', () => {
-    const props = view({ busy: 'resume' })
+    const input = view({ busy: 'resume' })
     expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
     for (const entry of buttons()) {
       expect(entry.getAttribute('aria-disabled')).toBe('true')
       click(entry)
     }
-    expect([props.onResume, props.onCancel, props.onStop].every((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.length === 0)).toBe(true)
+    expect([input.onResume, input.onEndPause, input.onStop!].every((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.length === 0)).toBe(true)
     view({ busy: 'cancel' })
-    expect(button('Cancelling…')).toBeDefined()
+    expect(button('Ending…')).toBeDefined()
   })
 
-  it('shows a failed press inline, as an alert', () => {
-    view({ error: 'This run is no longer paused.' })
+  it('a failed press shows as an error line that can be dismissed, with the buttons still there', () => {
+    const input = view({ error: 'This run is no longer paused.' })
+    expect(notice()!.dataset.tone).toBe('error')
     expect(host.querySelector('[role="alert"]')!.textContent).toBe('This run is no longer paused.')
+    expect(names()).toEqual(['Resume now', 'End pause', STOP, 'Dismiss'])
+    click(button('Dismiss'))
+    expect(input.onDismissError).toHaveBeenCalledTimes(1)
   })
 
-  describe('keyboard use', () => {
-    it('the buttons are plain buttons in reading order: Resume now, Cancel, Stop', () => {
-      view()
-      for (const entry of buttons()) {
-        expect(entry.tagName).toBe('BUTTON')
-        expect(entry.type).toBe('button')
-        expect(entry.tabIndex).toBeGreaterThanOrEqual(0)
-        expect(entry.disabled).toBe(false)
-      }
-      const order = Array.from(host.querySelectorAll('button')).map((entry) => entry.textContent)
-      expect(order).toEqual(['Resume now', 'Cancel', 'Stop'])
-    })
-
-    it('the banner is announced as a status group with the buttons inside it', () => {
-      view()
-      expect(banner()!.getAttribute('role')).toBe('group')
-      expect(banner()!.getAttribute('aria-label')).toBe('Run paused by a usage limit')
-      expect(host.querySelector('[role="status"]')!.textContent).toContain('Paused until')
-      expect(banner()!.contains(button('Resume now'))).toBe(true)
-    })
-
-    it('a button that goes busy keeps focus, so the next Tab continues from it', () => {
-      view()
-      button('Resume now').focus()
-      expect(document.activeElement).toBe(button('Resume now'))
-      view({ busy: 'resume' })
-      expect(document.activeElement).toBe(button('Resuming…'))
-    })
+  it('is a named group, and a button that goes busy keeps focus', () => {
+    view()
+    expect(notice()!.getAttribute('role')).toBe('group')
+    expect(notice()!.getAttribute('aria-label')).toBe('Run paused by a usage limit')
+    button('Resume now').focus()
+    view({ busy: 'resume' })
+    expect(document.activeElement).toBe(button('Resuming…'))
   })
 })
 
-describe('the banner on a thread', () => {
+describe('the notice on a thread', () => {
   const state = (patch: Partial<TurnState> = {}): TurnState => ({ threadId: 't1', turnId: 'run:1', phase: 'paused', updatedAt: new Date(NOW).toISOString(), pause: pause(), ...patch })
   const clientOf = (patch: Partial<PausedRunClient> = {}): PausedRunClient => ({ resumeNow: vi.fn(async () => undefined), cancel: vi.fn(async () => undefined), ...patch })
+  const inSlot = (child: ReactNode) => createElement(ComposerNoticeProvider, null, createElement(Fragment, null, createElement(ComposerNoticeSlot), child))
   const show = (threadId: string | null, client: PausedRunClient, onStop?: () => void) =>
-    act(() => root.render(createElement(PausedRunBanner, { threadId, client, ...(onStop ? { onStop } : {}) })))
+    act(() => root.render(inSlot(createElement(PausedRunNotice, { threadId, client, ...(onStop ? { onStop } : {}) }))))
   const setTurn = (turn: TurnState | undefined) => act(() => { useAppStore.setState({ turnStates: turn ? { [turn.threadId]: turn } : {} }) })
   const flush = () => act(async () => { await Promise.resolve() })
 
-  it('shows only for a paused thread', () => {
+  it('shows in the slot only for a paused thread', () => {
     const client = clientOf()
     setTurn(state({ phase: 'thinking', pause: undefined }))
     show('t1', client)
-    expect(banner()).toBeNull()
+    expect(notice()).toBeNull()
     setTurn(state())
-    expect(banner()).not.toBeNull()
+    expect(notice()).not.toBeNull()
     setTurn(state({ phase: 'idle', pause: undefined }))
-    expect(banner()).toBeNull()
+    expect(notice()).toBeNull()
     show(null, client)
-    expect(banner()).toBeNull()
+    expect(notice()).toBeNull()
   })
 
-  it('Resume now asks the daemon to continue that run, then waits for the turn state to change', async () => {
+  it('Resume now asks the daemon to continue that run, and a second press while it is in flight does nothing', async () => {
     const resume = vi.fn(() => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 0)))
     const client = clientOf({ resumeNow: resume })
     setTurn(state())
     show('t1', client)
     click(button('Resume now'))
     expect(resume).toHaveBeenCalledWith('run:1', 't1')
-    expect(button('Resuming…').getAttribute('aria-disabled')).toBe('true')
-    // A second press while the first is in flight does nothing.
     click(button('Resuming…'))
-    click(button('Cancel'))
+    click(button('End pause'))
     expect(resume).toHaveBeenCalledTimes(1)
     expect(client.cancel).not.toHaveBeenCalled()
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)) })
-    expect(button('Resume now').getAttribute('aria-disabled')).toBe('false')
+    expect(button('Resume now').getAttribute('aria-disabled')).toBeNull()
   })
 
-  it('Cancel asks the daemon to end the pause for that run', async () => {
+  it('End pause asks the daemon to end the pause for that run', async () => {
     const client = clientOf()
     setTurn(state({ pause: pause({ runId: 'run:9' }) }))
     show('t1', client)
-    click(button('Cancel'))
+    click(button('End pause'))
     await flush()
     expect(client.cancel).toHaveBeenCalledWith('run:9', 't1')
     expect(client.resumeNow).not.toHaveBeenCalled()
@@ -197,11 +180,11 @@ describe('the banner on a thread', () => {
     const onStop = vi.fn()
     setTurn(state())
     show('t1', clientOf(), onStop)
-    click(button('Stop'))
+    click(button(STOP))
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
-  it('a refused press (the run is no longer paused) shows inline and leaves the buttons usable', async () => {
+  it('a refused press shows as the error line, and the next press clears it', async () => {
     const refused = Object.assign(new Error('Run run:1 is not paused.'), { code: 'conflict' })
     const client = clientOf({ resumeNow: vi.fn(async () => { throw refused }) })
     setTurn(state())
@@ -209,21 +192,22 @@ describe('the banner on a thread', () => {
     click(button('Resume now'))
     await flush()
     expect(host.querySelector('[role="alert"]')!.textContent).toBe('This run is no longer paused.')
-    expect(button('Resume now').getAttribute('aria-disabled')).toBe('false')
-    // Cancel still works after the failure.
-    click(button('Cancel'))
+    click(button('End pause'))
     await flush()
     expect(client.cancel).toHaveBeenCalledWith('run:1', 't1')
     expect(host.querySelector('[role="alert"]')).toBeNull()
   })
 
-  it('another failure says what was tried', async () => {
+  it('another failure says what was tried, until dismissed', async () => {
     const client = clientOf({ cancel: vi.fn(async () => { throw new Error('Daemon unavailable') }) })
     setTurn(state())
     show('t1', client)
-    click(button('Cancel'))
+    click(button('End pause'))
     await flush()
-    expect(host.querySelector('[role="alert"]')!.textContent).toBe('Could not cancel the paused run: Daemon unavailable')
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe('Could not end the pause: Daemon unavailable')
+    click(button('Dismiss'))
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(notice()!.dataset.tone).toBe('warning')
   })
 
   it('a new pause (another run) starts without the last one\'s error', async () => {
@@ -241,9 +225,9 @@ describe('the banner on a thread', () => {
     vi.useFakeTimers({ now: NOW })
     setTurn(state())
     show('t1', clientOf())
-    expect(text()).toContain('Resets in 2h 15m')
+    expect(line()!.textContent).toContain('in 2h 15m')
     act(() => { vi.advanceTimersByTime(30 * 60_000) })
-    expect(text()).toContain('Resets in 1h 45m')
+    expect(line()!.textContent).toContain('in 1h 45m')
   })
 })
 

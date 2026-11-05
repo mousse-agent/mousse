@@ -63,6 +63,7 @@ import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -1188,6 +1189,7 @@ export function OrchestratorChat() {
               onDismiss={() => { setSendError(null); setSendChanges(null) }} />
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
+        <PausedRunNotice threadId={activeThreadId} onStop={() => void handleStop()} />
         <ComposerNoticeSource notice={connectionFailed ? {
           tone: 'error',
           title: 'Connection lost',

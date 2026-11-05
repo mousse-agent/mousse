@@ -63,7 +63,7 @@ describe('describePausedRun', () => {
     const text = describePausedRun(pause(), now)
     expect(text).toEqual({
       headline: `Paused until ${clock(at(15, 40))}`,
-      relative: 'Resets in 2h 15m',
+      timeLeft: '2h 15m',
       detail: "Claude's 5-hour limit was reached. Continues by itself at reset.",
       due: false,
       stale: false
@@ -91,7 +91,7 @@ describe('describePausedRun', () => {
     const later = at(16, 10)
     const armed = describePausedRun(pause(), later)
     expect(armed).toMatchObject({ due: true, stale: false, detail: 'Claude\'s 5-hour limit was reached. The limit should have reset, so it continues shortly.' })
-    expect(armed.relative).toBeUndefined()
+    expect(armed.timeLeft).toBeUndefined()
     const manual = describePausedRun(pause({ autoResume: false }), later)
     expect(manual).toMatchObject({ due: true, stale: false, detail: "Claude's 5-hour limit was reached. The limit should have reset. Press Resume now to continue." })
   })
@@ -100,7 +100,7 @@ describe('describePausedRun', () => {
     const text = describePausedRun(pause({ autoResume: false, stale: true }), at(9, 0, 29))
     expect(text.stale).toBe(true)
     expect(text.detail).toBe("Claude's 5-hour limit was reached. The reset passed while Mousse was off, so it won't continue by itself. Press Resume now to continue.")
-    expect(text.relative).toBeUndefined()
+    expect(text.timeLeft).toBeUndefined()
   })
 
   it('an armed timer more than a day past its reset is worded as stale before the daemon rules on it', () => {
@@ -132,7 +132,7 @@ describe('pausedActionError', () => {
 
   it('any other failure names what was tried and why', () => {
     expect(pausedActionError({ code: 'internal', message: 'Daemon unavailable\nmore' }, 'resume')).toBe('Could not continue the run: Daemon unavailable')
-    expect(pausedActionError(new Error('boom'), 'cancel')).toBe('Could not cancel the paused run: boom')
+    expect(pausedActionError(new Error('boom'), 'cancel')).toBe('Could not end the pause: boom')
     expect(pausedActionError('nope', 'stop')).toBe('Could not stop the thread. Try again.')
   })
 })

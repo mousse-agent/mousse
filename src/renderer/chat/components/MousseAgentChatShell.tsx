@@ -6,7 +6,6 @@ import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
-import { PausedRunBanner, usePausedRun } from './PausedRunBanner'
 import { WorkspaceRecoveryBanner } from './WorkspaceRecoveryBanner'
 import { SubagentCardsContext, SubagentInheritedProviderContext } from './agent-elements/tools/subagent-cards-context'
 import { useThreadProviderId } from '../../components/SubagentAvatar'
@@ -89,7 +88,6 @@ export function MousseAgentChatShell({
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
-  const paused = usePausedRun(threadId) !== undefined
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -114,7 +112,7 @@ export function MousseAgentChatShell({
           slots={slots}
           lastTurnNotice={<>
             <WorkspaceRecoveryBanner threadId={threadId} />
-            {paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <div className="chat-run-interrupted" role="status">
+            {interrupted ? <div className="chat-run-interrupted" role="status">
               <span className="chat-run-interrupted-label">
                 <X size={12} strokeWidth={1.8} aria-hidden="true" />
                 <span>Run interrupted</span>
