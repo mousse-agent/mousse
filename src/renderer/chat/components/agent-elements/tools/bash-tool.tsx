@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { IconCheck, IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
 import { TextShimmer } from "../text-shimmer";
+import { Collapse } from "../../../../components/ui/Collapse";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { cn } from "../utils/cn";
@@ -146,14 +147,11 @@ export function BashToolTerminalCard({
           </>
         )}
         <IconChevronRight
-          className={cn(
-            "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out",
-            expanded && "rotate-90",
-          )}
+          className="ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted"
+          data-open={expanded || undefined}
         />
       </button>
-      {expanded && (
-        <div className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">
+      <Collapse open={expanded} className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">
           {command && (
             <div className="max-h-[160px] overflow-y-auto break-words whitespace-pre-wrap">
               <span className="text-amber-600 dark:text-amber-400 select-none">
@@ -198,8 +196,7 @@ export function BashToolTerminalCard({
               {isInterrupted && <span>{step.bashSummary ?? "Interrupted"}</span>}
             </div>
           )}
-        </div>
-      )}
+      </Collapse>
       {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
     </div>
   );

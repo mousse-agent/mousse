@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from '../../lib/icons'
+import { Collapse } from './Collapse'
 
 export function Collapsible({ trigger, defaultOpen = false, children }: { trigger: ReactNode; defaultOpen?: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(defaultOpen)
@@ -11,7 +12,7 @@ export function Collapsible({ trigger, defaultOpen = false, children }: { trigge
         </span>
         <span className="collapsible-label">{trigger}</span>
       </button>
-      {open ? <div className="collapsible-body">{children}</div> : null}
+      <Collapse open={open} className="collapsible-body">{children}</Collapse>
     </div>
   )
 }
