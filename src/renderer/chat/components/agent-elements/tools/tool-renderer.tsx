@@ -12,6 +12,7 @@ import { McpTool, unwrapMcpOutput } from "./mcp-tool";
 import { ThinkingTool } from "./thinking-tool";
 import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
+import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
 import { QuickActionTool } from "./quick-action-tool";
 import { SubagentTool } from "./SubagentCard";
 import type { CustomToolRendererProps } from "../types";
@@ -64,6 +65,8 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <TodoTool part={part} chatStatus={chatStatus} />;
     case "tool-Question":
       return <QuestionTool part={part} chatStatus={chatStatus} />;
+    case "tool-QuestionAnswers":
+      return <AnsweredQuestionsTool part={part} />;
     case "tool-QuickAction":
       return <QuickActionTool part={part} chatStatus={chatStatus} />;
     case "tool-Subagent":
