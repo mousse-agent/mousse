@@ -53,6 +53,7 @@
         "tests/gitPanelLogic.test.ts",
         "tests/movedShortcuts.test.ts",
         "tests/platformMarkdownEditor.test.ts",
+        "tests/primaryButtonStyles.test.ts",
         "tests/ptyLiveness.test.ts",
         "tests/pullRequestPanel.test.ts",
         "tests/quickActionWorkspace.test.ts",
