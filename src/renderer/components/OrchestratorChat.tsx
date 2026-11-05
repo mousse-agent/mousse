@@ -1190,7 +1190,7 @@ export function OrchestratorChat() {
               onDismiss={() => { setSendError(null); setSendChanges(null) }} />
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
-        <PausedRunNotice threadId={activeThreadId} onStop={() => void handleStop()} />
+        <PausedRunNotice threadId={activeThreadId} />
         <ServiceLostNotice
           lost={connectionFailed}
           onReconnect={() => {
