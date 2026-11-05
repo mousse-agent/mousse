@@ -6,7 +6,7 @@ import { useToolComplete } from "../hooks/use-tool-complete";
 import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
 import { Collapse } from "../../../../components/ui/Collapse";
-import { CODE_FONT } from "../../../../lib/typography";
+import { CODE_FONT_VAR } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
@@ -258,7 +258,7 @@ export function EditToolDiffCard({
   // active theme in both modes. `colorScheme` keeps the library's
   // `light-dark()` backgrounds in sync with the shiki `themeType` tokens —
   // without it dark text lands on a dark background (unreadable).
-  // Font matches the Git tab diff (Monaco `fontFamily`).
+  // Font is the code font setting, like the Git tab diff.
   const diffCssVars = React.useMemo(
     () =>
       ({
@@ -267,7 +267,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": CODE_FONT,
+        "--diffs-font-family": CODE_FONT_VAR,
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -285,7 +285,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: ${CODE_FONT};
+  --diffs-font-family: ${CODE_FONT_VAR};
   color-scheme: ${themeType};
 }
 `,
