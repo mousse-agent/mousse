@@ -4,6 +4,9 @@ import type { ThreadSearchResult, ThreadSearchSkipped } from '../../shared/types
 import { useCommandOverlay } from '../commands/commandRegistry'
 import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
 import { ThreadComputerBadge } from './ComputerBadge'
+import { showToast } from './ui/Toast'
+import { failureLine } from '../lib/actionToast'
+import { isSessionClosing } from '../lib/errorText'
 import '../styles/thread-search.css'
 
 interface ThreadSearchDialogProps {
@@ -66,7 +69,8 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
         setSkipped(found.skipped)
         setActiveIndex(0)
       } catch (error) {
-        if (current) console.error('Thread search failed', error)
+        // Typing again searches again, so the toast needs no Retry.
+        if (current && !isSessionClosing(error)) showToast({ message: failureLine('search', error), tone: 'error' })
       } finally {
         if (current) setLoading(false)
       }

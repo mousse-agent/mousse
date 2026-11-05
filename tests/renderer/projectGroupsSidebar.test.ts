@@ -136,7 +136,7 @@ describe('the menu of a project group', () => {
         target,
         onClose: () => undefined,
         onPin: () => undefined,
-        onSettle: () => undefined,
+        onArchive: () => undefined,
         onRegenerateTitle: () => undefined,
         onRename: () => undefined,
         onRemove: () => undefined,
