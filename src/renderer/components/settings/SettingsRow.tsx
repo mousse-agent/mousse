@@ -185,12 +185,15 @@ export function Switch({
   checked,
   onChange,
   label,
+  labelledBy,
   id,
   disabled
 }: {
   checked: boolean
   onChange: (next: boolean) => void
   label?: string
+  /** Id of visible text that names the switch, when that text is richer than a plain label. */
+  labelledBy?: string
   id?: string
   disabled?: boolean
 }) {
@@ -201,6 +204,7 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-labelledby={labelledBy}
       disabled={disabled}
       className={`toggle-switch${checked ? ' on' : ''}`}
       onClick={() => onChange(!checked)}

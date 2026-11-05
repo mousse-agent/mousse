@@ -253,6 +253,26 @@
   margin: 0 0 12px;
 }
 
+.agent-field > .ui-select {
+  width: 100%;
+}
+
+/* An on/off row: text left, the shared switch right. */
+.agent-switch-row {
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  min-height: 28px;
+}
+
+.agent-switch-row > label {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.agent-switch-row .toggle-switch {
+  flex-shrink: 0;
+}
+
 .agent-validation a {
   color: var(--ad-accent);
 }

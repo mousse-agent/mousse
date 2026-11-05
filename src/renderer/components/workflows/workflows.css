@@ -296,7 +296,8 @@
 .wf-details > summary { cursor: pointer; font-weight: 500; }
 .wf-details[open] > summary { margin-bottom: 14px; }
 .wf-inspector h2 { margin: 2px 0 12px; font-size: 14px; font-weight: 600; }
-.wf-field > input, .wf-field > select, .wf-field > textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.wf-field > input, .wf-field > select, .wf-field > textarea, .wf-field > .ui-select { width: 100%; min-width: 0; box-sizing: border-box; }
+.wf-inline > .ui-select { width: auto; flex: 0 1 160px; }
 .wf-field textarea { resize: vertical; }
 .wf-root .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
 .wf-root .btn svg { flex-shrink: 0; }

@@ -9,7 +9,10 @@ import { isLibraryFiltered, uniqueLibraryRuntimes, EMPTY_LIBRARY_QUERY } from '.
 import { ArchiveDefinitionDialog } from '../../src/renderer/components/automations/EditorParts'
 import { RefreshToolsButton } from '../../src/renderer/components/automations/LibraryParts'
 import { definitionSaveState, fixIssuesLabel, publishBlockReason, SAVE_STATE_LABELS } from '../../src/renderer/components/automations/editorState'
+import type { WorkflowNode } from '../../src/shared/workflows'
 import { WorkflowEditor } from '../../src/renderer/components/workflows/WorkflowEditor'
+import { WorkflowInspector } from '../../src/renderer/components/workflows/WorkflowInspector'
+import { createBlankWorkflowBundle } from '../../src/renderer/components/workflows/templates'
 import { WorkflowLibrary } from '../../src/renderer/components/workflows/WorkflowLibrary'
 import type { WorkflowDefinitionsClient, WorkflowLeaveGuard, WorkflowLibraryItem } from '../../src/renderer/components/workflows/client'
 import { uniqueWorkflowStatuses } from '../../src/renderer/components/workflows/libraryFilter'
@@ -385,5 +388,87 @@ describe('workflow editor archive', () => {
     expect(onBack).toHaveBeenCalledTimes(1)
     expect(await guard!('navigate')).toBe(true)
     expect(button('Discard changes')).toBeUndefined()
+  })
+})
+
+/** The themed select named `name`, by its labelling text or its aria-label. */
+const combo = (name: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="combobox"]')].find((item) =>
+  item.getAttribute('aria-label') === name ||
+  document.getElementById(item.getAttribute('aria-labelledby') ?? '')?.textContent === name)
+const pick = async (name: string, option: string) => {
+  await act(async () => combo(name)!.click())
+  const item = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === option)!
+  await act(async () => item.click())
+}
+
+describe('editor controls', () => {
+  it('the agent settings use the shared select and switch; choices save as before and mark the draft unsaved', async () => {
+    const client = new IsolatedAgentDefinitionsClient()
+    const created = await client.create({ profileId: 'p', settings: { identity: { name: 'Helper', slug: 'helper', purpose: '', tags: [] } } })
+    const saveDraft = vi.spyOn(client, 'saveDraft')
+    await act(async () => root.render(createElement(AgentEditor, { profileId: 'p', definitionId: created.id, client, catalogs, onBack: vi.fn() })))
+    await flush()
+    const editor = document.querySelector('[data-agent-editor]')!
+    expect(editor.querySelectorAll('select')).toHaveLength(0)
+    expect(editor.querySelectorAll('input[type="checkbox"]')).toHaveLength(0)
+
+    await pick('Remember', 'Off')
+    expect(combo('Remember')!.getAttribute('data-value')).toBe('off')
+    expect(document.querySelector('[data-editor-status]')?.textContent).toBe('Unsaved edits')
+    // An unavailable choice stays visible but cannot be picked.
+    await act(async () => combo('Where they run')!.click())
+    const sandboxed = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === 'Sandboxed (unavailable)')!
+    expect(sandboxed.getAttribute('aria-disabled')).toBe('true')
+    await act(async () => sandboxed.click())
+    expect(combo('Where they run')!.getAttribute('data-value')).toBe('workspace')
+
+    // A switch is named by its row text, and the text toggles it too.
+    const thread = document.querySelector<HTMLButtonElement>('#include-thread')!
+    expect(thread.getAttribute('role')).toBe('switch')
+    expect(document.getElementById(thread.getAttribute('aria-labelledby')!)?.textContent).toBe('Current thread')
+    const before = thread.getAttribute('aria-checked')
+    await act(async () => document.querySelector<HTMLLabelElement>('label[for="include-thread"]')!.click())
+    expect(thread.getAttribute('aria-checked')).toBe(before === 'true' ? 'false' : 'true')
+
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click())
+    await flush()
+    const saved = saveDraft.mock.calls[0][0]
+    expect(saved.settings?.memory.scope).toBe('off')
+    expect(saved.settings?.script.executionMode).toBe('workspace')
+    expect(saved.settings?.context.includeCurrentThread).toBe(before !== 'true')
+  })
+
+  it('the workflow inspector uses the shared select, keeps disabled choices and is read-only for a published revision', async () => {
+    const manifest = createBlankWorkflowBundle('Nightly').manifest
+    const node = { id: 'step', type: 'load-skill', config: { skill: { id: 'gone', revision: '1' } } } as unknown as WorkflowNode
+    const onChangeNode = vi.fn()
+    const render = (readOnly: boolean) => root.render(createElement(WorkflowInspector, {
+      profileId: 'p',
+      manifest,
+      node,
+      readOnly,
+      catalogs: {
+        skills: [{ id: 'gone', name: 'Gone', revision: '1', available: false }, { id: 'docs', name: 'Docs', revision: '7', available: true }],
+        mcpServers: [],
+        builtinTools: [],
+        subworkflows: [],
+        browserWorkspaces: [],
+        models: []
+      },
+      instructions: '',
+      onChangeNode,
+      onChangeManifest: vi.fn(),
+      onChangeInstructions: vi.fn()
+    }))
+    await act(async () => render(false))
+    const inspector = document.querySelector('[data-inspector]')!
+    expect(inspector.querySelectorAll('select')).toHaveLength(0)
+    // The saved choice still shows even though it is no longer available.
+    expect(combo('Skill')!.textContent).toBe('Gone (missing)')
+    await pick('Skill', 'Docs')
+    expect(onChangeNode).toHaveBeenLastCalledWith(expect.objectContaining({ config: { skill: { id: 'docs', revision: '7' } } }))
+    await act(async () => render(true))
+    expect(combo('Skill')!.disabled).toBe(true)
+    expect(combo('Effect')!.disabled).toBe(true)
   })
 })
