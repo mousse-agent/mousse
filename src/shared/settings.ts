@@ -54,6 +54,8 @@ export interface AppearanceSettings {
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
   codeFont: FontChoice
+  /** Tint each thread in the Threads tab with its project's color. */
+  threadProjectColors: boolean
 }
 
 export interface NotificationSettings {
@@ -578,7 +580,8 @@ export function getDefaultSettings(): MousseSettings {
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
-      codeFont: { ...DEFAULT_FONT_CHOICE }
+      codeFont: { ...DEFAULT_FONT_CHOICE },
+      threadProjectColors: true
     },
     notifications: {
       threadCompletionSound: true,
@@ -696,7 +699,9 @@ export function normalizeAppearance(
     ),
     renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
-    codeFont: normalizeFontChoice(raw.codeFont)
+    codeFont: normalizeFontChoice(raw.codeFont),
+    threadProjectColors:
+      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors
   }
 }
 

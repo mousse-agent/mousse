@@ -205,6 +205,17 @@ export function GeneralSettings({
             />
           }
         />
+        <SettingsRow
+          title="Project colors on threads"
+          description="Tint threads with their project's color."
+          control={
+            <Switch
+              label="Project colors on threads"
+              checked={appearance.threadProjectColors}
+              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
+            />
+          }
+        />
       </SettingsGroup>
 
       <SettingsGroup title="Permissions" icon={ShieldCheck}>

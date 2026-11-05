@@ -36,6 +36,12 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ renderMath: 'no' as never }).renderMath).toBe(true)
   })
 
+  it('tints threads with project colors by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.threadProjectColors).toBe(true)
+    expect(normalizeAppearance({}).threadProjectColors).toBe(true)
+    expect(normalizeAppearance({ threadProjectColors: false }).threadProjectColors).toBe(false)
+  })
+
   it('migrates legacy acrylic theme ids', () => {
     expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toEqual({
       theme: 'system',
@@ -44,7 +50,8 @@ describe('appearance settings', () => {
       acrylicIntensity: 55,
       renderMath: true,
       interfaceFont: { source: 'default' },
-      codeFont: { source: 'default' }
+      codeFont: { source: 'default' },
+      threadProjectColors: true
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',
