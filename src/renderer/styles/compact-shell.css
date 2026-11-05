@@ -155,11 +155,10 @@ html:not(.platform-darwin) .app {
 .app .threads-sidebar-section-feed {
   flex: 1 0 auto;
 }
+/* The footer is the one scroll container for these; a height cap of their own would clip their rows. */
 .app .threads-sidebar-section-settled,
 .app .threads-sidebar-bottom-recent {
   flex: 0 0 auto;
   margin-top: 0;
   padding-top: 8px;
-  max-height: 40%;
-  overflow-y: auto;
 }

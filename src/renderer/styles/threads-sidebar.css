@@ -136,9 +136,7 @@
 }
 
 .threads-sidebar-tab-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
   white-space: nowrap;
 }
 
@@ -980,15 +978,18 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 .threads-sidebar-device-detail { font-size: 11px; }
 
-/* Too narrow for three labels: the tabs keep their icons, and their names stay in the tooltips. */
-@container threads-sidebar (max-width: 250px) {
+/* Too narrow for three whole labels (the default 260px included): the tabs keep their icons, and their names
+   stay in the tooltips. A label is shown whole or not at all. */
+@container threads-sidebar (max-width: 319px) {
   .threads-sidebar-tab-label { display: none; }
 }
 
-/* Under the lists: "No project" and "Archived". An open one scrolls on its own and leaves the lists room. */
+/* Under the lists: "No project" and "Archived". The footer is their one scroll container: it takes what its
+   open sections need up to 45vh, and the lists above give up the room. */
 .threads-sidebar-footer {
-  flex-shrink: 0;
-  max-height: 45%;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45vh;
   overflow-y: auto;
 }
 
