@@ -19,6 +19,7 @@ import {
   getWindowShortcuts,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
+import { registerFontIpc } from './fonts/registerFontIpc'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceSurfaceBase } from '../shared/themeSurfaces'
@@ -328,6 +329,7 @@ function startGuiApp(): void {
       browserMms.setAttachedBrowserHost(attachedBrowserHost)
 
       if (!ipcRegistered) {
+        registerFontIpc()
         registerGuiIpc(
           {
             guiMms,

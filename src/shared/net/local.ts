@@ -173,6 +173,11 @@ export interface PlusConfiguration {
 export interface PlusStatus {
   configured: boolean
   connected: boolean
+  /**
+   * Still signed in, but the short relay registration lapsed (after sleep or time offline) and the
+   * daemon is renewing it. Only a computer Mousse ID refused, with this unset, needs a new sign-in.
+   */
+  reconnecting?: boolean
   accountId?: string
   /** Display-only, from the sign-in grant when Mousse ID sends it. */
   email?: string
