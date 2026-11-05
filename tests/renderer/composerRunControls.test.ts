@@ -2,8 +2,10 @@
 import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
+import * as icons from '../../src/renderer/lib/icons'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { LlmModelOption } from '../../src/shared/settings'
@@ -341,6 +343,21 @@ describe('composer model picker', () => {
     expect(document.activeElement!.textContent).toBe('Fast')
     key(document.activeElement!, 'ArrowLeft')
     expect(document.activeElement!.textContent).toBe('Standard')
+  })
+
+  it('draws Auto-accept edits as a file with a tick, in the chip and the menu, not the pencil', () => {
+    render({ mode: 'accept_edits', open: false })
+    const paths = (svg: Element | null) => [...(svg?.querySelectorAll('path') ?? [])].map((path) => path.getAttribute('d')).join('|')
+    const markup = (Icon: typeof icons.Pencil) => {
+      const box = document.createElement('div')
+      box.innerHTML = renderToStaticMarkup(createElement(Icon))
+      return paths(box.querySelector('svg'))
+    }
+    expect(paths(permissionButton().querySelector('svg'))).toBe(markup(icons.FileApproved))
+    expect(markup(icons.FileApproved)).not.toBe(markup(icons.Pencil))
+    openPermissions()
+    const row = modes().find((mode) => modeName(mode) === 'Auto-accept edits')!
+    expect(paths(row.querySelector('svg.composer-permission-mode-icon'))).toBe(markup(icons.FileApproved))
   })
 
   it('shows the mode as a chip left of the model button, opens the modes in one click, and closes on Escape back to the chip', () => {
