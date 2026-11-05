@@ -81,6 +81,14 @@ describe('answers to the agent\'s questions', () => {
     expect(opened).toContain('Which output formats should it write?')
     expect(opened).toContain('CSV')
     expect(opened).toContain('“JSON later.”')
+    // The opened list is indented with no rule on its edge, and the questions use the app's secondary text colour
+    // (set for light and dark themes, dimmer than the answers), not a faded or faint shade.
+    const list = rowOf()!.querySelector<HTMLElement>('.an-answered-questions-list')!
+    expect(list.className).not.toMatch(/\bborder-l\b/)
+    expect(list.className).toMatch(/\bpl-/)
+    const prompt = list.querySelector<HTMLElement>('dt')!
+    expect(prompt.classList).toContain('text-[color:var(--text-secondary)]')
+    expect(prompt.className).not.toMatch(/an-foreground-muted|an-foreground-subtle/)
   })
 
   it('show one question as the question and its answer', () => {

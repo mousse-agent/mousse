@@ -57,10 +57,10 @@ export const AnsweredQuestionsTool = memo(function AnsweredQuestionsTool({
         isAnimating={false}
         expandable
       >
-        <dl className="an-answered-questions-list flex flex-col gap-2.5 ml-1.5 border-l border-an-border-color pl-3 py-0.5 text-[14px] leading-[20px]">
+        <dl className="an-answered-questions-list flex flex-col gap-2.5 pl-[18px] py-0.5 text-[14px] leading-[20px]">
           {questions.map((question, index) => (
             <div key={index} className="flex flex-col gap-0.5 min-w-0">
-              <dt className="text-an-foreground-muted/60 whitespace-pre-wrap break-words">{question.prompt}</dt>
+              <dt className="text-[color:var(--text-secondary)] whitespace-pre-wrap break-words">{question.prompt}</dt>
               {question.chosen.length > 0 && (
                 <dd className="text-foreground break-words">{question.chosen.join(", ")}</dd>
               )}
