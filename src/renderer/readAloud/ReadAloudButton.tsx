@@ -18,7 +18,6 @@ export function ReadAloudButton({ speechKey, markdown }: { speechKey: string; ma
   return (
     <button
       type="button"
-      tabIndex={-1}
       title={error ?? (status === 'loading' ? 'Loading voice, click to stop' : label)}
       aria-label={label}
       aria-busy={status === 'loading' || undefined}
