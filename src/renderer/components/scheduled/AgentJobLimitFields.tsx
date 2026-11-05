@@ -32,8 +32,9 @@ interface Props {
 }
 
 /**
- * The limits on jobs agents create, beside "Agents may create jobs" and visible whether it is on or off. A value is
- * saved when the field is left or Enter is pressed; one that is not a whole number in range is refused with the range.
+ * The limits on jobs agents create: rows under "Agents may create jobs" in the Scheduled settings, shown whether it is
+ * on or off. A value is saved when the field is left or Enter is pressed; one that is not a whole number in range is
+ * refused with the range.
  */
 export function AgentJobLimitFields({ settings, save }: Props) {
   const idPrefix = useId()
@@ -69,38 +70,42 @@ export function AgentJobLimitFields({ settings, save }: Props) {
         const id = `${idPrefix}-${key}`
         const invalid = problem?.key === key
         return (
-          <label key={key} className="scheduled-agent-toggle scheduled-agent-limit" htmlFor={id} title={`${help} Whole number from ${min} to ${max}.`}>
-            <input
-              id={id}
-              type="number"
-              className="scheduled-input"
-              min={min}
-              max={max}
-              step={1}
-              inputMode="numeric"
-              value={drafts[key] ?? (settings ? String(settings[setting]) : '')}
-              disabled={settings === null}
-              aria-invalid={invalid || undefined}
-              aria-describedby={invalid ? `${id}-problem` : undefined}
-              onChange={(event) => {
-                const typed = event.currentTarget.value
-                setDrafts((previous) => ({ ...previous, [key]: typed }))
-                if (invalid) setProblem(null)
-              }}
-              onBlur={() => commit(key)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commit(key)
-              }}
-            />
-            {label}
-          </label>
+          <div key={key} className="settings-item scheduled-agent-limit" title={`${help} Whole number from ${min} to ${max}.`}>
+            <div className="settings-item-text">
+              <label className="settings-item-title" htmlFor={id}>{label}</label>
+              {invalid && problem ? (
+                <p id={`${id}-problem`} className="scheduled-field-error" role="alert">
+                  {problem.text}
+                </p>
+              ) : null}
+            </div>
+            <div className="settings-item-control">
+              <input
+                id={id}
+                type="number"
+                className="settings-input narrow"
+                min={min}
+                max={max}
+                step={1}
+                inputMode="numeric"
+                value={drafts[key] ?? (settings ? String(settings[setting]) : '')}
+                disabled={settings === null}
+                aria-invalid={invalid || undefined}
+                aria-describedby={invalid ? `${id}-problem` : undefined}
+                onChange={(event) => {
+                  const typed = event.currentTarget.value
+                  setDrafts((previous) => ({ ...previous, [key]: typed }))
+                  if (invalid) setProblem(null)
+                }}
+                onBlur={() => commit(key)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commit(key)
+                }}
+              />
+            </div>
+          </div>
         )
       })}
-      {problem ? (
-        <p id={`${idPrefix}-${problem.key}-problem`} className="scheduled-field-error scheduled-agent-limit-error" role="alert">
-          {problem.text}
-        </p>
-      ) : null}
     </>
   )
 }

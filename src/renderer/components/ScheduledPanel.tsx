@@ -2,12 +2,10 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type Keyboard
 import {
   MessageSquare,
   Pause,
-  Pencil,
   Play,
   Plus,
   RefreshCw,
-  Trash2,
-  Webhook,
+  X,
   Zap
 } from '../lib/icons'
 import { normalizePermissionMode } from '../../shared/permissionMode'
@@ -16,6 +14,9 @@ import { AGENT_JOB_LIMIT_DEFAULTS } from '../../shared/agentJobLimits'
 import type { ScheduledJob, ScheduledJobRunRecord, ScheduledSettings, ScheduledSettingsUpdate, SchedulerStatus } from '../../shared/types'
 import { AgentJobLimitFields } from './scheduled/AgentJobLimitFields'
 import { JobEditor } from './scheduled/JobEditor'
+import { RowMenu } from './integrations/RowMenu'
+import { SettingsAdvanced, Switch } from './settings/SettingsRow'
+import { Modal } from './ui/Modal'
 import {
   createInputOf,
   draftFromJob,
@@ -32,18 +33,27 @@ import {
   describeMode,
   describeModel,
   describePermission,
+  describeRunProgress,
   describeSchedule,
   describeWorkspace,
   errorText,
+  formatWhen,
   RUN_STATUS_LABEL
 } from './scheduled/scheduledLabels'
 import { WebhookDialog, type WebhookApi } from './scheduled/WebhookDialog'
 import { openThread } from '../lib/openThread'
 import '../styles/scheduled-panel.css'
 
-function formatWhen(iso: string | null | undefined): string {
-  if (!iso) return 'none'
-  return new Date(iso).toLocaleString()
+/** Which record was newest when Run now was pressed: a different newest one is that run's. */
+function newestRecordKey(job: ScheduledJob): string | null {
+  const last = job.runHistory?.[job.runHistory.length - 1]
+  return last ? `${last.runAt}|${last.runId ?? ''}|${job.runHistory!.length}` : null
+}
+
+/** A Run now press being followed: the status line under the toolbar reads from the job as it updates. */
+interface RunWatch {
+  jobId: string
+  before: string | null
 }
 
 function stateLabel(job: ScheduledJob): string {
@@ -103,6 +113,12 @@ export function ScheduledPanel() {
   /** What "Extend" gives a job: the lifetime of jobs agents create (the default until the profile has answered). */
   const extendDays = settings?.agentJobLifetimeDays ?? AGENT_JOB_LIMIT_DEFAULTS.lifetimeDays
   const [actionError, setActionError] = useState<string | null>(null)
+  /** The scheduler could not be asked how it is: shown as unavailable rather than as stopped. */
+  const [unavailable, setUnavailable] = useState(false)
+  const [runWatch, setRunWatch] = useState<RunWatch | null>(null)
+  const [deleting, setDeleting] = useState<ScheduledJob | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const newButton = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const webhookApi = useMemo(browserWebhookApi, [])
@@ -131,12 +147,17 @@ export function ScheduledPanel() {
   }, [])
 
   const refresh = useCallback(async () => {
-    const [nextJobs, nextStatus] = await Promise.all([
-      window.mousse.scheduled.list(),
-      window.mousse.scheduled.status()
-    ])
-    setJobs(nextJobs)
-    setStatus(nextStatus)
+    try {
+      const [nextJobs, nextStatus] = await Promise.all([
+        window.mousse.scheduled.list(),
+        window.mousse.scheduled.status()
+      ])
+      setJobs(nextJobs)
+      setStatus(nextStatus)
+      setUnavailable(false)
+    } catch {
+      setUnavailable(true)
+    }
   }, [])
 
   useEffect(() => {
@@ -193,11 +214,66 @@ export function ScheduledPanel() {
     void loadCatalog()
   }
 
+  /** The row's "…" button, where Edit, Webhook and Delete live: focus goes back there when they finish. */
+  const moreButton = (jobId: string) => `[data-job-id="${jobId}"] .row-menu-btn`
+
   const closeEditor = (jobId?: string) => {
     setCreating(false)
     setEditing(null)
-    if (jobId) focusLater(`[data-edit-job="${jobId}"]`)
+    if (jobId) focusLater(moreButton(jobId))
     else newButton.current?.focus()
+  }
+
+  const runNow = async (job: ScheduledJob) => {
+    setActionError(null)
+    setRunWatch({ jobId: job.id, before: newestRecordKey(job) })
+    try {
+      await window.mousse.scheduled.run(job.id)
+    } catch (cause) {
+      setRunWatch(null)
+      setActionError(errorText(cause))
+      return
+    }
+    // The job's own update normally arrives first; asking again covers a missed one.
+    void refresh()
+  }
+
+  const askDelete = (job: ScheduledJob) => {
+    setDeleteError(null)
+    setDeleting(job)
+  }
+
+  const cancelDelete = () => {
+    if (deleteBusy || !deleting) return
+    const jobId = deleting.id
+    setDeleting(null)
+    focusLater(moreButton(jobId))
+  }
+
+  const confirmDelete = async () => {
+    if (!deleting) return
+    const jobId = deleting.id
+    // Focus moves on to the row below, else the row above, else New job.
+    const order = sortedJobs.map((item) => item.id)
+    const index = order.indexOf(jobId)
+    const neighbour = order[index + 1] ?? order[index - 1]
+    setDeleteBusy(true)
+    setDeleteError(null)
+    try {
+      await window.mousse.scheduled.delete(jobId)
+    } catch (cause) {
+      setDeleteError(errorText(cause))
+      setDeleteBusy(false)
+      return
+    }
+    setDeleteBusy(false)
+    setDeleting(null)
+    if (selectedId === jobId) setSelectedId(null)
+    if (runWatch?.jobId === jobId) setRunWatch(null)
+    setJobs((current) => current.filter((item) => item.id !== jobId))
+    if (neighbour) focusLater(`[data-job-id="${neighbour}"] [data-row-button]`)
+    else requestAnimationFrame(() => newButton.current?.focus())
+    void refresh()
   }
 
   const moveBetweenRows = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -214,15 +290,33 @@ export function ScheduledPanel() {
   const nameOfThread = (threadId: string) => catalog.threads.find((thread) => thread.id === threadId)?.name
   const nameOfProject = (projectId: string) => catalog.projects.find((project) => project.id === projectId)?.name
 
+  const schedulerState = unavailable ? 'unavailable' : status === null ? 'loading' : status.running ? 'running' : 'stopped'
+  const watchedJob = runWatch ? jobs.find((item) => item.id === runWatch.jobId) : undefined
+  const watchedRecord = watchedJob && newestRecordKey(watchedJob) !== runWatch?.before ? watchedJob.runHistory?.[watchedJob.runHistory.length - 1] : undefined
+  const runProgress = watchedJob ? describeRunProgress(watchedJob.name, watchedRecord, watchedJob.liveStatus) : null
+  const watchedThreadId = watchedJob ? (watchedRecord?.threadId ?? (watchedJob.liveStatus ? runThreadId(watchedJob) : undefined)) : undefined
+
   return (
     <div className="scheduled-panel">
       <div className="scheduled-toolbar">
         <div className="scheduled-stats">
-          <span className="scheduled-stat">
-            <span className={`scheduled-dot${status?.running ? ' on' : ''}`} />
-            {status?.running ? 'Running' : 'Stopped'}
-          </span>
-          {status ? (
+          {schedulerState === 'loading' ? null : (
+            <span
+              className={`scheduled-stat${schedulerState === 'running' ? '' : ' warn'}`}
+              data-testid="scheduler-state"
+              title={
+                schedulerState === 'stopped'
+                  ? 'Jobs do not run while the scheduler is stopped. Refresh to check again.'
+                  : schedulerState === 'unavailable'
+                    ? 'The scheduler did not answer. Refresh to try again.'
+                    : undefined
+              }
+            >
+              <span className={`scheduled-dot ${schedulerState === 'running' ? 'on' : 'warn'}`} />
+              {schedulerState === 'running' ? 'Running' : schedulerState === 'unavailable' ? 'Unavailable' : 'Stopped'}
+            </span>
+          )}
+          {status && !unavailable ? (
             <>
               <span className="scheduled-stat-sep" />
               <span className="scheduled-stat">{status.jobCount} jobs</span>
@@ -232,24 +326,6 @@ export function ScheduledPanel() {
           ) : null}
         </div>
         <div className="scheduled-toolbar-actions">
-          <label
-            className="scheduled-agent-toggle"
-            htmlFor={agentToggleId}
-            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after the lifetime set here unless you extend them, and are paused when you turn this off (you resume them)."
-          >
-            <input
-              id={agentToggleId}
-              type="checkbox"
-              checked={agentJobs === true}
-              disabled={agentJobs === null}
-              onChange={(event) => {
-                const next = event.currentTarget.checked
-                void saveSettings({ agentJobs: next })
-              }}
-            />
-            Agents may create jobs
-          </label>
-          <AgentJobLimitFields settings={settings} save={saveSettings} />
           <button
             type="button"
             className="scheduled-icon-btn"
@@ -272,7 +348,44 @@ export function ScheduledPanel() {
         </div>
       </div>
 
+      <div className="scheduled-settings">
+        <SettingsAdvanced label={`Jobs agents create · ${agentJobs === true ? 'On' : agentJobs === false ? 'Off' : '…'}`}>
+          <div
+            className="settings-item"
+            title="Lets agents create, change, pause and run their own scheduled jobs through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Jobs agents create run no wider than that agent, end after the lifetime set here unless you extend them, and are paused when you turn this off (you resume them)."
+          >
+            <div className="settings-item-text">
+              <label className="settings-item-title" htmlFor={agentToggleId}>Agents may create jobs</label>
+            </div>
+            <div className="settings-item-control">
+              <Switch
+                id={agentToggleId}
+                checked={agentJobs === true}
+                disabled={agentJobs === null}
+                onChange={(next) => void saveSettings({ agentJobs: next })}
+              />
+            </div>
+          </div>
+          <AgentJobLimitFields settings={settings} save={saveSettings} />
+        </SettingsAdvanced>
+      </div>
+
       {actionError ? <p className="scheduled-action-error" role="alert">{actionError}</p> : null}
+      <div className="scheduled-run-status" role="status" aria-live="polite">
+        {runProgress && watchedJob ? (
+          <>
+            <span className={runProgress.failed ? 'settings-status-bad' : undefined} data-testid="run-progress">{runProgress.text}</span>
+            {watchedThreadId ? (
+              <button type="button" className="scheduled-link-btn" onClick={() => void openThread(watchedThreadId)}>
+                Open thread
+              </button>
+            ) : null}
+            <button type="button" className="settings-icon-btn scheduled-run-status-close" title="Dismiss" aria-label="Dismiss" onClick={() => setRunWatch(null)}>
+              <X size={14} />
+            </button>
+          </>
+        ) : null}
+      </div>
 
       {creating ? (
         <JobEditor
@@ -334,34 +447,38 @@ export function ScheduledPanel() {
                       {stateLabel(job)}
                     </span>
                   </div>
-                  <p className="scheduled-item-prompt">{job.prompt}</p>
-                  <div className="scheduled-item-meta" aria-label="Job settings">
-                    <span>{describeSchedule(job.schedule)}</span>
-                    <span data-meta="model">{describeModel(job.selection)}</span>
-                    <span data-meta="mode">{describeMode(job.mode)}</span>
-                    {job.permissionMode ? <span data-meta="permission">{describePermission(job.permissionMode)}</span> : null}
-                    {workspace ? <span data-meta="workspace">{workspace}</span> : null}
-                    {project ? <span data-meta="project">{project}</span> : null}
-                    {thread ? <span data-meta="thread">Thread: {thread}</span> : null}
-                    {job.trigger?.webhook ? <span data-meta="webhook">Webhook</span> : null}
-                    {job.createdBy ? <span data-meta="agent">Created by an agent</span> : null}
-                    {job.expiresAt ? (
-                      <span data-meta="expires">
-                        {job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() ? 'Ended' : 'Ends'} {formatWhen(job.expiresAt)}{' '}
-                        <button type="button" className="scheduled-link-btn" onClick={() => void act(() => window.mousse.scheduled.extend(job.id))}>
-                          {`Extend ${extendDays} ${extendDays === 1 ? 'day' : 'days'}`}
-                        </button>
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="scheduled-item-meta">
-                    <span>Next {formatWhen(job.nextRunAt)}</span>
-                    <span>Last {formatWhen(job.lastRunAt)}</span>
-                    {job.lastStatus && <span>{describeLastStatus(job.lastStatus)}</span>}
+                  <div className="scheduled-item-meta" data-meta="summary">
+                    <span data-meta="schedule">{describeSchedule(job.schedule)}</span>
+                    {job.nextRunAt ? <span data-meta="next">Next {formatWhen(job.nextRunAt)}</span> : null}
+                    {job.lastStatus ? <span data-meta="last" className={job.lastStatus === 'error' ? 'settings-status-bad' : undefined}>Last: {describeLastStatus(job.lastStatus)}</span> : null}
                   </div>
                   {job.state === 'paused' && job.pausedReason ? <p className="scheduled-item-note" data-meta="paused-reason">Paused: {job.pausedReason}</p> : null}
                   {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
-                  {selected ? <RunHistory id={`${detailsId}-${job.id}`} job={job} /> : null}
+                  {selected ? (
+                    <div className="scheduled-item-details" id={`${detailsId}-${job.id}`}>
+                      <p className="scheduled-item-prompt">{job.prompt}</p>
+                      <div className="scheduled-item-meta" aria-label="Job settings">
+                        <span data-meta="model">{describeModel(job.selection)}</span>
+                        <span data-meta="mode">{describeMode(job.mode)}</span>
+                        {job.permissionMode ? <span data-meta="permission">{describePermission(job.permissionMode)}</span> : null}
+                        {workspace ? <span data-meta="workspace">{workspace}</span> : null}
+                        {project ? <span data-meta="project">{project}</span> : null}
+                        {thread ? <span data-meta="thread">Thread: {thread}</span> : null}
+                        {job.trigger?.webhook ? <span data-meta="webhook">Webhook</span> : null}
+                        {job.createdBy ? <span data-meta="agent">Created by an agent</span> : null}
+                        {job.lastRunAt ? <span data-meta="last-run">Last run {formatWhen(job.lastRunAt)}</span> : null}
+                        {job.expiresAt ? (
+                          <span data-meta="expires">
+                            {job.state === 'completed' && new Date(job.expiresAt).getTime() <= Date.now() ? 'Ended' : 'Ends'} {formatWhen(job.expiresAt)}{' '}
+                            <button type="button" className="scheduled-link-btn" onClick={() => void act(() => window.mousse.scheduled.extend(job.id))}>
+                              {`Extend ${extendDays} ${extendDays === 1 ? 'day' : 'days'}`}
+                            </button>
+                          </span>
+                        ) : null}
+                      </div>
+                      <RunHistory job={job} />
+                    </div>
+                  ) : null}
                 </div>
                 <div className="scheduled-item-actions">
                   {runThreadId(job) ? (
@@ -378,29 +495,9 @@ export function ScheduledPanel() {
                   <button
                     type="button"
                     className="scheduled-icon-btn"
-                    title="Edit"
-                    aria-label={`Edit ${job.name}`}
-                    data-edit-job={job.id}
-                    onClick={() => startEdit(job)}
-                  >
-                    <Pencil size={14} strokeWidth={2} />
-                  </button>
-                  <button
-                    type="button"
-                    className="scheduled-icon-btn"
-                    title="Webhook"
-                    aria-label={`Webhook for ${job.name}`}
-                    data-webhook-job={job.id}
-                    onClick={() => setWebhookJobId(job.id)}
-                  >
-                    <Webhook size={14} strokeWidth={2} />
-                  </button>
-                  <button
-                    type="button"
-                    className="scheduled-icon-btn"
                     title="Run now"
                     aria-label={`Run ${job.name} now`}
-                    onClick={() => void act(() => window.mousse.scheduled.run(job.id))}
+                    onClick={() => void runNow(job)}
                   >
                     <Zap size={14} strokeWidth={2} />
                   </button>
@@ -425,15 +522,14 @@ export function ScheduledPanel() {
                       <Pause size={14} strokeWidth={2} />
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="scheduled-icon-btn danger"
-                    title="Delete"
-                    aria-label={`Delete ${job.name}`}
-                    onClick={() => void act(() => window.mousse.scheduled.delete(job.id))}
-                  >
-                    <Trash2 size={14} strokeWidth={2} />
-                  </button>
+                  <RowMenu
+                    label={`More actions for ${job.name}`}
+                    items={[
+                      { label: 'Edit', onSelect: () => startEdit(job) },
+                      { label: 'Webhook', onSelect: () => setWebhookJobId(job.id) },
+                      { label: 'Delete', danger: true, onSelect: () => askDelete(job) }
+                    ]}
+                  />
                 </div>
               </div>
             )
@@ -447,18 +543,38 @@ export function ScheduledPanel() {
           api={webhookApi}
           onClose={() => {
             setWebhookJobId(null)
-            focusLater(`[data-webhook-job="${webhookJob.id}"]`)
+            focusLater(moreButton(webhookJob.id))
           }}
         />
+      ) : null}
+
+      {deleting ? (
+        <Modal
+          open
+          title={`Delete “${deleting.name}”?`}
+          onClose={cancelDelete}
+          closeDisabled={deleteBusy}
+          footer={
+            <>
+              <button type="button" className="settings-btn" disabled={deleteBusy} onClick={cancelDelete}>Cancel</button>
+              <button type="button" className="settings-btn danger" data-testid="delete-job-confirm" disabled={deleteBusy} onClick={() => void confirmDelete()}>
+                Delete
+              </button>
+            </>
+          }
+        >
+          <p className="scheduled-note">Its run history is deleted too; the threads it ran in stay.</p>
+          {deleteError ? <p className="scheduled-item-error" role="alert">{deleteError}</p> : null}
+        </Modal>
       ) : null}
     </div>
   )
 }
 
-function RunHistory({ id, job }: { id: string; job: ScheduledJob }) {
+function RunHistory({ job }: { job: ScheduledJob }) {
   const records: ScheduledJobRunRecord[] = [...(job.runHistory ?? [])].reverse().slice(0, HISTORY_ROWS)
   return (
-    <section className="scheduled-history" id={id} aria-label={`Run history for ${job.name}`}>
+    <section className="scheduled-history" aria-label={`Run history for ${job.name}`}>
       {records.length === 0 ? (
         <p className="scheduled-empty">No runs yet.</p>
       ) : (

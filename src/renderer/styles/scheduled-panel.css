@@ -93,25 +93,53 @@
   justify-content: flex-end;
 }
 
-.scheduled-agent-toggle {
-  display: inline-flex;
+.scheduled-stat.warn {
+  color: #facc15;
+}
+
+/* The one settings disclosure on the page: what agents may do with jobs. Rows come from settings.css. */
+.scheduled-settings {
+  padding: 4px 18px 0;
+  flex-shrink: 0;
+}
+
+.scheduled-settings .settings-advanced-body {
+  padding-bottom: 8px;
+}
+
+.scheduled-agent-limit .settings-input {
+  width: 72px;
+}
+
+/* Run now's line: what the run is doing, then a link to its thread. Takes no room while empty. */
+.scheduled-run-status {
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
+  padding: 8px 18px;
   font-size: 12.5px;
   color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.scheduled-agent-limit .scheduled-input {
-  width: 64px;
-  padding: 3px 6px;
-  font-size: 12.5px;
+.scheduled-run-status:empty {
+  padding: 0;
 }
 
-.scheduled-agent-limit-error {
-  flex-basis: 100%;
-  text-align: right;
+.scheduled-run-status-close {
+  margin-left: auto;
+}
+
+.scheduled-select {
+  width: 100%;
+}
+
+.scheduled-select.narrow {
+  max-width: 240px;
+}
+
+.scheduled-item-details {
+  margin-top: 8px;
 }
 
 .scheduled-link-btn {
@@ -129,10 +157,6 @@
   outline-offset: 2px;
 }
 
-.scheduled-agent-toggle input {
-  margin: 0;
-  cursor: inherit;
-}
 
 .scheduled-dot {
   width: 7px;
@@ -145,6 +169,11 @@
 
 .scheduled-dot.on {
   background: #4ade80;
+  opacity: 1;
+}
+
+.scheduled-dot.warn {
+  background: #facc15;
   opacity: 1;
 }
 

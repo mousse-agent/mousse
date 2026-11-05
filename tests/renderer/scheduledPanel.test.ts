@@ -12,14 +12,17 @@ import { MODE_NOTE, WORKFLOW_PERMISSION_NOTE } from '../../src/renderer/componen
 import {
   createInputOf,
   draftFromJob,
+  draftPreset,
   heldPermissionMode,
   modelGroups,
   newDraft,
   patchOf,
   permissionChoices,
+  presetFields,
   validateDraft,
   type ScheduledCatalog
 } from '../../src/renderer/components/scheduled/jobDraft'
+import { describeSchedule, presetOf } from '../../src/renderer/components/scheduled/scheduledLabels'
 import { SECRET_VISIBLE_MS } from '../../src/renderer/components/scheduled/WebhookDialog'
 
 const openThread = vi.hoisted(() => vi.fn(async (_threadId: string) => undefined))
@@ -158,9 +161,31 @@ const setValue = async (element: HTMLInputElement | HTMLSelectElement | HTMLText
     element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }))
   })
 }
+/** The options a shared Select offers: it lists them only while open, so this opens and closes it. */
+const optionsOf = async (label: string) => {
+  const trigger = control<HTMLButtonElement>(label)
+  await click(trigger)
+  const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((option) => ({
+    text: option.querySelector('.ui-select-option-label')?.textContent ?? '',
+    disabled: option.getAttribute('aria-disabled') === 'true'
+  }))
+  await click(trigger)
+  return options
+}
 const choose = async (label: string, optionText: string) => {
-  const select = control<HTMLSelectElement>(label)
-  await setValue(select, must([...select.options].find((option) => option.textContent === optionText), `option ${optionText}`).value)
+  await click(control<HTMLButtonElement>(label))
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.querySelector('.ui-select-option-label')?.textContent === optionText)
+  await click(must(option, `option ${optionText}`))
+}
+/** Edit, Webhook and Delete live in the row's "…" menu. */
+const menuAction = async (jobName: string, action: 'Edit' | 'Webhook' | 'Delete') => {
+  await click(button(`More actions for ${jobName}`))
+  await click(must([...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === action), `${action} in the menu`))
+}
+const expandRow = async (id: string) => {
+  const row = must(document.querySelector<HTMLElement>(`[data-job-id="${id}"]`), id)
+  if (row.getAttribute('data-selected') !== 'true') await click(row.querySelector<HTMLElement>('[data-row-button]'))
+  return row
 }
 const key = async (element: Element, name: string, init: KeyboardEventInit = {}) => {
   await act(async () => { element.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true, ...init })) })
@@ -169,7 +194,7 @@ const frame = async () => { await act(async () => { await new Promise((resolve) 
 const alerts = () => [...document.querySelectorAll('[role="alert"]')].map((item) => item.textContent ?? '')
 
 async function openEdit(item = job()): Promise<void> {
-  await click(button(`Edit ${item.name}`))
+  await menuAction(item.name, 'Edit')
 }
 async function save(): Promise<void> {
   await click(button('Save'))
@@ -242,7 +267,7 @@ describe('Scheduled page: editing a job saves only what changed', () => {
     const stale = { instanceId: 'gone:one', llmProvider: 'gone', model: 'retired' }
     const h = await mount([job({ selection: stale })])
     await openEdit()
-    expect(control<HTMLSelectElement>('Model').selectedOptions[0].textContent).toBe('Retired (not available now)')
+    expect(control('Model').textContent).toBe('Retired (not available now)')
     await setValue(control('Name'), 'Still nightly')
     await save()
     expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { name: 'Still nightly' })
@@ -298,14 +323,14 @@ describe('Scheduled page: validation', () => {
   it('offers only modes the job may use: no plan with a new worktree, no new worktree with plan', async () => {
     await mount([PROJECT_JOB()])
     await openEdit()
-    const modes = () => [...control<HTMLSelectElement>('Mode').options].map((option) => option.textContent)
-    const workspaces = () => [...control<HTMLSelectElement>('Workspace').options].map((option) => option.textContent)
-    expect(modes()).toEqual(['Default', 'Agent', 'Plan (no changes)'])
+    const modes = async () => (await optionsOf('Mode')).map((option) => option.text)
+    const workspaces = async () => (await optionsOf('Workspace')).map((option) => option.text)
+    expect(await modes()).toEqual(['Default', 'Agent', 'Plan (no changes)'])
     await choose('Workspace', 'New worktree per run (recommended)')
-    expect(modes()).toEqual(['Default', 'Agent'])
+    expect(await modes()).toEqual(['Default', 'Agent'])
     await choose('Workspace', 'Project checkout')
     await choose('Mode', 'Plan (no changes)')
-    expect(workspaces()).toEqual(['Project checkout', 'Existing worktree'])
+    expect(await workspaces()).toEqual(['Project checkout', 'Existing worktree'])
   })
 
   it('shows what the profile refuses, in words, and keeps the form open for another try', async () => {
@@ -339,7 +364,7 @@ describe('Scheduled page: validation', () => {
     expect([...document.querySelectorAll('label')].some((item) => item.textContent === 'Workspace')).toBe(false)
     expect(document.body.textContent).toContain("The run uses the thread's own workspace.")
     // The subagent thread is not offered; a thread of another project is not offered for this project.
-    expect([...control<HTMLSelectElement>('Target thread').options].map((option) => option.textContent)).toEqual(['A new thread for each run', 'Release thread'])
+    expect((await optionsOf('Target thread')).map((option) => option.text)).toEqual(['A new thread for each run', 'Release thread'])
   })
 })
 
@@ -353,6 +378,7 @@ describe('Scheduled page: creating a job', () => {
     await choose('Mode', 'Agent')
     await choose('Project', 'Mousse')
     await choose('Workspace', 'New worktree per run (recommended)')
+    await choose('Schedule', 'Custom')
     await click(button('Manual'))
     await click(button('Create'))
     expect(h.api.scheduled.create).toHaveBeenCalledWith({
@@ -391,6 +417,72 @@ describe('Scheduled page: creating a job', () => {
   })
 })
 
+describe('Scheduled page: schedule presets', () => {
+  const summary = () => document.querySelector('[data-testid="schedule-summary"]')?.textContent
+  const createWith = async (preset: string) => {
+    const h = await mount([])
+    await click(button('New job'))
+    await setValue(control('Prompt'), 'Check CI')
+    await choose('Schedule', preset)
+    await click(button('Create'))
+    return (h.api.scheduled.create.mock.calls[0][0] as { schedule: unknown }).schedule
+  }
+
+  it('a new job starts on Hourly with a plain summary and no custom fields', async () => {
+    await mount([])
+    await click(button('New job'))
+    expect(control('Schedule').textContent).toBe('Hourly')
+    expect(summary()).toBe('Every 60 minutes.')
+    expect(document.querySelector('[role="radiogroup"]')).toBeNull()
+    expect((await optionsOf('Schedule')).map((option) => option.text)).toEqual(['Hourly', 'Daily at 09:00', 'Weekdays at 09:00', 'Custom'])
+  })
+
+  it.each([
+    ['Hourly', { kind: 'interval', minutes: 60 }],
+    ['Daily at 09:00', { kind: 'cron', expr: '0 9 * * *' }],
+    ['Weekdays at 09:00', { kind: 'cron', expr: '0 9 * * 1-5' }]
+  ])('%s saves as the scheduler\'s own schedule', async (preset, schedule) => {
+    expect(await createWith(preset)).toEqual(schedule)
+  })
+
+  it('states the clock a daily preset reads, and never predicts a time before saving', async () => {
+    await mount([])
+    await click(button('New job'))
+    await choose('Schedule', 'Weekdays at 09:00')
+    expect(summary()).toBe("Monday to Friday at 09:00, this computer's time.")
+    expect(document.querySelector('form')?.textContent).not.toMatch(/Next /)
+  })
+
+  it('opens a saved preset job on its preset, and saving without a change sends nothing', async () => {
+    const item = job({ schedule: { kind: 'cron', expr: '0 9 * * 1-5' } })
+    const h = await mount([item])
+    await openEdit(item)
+    expect(control('Schedule').textContent).toBe('Weekdays at 09:00')
+    await save()
+    expect(h.api.scheduled.update).not.toHaveBeenCalled()
+  })
+
+  it('Custom opens on what the preset saves, ready to change, and stays Custom', async () => {
+    const item = job({ schedule: { kind: 'cron', expr: '0 9 * * *' } })
+    const h = await mount([item])
+    await openEdit(item)
+    await choose('Schedule', 'Custom')
+    expect(control<HTMLInputElement>('Cron expression').value).toBe('0 9 * * *')
+    expect(control('Schedule').textContent).toBe('Custom')
+    await setValue(control('Cron expression'), '30 7 * * *')
+    await save()
+    expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { schedule: { kind: 'cron', expr: '30 7 * * *' } })
+  })
+
+  it('a job on any other schedule opens on Custom with its own fields', async () => {
+    await mount([job()])
+    await openEdit()
+    expect(control('Schedule').textContent).toBe('Custom')
+    expect(control<HTMLInputElement>('Minutes between runs').value).toBe('30')
+    expect(summary()).toBeUndefined()
+  })
+})
+
 describe('Scheduled page: rows and history', () => {
   const record = (patch: Partial<NonNullable<ScheduledJob['runHistory']>[number]>) => ({ runAt: '2026-10-27T09:00:00.000Z', status: 'ok' as const, ...patch })
 
@@ -416,7 +508,32 @@ describe('Scheduled page: rows and history', () => {
     expect(must(document.querySelector('[data-job-id="job-3"]'), 'idle').querySelector('button[title="Open the run\'s thread"]')).toBeNull()
   })
 
-  it('shows the model, mode, workspace, target, webhook and a queued run on the row', async () => {
+  it('a row reads at a glance: name, state, schedule, next run and latest result; the prompt waits in the details', async () => {
+    await mount([job({ lastStatus: 'error', lastRunAt: '2026-10-27T09:00:00.000Z', schedule: { kind: 'cron', expr: '0 9 * * 1-5' } })])
+    const row = must(document.querySelector<HTMLElement>('[data-job-id="job-1"]'), 'row')
+    expect(row.querySelector('.scheduled-item-title')?.textContent).toBe('Nightly')
+    expect(row.querySelector('.scheduled-status')?.textContent).toBe('Scheduled')
+    expect(row.querySelector('[data-meta="schedule"]')?.textContent).toBe('Weekdays at 09:00')
+    expect(row.querySelector('[data-meta="next"]')?.textContent).toMatch(/^Next /)
+    expect(row.querySelector('[data-meta="last"]')?.textContent).toBe('Last: Failed')
+    expect(row.textContent).not.toContain('Check CI')
+    expect(row.querySelector('[data-meta="model"]')).toBeNull()
+    await expandRow('job-1')
+    expect(row.querySelector('.scheduled-item-prompt')?.textContent).toBe('Check CI')
+    expect(row.querySelector('[data-meta="model"]')?.textContent).toBe('Default model')
+    expect(row.querySelector('[data-meta="last-run"]')?.textContent).toMatch(/^Last run /)
+  })
+
+  it('keeps Run now and Pause on the row, and puts Edit, Webhook and Delete under "…"', async () => {
+    await mount([job()])
+    const row = must(document.querySelector<HTMLElement>('[data-job-id="job-1"]'), 'row')
+    const labels = [...row.querySelectorAll('button')].map((item) => item.getAttribute('aria-label')).filter(Boolean)
+    expect(labels).toEqual(['Run Nightly now', 'Pause Nightly', 'More actions for Nightly'])
+    await click(button('More actions for Nightly'))
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Edit', 'Webhook', 'Delete'])
+  })
+
+  it('shows the model, mode, workspace, target, webhook and a queued run in the details', async () => {
     await mount([
       job({
         projectId: 'p1',
@@ -428,14 +545,14 @@ describe('Scheduled page: rows and history', () => {
       }),
       job({ id: 'job-2', name: 'Bound', threadId: 't1', projectId: 'p1', nextRunAt: null, schedule: { kind: 'manual' } })
     ])
-    const row = must(document.querySelector('[data-job-id="job-1"]'), 'row')
+    const row = await expandRow('job-1')
     expect(row.querySelector('[data-meta="model"]')?.textContent).toBe('sonnet')
     expect(row.querySelector('[data-meta="mode"]')?.textContent).toBe('Plan')
     expect(row.querySelector('[data-meta="workspace"]')?.textContent).toBe('New worktree per run')
     expect(row.querySelector('[data-meta="project"]')?.textContent).toBe('Mousse')
     expect(row.querySelector('[data-meta="webhook"]')).not.toBeNull()
     expect(row.querySelector('.scheduled-status')?.textContent).toBe('Queued')
-    const bound = must(document.querySelector('[data-job-id="job-2"]'), 'bound row')
+    const bound = await expandRow('job-2')
     expect(bound.textContent).toContain('Thread: Release thread')
     expect(bound.textContent).toContain("The thread's own workspace")
     expect(bound.textContent).toContain('Manual')
@@ -489,6 +606,114 @@ describe('Scheduled page: rows and history', () => {
     h.api.scheduled.run.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:run': Error: Job is already running: Nightly"))
     await click(button('Run Nightly now'))
     expect(alerts()).toEqual(['Job is already running: Nightly'])
+    expect(document.querySelector('[data-testid="run-progress"]')).toBeNull()
+  })
+})
+
+describe('Scheduled page: Run now says what happened', () => {
+  const progress = () => document.querySelector('[data-testid="run-progress"]')?.textContent
+  const earlier = { runAt: '2026-10-27T08:00:00.000Z', status: 'ok' as const, threadId: 't-old' }
+
+  it('announces the start, the run as it works, and its result, with a link to the run\'s thread', async () => {
+    const h = await mount([job({ runHistory: [earlier] })])
+    await click(button('Run Nightly now'))
+    expect(h.api.scheduled.run).toHaveBeenCalledWith('job-1')
+    // The earlier record is not this run's result.
+    expect(progress()).toBe('Starting Nightly.')
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('Starting Nightly.')
+    expect(button('Open thread')).toBeUndefined()
+    await h.emit([job({ runHistory: [earlier], liveStatus: 'running', liveThreadId: 't-run' })])
+    expect(progress()).toBe('Nightly is running.')
+    await click(button('Open thread'))
+    expect(openThread).toHaveBeenLastCalledWith('t-run')
+    await h.emit([job({ runHistory: [earlier, { runAt: '2026-10-27T10:01:00.000Z', status: 'error', error: 'Provider refused', threadId: 't-run' }] })])
+    expect(progress()).toBe('Nightly failed: Provider refused')
+    expect(document.querySelector('[data-testid="run-progress"]')?.className).toContain('settings-status-bad')
+    await click(button('Dismiss'))
+    expect(progress()).toBeUndefined()
+  })
+
+  it('says when the run finished', async () => {
+    const h = await mount([job()])
+    await click(button('Run Nightly now'))
+    await h.emit([job({ runHistory: [{ runAt: '2026-10-27T10:01:00.000Z', status: 'ok', threadId: 't-run' }] })])
+    expect(progress()).toBe('Nightly finished.')
+    expect(button('Open thread')).toBeDefined()
+  })
+})
+
+describe('Scheduled page: deleting a job asks first', () => {
+  const two = () => [job({ id: 'a', name: 'Alpha', nextRunAt: '2026-10-27T11:00:00.000Z' }), job({ id: 'b', name: 'Bravo', nextRunAt: '2026-10-27T12:00:00.000Z' })]
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]')
+
+  it('names the job; Escape keeps it and returns focus to its "…" button', async () => {
+    const h = await mount(two())
+    await menuAction('Alpha', 'Delete')
+    expect(dialog()?.textContent).toContain('Delete “Alpha”?')
+    // Focus starts on the dialog, never on the destructive button.
+    expect(document.activeElement).not.toBe(document.querySelector('[data-testid="delete-job-confirm"]'))
+    await key(document, 'Escape')
+    expect(dialog()).toBeNull()
+    expect(h.api.scheduled.delete).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-job-id="a"]')).not.toBeNull()
+    await frame()
+    expect(document.activeElement).toBe(button('More actions for Alpha'))
+  })
+
+  it('Cancel keeps the job too', async () => {
+    const h = await mount(two())
+    await menuAction('Bravo', 'Delete')
+    await click(button('Cancel'))
+    expect(dialog()).toBeNull()
+    expect(h.api.scheduled.delete).not.toHaveBeenCalled()
+  })
+
+  it('deletes after the confirming button and moves focus to the next row', async () => {
+    const h = await mount(two())
+    h.api.scheduled.delete.mockImplementation(async () => { h.state.jobs = h.state.jobs.filter((item) => item.id !== 'a'); return true })
+    await menuAction('Alpha', 'Delete')
+    await click(document.querySelector<HTMLElement>('[data-testid="delete-job-confirm"]'))
+    expect(h.api.scheduled.delete).toHaveBeenCalledWith('a')
+    expect(dialog()).toBeNull()
+    expect(document.querySelector('[data-job-id="a"]')).toBeNull()
+    await frame()
+    expect(document.activeElement).toBe(document.querySelector('[data-job-id="b"] [data-row-button]'))
+  })
+
+  it('moves focus to New job when the last job is deleted', async () => {
+    const h = await mount([job()])
+    h.api.scheduled.delete.mockImplementation(async () => { h.state.jobs = []; return true })
+    await menuAction('Nightly', 'Delete')
+    await click(document.querySelector<HTMLElement>('[data-testid="delete-job-confirm"]'))
+    await frame()
+    expect(document.activeElement).toBe(button('New job'))
+  })
+
+  it('keeps the dialog open with the reason when deleting is refused', async () => {
+    const h = await mount([job()])
+    h.api.scheduled.delete.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:delete': Error: The scheduler is shutting down"))
+    await menuAction('Nightly', 'Delete')
+    await click(document.querySelector<HTMLElement>('[data-testid="delete-job-confirm"]'))
+    expect(dialog()).not.toBeNull()
+    expect(alerts()).toEqual(['The scheduler is shutting down'])
+    expect(document.querySelector('[data-job-id="job-1"]')).not.toBeNull()
+  })
+})
+
+describe('Scheduled page: scheduler state', () => {
+  it('says Stopped in the warning colour, with Refresh to check again', async () => {
+    const h = await mount([job()])
+    h.api.scheduled.status.mockResolvedValue({ running: false, lastHeartbeatAt: null, lastSuccessAt: null, lastTickError: null, activeJobId: null, activeJobIds: [], jobCount: 1, dueCount: 0 })
+    await click(button('Refresh'))
+    const state = must(document.querySelector<HTMLElement>('[data-testid="scheduler-state"]'), 'state')
+    expect(state.textContent).toBe('Stopped')
+    expect(state.className).toContain('warn')
+    expect(state.title).toContain('Refresh')
+    h.api.scheduled.status.mockRejectedValueOnce(new Error('no answer'))
+    await click(button('Refresh'))
+    expect(document.querySelector('[data-testid="scheduler-state"]')?.textContent).toBe('Unavailable')
+    await click(button('Refresh'))
+    expect(document.querySelector('[data-testid="scheduler-state"]')?.textContent).toBe('Stopped')
   })
 })
 
@@ -499,7 +724,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
   it('shows the secret after enabling with a copy button, then never again', async () => {
     const h = await mount([job()])
     h.api.scheduled.webhook.enable.mockImplementation(async () => { h.emitNow([hooked()]); return grant(SECRET) })
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     expect(document.body.textContent).toContain('Enable webhook')
     expect(h.api.scheduled.webhook.deliveries).not.toHaveBeenCalled()
     await click(button('Enable webhook'))
@@ -516,7 +741,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
     expect(document.body.textContent).not.toContain(SECRET)
 
     // Opening it again shows the address and the log but not the secret; nothing can ask for it.
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     expect(document.body.textContent).not.toContain(SECRET)
     expect(document.querySelector('[data-testid="webhook-secret"]')).toBeNull()
     expect(document.querySelector('[data-testid="webhook-secret-hidden"]')?.textContent).toContain('not shown again')
@@ -526,7 +751,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
   it('shows the secret even when the answer arrives before the job update', async () => {
     const h = await mount([job()])
     h.api.scheduled.webhook.enable.mockResolvedValue(grant(SECRET))
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     await click(button('Enable webhook'))
     expect(document.querySelector('[data-testid="webhook-secret"]')?.textContent).toBe(SECRET)
     await h.emit([hooked()])
@@ -536,11 +761,11 @@ describe('Scheduled page: the webhook secret is shown once', () => {
   it('drops the secret when the dialog is closed with Escape or the close button', async () => {
     const h = await mount([job()])
     h.api.scheduled.webhook.enable.mockImplementation(async () => { h.emitNow([hooked()]); return grant(SECRET) })
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     await click(button('Enable webhook'))
     await key(document, 'Escape')
     expect(document.body.textContent).not.toContain(SECRET)
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     expect(document.body.textContent).not.toContain(SECRET)
     await click(button('Close'))
     expect(document.querySelector('[data-testid="webhook-dialog"]')).toBeNull()
@@ -551,7 +776,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
     const h = await mount([hooked()])
     const NEW_SECRET = 'whsec_NEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEWNEW1'
     h.api.scheduled.webhook.rotate.mockResolvedValue(grant(NEW_SECRET))
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     expect(document.querySelector('[data-testid="webhook-secret"]')).toBeNull()
     await click(button('Rotate secret'))
     expect(document.querySelector('[data-testid="webhook-secret"]')?.textContent).toBe(NEW_SECRET)
@@ -565,7 +790,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const h = await mount([hooked()])
     h.api.scheduled.webhook.rotate.mockResolvedValue(grant(SECRET))
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     await click(button('Rotate secret'))
     expect(document.body.textContent).toContain(SECRET)
     await act(async () => { vi.advanceTimersByTime(SECRET_VISIBLE_MS - 1) })
@@ -579,7 +804,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
     const h = await mount([hooked()])
     h.api.scheduled.webhook.rotate.mockResolvedValue(grant(SECRET))
     h.clipboard.writeText.mockRejectedValueOnce(new Error('denied'))
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     await click(button('Rotate secret'))
     await click(button('Copy secret'))
     expect(alerts()).toEqual(['Copying failed. Select the text and copy it by hand.'])
@@ -591,11 +816,11 @@ describe('Scheduled page: the webhook secret is shown once', () => {
       job({ schedule: { kind: 'once', runAt: '2030-01-01T00:00:00.000Z' } }),
       job({ id: 'job-2', name: 'Agent job', createdBy: { threadId: 't1' } })
     ])
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     expect(button('Enable webhook')?.disabled).toBe(true)
     expect(document.body.textContent).toContain('Change its schedule to Manual first.')
     await key(document, 'Escape')
-    await click(button('Webhook for Agent job'))
+    await menuAction('Agent job', 'Webhook')
     expect(button('Enable webhook')?.disabled).toBe(true)
     expect(document.body.textContent).toContain('Agent-created jobs cannot have a webhook.')
   })
@@ -603,7 +828,7 @@ describe('Scheduled page: the webhook secret is shown once', () => {
   it('shows a refusal from enabling, and a listener that did not start', async () => {
     const h = await mount([job()])
     h.api.scheduled.webhook.enable.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:webhook:enable': Error: Webhooks are not available in this profile."))
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     await click(button('Enable webhook'))
     expect(alerts()).toEqual(['Webhooks are not available in this profile.'])
     h.api.scheduled.webhook.enable.mockImplementation(async () => { h.emitNow([hooked()]); return { ...grant(SECRET), listening: false, error: 'The webhook listener could not start on port 18790.' } })
@@ -619,7 +844,7 @@ describe('Scheduled page: disabling a webhook needs a confirmation', () => {
   async function openWebhook(): Promise<Harness> {
     const h = await mount([hooked()])
     h.api.scheduled.webhook.disable.mockImplementation(async () => { h.emitNow([job()]); return job() })
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     return h
   }
   const dialogs = () => document.querySelectorAll('[role="dialog"]')
@@ -675,7 +900,7 @@ describe('Scheduled page: recent requests', () => {
   async function openLog(deliveries: ScheduledWebhookDelivery[]): Promise<Harness> {
     const h = await mount([job({ trigger: webhookTrigger })])
     h.api.scheduled.webhook.deliveries.mockResolvedValue({ deliveries, url: URL_OF('job-1') })
-    await click(button('Webhook for Nightly'))
+    await menuAction('Nightly', 'Webhook')
     return h
   }
   const items = () => [...document.querySelectorAll<HTMLElement>('.scheduled-request')]
@@ -768,26 +993,24 @@ describe('Scheduled page: keyboard', () => {
 
   it('every control is a labelled button a person can tab to', async () => {
     await mount(three())
-    const unlabeled = buttons().filter((item) => !(item.textContent?.trim() || item.getAttribute('aria-label') || item.title))
+    const unlabeled = buttons().filter((item) => !(item.textContent?.trim() || item.getAttribute('aria-label') || item.title || item.labels.length > 0))
     expect(unlabeled).toEqual([])
     const row = must(document.querySelector('[data-job-id="a"]'), 'row')
-    for (const name of ['Edit Alpha', 'Webhook for Alpha', 'Run Alpha now', 'Pause Alpha', 'Delete Alpha']) {
+    for (const name of ['Run Alpha now', 'Pause Alpha', 'More actions for Alpha']) {
       const item = must(button(name), name)
       expect(row.contains(item)).toBe(true)
       expect(item.tabIndex).toBe(0)
     }
   })
 
-  it('Escape cancels an edit and focus returns to that row\'s Edit button', async () => {
+  it('Escape cancels an edit and focus returns to that row\'s "…" button', async () => {
     await mount(three())
-    const edit = must(button('Edit Bravo'), 'edit')
-    edit.focus()
-    await click(edit)
+    await menuAction('Bravo', 'Edit')
     expect(document.activeElement).toBe(control('Name'))
     await key(control('Name'), 'Escape')
     expect(document.querySelector('form')).toBeNull()
     await frame()
-    expect(document.activeElement).toBe(button('Edit Bravo'))
+    expect(document.activeElement).toBe(button('More actions for Bravo'))
   })
 
   it('Escape cancels a new job and focus returns to New job', async () => {
@@ -814,13 +1037,11 @@ describe('Scheduled page: keyboard', () => {
     expect(checked()).toBe('Every…')
   })
 
-  it('the webhook dialog takes focus on open, keeps Tab inside, closes with Escape and returns focus to its button', async () => {
+  it('the webhook dialog takes focus on open, keeps Tab inside, closes with Escape and returns focus to the row\'s "…" button', async () => {
     // jsdom lays nothing out, so every control would count as hidden to the dialog's focus handling.
     vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
     await mount([job({ trigger: webhookTrigger })])
-    const opener = must(button('Webhook for Nightly'), 'webhook button')
-    opener.focus()
-    await click(opener)
+    await menuAction('Nightly', 'Webhook')
     const dialog = must(document.querySelector<HTMLElement>('[role="dialog"]'), 'dialog')
     expect(dialog.contains(document.activeElement)).toBe(true)
     const last = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled])')].pop()!
@@ -831,22 +1052,34 @@ describe('Scheduled page: keyboard', () => {
     await key(document, 'Escape')
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     await frame()
-    expect(document.activeElement).toBe(button('Webhook for Nightly'))
+    expect(document.activeElement).toBe(button('More actions for Nightly'))
   })
 })
 
 describe('Scheduled page: jobs agents create', () => {
-  const agentsToggle = () => control<HTMLInputElement>('Agents may create jobs')
+  const agentsToggle = () => control<HTMLButtonElement>('Agents may create jobs')
+  const isOn = () => agentsToggle().getAttribute('aria-checked') === 'true'
 
-  it('shows "Agents may create jobs" off by default and saves the choice', async () => {
+  it('keeps the setting and its limits in one disclosure that says whether it is on', async () => {
+    await mount([])
+    const disclosure = must(agentsToggle().closest('details'), 'disclosure')
+    expect(disclosure.open).toBe(false)
+    expect(disclosure.querySelector('summary')?.textContent).toBe('Jobs agents create · Off')
+    for (const label of ['Max active jobs', 'Min interval (minutes)', 'Lifetime (days)']) expect(disclosure.contains(control(label))).toBe(true)
+    expect(document.querySelector('.scheduled-toolbar')?.contains(agentsToggle())).toBe(false)
+  })
+
+  it('shows "Agents may create jobs" off by default as a switch, and saves the choice', async () => {
     const h = await mount([])
-    expect(agentsToggle().checked).toBe(false)
+    expect(agentsToggle().getAttribute('role')).toBe('switch')
+    expect(isOn()).toBe(false)
     await click(agentsToggle())
     expect(h.api.scheduled.settings.set).toHaveBeenCalledWith({ agentJobs: true })
-    expect(agentsToggle().checked).toBe(true)
+    expect(isOn()).toBe(true)
+    expect(agentsToggle().closest('details')?.querySelector('summary')?.textContent).toBe('Jobs agents create · On')
     await click(agentsToggle())
     expect(h.api.scheduled.settings.set).toHaveBeenLastCalledWith({ agentJobs: false })
-    expect(agentsToggle().checked).toBe(false)
+    expect(isOn()).toBe(false)
   })
 
   it('shows the setting as the profile has it, and says why when the choice is refused', async () => {
@@ -855,23 +1088,23 @@ describe('Scheduled page: jobs agents create', () => {
     h.api.scheduled.settings.set.mockRejectedValueOnce(new Error("Error invoking remote method 'scheduled:settings:set': Error: Not saved"))
     await click(agentsToggle())
     expect(alerts().join(' ')).toContain('Not saved')
-    expect(agentsToggle().checked).toBe(false)
+    expect(isOn()).toBe(false)
   })
 
   describe('the limits on jobs agents create', () => {
     const limit = (label: string) => control<HTMLInputElement>(label)
     const blur = async (element: HTMLElement) => { await act(async () => { element.dispatchEvent(new FocusEvent('focusout', { bubbles: true })) }) }
 
-    it('shows the three limits beside the toggle, whether it is on or off, with their values', async () => {
+    it('shows the three limits under the switch, whether it is on or off, with their values', async () => {
       await mount([])
-      expect(agentsToggle().checked).toBe(false)
+      expect(isOn()).toBe(false)
       expect(limit('Max active jobs').value).toBe('10')
       expect(limit('Min interval (minutes)').value).toBe('15')
       expect(limit('Lifetime (days)').value).toBe('7')
       await click(agentsToggle())
       expect(limit('Max active jobs').value).toBe('10')
-      expect(limit('Max active jobs').closest('label')?.title).toMatch(/never pauses or deletes a job that exists/)
-      expect(limit('Lifetime (days)').closest('label')?.title).toMatch(/does not change/)
+      expect(limit('Max active jobs').closest<HTMLElement>('.settings-item')?.title).toMatch(/never pauses or deletes a job that exists/)
+      expect(limit('Lifetime (days)').closest<HTMLElement>('.settings-item')?.title).toMatch(/does not change/)
     })
 
     it('saves a value when the field is left, and only that one', async () => {
@@ -905,6 +1138,7 @@ describe('Scheduled page: jobs agents create', () => {
     it('says "Extend N days" with the lifetime that is set', async () => {
       const future = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString()
       const h = await mount([job({ id: 'job-agent', name: 'Agent made', createdBy: { threadId: 't1' }, expiresAt: future })])
+      await expandRow('job-agent')
       const extendLabel = () => [...document.querySelectorAll('button')].map((item) => item.textContent).find((text) => text?.startsWith('Extend'))
       expect(extendLabel()).toBe('Extend 7 days')
       await setValue(limit('Lifetime (days)'), '30')
@@ -922,10 +1156,13 @@ describe('Scheduled page: jobs agents create', () => {
       job({ id: 'job-person', name: 'Person made' })
     ])
     const row = (id: string) => must(document.querySelector<HTMLElement>(`[data-job-id="${id}"]`), id)
-    expect(row('job-agent').querySelector('[data-meta="expires"]')?.textContent).toContain('Ends')
-    expect(row('job-person').querySelector('[data-meta="expires"]')).toBeNull()
+    // Why a job is paused shows on the row itself; when a job ends is in its details.
     expect(row('job-off').querySelector('[data-meta="paused-reason"]')?.textContent).toContain('Agents may create jobs is off')
     expect(row('job-agent').querySelector('[data-meta="paused-reason"]')).toBeNull()
+    await expandRow('job-person')
+    expect(row('job-person').querySelector('[data-meta="expires"]')).toBeNull()
+    await expandRow('job-agent')
+    expect(row('job-agent').querySelector('[data-meta="expires"]')?.textContent).toContain('Ends')
     await click(must([...row('job-agent').querySelectorAll('button')].find((item) => item.textContent === 'Extend 7 days'), 'extend button'))
     expect(h.api.scheduled.extend).toHaveBeenCalledWith('job-agent')
   })
@@ -941,11 +1178,11 @@ describe('Scheduled page: jobs agents create', () => {
       job({ id: 'job-person', name: 'Person made', runHistory: [{ runAt: NOW, status: 'ok' }] })
     ])
     const rowOf = (name: string) => must(document.querySelector<HTMLElement>(`[data-job-id="${name}"]`), name)
+    await expandRow('job-agent')
     expect(rowOf('job-agent').querySelector('[data-meta="agent"]')?.textContent).toBe('Created by an agent')
-    expect(rowOf('job-person').querySelector('[data-meta="agent"]')).toBeNull()
-    await click(must(rowOf('job-agent').querySelector<HTMLElement>('[data-row-button]'), 'row'))
     expect(rowOf('job-agent').querySelector('.scheduled-history [data-meta="agent"]')?.textContent).toBe('Job created by an agent')
-    await click(must(rowOf('job-person').querySelector<HTMLElement>('[data-row-button]'), 'row'))
+    await expandRow('job-person')
+    expect(rowOf('job-person').querySelector('[data-meta="agent"]')).toBeNull()
     expect(rowOf('job-person').querySelector('.scheduled-history [data-meta="agent"]')).toBeNull()
   })
 })
@@ -960,8 +1197,20 @@ describe('job draft', () => {
     expect(draft).toMatchObject({ modelKey: expect.stringContaining('sonnet'), workspaceKind: 'newWorktree', scheduleKind: 'cron' })
   })
 
-  it('a new draft is an hourly-ish interval job on the default model, mode and project checkout', () => {
-    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '30', modelKey: '', mode: '', permissionMode: '', projectId: '', threadId: '', workspaceKind: 'project' })
+  it('a new draft is an hourly interval job on the default model, mode and project checkout', () => {
+    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '60', modelKey: '', mode: '', permissionMode: '', projectId: '', threadId: '', workspaceKind: 'project' })
+    expect(draftPreset(newDraft())).toBe('hourly')
+  })
+
+  it('reads a preset only from the exact saved form, so anything else stays custom', () => {
+    expect(presetOf({ kind: 'interval', minutes: 60 })).toBe('hourly')
+    expect(presetOf({ kind: 'cron', expr: ' 0  9 * * 1-5 ' })).toBe('weekdays')
+    expect(presetOf({ kind: 'cron', expr: '0 9 * * 1-6' })).toBe('custom')
+    expect(presetOf({ kind: 'interval', minutes: 30 })).toBe('custom')
+    expect(draftPreset({ ...newDraft(), scheduleKind: 'once' })).toBe('custom')
+    expect(presetFields('daily')).toEqual({ scheduleKind: 'cron', expr: '0 9 * * *' })
+    expect(describeSchedule({ kind: 'cron', expr: '0 9 * * *' })).toBe('Daily at 09:00')
+    expect(describeSchedule({ kind: 'cron', expr: '15 3 * * *' })).toBe('Cron 15 3 * * *')
   })
 
   it('offers no permission mode above the one the person holds for the job', () => {
@@ -1012,12 +1261,10 @@ describe('job draft', () => {
 })
 
 describe('Scheduled page: permissions respect the job\'s ceiling', () => {
-  const optionsOf = (label: string) => [...control<HTMLSelectElement>(label).options].map((option) => ({ text: option.textContent, disabled: option.disabled }))
-
   it('offers modes up to the one held for the job, and moving the job to a stricter thread narrows the choices', async () => {
     await mount([])
     await click(button('New job'))
-    expect(optionsOf('Permissions')).toEqual([
+    expect(await optionsOf('Permissions')).toEqual([
       { text: "Default (the mode new threads start in, up to the job's limit)", disabled: false },
       { text: 'Ask before acting', disabled: false },
       { text: 'Auto-accept edits', disabled: false },
@@ -1026,7 +1273,7 @@ describe('Scheduled page: permissions respect the job\'s ceiling', () => {
     ])
     await choose('Project', 'Other')
     await choose('Target thread', 'Other project thread')
-    expect(optionsOf('Permissions').map((option) => option.disabled)).toEqual([false, false, true, true, true])
+    expect((await optionsOf('Permissions')).map((option) => option.disabled)).toEqual([false, false, true, true, true])
     expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('Ask before acting')
   })
 
@@ -1098,7 +1345,7 @@ describe('Scheduled page: permissions respect the job\'s ceiling', () => {
     const item = job({ projectId: 'p1', threadId: 't1', permissionCeiling: 'ask' })
     await mount([item])
     await openEdit(item)
-    expect(optionsOf('Permissions')[0].text).toBe("Default (the thread's mode, up to the job's limit)")
+    expect((await optionsOf('Permissions'))[0].text).toBe("Default (the thread's mode, up to the job's limit)")
     expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('A run follows its thread, never above that limit')
   })
 
@@ -1121,9 +1368,8 @@ describe('Scheduled page: permissions respect the job\'s ceiling', () => {
 
   it('shows the mode on the row and on each run that recorded one', async () => {
     await mount([job({ permissionMode: 'ask', permissionCeiling: 'full', runHistory: [{ runAt: '2026-10-27T09:00:00.000Z', status: 'ok', permissionMode: 'ask' }] })])
-    const row = must(document.querySelector('[data-job-id="job-1"]'), 'row')
+    const row = await expandRow('job-1')
     expect(row.querySelector('[data-meta="permission"]')?.textContent).toBe('Ask before acting')
-    await click(row.querySelector<HTMLElement>('[data-row-button]'))
     expect(row.querySelector('.scheduled-history-row [data-meta="permission"]')?.textContent).toBe('Ask before acting')
   })
 })
