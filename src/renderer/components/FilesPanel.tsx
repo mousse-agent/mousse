@@ -463,7 +463,7 @@ export function FilesPanel() {
           onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(path, filesRoot))} refreshKey={refreshKey} />
       </ResizablePanelSidebar>
       <div className="files-editor">
-        <div className="files-tabs" role="tablist" aria-label="Open files">
+        {openPaths.length > 0 && <div className="files-tabs" role="tablist" aria-label="Open files">
           {openPaths.map((path) => {
             const key = fileKey(path)
             const file = files[key]
@@ -480,9 +480,10 @@ export function FilesPanel() {
               <span className="files-tab-close" role="button" aria-label={`Close ${basename(path)}`} onClick={(event) => { event.stopPropagation(); void closeTab(path) }}><X size={12} /></span>
             </button>
           })}
-        </div>
-        <div className="panel-toolbar files-editor-toolbar">
-          <span className="panel-toolbar-path" title={selectedPath ?? undefined}>{selectedPath ?? 'Select a file'}</span>
+        </div>}
+        {/* Until a file is open the body alone says what to do; the header only ever names a real file. */}
+        {selectedPath && <div className="panel-toolbar files-editor-toolbar">
+          <span className="panel-toolbar-path" title={selectedPath}>{selectedPath}</span>
           <div className="files-toolbar-actions">
             {supportsPreview && <div className="files-view-toggle" role="group" aria-label="File view">
               <button type="button" className={`btn btn-sm ${!selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: false }))}><Pencil size={13} /> Edit</button>
@@ -490,7 +491,7 @@ export function FilesPanel() {
             </div>}
             {selected && <span className={`files-save-status ${selected.saveState}`}>{saveLabel}</span>}
           </div>
-        </div>
+        </div>}
         {selected?.error && <div className={`panel-error ${selected.saveState === 'conflict' ? 'files-conflict' : ''}`}>
           {selected.saveState === 'conflict' && <AlertTriangle size={15} />}{selected.error}
           {selected.initialLoadFailed && selectedKey && <div className="files-conflict-actions">
