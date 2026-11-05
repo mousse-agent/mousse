@@ -1,5 +1,9 @@
-import { createContext, useContext, useId, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { AlertTriangle, ArrowDown, CircleAlert, Info, X } from '../lib/icons'
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { AlertTriangle, ArrowDown, CircleAlert, Info, MoreHorizontal, X } from '../lib/icons'
+import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
+import { useOutsideDismiss } from '../hooks/useOutsideDismiss'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { IconButton } from './ui/IconButton'
 
 /**
  * The one notice line above the composer. Every source (a failed send, Undo, the queue, dictation,
@@ -24,6 +28,14 @@ export interface ComposerNoticeAction {
   busy?: boolean
 }
 
+/** A rarer action, in the notice's "…" menu. */
+export interface ComposerNoticeMenuItem {
+  label: string
+  onSelect: () => void
+  /** Presses are ignored, but the item stays reachable (`aria-disabled`). */
+  blocked?: boolean
+}
+
 export interface ComposerNoticeProps {
   tone: ComposerNoticeTone
   /** One short line. Longer wording goes in `tooltip`. */
@@ -36,6 +48,8 @@ export interface ComposerNoticeProps {
   icon?: ReactNode
   /** Usually at most one; an approval shows two (Deny, Approve). */
   actions?: ComposerNoticeAction[]
+  /** Rarer actions, behind a "…" button after `actions`. */
+  menu?: ComposerNoticeMenuItem[]
   /** Scrolls to what the notice is about (an approval's row in the transcript). */
   onJump?: () => void
   jumpLabel?: string
@@ -52,8 +66,71 @@ function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
   return <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
 }
 
-/** One notice: tone icon, one line, its actions, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+/** The notice's "…" button and its menu. Arrows, Home and End move; Escape and Tab close it. */
+function ComposerNoticeMenu({ items }: { items: ComposerNoticeMenuItem[] }) {
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuId = useId()
+  const style = useFloatingPosition({ open, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-end', gap: 4 })
+  const close = useCallback(() => setOpen(false), [])
+  const closeAndFocus = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
+  const dismissRefs = useMemo(() => [triggerRef, menuRef], [])
+  useOutsideDismiss(open, dismissRefs, close)
+  useEffect(() => {
+    if (open && style.visibility === 'visible') focusInitialMenuItem(menuRef.current)
+  }, [open, style.visibility])
+  const menuKeyDown = useMenuKeyboard(menuRef, closeAndFocus)
+  return (
+    <>
+      <IconButton
+        ref={triggerRef}
+        icon={MoreHorizontal}
+        label="More"
+        size={14}
+        className="composer-notice-icon-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+          event.preventDefault()
+          setOpen(true)
+        }}
+      />
+      {open && (
+        <FloatingPortal>
+          <div ref={menuRef} id={menuId} className="composer-mode-menu composer-mode-menu-floating" role="menu" aria-label="More" style={style} onKeyDown={menuKeyDown}>
+            {items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                className="composer-mode-menu-item"
+                aria-disabled={item.blocked || undefined}
+                onClick={() => {
+                  if (item.blocked) return
+                  closeAndFocus()
+                  item.onSelect()
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </FloatingPortal>
+      )}
+    </>
+  )
+}
+
+/** One notice: tone icon, one line, its actions and "…" menu, then jump and dismiss icons. */
+export function ComposerNotice({ tone, title, detail, tooltip, icon, actions = [], menu, onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
   return (
     <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
@@ -77,6 +154,7 @@ export function ComposerNotice({ tone, title, detail, tooltip, icon, actions = [
           {action.icon ?? action.label}
         </button>
       ))}
+      {menu && menu.length > 0 && <ComposerNoticeMenu items={menu} />}
       {onJump && (
         <button type="button" className="composer-notice-icon-btn" title={jumpLabel} aria-label={jumpLabel} onClick={onJump}>
           <ArrowDown size={14} strokeWidth={1.8} />

@@ -31,7 +31,7 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
       />
       <SettingsRow
         title="Resume after usage limits reset"
-        description={<span title={`Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row. Runs already paused are not resumed; press Resume now.`}>Continues a paused run when the limit resets.</span>}
+        description={<span title={`Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row. Runs already paused are not resumed; press Try now.`}>Continues a paused run when the limit resets.</span>}
         control={
           <Switch
             label="Resume after usage limits reset"

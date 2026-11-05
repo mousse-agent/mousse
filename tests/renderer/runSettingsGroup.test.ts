@@ -69,7 +69,7 @@ describe('Settings > General > Runs', () => {
     expect(capTrigger().textContent).toContain('3')
     expect(host.textContent).toContain('Continues a paused run when the limit resets.')
     expect(tooltips()).toContain('at most 3 times in a row')
-    expect(tooltips()).toContain('Runs already paused are not resumed; press Resume now.')
+    expect(tooltips()).toContain('Runs already paused are not resumed; press Try now.')
   })
 
   it('turning it on saves it, and the daemon reads it from disk', () => {
