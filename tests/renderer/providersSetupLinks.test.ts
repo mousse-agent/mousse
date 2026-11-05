@@ -30,6 +30,9 @@ describe('the default model with no provider', () => {
     act(() => root.render(createElement(AgentsSettings, { settings: getDefaultSettings(), options: NO_PROVIDERS, projects: [], updateSettings: async () => {} })))
     expect(host.textContent).toContain('Add a provider to choose a model.')
     expect(host.querySelector('[aria-label="Default model"]')).toBeNull()
+    // A conversation is a thread in every label.
+    expect(host.textContent).toContain('Thread titles')
+    expect(host.textContent).not.toMatch(/\bchats?\b/i)
     const open = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Open Providers')!
     act(() => open.click())
     expect(opened).toEqual(['providers'])

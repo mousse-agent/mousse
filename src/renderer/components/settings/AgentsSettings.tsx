@@ -11,7 +11,7 @@ import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 
 /**
- * Settings > Agents: the default model and chat title model, plus context
+ * Settings > Agents: the default model and thread title model, plus context
  * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
  * per-CLI Agents pages; their stored keys are left untouched.
  */
@@ -31,7 +31,7 @@ export function AgentsSettings({
   // Titles are one request with no tools: only instances (and models) that run one are offered.
   const titleProviders = oneShotProviderOptions(providers)
 
-  // Blank title keys mean "Automatic": chats are named from their first line, with no model call.
+  // Blank title keys mean "Automatic": threads are named from their first line, with no model call.
   // Show the saved mode.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
@@ -74,11 +74,11 @@ export function AgentsSettings({
           )}
         />
         <SettingsRow
-          title="Chat titles"
+          title="Thread titles"
           titleId="agents-title-model-title"
           description={titleUnavailable
-            ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
-            : 'Automatic picks a fast connected model to name chats.'}
+            ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name threads here, so threads keep their first line as the title. Choose another model or Automatic.`
+            : 'Automatic picks a fast connected model to name threads.'}
           titleAction={!titleIsAutomatic && (
             <button
               type="button"
@@ -93,7 +93,7 @@ export function AgentsSettings({
           control={
             <SettingsModelPicker
               id="agents-title-model"
-              ariaLabel="Chat title model"
+              ariaLabel="Thread title model"
               placeholder="Automatic"
               providers={titleProviders}
               providerId={titleIsAutomatic ? '' : titleProvider}

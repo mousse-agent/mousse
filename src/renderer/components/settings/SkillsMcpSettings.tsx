@@ -125,7 +125,7 @@ function WebSearchKeys() {
   }
 
   return (
-    <SettingsGroup title="Web search" icon={Globe} description="Optional API keys for the web_search tool, kept in the secure credential store.">
+    <SettingsGroup title="Web search" icon={Globe} description="Optional API keys that let agents search the web, kept in the secure credential store.">
       {WEB_SERVICES.map(({ id, label }) => (
         <SecretRow
           key={id}

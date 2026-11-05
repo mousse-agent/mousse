@@ -35,6 +35,12 @@ describe('Skills & MCP settings', () => {
     for (const text of ['MCP registry', 'Skills registry', 'Config files', 'Expose to orchestrator', 'integration-status-dot', 'integration-card']) expect(html).not.toContain(text)
   })
 
+  it('describes web search in plain words, not by its tool name', () => {
+    const html = render(getDefaultSettings())
+    expect(html).toContain('Optional API keys that let agents search the web')
+    expect(html).not.toContain('for the web_search tool')
+  })
+
   it('never shows a built-in tool on while the hidden tools gate is off', () => {
     const settings = getDefaultSettings()
     settings.integrations.tools.enabled = false
