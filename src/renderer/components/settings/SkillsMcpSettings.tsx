@@ -5,9 +5,10 @@ import type { AgentTypeId, MousseSettings, MousseSettingsUpdate, SettingsOptions
 import { confirmNavigation } from '../../services/navigationGuards'
 import { IntegrationsWorkspace, type IntegrationPolicy } from '../integrations/IntegrationsWorkspace'
 import type { SkillModelBinding } from '../integrations/SkillModelPicker'
-import { Check, CircleCheck, Globe, Loader2, Pencil, X } from '../../lib/icons'
+import { CircleCheck, Globe } from '../../lib/icons'
 import { ConfirmRemoveButton } from './IconButtons'
-import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { SecretRow } from './SecretRow'
+import { MoreDetails, SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
 
 type WebService = 'exa' | 'parallel'
@@ -105,9 +106,7 @@ export function SkillsMcpSettings({
 
 function WebSearchKeys() {
   const [configured, setConfigured] = useState<Record<WebService, boolean>>({ exa: false, parallel: false })
-  const [drafts, setDrafts] = useState<Record<WebService, string>>({ exa: '', parallel: '' })
-  const [replacing, setReplacing] = useState<WebService | null>(null)
-  const [saving, setSaving] = useState<WebService | null>(null)
+  const [removing, setRemoving] = useState<WebService | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let current = true
@@ -115,53 +114,35 @@ function WebSearchKeys() {
     return () => { current = false }
   }, [])
 
-  const run = async (service: WebService, task: () => Promise<void>, nowConfigured: boolean) => {
-    setSaving(service); setError(null)
+  const remove = async (service: WebService) => {
+    setRemoving(service); setError(null)
     try {
-      await task()
-      setConfigured((value) => ({ ...value, [service]: nowConfigured }))
-      setDrafts((value) => ({ ...value, [service]: '' }))
-      setReplacing(null)
+      await window.mousse.webTools.clearApiKey(service)
+      setConfigured((value) => ({ ...value, [service]: false }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
-    } finally { setSaving(null) }
+    } finally { setRemoving(null) }
   }
 
   return (
     <SettingsGroup title="Web search" icon={Globe} description="Optional API keys for the web_search tool, kept in the secure credential store.">
-      {WEB_SERVICES.map(({ id, label }) => {
-        const editing = !configured[id] || replacing === id
-        const inputId = `web-search-key-${id}`
-        const save = () => { if (drafts[id].trim()) void run(id, () => window.mousse.webTools.setApiKey(id, drafts[id].trim()), true) }
-        return (
-          <SettingsRow
-            key={id}
-            title={label}
-            htmlFor={editing ? inputId : undefined}
-            description={configured[id] ? <span className="settings-status-ok"><CircleCheck size={14} className="settings-status-glyph" />Connected</span> : 'Not connected'}
-            control={editing ? <span className="settings-icon-actions">
-              <input
-                id={inputId}
-                className="settings-input"
-                type="password"
-                autoComplete="off"
-                value={drafts[id]}
-                placeholder={configured[id] ? 'New API key' : 'API key'}
-                disabled={saving !== null}
-                onChange={(event) => setDrafts((value) => ({ ...value, [id]: event.target.value }))}
-                onKeyDown={(event) => { if (event.key === 'Enter') save() }}
-              />
-              {replacing === id ? <button type="button" className="settings-icon-btn" title="Cancel" aria-label="Cancel" disabled={saving !== null} onClick={() => { setReplacing(null); setDrafts((value) => ({ ...value, [id]: '' })) }}><X size={14} /></button> : null}
-              <button type="button" className="settings-icon-btn primary" title={saving === id ? 'Saving…' : 'Save key'} aria-label={saving === id ? 'Saving…' : 'Save'} disabled={saving !== null || !drafts[id].trim()} onClick={save}>
-                {saving === id ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
-              </button>
-            </span> : <span className="settings-icon-actions">
-              <button type="button" className="settings-icon-btn" title="Replace key" aria-label="Replace" disabled={saving !== null} onClick={() => setReplacing(id)}><Pencil size={14} /></button>
-              <ConfirmRemoveButton label="Remove key" disabled={saving !== null} onRemove={() => void run(id, () => window.mousse.webTools.clearApiKey(id), false)} />
-            </span>}
-          />
-        )
-      })}
+      {WEB_SERVICES.map(({ id, label }) => (
+        <SecretRow
+          key={id}
+          title={label}
+          inputId={`web-search-key-${id}`}
+          fieldLabel={`${label} API key`}
+          placeholder={configured[id] ? 'New API key' : 'API key'}
+          configured={configured[id]}
+          description={configured[id] ? <span className="settings-status-ok"><CircleCheck size={14} className="settings-status-glyph" />Connected</span> : 'Not connected'}
+          onSave={async (key) => {
+            await window.mousse.webTools.setApiKey(id, key)
+            setConfigured((value) => ({ ...value, [id]: true }))
+          }}
+          busy={removing !== null}
+          actions={<ConfirmRemoveButton label="Remove key" disabled={removing !== null} onRemove={() => void remove(id)} />}
+        />
+      ))}
       {error ? <p className="skills-mcp-error" role="alert">{error}</p> : null}
     </SettingsGroup>
   )
@@ -195,30 +176,27 @@ function AgentAvailability({ settings, options, onUpdate }: {
   const { skills, mcp } = settings.integrations
   if (!options.agentTypes.length) return null
   // Matches the daemon: an agent gets skills or servers only when its flag is true.
-  const chip = (kind: 'skills' | 'mcp', agentId: AgentTypeId, label: string, agentLabel: string) => {
+  const row = (kind: 'skills' | 'mcp', agentId: AgentTypeId, label: string, agentLabel: string) => {
     const on = (kind === 'skills' ? skills : mcp).enableForAgents[agentId] === true
+    const id = `agent-${kind}-${agentId}`
     return (
-      <button
-        type="button"
-        className={`settings-chip${on ? ' on' : ''}`}
-        aria-pressed={on}
-        aria-label={`${label} available to ${agentLabel}`}
-        onClick={() => void onUpdate(patch({ [kind]: { enableForAgents: { [agentId]: !on } } }))}
-      >{label}</button>
+      <SettingsRow
+        key={id}
+        indent
+        title={label}
+        htmlFor={id}
+        control={<Switch id={id} label={`${label} available to ${agentLabel}`} checked={on}
+          onChange={(next) => void onUpdate(patch({ [kind]: { enableForAgents: { [agentId]: next } } }))} />}
+      />
     )
   }
   return (
     <SettingsGroup title="Available to agents" description="Which agents can use the skills and MCP servers that are on.">
-      {options.agentTypes.map((agent) => (
-        <SettingsRow
-          key={agent.id}
-          title={agent.label}
-          control={<div className="skills-mcp-chips" role="group" aria-label={`Available to ${agent.label}`}>
-            {chip('skills', agent.id, 'Skills', agent.label)}
-            {chip('mcp', agent.id, 'MCP', agent.label)}
-          </div>}
-        />
-      ))}
+      {options.agentTypes.map((agent) => [
+        <SettingsRow key={agent.id} title={agent.label} />,
+        row('skills', agent.id, 'Skills', agent.label),
+        row('mcp', agent.id, 'MCP servers', agent.label)
+      ])}
     </SettingsGroup>
   )
 }
@@ -230,8 +208,11 @@ export function RelayAvailability({ settings, onUpdate }: { settings: MousseSett
   const disabled = mcp.enabled === false
   return (
     <SettingsGroup
-      title="Share with other agents"
-      description="Claude Code, Codex and other agents reach the MCP servers that are on through Mousse, as the mousse-relay server. Claude Code also keeps the servers Mousse adds to it directly, so their tools can appear twice."
+      title="Let other agents use your MCP servers"
+      description={<MoreDetails>
+        They reach the servers that are on through Mousse, as the mousse-relay server. Claude Code also keeps the servers Mousse
+        adds to it directly, so their tools can appear twice.
+      </MoreDetails>}
       className="skills-mcp-compact"
     >
       {MCP_RELAY_RUNTIMES.map((runtime) => (

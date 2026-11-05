@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -57,9 +57,10 @@ const savedByDaemon = (): AccessSetting => normalizeAgentAccessSettings(new Sett
 
 const text = () => host.textContent ?? ''
 const trigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Agent access level"]')!
-const rows = () => Array.from(host.querySelectorAll<HTMLButtonElement>('.agent-access-projects [role="checkbox"]'))
-const row = (name: string) => rows().find((entry) => entry.textContent === name)!
-const checked = () => rows().filter((entry) => entry.getAttribute('aria-checked') === 'true').map((entry) => entry.textContent)
+/** The project and computer switches, each named by its row. */
+const rows = () => Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"][id^="agent-access-project-"], [role="switch"][id^="agent-access-computer-"]'))
+const row = (name: string) => rows().find((entry) => entry.getAttribute('aria-label') === name)!
+const checked = () => rows().filter((entry) => entry.getAttribute('aria-checked') === 'true').map((entry) => entry.getAttribute('aria-label'))
 const key = (target: Element, name: string) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })) })
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
 const pickLevel = (label: string) => {
@@ -80,7 +81,7 @@ describe('Settings > Agents > Agent access', () => {
   it('starts at Lineage only for a profile that never touched the setting', () => {
     show()
     expect(trigger().textContent).toContain('Lineage only')
-    expect(text()).toContain('cannot see or change any other thread')
+    expect(text()).toContain('see only their own thread')
     expect(rows()).toHaveLength(0)
   })
 
@@ -111,18 +112,20 @@ describe('Settings > Agents > Agent access', () => {
     expect(rows()).toHaveLength(0)
     expect(text()).not.toContain('All projects')
     pickLevel('Read')
-    expect(rows().map((entry) => entry.textContent)).toEqual(['All projects', 'Alpha', 'Beta', 'Gamma'])
+    expect(rows().map((entry) => entry.getAttribute('aria-label'))).toEqual(['All projects', 'Alpha', 'Beta', 'Gamma'])
   })
 
   it('picks projects one at a time, and saves each pick', () => {
     const { updates } = show({ level: 'manage' })
     expect(checked()).toEqual(['All projects'])
-    expect(text()).toContain('every project, including threads without a project')
+    expect(text()).toContain('Every project, including threads without a project')
+    // Every project is left by turning a project on, not by switching it off.
+    expect(row('All projects').disabled).toBe(true)
 
     click(row('Beta'))
     expect(updates).toHaveBeenLastCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] } })
     expect(checked()).toEqual(['Beta'])
-    expect(text()).toContain('only threads in the checked projects')
+    expect(text()).toContain('Only the projects turned on')
 
     click(row('Alpha'))
     expect(checked()).toEqual(['Alpha', 'Beta'])
@@ -136,13 +139,13 @@ describe('Settings > Agents > Agent access', () => {
   it('never turns a limited list into an empty one, which the daemon reads as every project', () => {
     const { updates } = show({ level: 'manage', projectIds: ['p1'] })
     expect(checked()).toEqual(['Alpha'])
-    expect(row('Alpha').getAttribute('aria-disabled')).toBe('true')
+    expect(row('Alpha').disabled).toBe(true)
 
     click(row('Alpha'))
     expect(updates).not.toHaveBeenCalled()
     expect(checked()).toEqual(['Alpha'])
     expect(savedByDaemon().projectIds).toEqual(['p1'])
-    expect(text()).toContain('Keep at least one checked, or choose All projects.')
+    expect(text()).toContain('Keep at least one project on, or turn on All projects.')
 
     // Widening to every project is its own, named choice.
     click(row('All projects'))
@@ -168,7 +171,7 @@ describe('Settings > Agents > Agent access', () => {
     expect(checked()).toEqual(['Alpha', 'Removed project'])
     click(row('Removed project'))
     expect(savedByDaemon().projectIds).toEqual(['p1'])
-    expect(rows().map((entry) => entry.textContent)).not.toContain('Removed project')
+    expect(rows().map((entry) => entry.getAttribute('aria-label'))).not.toContain('Removed project')
   })
 
   describe('answering approvals on other threads', () => {
@@ -185,6 +188,7 @@ describe('Settings > Agents > Agent access', () => {
       expect(on()).toBe(false)
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).answerApprovals).toBe(false)
       expect(text()).toContain('Use with care.')
+      expect(text()).toContain('within their own permission mode')
       expect(text()).toContain('approve a command, a file change or a tool that another thread asked to run')
       expect(text()).toContain('never its own thread')
       expect(text()).toContain('Off by default')
@@ -242,7 +246,7 @@ describe('Settings > Agents > Agent access', () => {
 
     it('hides the computer list while off and keeps it, so switching back on restores the same computers', () => {
       show({ remoteSubagents: false, computers: ['node-gone'] })
-      expect(rows().some((entry) => entry.textContent === 'Removed computer')).toBe(false)
+      expect(rows().some((entry) => entry.getAttribute('aria-label') === 'Removed computer')).toBe(false)
       click(remoteSwitch()!)
       expect(row('Removed computer').getAttribute('aria-checked')).toBe('true')
       click(remoteSwitch()!)
@@ -285,27 +289,13 @@ describe('Settings > Agents > Agent access', () => {
       expect(updates).not.toHaveBeenCalled()
     })
 
-    it('project rows are buttons in the tab order, and the arrow keys, Home and End move between them', () => {
+    it('every project is a labelled switch in the tab order', () => {
       show({ level: 'read' })
       for (const entry of rows()) {
         expect(entry.tagName).toBe('BUTTON')
         expect(entry.tabIndex).toBe(0)
+        expect(host.querySelector(`label[for="${CSS.escape(entry.id)}"]`)?.textContent).toBe(entry.getAttribute('aria-label'))
       }
-      act(() => row('All projects').focus())
-      key(document.activeElement!, 'ArrowDown')
-      expect(document.activeElement).toBe(row('Alpha'))
-      key(document.activeElement!, 'ArrowDown')
-      expect(document.activeElement).toBe(row('Beta'))
-      key(document.activeElement!, 'End')
-      expect(document.activeElement).toBe(row('Gamma'))
-      key(document.activeElement!, 'ArrowDown')
-      expect(document.activeElement).toBe(row('Gamma'))
-      key(document.activeElement!, 'ArrowUp')
-      expect(document.activeElement).toBe(row('Beta'))
-      key(document.activeElement!, 'Home')
-      expect(document.activeElement).toBe(row('All projects'))
-      key(document.activeElement!, 'ArrowUp')
-      expect(document.activeElement).toBe(row('All projects'))
     })
 
     it('a focused project row is picked by activating it', () => {
@@ -318,11 +308,23 @@ describe('Settings > Agents > Agent access', () => {
     })
   })
 
-  it('marks a selected row with a background fill only, never an edge bar', () => {
-    const css = readFileSync(join(__dirname, '../../src/renderer/styles/settings.css'), 'utf8')
-    const rules = [...css.matchAll(/(\.agent-access-row[^{,]*)\{([^}]*)\}/g)].filter((match) => match[1].includes('.on') || match[1].includes('[aria-'))
-    const on = rules.find((match) => match[1].trim() === '.agent-access-row.on')
-    expect(on?.[2]).toMatch(/background:/)
-    for (const [, , body] of rules) expect(body).not.toMatch(/border|box-shadow|outline/)
+  it('keeps each rule in one line, with the exact terms one keyboard step away', () => {
+    show({ level: 'manage' })
+    const approvals = host.querySelector('#agent-access-answer-approvals')!.closest('.settings-item')!
+    const toggle = approvals.querySelector<HTMLButtonElement>('.settings-more-btn')!
+    const body = document.getElementById(toggle.getAttribute('aria-controls')!)!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(body.hidden).toBe(true)
+    expect(body.textContent).toContain('Requests the provider asks for itself')
+    act(() => toggle.focus())
+    click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(body.hidden).toBe(false)
+    // The words always shown stay short: no paragraph of rules.
+    const shown = (element: Element) => [...element.childNodes].map((node) => (node instanceof HTMLElement && node.hidden ? '' : node.textContent ?? '')).join('')
+    for (const desc of host.querySelectorAll('.settings-item-desc')) {
+      act(() => { for (const entry of desc.querySelectorAll<HTMLElement>('.settings-more-body')) entry.hidden = true })
+      expect(shown(desc).split(/[.!?](?:\s|$)/).filter((part) => part.trim().length > 1).length, shown(desc)).toBeLessThanOrEqual(3)
+    }
   })
 })

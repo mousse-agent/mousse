@@ -39,8 +39,6 @@
 /* Compact rows for the built-in tool list under Advanced. */
 .skills-mcp-compact { --settings-row-y: var(--space-4); }
 
-.skills-mcp-chips { display: flex; gap: var(--space-8); }
-
 /* Overflow menu. The shared icon button reads as "delete" on hover; this one does not. */
 .settings-icon-btn.row-menu-btn:hover:not(:disabled) { color: var(--text-primary); }
 .settings-icon-btn.row-menu-btn[aria-expanded='true'] { color: var(--text-primary); background: var(--ui-hover); }
