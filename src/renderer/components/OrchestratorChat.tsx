@@ -106,6 +106,14 @@ function selectionKey(selection: { instanceId?: string; llmProvider: string; pic
   return `${selection.instanceId ?? ''}\u0000${selection.llmProvider}\u0000${selection.pickerId}`
 }
 
+/**
+ * The model catalogue to keep after a read: the current one when the read returned the same providers
+ * and models, so a repeated read does not hand the picker a new list.
+ */
+function keepCatalog(current: LlmProviderOption[], next: LlmProviderOption[]): LlmProviderOption[] {
+  return JSON.stringify(current) === JSON.stringify(next) ? current : next
+}
+
 /** The thread's model is exactly the wanted one: the same account, model and reasoning level. */
 function sameModel(
   has: { instanceId?: string; llmProvider: string; model: string; effort?: string } | undefined,
@@ -497,7 +505,7 @@ export function OrchestratorChat() {
       window.mousse.settings.get(),
       window.mousse.settings.getOptions()
     ])
-    setCatalog(options.llmProviders)
+    setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setProfileDefault((current) =>
@@ -542,13 +550,22 @@ export function OrchestratorChat() {
   const remoteAppliedRef = useRef<{ context: string; shown: string } | undefined>(undefined)
   const refreshSelectionRef = useRef(refreshSelection)
   refreshSelectionRef.current = refreshSelection
+  // Coming back from another computer reads this computer's settings again. The read also replaces the
+  // model catalogue, which `providers` is built from, so this runs on a change of computer only: keyed on
+  // `providers` it re-read settings after every read, without end. The first read is the settings effect's.
+  const wasRemoteRef = useRef(false)
   useEffect(() => {
-    if (!remoteNode) {
-      remoteAppliedRef.current = undefined
-      void refreshSelectionRef.current()
+    if (remoteNode) {
+      wasRemoteRef.current = true
       return
     }
-    if (!remoteOptions.loaded) return
+    remoteAppliedRef.current = undefined
+    if (!wasRemoteRef.current) return
+    wasRemoteRef.current = false
+    void refreshSelectionRef.current()
+  }, [remoteNode])
+  useEffect(() => {
+    if (!remoteNode || !remoteOptions.loaded) return
     const own = remoteDraft ? undefined : activeThreadModelOverride
     const remote = remoteDefaultRef.current
     const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
@@ -577,7 +594,7 @@ export function OrchestratorChat() {
       void window.mousse.settings
         .getOptions()
         .then((options) => {
-          if (request === catalogRequest) setCatalog(options.llmProviders)
+          if (request === catalogRequest) setCatalog((current) => keepCatalog(current, options.llmProviders))
         })
         .catch(() => undefined)
     })
