@@ -85,7 +85,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(policy.trash12.saved).toMatchObject({ graceDays: 12, automaticPurge: true })
     expect(policy.otherRulesKept).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 7, removeMerged: false }, browser: { captureDays: 90 } })
 
-    // Clean up now: the plan first, nothing removed until it is confirmed, then the report.
+    // Preview cleanup: the plan first, nothing removed until it is confirmed, then the report.
     const cleanup = report.cleanup
     expect(cleanup.beforeRun).toContain('Cleanup has not run yet.')
     expect(cleanup.enabled).toBe(true)
@@ -164,7 +164,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.trash.reviewButton).toBe(false)
     expect(report.trash.otherThreads).toBe(false)
 
-    // With every rule off, Clean up now says why it is disabled and asks for nothing.
+    // With every rule off, Preview cleanup says why it is disabled and asks for nothing.
     expect(report.noRule.disabled).toBe(true)
     expect(report.noRule.text).toContain('Turn on a cleanup rule to use this.')
     expect(report.noRule.policy).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } })

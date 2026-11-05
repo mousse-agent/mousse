@@ -309,7 +309,7 @@ async function run() {
   policy.otherRulesKept = structuredClone(daemon.policy)
   evidence.policy = policy
 
-  // Clean up now with a rule on: plan first, then confirm, then the report.
+  // Preview cleanup with a rule on: plan first, then confirm, then the report.
   const cleanup: Record<string, unknown> = {}
   cleanup.beforeRun = text(tid('storage-last-run'))
   cleanup.enabled = !$<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled
@@ -469,7 +469,7 @@ async function run() {
   // Trash is reviewed from the sidebar; the row says how many threads wait there.
   evidence.trash = { row: text(tid('storage-auto-empty')), reviewButton: Boolean($(tid('storage-review-trash-button'))), otherThreads: document.body.textContent?.includes('Other threads') ?? false }
 
-  // With every rule off, Clean up now has nothing to do and says so.
+  // With every rule off, Preview cleanup has nothing to do and says so.
   await pick('storage-auto-empty-select', 'never')
   await until(() => valueOf('storage-auto-empty-select') === 'never', 'trash never')
   await pick('storage-inactive-select', 'off')
