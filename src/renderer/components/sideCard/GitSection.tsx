@@ -38,6 +38,7 @@ import {
 import { closePullRequest, createPullRequestForBranch, mergePullRequest, pullRequestMergeMethod, useGitPullRequestStore } from '../../stores/pullRequestStore'
 import type { PullRequestDetail, PullRequestMergeMethod, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { usePullRequestPushTarget } from './usePullRequestPushTarget'
+import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -986,6 +987,8 @@ interface GitSectionViewProps {
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
   canInitialize?: boolean
+  /** "Worktree removed by cleanup on …" while a cleanup rule's retirement of the thread's worktree stands. */
+  retiredNote?: string | null
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
@@ -1002,8 +1005,10 @@ export function GitSectionView({
   pullRequestLink = null,
   pullRequestPushTarget = null,
   collapsedLabel,
-  canInitialize = false
+  canInitialize = false,
+  retiredNote = null
 }: GitSectionViewProps) {
+  const retired = retiredNote ? <p className="side-card-git-quiet side-card-git-retired">{retiredNote}</p> : null
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const [running, setRunning] = useState<GitAction | null>(null)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -1050,6 +1055,7 @@ export function GitSectionView({
         collapsedNote={settled ? label : null}
       >
         <p className="side-card-git-quiet side-card-git-collapsed">{label}</p>
+        {retired}
         {canInitialize && path && (
           <button
             type="button"
@@ -1132,6 +1138,7 @@ export function GitSectionView({
 
   return (
     <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
+      {retired}
       <BranchPicker
         path={path}
         scope={scope}
@@ -1234,6 +1241,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
   const pullRequestPushTarget = usePullRequestPushTarget(location.workspaceThreadId, link)
+  const retiredNote = useRetiredWorktreeNote(ownThreadId, !loading)
   return (
     <GitSectionView
       threadId={threadId}
@@ -1249,6 +1257,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestPushTarget={pullRequestPushTarget}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
+      retiredNote={retiredNote}
     />
   )
 }
