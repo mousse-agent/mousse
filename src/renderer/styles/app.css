@@ -3382,9 +3382,12 @@ html[data-theme='high-contrast'] {
 }
 
 /* Dialogs are the surface (mousse-ui skill, section 4): lit, not boxed. No
-   dividers: the header, body and footer share one 16px inset and are told apart
-   by position alone. The close glyph sits on the right edge of the row controls. */
+   dividers: the header, body and footer share one inset (--modal-inset) and are
+   told apart by position alone. The close glyph sits on the right edge of the row controls. */
 .modal {
+  --modal-inset: 16px;
+  --modal-footer-gap: 12px;
+  --modal-fade: 18px;
   background: var(--ui-raised);
   border-radius: var(--ui-card-radius);
   width: 560px;
@@ -3406,7 +3409,7 @@ html[data-theme='high-contrast'] {
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
-  padding: 12px 12px 4px 16px;
+  padding: 12px 12px 4px var(--modal-inset, 16px);
 }
 
 /* Without a visible title the close button keeps its corner and the content leads. */
@@ -3430,19 +3433,40 @@ html[data-theme='high-contrast'] {
 :is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
-.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
-.modal-footer > button { min-height: 36px; }
-/* Settings buttons keep the one control size in a footer too. */
-.modal-footer > .settings-btn { height: var(--settings-control-h, 28px); min-height: 0; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small, 12.5px); }
+/* The footer is its own row under the scrolling body: the dialog inset on the
+   sides and bottom, and a fixed gap above the buttons that content never fills. */
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: var(--modal-footer-gap, 12px) var(--modal-inset, 16px) var(--modal-inset, 16px); flex-shrink: 0; }
+/* Footer buttons keep the one control size (28px). */
+.modal-footer > button { height: var(--settings-control-h, 28px); min-height: 0; padding-block: 0; border-radius: var(--ui-control-radius); }
+.modal-footer > .settings-btn { font-size: var(--settings-fs-small, 12.5px); }
 
 .modal-body {
   min-height: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding: 0 var(--modal-inset, 16px) var(--modal-inset, 16px);
+}
+
+/* Above a footer the body keeps only room for a focus ring: the footer's own
+   gap is the space. While more content is below, the last rows fade out over
+   --modal-fade instead of being cut at the edge; the fade is gone at the end of
+   the list, and never drawn when the body does not scroll (no divider either). */
+@property --modal-body-fade {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes modal-body-fade {
+  0%, 90% { --modal-body-fade: var(--modal-fade, 18px); }
+  100% { --modal-body-fade: 0px; }
 }
 
 .modal-body:has(+ .modal-footer) {
-  padding-bottom: 12px;
+  padding-bottom: 4px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--modal-body-fade)), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--modal-body-fade)), transparent);
+  animation: modal-body-fade linear both;
+  animation-timeline: scroll(self);
 }
 
 .modal-section {

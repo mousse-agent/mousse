@@ -48,6 +48,7 @@
         "tests/commandPalette.test.ts",
         "tests/composerMentionList.test.ts",
         "tests/composerRenderingPerformance.test.ts",
+        "tests/dialogFooterStyles.test.ts",
         "tests/filesSearch.test.ts",
         "tests/gitBranchActions.test.ts",
         "tests/gitPanelLogic.test.ts",
