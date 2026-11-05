@@ -123,4 +123,14 @@ describe('chat layout styles', () => {
     const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
     expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
   })
+
+  it('cuts the approval command, not the title, and sets the connection state apart', () => {
+    const rule = (selector: string) => rulesFor(css, selector).find((entry) => entry.selector.endsWith(selector))!
+    expect(rule('.composer-notice-title:has(+ .composer-notice-detail)').body).toMatch(/flex:\s*none;/)
+    expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
+    const note = rule('.composer-notice-note')
+    expect(note.body).toMatch(/flex:\s*none;/)
+    expect(note.body).toMatch(/color:\s*var\(--warning\);/)
+    expect(rule('.composer-notice-note::before').body).toMatch(/content:\s*'·'/)
+  })
 })

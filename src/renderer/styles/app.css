@@ -1405,6 +1405,11 @@ html[data-theme='high-contrast'] .composer-notice {
   text-overflow: ellipsis;
 }
 
+/* With a detail after it, the title keeps its width and the detail is the part that is cut. */
+.composer-notice-title:has(+ .composer-notice-detail) {
+  flex: none;
+}
+
 .composer-notice-detail {
   flex: 1 1 auto;
   min-width: 0;
@@ -1415,6 +1420,13 @@ html[data-theme='high-contrast'] .composer-notice {
 
 .composer-notice-note {
   flex: none;
+  color: var(--warning);
+}
+
+/* A quiet "·" sets the state apart from the detail; only the state word takes the status colour. */
+.composer-notice-note::before {
+  content: '·' / '';
+  margin-right: 8px;
   color: var(--text-secondary);
 }
 
