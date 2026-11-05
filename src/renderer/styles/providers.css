@@ -854,6 +854,13 @@
   cursor: pointer;
 }
 
+.prov-account-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-12);
+  font-size: var(--settings-fs-small);
+}
+
 .settings-group-rows .settings-input.prov-wide {
   width: 300px;
 }

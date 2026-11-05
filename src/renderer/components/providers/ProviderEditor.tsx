@@ -3,6 +3,8 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { ModelPrefsPatch, ProviderOperationEvent, TelemetrySetting } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
+import { confirmNavigation } from '../../services/navigationGuards'
+import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
@@ -15,6 +17,14 @@ import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup } from './provider
  * a project scope the device-wide sections say so.
  */
 const DEVICE_WIDE = 'Applies to this device, in every project.'
+
+/** Agents whose subscription usage the Subscription usage page shows. */
+const USAGE_DRIVERS: ReadonlySet<InstanceSnapshot['driver']> = new Set(['claude', 'codex'])
+
+/** Leaves Settings for the Usage page; an integrations draft is asked about first, as on any navigation. */
+function openUsagePage() {
+  void confirmNavigation().then((allowed) => { if (allowed) useAppStore.getState().setUsageOpen(true) })
+}
 
 function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
   return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
@@ -148,7 +158,7 @@ export function AgentEditor({
         <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
-        <AccountRow snapshot={snapshot} actions={actions} />
+        <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
         <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
