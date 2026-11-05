@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Pause } from '../../lib/icons'
-import { describePausedRun, pausedActionError, type PausedAction } from '../../lib/pausedRun'
+import { describePausedRun, pausedActionError, type PausedAction, type PausedRunText } from '../../lib/pausedRun'
 import { createPausedRunClient, type PausedRunClient } from '../../services/pausedRunClient'
 import { useAppStore } from '../../stores/appStore'
 import { useComposerNotice, type ComposerNoticeProps } from '../../components/ComposerNotice'
@@ -22,21 +22,33 @@ export interface PausedRunNoticeInput {
   onDismissError: () => void
   /**
    * Stops the thread and the subagents it started. The composer has no Stop while a run is paused (a paused
-   * thread is not running), so this is the one Stop in reach. It says "Stop thread" in words, so it is not read as
-   * a second End pause. Omitted where the shell has no Stop.
+   * thread is not running), so this is the one Stop in reach; it sits in the "…" menu. Omitted where the shell
+   * has no Stop.
    */
   onStop?: () => void
 }
 
 /**
- * A run a usage limit paused, as the composer's notice: "Paused until 3:40 PM · in 2h 15m", the limit and what
- * happens next in the tooltip, then Resume now, End pause and Stop thread. A busy button keeps focus
- * (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
+ * The notice's one line: "Usage limit reached · resumes 3:40 PM (in 2h 15m)". A pause without a timer "resets"
+ * instead, since it does not resume by itself; past the reset it says what happens now.
+ */
+export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoResume' | 'estimated'>): string {
+  const head = 'Usage limit reached'
+  if (text.stale) return `${head} · resume time unknown`
+  if (text.due) return `${head} · ${pause.autoResume ? 'retrying now' : 'should have reset by now'}`
+  const when = `${pause.estimated ? 'around ' : ''}${text.resetAt}${text.timeLeft ? ` (in ${text.timeLeft})` : ''}`
+  return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${when}`
+}
+
+/**
+ * A run a usage limit paused, as the composer's notice: "Usage limit reached · resumes 3:40 PM (in 2h 15m)", the
+ * limit and what happens next in the tooltip, then Try now, Don't resume and a "…" menu with Stop thread and
+ * subagents. A busy button keeps focus (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
  */
 export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError, onStop }: PausedRunNoticeInput): ComposerNoticeProps {
   const text = describePausedRun(pause, now)
   const blocked = busy !== null
-  const line = text.timeLeft ? `${text.headline} · in ${text.timeLeft}` : text.headline
+  const line = pausedRunLine(text, pause)
   return {
     tone: error ? 'error' : 'warning',
     ...(error ? {} : { icon: <Pause size={14} strokeWidth={2} aria-hidden="true" /> }),
@@ -44,10 +56,10 @@ export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause,
     title: error ?? line,
     tooltip: error ? `${line}. ${text.detail}` : text.detail,
     actions: [
-      { label: busy === 'resume' ? 'Resuming…' : 'Resume now', blocked, busy: busy === 'resume', onClick: onResume },
-      { label: busy === 'cancel' ? 'Ending…' : 'End pause', title: 'End the pause without continuing; queued messages go on', blocked, busy: busy === 'cancel', onClick: onEndPause },
-      ...(onStop ? [{ label: 'Stop thread', title: 'Stop this thread and the subagents it started', blocked, onClick: onStop }] : [])
+      { label: busy === 'resume' ? 'Trying…' : 'Try now', blocked, busy: busy === 'resume', onClick: onResume },
+      { label: busy === 'cancel' ? 'Cancelling…' : "Don't resume", title: 'Drop this run; queued messages still send', blocked, busy: busy === 'cancel', onClick: onEndPause }
     ],
+    ...(onStop ? { menu: [{ label: 'Stop thread and subagents', blocked, onSelect: onStop }] } : {}),
     ...(error ? { onDismiss: onDismissError } : {})
   }
 }

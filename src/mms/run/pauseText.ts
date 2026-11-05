@@ -8,7 +8,7 @@ export { formatPauseUntil, pauseProviderName, pauseWindowLabel }
 export const CONTINUE_TEXT = 'Continue where you left off.'
 
 /** What a pause without a timer tells the person to do: both ways on are real, the button and a message. */
-export const MANUAL_CONTINUE_TEXT = 'Press Resume now or send a message to continue.'
+export const MANUAL_CONTINUE_TEXT = 'Press Try now or send a message to continue.'
 
 /** The system line written into the thread when a run pauses. */
 export function pausedLine(pause: Pick<RunPause, 'until' | 'estimated' | 'provider' | 'limitKind' | 'autoResume'>, nowMs: number = Date.now()): string {

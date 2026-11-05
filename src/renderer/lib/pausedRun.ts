@@ -8,6 +8,8 @@ const AUTO_RESUME_GRACE_MS = 24 * 60 * 60 * 1000
 export interface PausedRunText {
   /** "Paused until 3:40 PM", with "(estimated)" when the time is Mousse's guess. */
   headline: string
+  /** The reset time alone, "3:40 PM"; the date is added when it is not today. */
+  resetAt: string
   /** The time left, "2h 15m"; absent once the time has passed. */
   timeLeft?: string
   /** Which limit was hit and what happens next. */
@@ -39,11 +41,12 @@ export function describePausedRun(pause: TurnPause, nowMs: number): PausedRunTex
   const reached = `${limitName(pause)} was reached.`
   const relative = formatTimeUntil(pause.until, nowMs)
   let next: string
-  if (stale) next = "The reset passed while Mousse was off, so it won't continue by itself. Press Resume now to continue."
+  if (stale) next = "The reset passed while Mousse was off, so it won't continue by itself. Press Try now to continue."
   else if (pause.autoResume) next = due ? 'The limit should have reset, so it continues shortly.' : 'Continues by itself at reset.'
-  else next = due ? 'The limit should have reset. Press Resume now to continue.' : "It won't continue by itself. Press Resume now once it resets."
+  else next = due ? 'The limit should have reset. Press Try now to continue.' : "It won't continue by itself. Press Try now once it resets."
   return {
     headline: pausedUntilLabel(pause, nowMs),
+    resetAt: formatPauseUntil(pause.until, nowMs),
     ...(relative ? { timeLeft: relative } : {}),
     detail: `${reached} ${next}`,
     due,
@@ -67,12 +70,12 @@ export function pausedStatusLabel(pause: Pick<TurnPause, 'until' | 'estimated'> 
 
 export type PausedAction = 'resume' | 'cancel' | 'stop'
 
-/** What the paused notice says when a button press fails. A run that is no longer paused is the usual cause (the notice lagged a hand-over or an End pause). */
+/** What the paused notice says when a button press fails. A run that is no longer paused is the usual cause (the notice lagged a hand-over or a Don't resume). */
 export function pausedActionError(error: unknown, action: PausedAction): string {
   const code = error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : ''
   if (code === 'conflict') return 'This run is no longer paused.'
   const message = error && typeof error === 'object' && 'message' in error && typeof (error as { message: unknown }).message === 'string' ? (error as { message: string }).message : ''
   const line = message.split('\n').map((part) => part.trim()).find(Boolean)
-  const what = action === 'resume' ? 'continue the run' : action === 'cancel' ? 'end the pause' : 'stop the thread'
+  const what = action === 'resume' ? 'continue the run' : action === 'cancel' ? 'cancel the run' : 'stop the thread'
   return line ? `Could not ${what}: ${line}` : `Could not ${what}. Try again.`
 }

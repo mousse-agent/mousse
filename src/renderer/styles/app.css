@@ -2354,7 +2354,8 @@ html[data-theme='high-contrast'] .composer-notice {
   color: var(--text-primary);
 }
 
-.composer-mode-menu-item:disabled {
+.composer-mode-menu-item:disabled,
+.composer-mode-menu-item[aria-disabled='true'] {
   opacity: 0.55;
   cursor: default;
 }
