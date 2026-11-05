@@ -1,5 +1,8 @@
-import { Archive, Copy, Download, Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from '../../lib/icons'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from '../../lib/icons'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { ArchiveDefinitionDialog, FixIssuesLink, SaveStateLabel } from '../automations/EditorParts'
+import { definitionSaveState, publishBlockReason } from '../automations/editorState'
+import { RowMenu } from '../integrations/RowMenu'
 import type { WorkflowBundle, WorkflowDiagnostic, WorkflowEditorDocument, WorkflowManifest, WorkflowNode } from '../../../shared/workflows'
 import { useCommands } from '../../commands/commandRegistry'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'
@@ -108,10 +111,11 @@ export function WorkflowEditor({
   const [history, setHistory] = useState<BoundedHistory<DraftState>>(() => createBoundedHistory<DraftState>())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [status, setStatus] = useState('Loading')
   const [error, setError] = useState<string | null>(null)
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const publishReasonId = useId()
   const pendingLeave = useRef<(() => void) | null>(null)
   const [view, setView] = useState<'canvas' | 'source'>('canvas')
   const [sourceText, setSourceText] = useState('')
@@ -159,7 +163,6 @@ export function WorkflowEditor({
       const next = await client.get({ profileId, id: definitionId })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       applyDocument(next)
-      setStatus(next.head ? 'Published revision available' : 'Draft')
     } catch (caught) {
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       setError(isWorkflowClientError(caught) ? caught.message : String(caught))
@@ -262,7 +265,6 @@ export function WorkflowEditor({
       })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       applyDocument(next)
-      setStatus(visualOnly ? 'Visual draft saved' : 'Draft saved')
     } catch (caught) {
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       if (isRevisionConflict(caught)) setConflictMessage(isWorkflowClientError(caught) ? caught.message : 'Draft changed elsewhere.')
@@ -322,12 +324,10 @@ export function WorkflowEditor({
     const parsed = parseManifestSource(sourceText)
     if (!parsed.ok) {
       setSourceError(parsed.error)
-      setStatus('Invalid source retained')
       return
     }
     updateDraft((current) => ({ ...current, manifest: parsed.manifest }), true)
     setSourceError(null)
-    setStatus('Source applied')
     setView('canvas')
   }
 
@@ -417,6 +417,72 @@ export function WorkflowEditor({
   const canPublish = !dirty && blocking.length === 0 && !sourceError
   const duplicateSupported = Boolean(client.duplicate)
   const archiveSupported = Boolean(client.archive)
+  const saveState = definitionSaveState({
+    dirty,
+    matchesPublished: document.head ? document.head.semanticHash === document.semanticHash : null
+  })
+  const publishReason = publishBlockReason({ state: saveState, busy: saving, readOnly, invalidSource: Boolean(sourceError), blocking })
+  // Opens Validation on the first blocking error, selects its node, and moves focus to the error.
+  const showBlockingIssue = () => {
+    const first = blocking[0]
+    if (!first) return
+    setBottom('diagnostics')
+    if (first.nodeId) setSelectedId(first.nodeId)
+    requestAnimationFrame(() => {
+      window.document.querySelector<HTMLElement>('[data-diagnostics] [data-severity="error"]')?.focus()
+    })
+  }
+  const duplicate = () => {
+    if (!client.duplicate) return
+    const started = gate.current.current()
+    void client.duplicate({ profileId, id: document.id })
+      .then((copy) => {
+        if (!shouldApplyAsyncResult(started, gate.current.current())) return
+        if (onOpenDefinition) onOpenDefinition(copy.id)
+        else onBack()
+      })
+      .catch((caught: unknown) => {
+        if (shouldApplyAsyncResult(started, gate.current.current())) {
+          setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+        }
+      })
+  }
+  const exportBundle = () => {
+    const started = gate.current.current()
+    void client.exportBundle({ profileId, id: document.id })
+      .then((bundle) => {
+        if (!shouldApplyAsyncResult(started, gate.current.current())) return
+        downloadJson(`${draft.manifest.slug || 'workflow'}.mousse-workflow.json`, bundleToExportJson(bundle))
+      })
+      .catch((caught: unknown) => {
+        if (shouldApplyAsyncResult(started, gate.current.current())) {
+          setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+        }
+      })
+  }
+  const archive = () => {
+    if (!client.archive) return
+    const started = gate.current.current()
+    void client.archive({ profileId, id: document.id })
+      .then(() => {
+        if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
+      })
+      .catch((caught: unknown) => {
+        if (shouldApplyAsyncResult(started, gate.current.current())) {
+          setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+        }
+      })
+  }
+  const step = (direction: 'undo' | 'redo') => {
+    setDraft((current) => {
+      if (!current) return current
+      const result = direction === 'redo' ? history.redo(current) : history.undo(current)
+      if (!result) return current
+      setHistory(result.history)
+      setSourceText(stringifyManifest(result.next.manifest))
+      return result.next
+    })
+  }
 
   return (
     <div
@@ -434,39 +500,25 @@ export function WorkflowEditor({
           ← Workflows
         </button>
         <span className="wf-title">{draft.manifest.name || 'Untitled workflow'}</span>
-        <span className="wf-status" data-editor-status="">
-          {status}
-          {dirty ? ' · Unsaved' : ''}
-          {sourceError ? ' · Invalid source retained' : ''}
-          {readOnly ? ' · Published revision (read-only)' : ''}
-        </span>
+        {readOnly ? (
+          <span className="automation-save-state" data-editor-status="" data-state="published">
+            Published revision, read-only
+          </span>
+        ) : (
+          <SaveStateLabel state={saveState} extra={sourceError ? 'Invalid source' : null} />
+        )}
+        {!readOnly && saveState !== 'unsaved' ? <FixIssuesLink issues={blocking} onShow={showBlockingIssue} /> : null}
         <div className="wf-actions">
           {readOnly ? (
             <button type="button" className="btn btn-sm" data-action="view-draft" onClick={() => { setRevisionView('draft'); void load() }}>
               View draft
             </button>
           ) : null}
-          <button type="button" className="btn btn-sm" data-action="undo" disabled={!history.canUndo || readOnly} onClick={() => {
-            setDraft((current) => {
-              if (!current) return current
-              const result = history.undo(current)
-              if (!result) return current
-              setHistory(result.history)
-              return result.next
-            })
-          }}>
-            <Undo2 size={14} /> Undo
+          <button type="button" className="settings-icon-btn" data-action="undo" title="Undo" aria-label="Undo" disabled={!history.canUndo || readOnly} onClick={() => step('undo')}>
+            <Undo2 size={14} />
           </button>
-          <button type="button" className="btn btn-sm" data-action="redo" disabled={!history.canRedo || readOnly} onClick={() => {
-            setDraft((current) => {
-              if (!current) return current
-              const result = history.redo(current)
-              if (!result) return current
-              setHistory(result.history)
-              return result.next
-            })
-          }}>
-            <Redo2 size={14} /> Redo
+          <button type="button" className="settings-icon-btn" data-action="redo" title="Redo" aria-label="Redo" disabled={!history.canRedo || readOnly} onClick={() => step('redo')}>
+            <Redo2 size={14} />
           </button>
           <button
             type="button"
@@ -517,82 +569,28 @@ export function WorkflowEditor({
             className="btn btn-primary btn-sm"
             data-action="publish"
             disabled={saving || !canPublish || readOnly}
-            title={blocking[0]?.message}
+            title={publishReason ?? undefined}
+            aria-describedby={publishReason ? publishReasonId : undefined}
             onClick={() => void publish()}
           >
-            Publish version
+            Publish
           </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Duplicate workflow"
-            disabled={saving || !duplicateSupported}
-            title={duplicateSupported ? undefined : 'Duplicate is not provided by the host definitions port.'}
-            onClick={() =>
-              requestLeave(() => {
-                if (!client.duplicate) return
-                const started = gate.current.current()
-                void client.duplicate({ profileId, id: document.id })
-                  .then((copy) => {
-                    if (!shouldApplyAsyncResult(started, gate.current.current())) return
-                    onOpenDefinition?.(copy.id) ?? onBack()
-                  })
-                  .catch((caught: unknown) => {
-                    if (shouldApplyAsyncResult(started, gate.current.current())) {
-                      setError(isWorkflowClientError(caught) ? caught.message : String(caught))
-                    }
-                  })
-              })
-            }
-          >
-            <Copy size={14} /> Duplicate
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Export workflow"
-            disabled={saving || dirty}
-            title={dirty ? 'Save or discard local edits before exporting the registry draft.' : undefined}
-            onClick={() => {
-              const started = gate.current.current()
-              void client.exportBundle({ profileId, id: document.id })
-                .then((bundle) => {
-                  if (!shouldApplyAsyncResult(started, gate.current.current())) return
-                  downloadJson(`${draft.manifest.slug || 'workflow'}.mousse-workflow.json`, bundleToExportJson(bundle))
-                })
-                .catch((caught: unknown) => {
-                  if (shouldApplyAsyncResult(started, gate.current.current())) {
-                    setError(isWorkflowClientError(caught) ? caught.message : String(caught))
-                  }
-                })
-            }}
-          >
-            <Download size={14} /> Export
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Archive workflow"
-            disabled={saving || !archiveSupported}
-            title={archiveSupported ? undefined : 'Archive is not provided by the host definitions port.'}
-            onClick={() =>
-              requestLeave(() => {
-                if (!client.archive) return
-                const started = gate.current.current()
-                void client.archive({ profileId, id: document.id })
-                  .then(() => {
-                    if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
-                  })
-                  .catch((caught: unknown) => {
-                    if (shouldApplyAsyncResult(started, gate.current.current())) {
-                      setError(isWorkflowClientError(caught) ? caught.message : String(caught))
-                    }
-                  })
-              })
-            }
-          >
-            <Archive size={14} /> Archive
-          </button>
+          {publishReason ? <span id={publishReasonId} className="sr-only">{publishReason}</span> : null}
+          <RowMenu
+            label="Workflow actions"
+            disabled={saving}
+            items={[
+              ...(duplicateSupported ? [{ label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(duplicate) }] : []),
+              {
+                label: 'Export',
+                action: 'export',
+                disabled: dirty,
+                title: dirty ? 'Save or discard your edits to export the saved draft.' : undefined,
+                onSelect: exportBundle
+              },
+              ...(archiveSupported ? [{ label: 'Archive', action: 'archive', danger: true, onSelect: () => setArchiveOpen(true) }] : [])
+            ]}
+          />
         </div>
       </header>
       {error ? (
@@ -728,7 +726,6 @@ export function WorkflowEditor({
                   if (!shouldApplyAsyncResult(started, gate.current.current())) return
                   applyDocument(next)
                   setRevisionView('published')
-                  setStatus('Published revision (read-only)')
                 } catch (caught) {
                   if (shouldApplyAsyncResult(started, gate.current.current())) {
                     setError(isWorkflowClientError(caught) ? caught.message : String(caught))
@@ -790,6 +787,23 @@ export function WorkflowEditor({
         onReload={() => {
           setConflictMessage(null)
           void load()
+        }}
+      />
+      <ArchiveDefinitionDialog
+        open={archiveOpen}
+        kind="workflow"
+        name={document.name || draft.manifest.name || 'Untitled workflow'}
+        dirty={dirty}
+        onCancel={() => setArchiveOpen(false)}
+        onConfirm={() => {
+          setArchiveOpen(false)
+          // The dialog said unsaved edits go; drop them so the leave guard does not ask again.
+          if (baseline) {
+            setDraft(baseline)
+            setSourceText(stringifyManifest(baseline.manifest))
+          }
+          setSourceError(null)
+          archive()
         }}
       />
     </div>

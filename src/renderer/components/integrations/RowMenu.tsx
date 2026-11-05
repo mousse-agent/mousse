@@ -7,6 +7,10 @@ export interface RowMenuItem {
   onSelect: () => void
   disabled?: boolean
   danger?: boolean
+  /** Tooltip, e.g. why the item is disabled. */
+  title?: string
+  /** `data-action` on the item, for tests and scripted checks. */
+  action?: string
 }
 
 /** Overflow menu for a settings row's secondary actions. */
@@ -68,7 +72,14 @@ export function RowMenu({ label, items, disabled }: { label: string; items: RowM
           role="menuitem"
           className={`row-menu-item${item.danger ? ' danger' : ''}`}
           disabled={item.disabled}
-          onClick={() => { setOpen(false); item.onSelect() }}
+          title={item.title}
+          data-action={item.action}
+          onClick={() => {
+            // Focus goes back to "…" first, so a dialog the item opens returns there when it closes.
+            buttonRef.current?.focus()
+            setOpen(false)
+            item.onSelect()
+          }}
         >{item.label}</button>)}
       </div>
     </FloatingPortal>}

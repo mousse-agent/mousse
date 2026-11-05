@@ -1,5 +1,9 @@
-import { Archive, Copy, Download, Star } from '../../lib/icons'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Star } from '../../lib/icons'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { ArchiveDefinitionDialog, FixIssuesLink, SaveStateLabel } from '../automations/EditorParts'
+import { definitionSaveState, publishBlockReason } from '../automations/editorState'
+import { RowMenu } from '../integrations/RowMenu'
+import { Switch } from '../settings/SettingsRow'
 import type {
   AgentDefinitionRecord,
   AgentDefinitionSettings,
@@ -54,6 +58,16 @@ function snapshotsEqual(a: DraftSnapshot, b: DraftSnapshot): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
+/**
+ * Null when never published; otherwise whether the saved draft is the published revision. A
+ * revision is named by its content hashes, and a draft saved for an older CLI kind is republished
+ * as Mousse's, so it counts as changed.
+ */
+export function matchesPublished(record: Pick<AgentDefinitionRecord, 'published' | 'semanticHash' | 'visualHash' | 'runtimeKind'>): boolean | null {
+  if (!record.published) return null
+  return record.runtimeKind === 'mousse' && record.published.revision === record.semanticHash && record.published.visualRevision === record.visualHash
+}
+
 export function AgentEditor({
   profileId,
   definitionId,
@@ -70,10 +84,11 @@ export function AgentEditor({
   const [baseline, setBaseline] = useState<DraftSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [status, setStatus] = useState<string>('Loading')
   const [error, setError] = useState<string | null>(null)
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const publishReasonId = useId()
   const pendingLeave = useRef<(() => void) | null>(null)
   const navigationDecision = useRef<((allow: boolean) => void) | null>(null)
   const [desktop, setDesktop] = useState(
@@ -103,7 +118,6 @@ export function AgentEditor({
       const snap = snapshotFromRecord(next)
       setDraft(snap)
       setBaseline(snap)
-      setStatus(next.published ? 'Published revision pinned' : 'Draft')
     } catch (caught) {
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       setRecord(null)
@@ -167,6 +181,8 @@ export function AgentEditor({
   )
   const blocking = issues.filter((issue) => issue.blocking)
   const canPublish = Boolean(record && draft && !dirty && runtimeChecked && blocking.length === 0)
+  const saveState = definitionSaveState({ dirty, matchesPublished: record ? matchesPublished(record) : null })
+  const publishReason = publishBlockReason({ state: saveState, busy: saving, blocking, checking: !runtimeChecked })
   const canRun = Boolean(record && draft && !dirty && blocking.length === 0)
 
   const requestLeave = (action: () => void) => {
@@ -204,7 +220,6 @@ export function AgentEditor({
       })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       applyRecord(next)
-      setStatus('Draft saved')
     } catch (caught) {
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       if (isAgentDefinitionClientError(caught) && caught.code === 'REVISION_CONFLICT') {
@@ -320,19 +335,19 @@ export function AgentEditor({
           ← Agents
         </button>
         <span className="agent-defs__title">{draft.settings.identity.name || 'Untitled agent'}</span>
-        <span className="agent-defs__status" data-editor-status="">
-          {status}
-          {dirty ? ' · Unsaved' : ''}
-          {runsOn ? ` · Runs on ${runsOn}` : ''}
-        </span>
+        <SaveStateLabel state={saveState} extra={runsOn ? `Runs on ${runsOn}` : null} />
+        {saveState !== 'unsaved' ? <FixIssuesLink issues={blocking} onShow={() => focusIssue(blocking[0].fieldId)} /> : null}
         <div className="agent-defs__actions">
           <button
             type="button"
-            className="btn btn-sm"
+            className="settings-icon-btn automation-icon-toggle"
+            data-action="favorite"
             aria-pressed={draft.flags.favorite}
+            aria-label="Favorite"
+            title={draft.flags.favorite ? 'Remove from favorites' : 'Add to favorites'}
             onClick={() => setDraft({ ...draft, flags: { ...draft.flags, favorite: !draft.flags.favorite } })}
           >
-            <Star size={14} /> {draft.flags.favorite ? 'Favorited' : 'Favorite'}
+            <Star size={14} fill={draft.flags.favorite ? 'currentColor' : 'none'} />
           </button>
           <button
             type="button"
@@ -348,43 +363,33 @@ export function AgentEditor({
             className="btn btn-primary btn-sm"
             data-action="publish"
             disabled={saving || !canPublish}
-            title={blocking[0]?.message}
+            title={publishReason ?? undefined}
+            aria-describedby={publishReason ? publishReasonId : undefined}
             onClick={() => void publish()}
           >
             Publish
           </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Duplicate agent"
+          {publishReason ? <span id={publishReasonId} className="sr-only">{publishReason}</span> : null}
+          <RowMenu
+            label="Agent actions"
             disabled={saving}
-            onClick={() => requestLeave(() => void duplicate())}
-          >
-            <Copy size={14} /> Duplicate
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Export agent"
-            disabled={saving || dirty}
-            title={dirty ? 'Save or discard local edits before exporting the registry draft.' : undefined}
-            onClick={() =>
-              void client.exportBundle({ profileId, id: record.id }).then((bundle) => {
-                downloadJson(`${draft.settings.identity.slug || 'agent'}.mousse-agent.json`, bundle)
-              })
-            }
-          >
-            <Download size={14} /> Export
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="Archive agent"
-            disabled={saving}
-            onClick={() => requestLeave(() => void archive())}
-          >
-            <Archive size={14} /> Archive
-          </button>
+            items={[
+              { label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(() => void duplicate()) },
+              {
+                label: 'Export',
+                action: 'export',
+                disabled: dirty,
+                title: dirty ? 'Save or discard your edits to export the saved draft.' : undefined,
+                onSelect: () => {
+                  void client.exportBundle({ profileId, id: record.id }).then(
+                    (bundle) => downloadJson(`${draft.settings.identity.slug || 'agent'}.mousse-agent.json`, bundle),
+                    (caught: unknown) => setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+                  )
+                }
+              },
+              { label: 'Archive', action: 'archive', danger: true, onSelect: () => setArchiveOpen(true) }
+            ]}
+          />
         </div>
       </header>
       {error ? (
@@ -487,21 +492,29 @@ export function AgentEditor({
           void load()
         }}
       />
+      <ArchiveDefinitionDialog
+        open={archiveOpen}
+        kind="agent"
+        name={record.settings.identity.name || 'Untitled agent'}
+        dirty={dirty}
+        onCancel={() => setArchiveOpen(false)}
+        onConfirm={() => {
+          setArchiveOpen(false)
+          // The dialog said unsaved edits go; drop them so the leave guard does not ask again.
+          setDraft(baseline)
+          void archive()
+        }}
+      />
     </div>
   )
 }
 
 function CheckEnabled({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {
   return (
-    <label className="agent-check-row" htmlFor="agent-enabled">
-      <input
-        id="agent-enabled"
-        type="checkbox"
-        checked={enabled}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      Enabled
-    </label>
+    <div className="agent-check-row agent-switch-row">
+      <span id="agent-enabled-label">Enabled</span>
+      <Switch id="agent-enabled" checked={enabled} onChange={onChange} label="Enabled" />
+    </div>
   )
 }
 
