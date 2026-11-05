@@ -32,6 +32,12 @@
   font-size: 12.5px;
 }
 
+/* Nothing to say: the strip takes no room, and stays in place as a live region for when it has something. */
+.start-from-pr-status:empty {
+  min-height: 0;
+  margin: 0;
+}
+
 .start-from-pr-resolved {
   color: var(--text-primary);
 }
