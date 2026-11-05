@@ -209,6 +209,9 @@ describe('the transcript under a notice', () => {
   it('keeps its end, fade, Go to latest and prompt rail clear of the notice line', () => {
     expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot)'))
       .toMatch(/--chat-notice-stack:\s*42px;[\s\S]*--chat-notice-fade:\s*24px;/)
+    // Two stacked lines (the lost service above an approval) reserve two lines.
+    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot > .composer-notice + .composer-notice)'))
+      .toMatch(/--chat-notice-stack:\s*84px;/)
     expect(body('.chat:not(.chat--empty) .an-message-list > div')).toContain('var(--chat-notice-stack, 0px)')
     const mask = polish.slice(polish.indexOf('--transcript-mask:'), polish.indexOf('-webkit-mask-image', polish.indexOf('--transcript-mask:')))
     expect(mask).toMatch(/#000 max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - 32px\)\)/)

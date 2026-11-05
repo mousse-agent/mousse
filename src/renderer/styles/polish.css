@@ -1149,6 +1149,11 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   --chat-notice-fade: 24px;
 }
 
+/* The lost background service stacked above a waiting approval: two lines. */
+.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot > .composer-notice + .composer-notice) {
+  --chat-notice-stack: 84px;
+}
+
 .chat:not(.chat--empty) .an-message-list > div {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + var(--chat-notice-stack, 0px) + 32px);
 }
