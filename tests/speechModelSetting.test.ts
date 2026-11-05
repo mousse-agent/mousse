@@ -23,6 +23,7 @@ const render = (value: SpeechSelection | null, providerModels: Parameters<typeof
       title: 'Model',
       description: 'Turns speech into text.',
       dialogTitle: 'Dictation models',
+      addLabel: 'Add a dictation model',
       value,
       onSelect: () => undefined,
       providerModels,
@@ -43,10 +44,18 @@ it('lists provider models in the select and keeps downloads behind Get more mode
   expect(html).not.toContain('Moonshine Base')
 })
 
-it('shows an empty, disabled select when no model is ready', () => {
+it('offers one add action instead of a dead select when no model is ready', () => {
   const html = render(null, [])
+  expect(html).not.toContain('<select')
+  expect(html).not.toContain('Get more models')
+  expect(html).toMatch(/<button[^>]*aria-label="Add a dictation model"[^>]*>.*Add model<\/button>/)
+})
+
+it('keeps the select while provider models are still loading', () => {
+  const html = render(null, null)
   expect(html).toMatch(/<select[^>]*disabled=""/)
-  expect(html).toContain('No models yet')
+  expect(html).toContain('Loading models')
+  expect(html).not.toContain('Add model')
 })
 
 it('keeps a saved choice visible when its model is no longer listed', () => {

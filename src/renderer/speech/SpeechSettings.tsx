@@ -28,7 +28,7 @@ import { SpeechModelSetting } from '../speechModels/SpeechModelSetting'
 import { dictationComparison, readAloudComparison } from '../speechModels/modelComparison'
 import { useAppStore } from '../stores/appStore'
 import { SPEECH_SPEEDS, useSpeechPreferences, voiceFor } from './speechPreferences'
-import { VocabularySetting } from './VocabularySetting'
+import { VocabularySetting, usesVocabulary } from './VocabularySetting'
 import '../styles/speech.css'
 
 const READ_ALOUD_COMPARISON = readAloudComparison(RECOMMENDED_TTS_MODEL_ID)
@@ -111,6 +111,7 @@ function ReadAloudSpeechSettings() {
         title="Model"
         description="Reads messages when you press read aloud under one."
         dialogTitle="Read aloud models"
+        addLabel="Add a read aloud model"
         value={selection}
         onSelect={setSelection}
         providerModels={providerModels}
@@ -120,57 +121,56 @@ function ReadAloudSpeechSettings() {
         localApi={readAloudLocalApi}
         comparison={READ_ALOUD_COMPARISON}
       />
-      <SettingsRow
-        title="Voice"
-        description={
-          previewError ? (
-            <span className="speech-settings-error" role="alert">
-              {previewError}
-            </span>
-          ) : selection ? (
-            'Each model keeps its own voice.'
-          ) : (
-            'Choose a model first.'
-          )
-        }
-        htmlFor={voiceSelectId}
-        disabled={!selection}
-        control={
-          <>
-            <Select
-              id={voiceSelectId}
-              value={voice ?? ''}
-              disabled={voices.length === 0}
-              placeholder="No voices"
-              onChange={chooseVoice}
-              options={voices.map((option) => ({ value: option.id, label: option.label }))}
-            />
-            <button
-              type="button"
-              className="settings-icon-btn primary"
-              disabled={!selection}
-              title={previewLoading ? 'Loading voice, click to stop' : previewing ? 'Stop sample' : 'Play sample'}
-              aria-label={previewing ? 'Stop sample' : 'Play sample'}
-              aria-busy={previewLoading || undefined}
-              onClick={playSample}
-            >
-              {previewLoading ? (
-                <Loader2 size={14} strokeWidth={2} className="icon-spin" aria-hidden="true" />
-              ) : previewing ? (
-                <Stop size={14} strokeWidth={2} aria-hidden="true" />
-              ) : (
-                <Play size={14} strokeWidth={2} aria-hidden="true" />
-              )}
-            </button>
-          </>
-        }
-      />
-      <SettingsRow
-        title="Speed"
-        titleId={speedLabelId}
-        description="A change applies from the next sentence."
-        control={<Segmented value={preferences.speed} options={SPEED_OPTIONS} onChange={setSpeed} ariaLabelledBy={speedLabelId} />}
-      />
+      {/* Voice and sample wait for a model that offers voices; speed waits for any model. */}
+      {voices.length > 0 && (
+        <SettingsRow
+          title="Voice"
+          description={
+            previewError ? (
+              <span className="speech-settings-error" role="alert">
+                {previewError}
+              </span>
+            ) : (
+              'Each model keeps its own voice.'
+            )
+          }
+          htmlFor={voiceSelectId}
+          control={
+            <>
+              <Select
+                id={voiceSelectId}
+                value={voice ?? ''}
+                onChange={chooseVoice}
+                options={voices.map((option) => ({ value: option.id, label: option.label }))}
+              />
+              <button
+                type="button"
+                className="settings-icon-btn primary"
+                title={previewLoading ? 'Loading voice, click to stop' : previewing ? 'Stop sample' : 'Play sample'}
+                aria-label={previewing ? 'Stop sample' : 'Play sample'}
+                aria-busy={previewLoading || undefined}
+                onClick={playSample}
+              >
+                {previewLoading ? (
+                  <Loader2 size={14} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+                ) : previewing ? (
+                  <Stop size={14} strokeWidth={2} aria-hidden="true" />
+                ) : (
+                  <Play size={14} strokeWidth={2} aria-hidden="true" />
+                )}
+              </button>
+            </>
+          }
+        />
+      )}
+      {selection && (
+        <SettingsRow
+          title="Speed"
+          titleId={speedLabelId}
+          description="A change applies from the next sentence."
+          control={<Segmented value={preferences.speed} options={SPEED_OPTIONS} onChange={setSpeed} ariaLabelledBy={speedLabelId} />}
+        />
+      )}
     </SettingsGroup>
   )
 }
@@ -193,12 +193,20 @@ function DictationSpeechSettings() {
     syncPreferences(profileId)
   }, [profileId, syncDictation, syncPreferences])
 
+  // Vocabulary only applies where the model's runtime uses it; saved terms stay either way.
+  const vocabularyApplies = usesVocabulary(selection)
+  const modelDescription =
+    selection && !vocabularyApplies && vocabulary.length > 0
+      ? "Doesn't use your vocabulary. Parakeet models do."
+      : 'Turns speech into text when you press the microphone in the message box.'
+
   return (
     <SettingsGroup title="Dictation" icon={Mic}>
       <SpeechModelSetting
         title="Model"
-        description="Turns speech into text when you press the microphone in the message box."
+        description={modelDescription}
         dialogTitle="Dictation models"
+        addLabel="Add a dictation model"
         value={selection}
         onSelect={setSelection}
         providerModels={providerModels}
@@ -208,13 +216,15 @@ function DictationSpeechSettings() {
         localApi={dictationLocalApi}
         comparison={DICTATION_COMPARISON}
       />
-      <SettingsRow
-        title="Reduce background noise"
-        description="Removes fans, typing and street noise before your speech is turned into text."
-        htmlFor={noiseSwitchId}
-        control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}
-      />
-      <VocabularySetting vocabulary={vocabulary} selection={selection} onChange={setVocabulary} />
+      {vocabularyApplies && <VocabularySetting vocabulary={vocabulary} onChange={setVocabulary} />}
+      {selection && (
+        <SettingsRow
+          title="Reduce background noise"
+          description="Removes fans, typing and street noise before your speech is turned into text."
+          htmlFor={noiseSwitchId}
+          control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}
+        />
+      )}
     </SettingsGroup>
   )
 }

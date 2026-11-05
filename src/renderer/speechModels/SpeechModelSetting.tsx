@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { localModelBytes, type LocalModelManifest, type LocalModelState, type LocalModelStatus } from '../../shared/localModels'
 import { Modal } from '../components/ui/Modal'
-import { ChevronLeft, ChevronRight, Download, RotateCcw, Trash2, X } from '../lib/icons'
+import { ChevronLeft, ChevronRight, Download, Plus, RotateCcw, Trash2, X } from '../lib/icons'
 import { SettingsGroup, SettingsRow } from '../components/settings/SettingsRow'
 import { Select } from '../components/ui/Select'
 import { isBestValue, pickModels, type ModelComparison, type ModelMetric, type ModelPick } from './modelComparison'
@@ -16,14 +16,16 @@ import {
 } from './SpeechModelPicker'
 
 /**
- * Settings, Speech: one model row (a select of the models ready to use, plus "Get more models")
- * and the dialog that compares, downloads, deletes and picks the models that run on this computer.
+ * Settings, Speech: one model row (a select of the models ready to use, plus "Get more models";
+ * with none ready, only "Add model", which opens the same dialog) and the dialog that compares, downloads, deletes and picks the models that run on this computer.
  */
 export interface SpeechModelSettingProps<S extends SpeechSelection, M extends LocalModelManifest> {
   title: string
   description: string
   /** Title of the "Get more models" dialog. */
   dialogTitle: string
+  /** Accessible name of the one add action shown while no model is ready, e.g. "Add a dictation model". */
+  addLabel: string
   value: S | null
   onSelect: (selection: S) => void
   providerModels: SpeechProviderModel[] | null
@@ -42,6 +44,7 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
   title,
   description,
   dialogTitle,
+  addLabel,
   value,
   onSelect,
   providerModels,
@@ -88,36 +91,45 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
   // The saved choice stays visible even when its model is no longer listed.
   const orphan = value && !options.has(valueKey) ? value : null
   const empty = options.size === 0 && !orphan
+  // With nothing to choose from, the select would be dead: adding a model is the one action.
+  const needsModel = empty && providerModels !== null
 
   return (
     <>
       <SettingsRow
         title={title}
         description={description}
-        htmlFor={selectId}
+        htmlFor={needsModel ? undefined : selectId}
         control={
-          <>
-            <Select
-              id={selectId}
-              value={valueKey}
-              disabled={empty}
-              placeholder={empty ? (providerModels === null ? 'Loading models' : 'No models yet') : 'Choose a model'}
-              onChange={(key) => {
-                const selection = options.get(key)
-                if (selection) onSelect(selection)
-              }}
-              options={[
-                ...(orphan ? [{ value: valueKey, label: orphan.label }] : []),
-                ...[...providerGroups].flatMap(([providerLabel, group]) =>
-                  group.map((option) => ({ value: option.key, label: option.label, group: providerLabel }))
-                ),
-                ...installed.map((option) => ({ value: option.key, label: option.label, group: 'On this computer' }))
-              ]}
-            />
-            <button type="button" className="settings-btn" onClick={() => setDialogOpen(true)}>
-              Get more models
+          needsModel ? (
+            <button type="button" className="settings-btn" aria-label={addLabel} title={addLabel} onClick={() => setDialogOpen(true)}>
+              <Plus size={14} aria-hidden="true" />
+              Add model
             </button>
-          </>
+          ) : (
+            <>
+              <Select
+                id={selectId}
+                value={valueKey}
+                disabled={empty}
+                placeholder={empty ? 'Loading models' : 'Choose a model'}
+                onChange={(key) => {
+                  const selection = options.get(key)
+                  if (selection) onSelect(selection)
+                }}
+                options={[
+                  ...(orphan ? [{ value: valueKey, label: orphan.label }] : []),
+                  ...[...providerGroups].flatMap(([providerLabel, group]) =>
+                    group.map((option) => ({ value: option.key, label: option.label, group: providerLabel }))
+                  ),
+                  ...installed.map((option) => ({ value: option.key, label: option.label, group: 'On this computer' }))
+                ]}
+              />
+              <button type="button" className="settings-btn" onClick={() => setDialogOpen(true)}>
+                Get more models
+              </button>
+            </>
+          )
         }
       />
       {dialogOpen && (
