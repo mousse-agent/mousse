@@ -1,5 +1,6 @@
 import Editor from '@monaco-editor/react'
 import { MarkdownDocumentEditor } from '../editors/MarkdownDocumentEditor'
+import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
 
 export function WorkflowSourceEditor({
   value,
@@ -14,6 +15,7 @@ export function WorkflowSourceEditor({
   onChange: (value: string) => void
   onSave?: () => void
 }) {
+  const codeFont = useMonacoCodeFont()
   return (
     <div className="wf-source" data-source-editor="">
       <label className="wf-hidden" htmlFor="workflow-source-text">
@@ -36,6 +38,7 @@ export function WorkflowSourceEditor({
         options={{
           readOnly: Boolean(readOnly),
           minimap: { enabled: false },
+          fontFamily: codeFont,
           fontSize: 13,
           wordWrap: 'on',
           automaticLayout: true
