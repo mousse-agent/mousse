@@ -112,6 +112,8 @@ html[data-theme='light'] {
   --hue-5: #3f6edb;
   --hue-6: #d34f6c;
   --ui-on-accent: #ffffff;
+  /* Lighter than --text-secondary, still 4.5:1 on every light surface. */
+  --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
 }
 
 @media (prefers-color-scheme: light) {
@@ -135,6 +137,7 @@ html[data-theme='light'] {
     --hue-5: #3f6edb;
     --hue-6: #d34f6c;
     --ui-on-accent: #ffffff;
+    --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
   }
 }
 
@@ -348,8 +351,9 @@ html[data-theme='high-contrast'] {
 .app .threads-sidebar-project:nth-child(6n + 5) .threads-sidebar-project-icon { color: var(--hue-3); }
 .app .threads-sidebar-project:nth-child(6n + 6) .threads-sidebar-project-icon { color: var(--hue-6); }
 
+/* The list sits inside a Collapse, so its bottom margin adds to the project's 2px: 4px + 2px keeps the 6px gap. */
 .app .threads-sidebar-children {
-  margin: 1px 0 6px calc(var(--ui-row-x) + 7px);
+  margin: 1px 0 4px calc(var(--ui-row-x) + 7px);
   padding-left: 6px;
   border-left: 1px solid var(--ui-line-strong);
 }

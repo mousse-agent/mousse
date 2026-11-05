@@ -206,11 +206,14 @@
   flex: none;
   opacity: 0;
   transform: rotate(90deg);
-  transition: opacity 120ms ease, transform 120ms ease;
+  /* The turn follows the section body's Collapse: same easing, 160ms open and 130ms close. */
+  transition: opacity 120ms ease, transform 160ms var(--ui-collapse-ease);
 }
 
 .side-card-section[data-collapsed='true'] .side-card-section-chevron {
   transform: none;
+  transition-duration: 120ms, 130ms;
+  transition-timing-function: ease, var(--ui-collapse-ease-close);
 }
 
 /* The chevron shows on hover and focus, and always while collapsed so a closed section reads as one. */

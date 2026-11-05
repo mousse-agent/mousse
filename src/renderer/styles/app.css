@@ -852,11 +852,6 @@ html.platform-darwin .titlebar-left {
 .turn-edits-chevron {
   flex-shrink: 0;
   color: var(--text-secondary);
-  transition: transform 0.15s ease;
-}
-
-.turn-edits-chevron.is-open {
-  transform: rotate(90deg);
 }
 
 .turn-edits-count {
@@ -3215,33 +3210,6 @@ html.platform-darwin .titlebar-left {
   margin-bottom: 8px;
 }
 
-.pre-thinking-box {
-  min-width: min(220px, 80vw);
-}
-
-.pre-thinking-box .thinking-heading {
-  margin-bottom: 0;
-}
-
-.pre-thinking-phrase {
-  animation: pre-thinking-fade-in calc(350ms * var(--ui-motion-scale)) ease;
-}
-
-@keyframes pre-thinking-fade-in {
-  from {
-    opacity: 0.35;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.message-pre-thinking {
-  align-self: flex-start;
-}
-
 .thinking-scroll {
   max-height: 160px;
   overflow-y: auto;
@@ -3299,10 +3267,6 @@ html.platform-darwin .titlebar-left {
 @media (prefers-reduced-motion: reduce) {
   .shimmer-text {
     animation: none !important;
-  }
-
-  .pre-thinking-phrase {
-    animation: none;
   }
 
   .response-work-status {
@@ -5691,12 +5655,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   51%, 100% { opacity: 0; }
 }
 
-.pre-thinking-flat {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-}
-
 .message-streaming.streaming-text::after {
   content: '▍';
   width: auto;
@@ -5744,14 +5702,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   background: transparent;
   font-size: 12px;
   color: var(--text-secondary);
-}
-
-.pre-thinking-box {
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 14px;
 }
 
 .pixel-grid {
@@ -5885,6 +5835,16 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 }
 
 .composer-input::placeholder { color: rgba(255,255,255,0.42); }
+/* White placeholder vanishes on the light composer; high contrast needs more than 42%. */
+html[data-theme='light'] .composer-input::placeholder,
+html[data-theme='high-contrast'] .composer-input::placeholder {
+  color: var(--text-secondary);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .composer-input::placeholder {
+    color: var(--text-secondary);
+  }
+}
 
 .composer-footer {
   padding: 8px 10px 10px;
