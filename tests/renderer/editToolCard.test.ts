@@ -175,6 +175,17 @@ describe('edit row', () => {
     expect(line()).toBe('Createda.test.ts+3')
   })
 
+  it('a new file with no diff shows the lines it wrote', () => {
+    draw({
+      type: 'tool-Write',
+      toolCallId: 'w4',
+      state: 'output-available',
+      input: { file_path: 'tests/big.test.ts' },
+      output: { changes: [{ path: 'tests/big.test.ts', change: 'add', diffUnavailable: true, linesWritten: 40 }] }
+    })
+    expect(line()).toBe('Createdbig.test.ts+40')
+  })
+
   it('a Write sent as `contents` counts its lines, like the changed-files line', () => {
     draw({ type: 'tool-Write', toolCallId: 'w3', state: 'output-available', input: { file_path: 'docs/b.md', contents: 'x\ny' } })
     expect(line()).toBe('Createdb.md+2')

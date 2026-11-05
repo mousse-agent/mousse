@@ -101,7 +101,7 @@ function filesFromChanges(changes: unknown): EditedFile[] | undefined {
       path: change.path,
       name,
       verb: verbOf(change.change),
-      added: change.added ?? 0,
+      added: change.added ?? (change.change === "add" ? change.linesWritten : undefined) ?? 0,
       removed: change.removed ?? 0,
       ...(change.error ? { error: change.error } : {}),
     };
@@ -114,7 +114,9 @@ function filesFromChanges(changes: unknown): EditedFile[] | undefined {
       } else {
         const { oldText, newText } = diffSides(change.diff, change.change);
         // A new file recorded without its line count still shows +N: its text is all added lines.
-        if (file.verb === "create" && file.added === 0 && file.removed === 0) file.added = lineCount(newText);
+        if (file.verb === "create" && change.added === undefined && change.linesWritten === undefined) {
+          file.added = lineCount(newText);
+        }
         file.diff = {
           kind: "sides",
           oldFile: { name, contents: oldText },
