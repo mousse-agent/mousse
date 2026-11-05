@@ -1,13 +1,5 @@
-/* Short, tightly stacked marks; only pointer/focus proximity forms a bump. */
-.an-message-list-wrap .chat-prompt-rail {
-  left: 8px;
-}
-
-/* In a narrow pane the transcript reaches the edges; keep its text clear of the rail's 48px hit
-   area. Wide panes center the transcript well away from the rail, so this changes nothing there. */
-.an-message-list-wrap:has(> .chat-prompt-rail) > .an-message-list {
-  padding-inline: 24px;
-}
+/* Short, tightly stacked marks; only pointer/focus proximity forms a bump. The rail sets its own
+   left edge beside the transcript text and hides when the gutter cannot hold it. */
 
 .an-message-list-wrap .chat-prompt-tick {
   height: 9px;
