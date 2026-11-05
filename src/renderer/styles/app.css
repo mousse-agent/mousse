@@ -1107,31 +1107,12 @@ html.platform-darwin .titlebar-left {
   padding-bottom: 0;
 }
 
-/* Anchor above the input so the composer itself stays at the pane's midpoint. */
-.chat-empty-logo {
+/* Anchored above the input so the composer itself stays at the pane's midpoint. */
+.chat-empty-add-project {
   position: absolute;
-  bottom: calc(100% + 32px);
+  bottom: calc(100% + var(--space-16));
   left: 50%;
   transform: translateX(-50%);
-  width: 96px;
-  height: 96px;
-  color: var(--accent);
-  opacity: 0.7;
-  pointer-events: none;
-}
-
-.chat-empty-logo svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-@media (max-height: 560px) {
-  .chat-empty-logo {
-    width: 56px;
-    height: 56px;
-    bottom: calc(100% + 16px);
-  }
 }
 
 /* Queued messages stack — visually attached above the composer */

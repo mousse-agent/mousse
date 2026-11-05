@@ -625,34 +625,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   );
 }
 
-.app .chat-empty-logo {
-  bottom: calc(100% + 76px);
-  width: 76px;
-  height: 76px;
-  opacity: 1;
-  filter: drop-shadow(0 0 22px rgba(var(--accent-rgb), 0.45));
-}
-
-.chat-empty-title {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 24px);
-  margin: 0;
-  font-size: 26px;
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
-  text-align: center;
-  color: var(--text-primary);
-  pointer-events: none;
-}
-
-@media (max-height: 560px) {
-  .chat-empty-title { display: none; }
-  .app .chat-empty-logo { bottom: calc(100% + 16px); width: 48px; height: 48px; }
-}
-
 .app .chat-input-area .composer {
   border-color: var(--ui-line-strong);
   border-radius: 16px;
