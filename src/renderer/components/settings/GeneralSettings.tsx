@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import { ANIMATION_SPEEDS, type AnimationSpeed, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
@@ -8,8 +8,15 @@ import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldChe
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
+
+const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
+  off: 'Off',
+  fast: 'Fast',
+  normal: 'Normal',
+  slow: 'Slow'
+}
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -234,6 +241,21 @@ export function GeneralSettings({
           }
         />
       </SettingsGroup>
+
+      <SettingsAdvanced>
+        <SettingsRow
+          title="Animation speed"
+          description={<span title="Off whenever your system is set to reduce motion.">How fast panels, menus and lists move.</span>}
+          control={
+            <Select
+              ariaLabel="Animation speed"
+              value={appearance.animationSpeed}
+              onChange={(animationSpeed) => void onUpdate({ appearance: { ...appearance, animationSpeed } })}
+              options={ANIMATION_SPEEDS.map((speed) => ({ value: speed, label: ANIMATION_SPEED_LABELS[speed] }))}
+            />
+          }
+        />
+      </SettingsAdvanced>
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />

@@ -8,6 +8,7 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { setAnimationSpeed } from '../lib/motion'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -194,6 +195,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
+  setAnimationSpeed(normalized.animationSpeed)
 }
 
 async function syncWindowBackground(): Promise<void> {
