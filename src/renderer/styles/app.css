@@ -854,10 +854,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
-.turn-edits-chevron.is-open {
-  transform: rotate(90deg);
-}
-
 .turn-edits-count {
   font-weight: 600;
 }

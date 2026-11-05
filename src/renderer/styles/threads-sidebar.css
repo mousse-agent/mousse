@@ -334,6 +334,14 @@
   border-left: 1px solid rgba(var(--accent-pale-rgb), 0.1);
 }
 
+/* In a closing group a row's highlight (selected, hovered) fades with its text, quicker than the clip
+   shrinks, so no strip of it is left once the text is gone. */
+.app .ui-collapse[data-motion='exit'] .threads-sidebar-thread {
+  background: transparent;
+  box-shadow: none;
+  transition: background-color 70ms var(--ui-collapse-ease-close), box-shadow 70ms var(--ui-collapse-ease-close);
+}
+
 .threads-sidebar-thread {
   display: flex;
   align-items: center;

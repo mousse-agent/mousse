@@ -147,10 +147,7 @@ export function BashToolTerminalCard({
           </>
         )}
         <IconChevronRight
-          className={cn(
-            "ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted",
-            expanded && "rotate-90",
-          )}
+          className="ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted"
           data-open={expanded || undefined}
         />
       </button>

@@ -231,10 +231,8 @@
   width: 14px;
   height: 14px;
   color: var(--ui-faint);
-}
-
-.subagent-group-chevron.is-open {
-  transform: rotate(180deg);
+  /* A down chevron: open turns it to point up (collapse.css turns it). */
+  --ui-collapse-chevron-turn: 180deg;
 }
 
 /* The gap under the group's head opens and closes with its rows. */

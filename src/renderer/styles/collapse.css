@@ -94,13 +94,27 @@
   transition: opacity 110ms var(--ui-collapse-ease-close), transform 130ms var(--ui-collapse-ease-close);
 }
 
+/* The bottom edge of a closing group fades out over its last 20px (the last 4px fully), so a row the
+   shrinking clip cuts through (a selected row's highlight) fades with its text instead of showing as a
+   sliver once the text is gone. */
+.ui-collapse[data-motion='exit'] > .ui-collapse-clip {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent calc(100% - 4px));
+}
+
 /* A toggle's chevron turns with the group: same easing, the open or close duration, starting in the same
-   frame (it changes in the same render as the group). The chevron marks itself open with `data-open`. */
+   frame (it changes in the same render as the group). The chevron marks itself open with `data-open`, and
+   this rule turns it: one glyph, rotated by `transform` (a chevron that points down when open sets
+   `--ui-collapse-chevron-turn: 180deg`). Tailwind's `rotate-*` classes set the separate `rotate` property,
+   which is listed too so such a class still turns instead of snapping. */
 .ui-collapse-chevron {
-  transition: transform 130ms var(--ui-collapse-ease-close);
+  transform: rotate(0deg);
+  transition-property: transform, rotate;
+  transition-duration: 130ms;
+  transition-timing-function: var(--ui-collapse-ease-close);
 }
 
 .ui-collapse-chevron[data-open] {
+  transform: rotate(var(--ui-collapse-chevron-turn, 90deg));
   transition-duration: 160ms;
   transition-timing-function: var(--ui-collapse-ease);
 }

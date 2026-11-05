@@ -223,7 +223,7 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
           </span>
         </span>
         {elapsed && <span className="subagent-group-elapsed">{elapsed}</span>}
-        <IconChevronDown className={`subagent-group-chevron ui-collapse-chevron${open ? " is-open" : ""}`} data-open={open || undefined} aria-hidden="true" />
+        <IconChevronDown className="subagent-group-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />
       </button>
       <Collapse open={open} className="subagent-group-rows" itemCount={models.length}>{children}</Collapse>
     </div>

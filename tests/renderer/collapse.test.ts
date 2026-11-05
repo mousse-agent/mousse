@@ -152,8 +152,35 @@ describe('Collapse', () => {
   it('turns the chevron with the group: the open and close durations and easings', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
     expect(css).toMatch(/\[data-motion='exit'\]\s*\{[^}]*grid-template-rows 130ms var\(--ui-collapse-ease-close\)/)
-    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transition: transform 130ms var\(--ui-collapse-ease-close\);/)
-    expect(css).toMatch(/\.ui-collapse-chevron\[data-open\] \{\s*transition-duration: 160ms;\s*transition-timing-function: var\(--ui-collapse-ease\);/)
+    // The rule that turns the chevron is the one with the transition, on `transform`; `rotate` is listed too
+    // because Tailwind's `rotate-*` classes set that separate property, which a `transform` transition skips.
+    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transform: rotate\(0deg\);\s*transition-property: transform, rotate;\s*transition-duration: 130ms;\s*transition-timing-function: var\(--ui-collapse-ease-close\);/)
+    expect(css).toMatch(/\.ui-collapse-chevron\[data-open\] \{\s*transform: rotate\(var\(--ui-collapse-chevron-turn, 90deg\)\);\s*transition-duration: 160ms;\s*transition-timing-function: var\(--ui-collapse-ease\);/)
+  })
+
+  it('fades the bottom edge of a closing group, so a highlighted row cut by the clip leaves no sliver', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
+    expect(css).toMatch(/\[data-motion='exit'\] > \.ui-collapse-clip \{\s*mask-image: linear-gradient\(to bottom, #000 calc\(100% - 20px\), transparent calc\(100% - 4px\)\);/)
+    // A sidebar row's highlight fades out with the close (it would otherwise outlast the row's clipped text).
+    const sidebar = readFileSync(resolve(process.cwd(), 'src/renderer/styles/threads-sidebar.css'), 'utf8')
+    expect(sidebar).toMatch(/\.app \.ui-collapse\[data-motion='exit'\] \.threads-sidebar-thread \{\s*background: transparent;\s*box-shadow: none;/)
+  })
+
+  it('no other rule turns a shared chevron, so its one transition always applies', () => {
+    const files = [
+      'src/renderer/styles/app.css',
+      'src/renderer/chat/components/agent-elements/tools/subagent-card.css',
+      'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx',
+      'src/renderer/chat/components/agent-elements/tools/bash-tool.tsx',
+      'src/renderer/chat/components/agent-elements/tools/edit-tool.tsx',
+      'src/renderer/chat/components/agent-elements/tools/SubagentCard.tsx',
+      'src/renderer/chat/components/agent-elements/turn-edit-summary.tsx'
+    ].map((file) => readFileSync(resolve(process.cwd(), file), 'utf8'))
+    for (const source of files) {
+      expect(source).not.toMatch(/(turn-edits|subagent-group)-chevron\.is-open/)
+      // No Tailwind `rotate-*` class on the chevron element (up to the end of its tag).
+      expect(source).not.toMatch(/ui-collapse-chevron[^>]*\brotate-/)
+    }
   })
 })
 
@@ -189,15 +216,20 @@ describe('Collapse adopters', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(host.textContent).not.toContain('Read a.ts')
     const chevron = () => toggle.querySelector('.ui-collapse-chevron')
-    expect(chevron()?.hasAttribute('data-open')).toBe(false)
+    // One glyph for both states: the same element turns (a swapped or remounted icon would snap, not turn).
+    const glyph = chevron()
+    expect(toggle.querySelectorAll('svg')).toHaveLength(1)
+    expect(glyph?.hasAttribute('data-open')).toBe(false)
     act(() => toggle.click())
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(shell()?.dataset.motion).toBe('enter')
+    expect(chevron()).toBe(glyph)
     expect(chevron()?.hasAttribute('data-open')).toBe(true)
     expect(host.querySelector('.ui-collapse-items')?.children).toHaveLength(2)
     act(() => toggle.click())
     // The chevron turns back in the same render the close starts, while the rows are still there.
     expect(shell()?.dataset.motion).toBe('exit')
+    expect(chevron()).toBe(glyph)
     expect(chevron()?.hasAttribute('data-open')).toBe(false)
     expect(host.textContent).toContain('Read a.ts')
     advance(COLLAPSE_CLOSE_MS + 50)

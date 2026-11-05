@@ -82,11 +82,7 @@ export function ToolRowBase({
       {expandable && (isComplete || isExpanded || isAnimating) && (
         <div>
           <IconChevronRight
-            className={cn(
-              "ui-collapse-chevron shrink-0 text-muted-foreground",
-              "size-[18px]",
-              isExpanded ? "rotate-90" : "rotate-0",
-            )}
+            className="ui-collapse-chevron shrink-0 text-muted-foreground size-[18px]"
             data-open={isExpanded || undefined}
           />
         </div>
