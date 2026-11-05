@@ -586,9 +586,9 @@ describe('Ctrl/Cmd+F and the find bar', () => {
     expect(focusOwnsFind(composer())).toBe(false)
   })
 
-  it('does not take the key while the command palette, thread search or a dialog owns the keyboard', () => {
+  it('does not take the key while the command palette or a dialog owns the keyboard', () => {
     render(createElement(Harness, { log: [], initiallyMounted: ['k0'] }))
-    for (const scope of ['palette', 'thread-search', 'modal'] as const) {
+    for (const scope of ['palette', 'modal'] as const) {
       const pop = pushOverlay(scope)
       expect(press(composer(), ctrlF).defaultPrevented, scope).toBe(false)
       expect(bar()).toBeNull()

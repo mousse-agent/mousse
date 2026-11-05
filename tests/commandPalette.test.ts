@@ -14,7 +14,9 @@ import {
   useCommandRegistry
 } from '../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../src/renderer/commands/useCommandShortcuts'
-import { chooseCommandPaletteItem, closePalette, dismissPalette, openPalette, togglePalette } from '../src/renderer/commands/paletteActions'
+import { chooseCommandPaletteItem, closePalette, dismissPalette, openMessage, openPalette, togglePalette } from '../src/renderer/commands/paletteActions'
+import { registerNavigationGuard } from '../src/renderer/services/navigationGuards'
+import { useChatNavigationStore } from '../src/renderer/stores/chatNavigationStore'
 import { buildPaletteGroups, eligibleCommands, flattenGroups, type PaletteItem } from '../src/renderer/commands/paletteItems'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { KeyInput } from '../src/shared/commands'
@@ -98,7 +100,7 @@ beforeEach(() => {
     shortcuts: {},
     paletteOpen: false,
     settingsOpen: false,
-    threadSearchOpen: false,
+    paletteMode: 'all',
     activeThreadId: 'thread-1',
     threads: [],
     projects: [],
@@ -173,6 +175,24 @@ describe('opening and closing with Ctrl+K', () => {
   })
 })
 
+describe('opening thread search', () => {
+  it('opens the palette with message hits first from Search threads, and Ctrl+K opens it plain', () => {
+    const { win } = stubWindow(composer())
+    attachCommandShortcuts(win as never)
+    registerPaletteToggle()
+    // As `useAppCommands` registers it.
+    registerCommand('threads.search', { run: () => openPalette('messages') })
+
+    expect(keydown(win, { key: 'O', code: 'KeyO', ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(true)
+    expect(useAppStore.getState()).toMatchObject({ paletteOpen: true, paletteMode: 'messages' })
+    dismissPalette()
+    expect(focusLog).toEqual(['composer'])
+
+    keydown(win, ctrlK)
+    expect(useAppStore.getState()).toMatchObject({ paletteOpen: true, paletteMode: 'all' })
+  })
+})
+
 describe('where Ctrl+K stands down', () => {
   it('does not fire in a terminal, and leaves the key to the shell', () => {
     const { win } = stubWindow(terminal())
@@ -184,7 +204,7 @@ describe('where Ctrl+K stands down', () => {
     expect(event.defaultPrevented).toBe(false)
   })
 
-  it('does not fire under a dialog or the thread search dialog, and works again once they close', () => {
+  it('does not fire under a dialog or the model picker, and works again once they close', () => {
     const { win } = stubWindow(composer())
     attachCommandShortcuts(win as never)
     registerPaletteToggle()
@@ -193,7 +213,7 @@ describe('where Ctrl+K stands down', () => {
     expect(keydown(win, ctrlK).defaultPrevented).toBe(false)
     release()
 
-    const pop = pushOverlay('thread-search')
+    const pop = pushOverlay('model-picker')
     expect(keydown(win, ctrlK).defaultPrevented).toBe(false)
     pop()
     expect(useAppStore.getState().paletteOpen).toBe(false)
@@ -356,6 +376,37 @@ describe('opening a thread from the palette', () => {
     expect(useAppStore.getState().activeThreadId).toBe('t2')
   })
 
+  it('opens a message hit: selects its thread, then asks the transcript to show the message', async () => {
+    const { win } = stubWindow(composer())
+    useChatNavigationStore.setState({ message: null })
+    // Search threads works over the Usage page; the thread it opens has to show.
+    useAppStore.setState({ usageOpen: true })
+    openPalette('messages')
+
+    chooseCommandPaletteItem({ kind: 'message', key: 'message:t2:m7', id: 'm7', threadId: 't2', title: '…checkout…', match: 'checkout' })
+    expect(useAppStore.getState().paletteOpen).toBe(false)
+    await vi.waitFor(() => expect(useChatNavigationStore.getState().message?.messageId).toBe('m7'))
+    expect(win.mousse.threads.select).toHaveBeenCalledWith('t2')
+    expect(useAppStore.getState()).toMatchObject({ activeThreadId: 't2', usageOpen: false })
+  })
+
+  it('does not ask for the message when a navigation guard keeps the current thread', async () => {
+    stubWindow(composer())
+    useChatNavigationStore.setState({ message: null })
+    const unregister = registerNavigationGuard(() => false)
+    await openMessage('t2', 'm7')
+    unregister()
+    expect(useAppStore.getState().activeThreadId).toBe('thread-1')
+    expect(useChatNavigationStore.getState().message).toBeNull()
+  })
+
+  it('leaves the palette open for a "+N more" row', () => {
+    stubWindow(composer())
+    openPalette('messages')
+    chooseCommandPaletteItem({ kind: 'more', key: 'more:t2', threadId: 't2', title: '+2 more' })
+    expect(useAppStore.getState().paletteOpen).toBe(true)
+  })
+
   it('opens the newest thread of a chosen project', async () => {
     const { win } = stubWindow(composer())
     chooseCommandPaletteItem({ kind: 'project', key: 'project:p1', id: 'p1', title: 'Mousse', detail: 'Project', threadId: 't9' })
@@ -406,8 +457,38 @@ describe('the palette list', () => {
     expect(html.match(/palette-result-shortcut/g)).toHaveLength(1)
   })
 
-  it('says so when nothing matches', () => {
+  it('says so when nothing matches, and shows nothing while a search is still running', () => {
     expect(render(0, [])).toContain('No results')
+    const pending = renderToStaticMarkup(
+      createElement(PaletteList, { groups: [], activeIndex: 0, listId: 'list', emptyLabel: '', onActivate: () => undefined, onChoose: () => undefined })
+    )
+    expect(pending).not.toContain('thread-search-empty')
+  })
+
+  it('draws a command on one line: title left, category and key right', () => {
+    const html = render(0, [
+      { label: 'Commands', items: [{ key: 'command:thread.new', title: 'New thread', trailing: 'Thread', shortcut: 'Ctrl+N' }] }
+    ])
+    expect(html).not.toContain('thread-search-result-meta')
+    expect(html).toMatch(/palette-result-end"><span class="palette-result-category">Thread<\/span><kbd class="palette-result-shortcut">Ctrl\+N<\/kbd>/)
+  })
+
+  it('draws a message hit as one line with the matched text in bold', () => {
+    const html = render(1, [
+      {
+        label: 'Messages',
+        items: [
+          { key: 'message-thread:t1', title: 'Fix flaky checkout test', detail: 'acme-web' },
+          { key: 'message:t1:m1', title: 'The Checkout test is flaky', variant: 'snippet', match: 'checkout' },
+          { key: 'more:t1', title: '+4 more', variant: 'more' }
+        ]
+      }
+    ])
+    expect(html).toContain('Fix flaky checkout test</span><span class="thread-search-result-meta">acme-web</span>')
+    expect(html).toContain('The <strong class="palette-match">Checkout</strong> test is flaky')
+    expect(html).toMatch(/class="thread-search-result palette-result palette-result--snippet active"/)
+    expect(html).toContain('palette-result--more')
+    expect(html).toContain('+4 more')
   })
 
   it('highlights the selected row with a background only, never an edge bar', () => {
@@ -415,6 +496,41 @@ describe('the palette list', () => {
     const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selector]) => /\.active|\.palette-result/.test(selector!))
     expect(rules.length).toBeGreaterThan(0)
     for (const [, , body] of rules) expect(body).not.toMatch(/border-(left|right|inline)|box-shadow\s*:\s*inset|outline/)
+  })
+
+  const css = () => readFileSync(new URL('../src/renderer/styles/thread-search.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  const rule = (selector: string) => {
+    const found = [...css().matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, selectors]) => selectors!.split(',').some((part) => part.trim() === selector))
+    if (!found) throw new Error(`no rule for ${selector}`)
+    return found[2]!
+  }
+
+  it('keeps the input bare in every theme, focused or not', () => {
+    for (const selector of [
+      "html[data-theme] .thread-search-input-row .thread-search-input",
+      "html[data-theme] .thread-search-input-row .thread-search-input:focus"
+    ]) {
+      const body = rule(selector)
+      expect(body).toMatch(/background:\s*transparent/)
+      expect(body).toMatch(/box-shadow:\s*none/)
+    }
+  })
+
+  it('never dims muted text below the secondary colour (light-theme contrast)', () => {
+    for (const selector of [
+      '.thread-search-group-label',
+      '.thread-search-result-meta',
+      '.palette-result-snippet',
+      '.palette-result-category',
+      '.thread-search-empty',
+      '.thread-search-skipped',
+      '.thread-search-hint'
+    ]) {
+      expect(rule(selector)).toMatch(/color:\s*var\(--text-secondary\)/)
+      expect(rule(selector)).not.toMatch(/opacity/)
+    }
+    expect(rule('.palette-match')).toMatch(/font-weight:\s*600/)
+    expect(rule('.palette-match')).toMatch(/color:\s*var\(--text-primary\)/)
   })
 })
 
