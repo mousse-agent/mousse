@@ -4970,100 +4970,169 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   opacity: 0.8;
 }
 
+/* The question dialog: the app's dialog surface, radius, insets and title (see .modal),
+   shown above the composer. One question at a time; the dots jump between them. */
 .composer-question-modal {
   position: absolute;
-  left: 16px;
-  right: 16px;
+  left: 12px;
+  right: 12px;
   bottom: calc(100% + 8px);
   z-index: 30;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-  border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 16px 40px rgba(var(--surface-base-rgb), 0.45);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop);
   overflow: hidden;
+  animation: approval-in 0.22s ease;
 }
 
 .composer-question-modal-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 16px;
+  padding: 12px 16px 4px;
 }
 
 .composer-question-modal-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.composer-question-modal-close {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.composer-question-modal-title svg {
+  flex-shrink: 0;
   color: var(--text-secondary);
 }
 
-.composer-question-modal-close:hover {
-  background: rgba(var(--accent-rgb), 0.14);
-  color: var(--text-primary);
+/* Progress dots: hollow until answered, the current one is a short pill. */
+.composer-question-dots {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.composer-question-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-question-dot::after {
+  content: '';
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--text-primary) 38%, transparent);
+  transition: width 0.18s ease-out, background-color 0.15s, border-color 0.15s;
+}
+
+.composer-question-dot:hover::after {
+  border-color: color-mix(in srgb, var(--text-primary) 70%, transparent);
+}
+
+.composer-question-dot.is-current {
+  width: 24px;
+}
+
+.composer-question-dot.is-current::after {
+  width: 16px;
+  border-color: color-mix(in srgb, var(--text-primary) 70%, transparent);
+}
+
+.composer-question-dot.is-answered::after {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+.composer-question-dot:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .composer-question-modal-body {
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: 260px;
+  max-height: 320px;
+  padding: 4px 16px 12px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
+.composer-question-slide.from-next { animation: composer-question-from-next 180ms ease-out; }
+.composer-question-slide.from-previous { animation: composer-question-from-previous 180ms ease-out; }
+
+@keyframes composer-question-from-next {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes composer-question-from-previous {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: none; }
+}
+
 .composer-question-prompt {
-  margin: 0 0 8px;
-  font-size: 13px;
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
   color: var(--text-primary);
 }
 
+/* Choices: full-width rows, a radio or checkbox on the left, neutral hover,
+   filled background and indicator when selected. */
 .composer-question-options {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
   gap: 2px;
+  margin: 0 -8px;
 }
 
-/* Rows follow the menu language: neutral hover, filled background when selected. */
 .composer-question-option {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--ui-menu-row-x);
+  gap: 10px;
   width: 100%;
-  padding: 6px var(--ui-menu-row-x);
-  border-radius: var(--ui-menu-row-radius);
-  font-size: 12.5px;
-  text-align: left;
-  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
-  background: transparent;
+  min-height: 34px;
+  padding: 6px 8px;
   border: none;
-  transition: background 0.12s;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s;
 }
 
-.composer-question-option:hover,
-.composer-question-option:focus-visible {
+.composer-question-option:hover {
   background: var(--ui-hover);
-  color: var(--text-primary);
+}
+
+.composer-question-option:focus-visible {
   outline: none;
+  background: var(--ui-hover);
+  box-shadow: inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 .composer-question-option.selected {
   background: var(--ui-pressed);
   box-shadow: var(--ui-specular);
-  color: var(--text-primary);
+}
+
+.composer-question-option.selected:focus-visible {
+  box-shadow: var(--ui-specular), inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 html[data-theme='high-contrast'] .composer-question-option.selected {
@@ -5075,78 +5144,137 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   overflow-wrap: anywhere;
 }
 
-.composer-question-option-check {
+.composer-question-indicator {
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid color-mix(in srgb, var(--text-primary) 38%, transparent);
+  color: #fff;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.composer-question-indicator.is-radio { border-radius: 999px; }
+.composer-question-indicator.is-checkbox { border-radius: 4px; }
+
+.composer-question-option:hover .composer-question-indicator:not(.is-checked) {
+  border-color: color-mix(in srgb, var(--text-primary) 60%, transparent);
+}
+
+.composer-question-indicator.is-checked {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+.composer-question-indicator.is-radio.is-checked::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #fff;
+}
+
+/* "Other…" once chosen: the same row, holding a text field. */
+.composer-question-other {
+  cursor: text;
+}
+
+.composer-question-other-toggle {
+  display: grid;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.composer-question-other-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
   color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.composer-question-other-input::placeholder {
+  color: var(--text-secondary);
 }
 
 .composer-question-modal-footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 4px 16px 16px;
 }
 
-.composer-question-dismiss,
-.composer-question-submit {
-  height: 28px;
-  padding: 0 12px;
-  border-radius: var(--ui-control-radius);
-  font-size: 12.5px;
+.composer-question-footer-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
-.composer-question-dismiss {
+.composer-question-hint {
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
-.composer-question-steps {
-  display: flex;
+/* Flat buttons, no gradient: neutral by default, .is-quiet for Skip. Submit (.is-primary) uses the shared primary rule in polish.css. */
+.composer-question-btn {
+  display: inline-flex;
   align-items: center;
-  flex: 1;
-  min-width: 0;
-  gap: 6px;
-  padding: 0;
-}
-
-.composer-question-step {
-  width: 8px;
-  height: 8px;
-  padding: 0;
-  border-radius: 999px;
-  background: rgba(var(--surface-soft-rgb), 0.9);
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-}
-
-.composer-question-step.active {
-  width: 22px;
-  background: rgba(var(--accent-deep-rgb), 0.55);
-  border-color: transparent;
-}
-
-.composer-question-step.answered:not(.active) {
-  background: rgba(var(--accent-deep-rgb), 0.45);
-  border-color: transparent;
-}
-
-.composer-question-custom {
-  margin-top: 8px;
-  width: 100%;
+  justify-content: center;
   height: 28px;
-  border-radius: var(--ui-control-radius);
+  padding: 0 12px;
   border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
   background: transparent;
-  padding: 0 8px;
+  color: var(--text-primary);
   font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.composer-question-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.composer-question-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-question-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-question-btn.is-quiet {
+  margin-left: -8px;
+  padding: 0 8px;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.composer-question-btn.is-quiet:hover {
   color: var(--text-primary);
 }
 
-.composer-question-custom::placeholder {
-  color: var(--text-secondary);
+@media (prefers-reduced-motion: reduce) {
+  .composer-question-modal,
+  .composer-question-slide.from-next,
+  .composer-question-slide.from-previous {
+    animation: none;
+  }
 }
 
-/* Question-tool swap: the modal replaces the composer in-flow while active.
- * Both wrappers animate height (grid-rows) + fade/slide so hiding the input
- * bar and re-showing it after submit happens without a layout jump. */
+/* The question card sits in flow directly above the composer, which stays usable. The wrapper
+ * animates its height (grid-rows) + fade/slide, so the card opens and closes without a layout
+ * jump; being in flow, its height is part of the composer stack the transcript leaves room for. */
 .composer-question-swap {
   display: grid;
   grid-template-rows: 0fr;
@@ -5166,50 +5294,22 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   overflow: hidden;
   min-height: 0;
 }
-/* In swap mode the modal is an in-flow replacement, not a floating overlay. */
+/* Above the composer the card is in flow, not a floating overlay: it keeps
+   the lit edge but casts no drop shadow, which the swap's clipping would cut into a band. */
 .composer-question-swap .composer-question-modal {
   position: static;
   left: auto;
   right: auto;
   bottom: auto;
   margin-bottom: 8px;
-}
-
-.composer-collapse {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  transition:
-    grid-template-rows 300ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 220ms ease,
-    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.composer-collapse.is-collapsed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(8px) scale(0.99);
-  pointer-events: none;
-}
-.composer-collapse-inner {
-  overflow: visible;
-  min-height: 0;
-}
-.composer-collapse.is-collapsed .composer-collapse-inner {
-  overflow: hidden;
+  box-shadow: var(--ui-dialog-edge);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .composer-question-swap,
-  .composer-collapse {
+  .composer-question-swap {
     transition: none;
     transform: none;
   }
-}
-
-.composer-question-dismiss:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .document-panel {
@@ -5449,6 +5549,17 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   outline: 2px solid var(--accent-hover);
   outline-offset: 2px;
 }
+
+/* Copy, Details, Undo and Read aloud under a message: a keyboard ring, full strength while focused. */
+.chat-message-toolbar button:focus-visible,
+.chat-user-image:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
+}
+
+/* An attached image is a button; the global button reset would drop its tile fill. */
+button.chat-user-image { background: color-mix(in oklab, var(--color-an-foreground) 4%, transparent); }
 
 .assistant-response-metadata {
   position: absolute;
@@ -5920,31 +6031,14 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 
-.composer-question-modal {
-  left: 12px;
-  right: 12px;
-  border-radius: 16px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 20px 50px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.12);
-  animation: approval-in 0.22s ease;
-}
-
 @keyframes approval-in {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.composer-question-modal-header { padding: 14px 16px; }
-
-.composer-question-modal-title { font-size: 12px; letter-spacing: normal; }
-
-.composer-question-prompt { font-size: 13.5px; font-weight: 500; letter-spacing: -0.01em; }
 /* A command or file change the user is asked to allow: the whole text, wrapped; the body is the one scroller. */
 .composer-question-prompt--approval { white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-question-reason { margin: 0 0 8px; font-size: 12px; color: var(--text-secondary); }
-
-.composer-question-submit { font-weight: 600; }
 
 .queued-messages {
   border-radius: 16px 16px 0 0;

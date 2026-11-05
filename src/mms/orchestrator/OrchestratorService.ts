@@ -165,7 +165,8 @@ import {
   type TurnState,
   type TurnStateSnapshot,
   type UserQuestion,
-  type UserQuestionAnswers
+  type UserQuestionAnswers,
+  type AnsweredQuestion
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
@@ -374,6 +375,30 @@ export function formatQuestionAnswersMessage(
       return `Q: ${question.prompt}\nA: ${rendered}`
     })
     .join('\n\n')
+}
+
+/**
+ * The answers as the transcript keeps them (`ChatMessage.questionAnswers`): option ids resolve to
+ * their labels; text that names no option is the reply typed instead.
+ */
+export function describeQuestionAnswers(
+  questions: UserQuestion[],
+  answers: UserQuestionAnswers
+): AnsweredQuestion[] {
+  return questions.map((question) => {
+    const value = answers[question.id]
+    const values = (value === undefined ? [] : Array.isArray(value) ? value : [value])
+      .map((entry) => String(entry).trim())
+      .filter((entry) => entry.length > 0)
+    const chosen: string[] = []
+    const typed: string[] = []
+    for (const entry of values) {
+      const option = question.options.find((each) => each.id === entry)
+      if (option) chosen.push(option.label.trim() || entry)
+      else typed.push(entry)
+    }
+    return { prompt: question.prompt, chosen, ...(typed.length ? { reply: typed.join('\n') } : {}) }
+  })
 }
 
 /** Render an explicit dismissal as transcript text. */
@@ -5985,7 +6010,7 @@ export class OrchestratorService extends EventEmitter {
       return { answered: false as const, code, message: `"${target.title}" asked for an approval you cannot give. ${describeApprovalRefusal(code)}` }
     }
     // As in the GUI: the model gets the answers as the tool result; the transcript shows what was said.
-    this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers))
+    this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers), describeQuestionAnswers(pending.questions, input.answers))
     return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId }
   }
 
@@ -9136,7 +9161,8 @@ export class OrchestratorService extends EventEmitter {
    * there mid-turn would corrupt the in-flight tool loop. Best-effort:
    * returns null when the thread is gone.
    */
-  recordQuestionResponseMessage(threadId: string, content: string): ChatMessage | null {
+  /** `questionAnswers`, for answers (not a dismissal), makes the transcript show them as a step of the agent's turn. */
+  recordQuestionResponseMessage(threadId: string, content: string, questionAnswers?: AnsweredQuestion[]): ChatMessage | null {
     const text = content.trim()
     if (!text || threadId === '__unbound__') return null
     if (this.threadStore && !this.threadStore.getThread(threadId)) return null
@@ -9148,6 +9174,7 @@ export class OrchestratorService extends EventEmitter {
         role: 'user',
         content: text,
         timestamp: new Date().toISOString(),
+        ...(questionAnswers?.length ? { questionAnswers } : {}),
         // Presentation-only echo: preserve the tracked mode so the next real
         // turn does not mistake this answer for a legacy agent turn.
         ...((() => {
