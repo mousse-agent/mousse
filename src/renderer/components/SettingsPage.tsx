@@ -1,9 +1,11 @@
 import { findListedModel } from '../../shared/modelChoice'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
+import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
+import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import type {
   MousseSettings,
   MousseSettingsUpdate,
@@ -51,9 +53,7 @@ const SETTINGS_SECTIONS = [
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
-] as const
-
-type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
+] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
@@ -73,12 +73,11 @@ const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
   (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
 
 const CONTEXT_COMPACTION_HASH = '#settings-context-compaction'
+/** Where the old 'context' section and the compaction link land. */
+const CONTEXT_COMPACTION_ANCHOR = 'agents-context-compaction'
 
-const matchesSettingsQuery = (section: (typeof SETTINGS_SECTIONS)[number], query: string): boolean => {
-  const q = query.trim().toLowerCase()
-  if (!q) return true
-  return section.label.toLowerCase().includes(q) || section.keywords.some((keyword) => keyword.includes(q))
-}
+/** A setting to bring into view once its page shows it; `seq` makes picking the same result again count. */
+interface PendingAnchor { anchor: string; seq: number }
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -100,13 +99,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   const [restartRequired, setRestartRequired] = useState(false)
 
-  // Opening at the old 'context' section, or with the compaction hash, focuses the compaction threshold on Agents.
-  const focusCompaction = useRef(false)
-  const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() => {
-    const requested = window.location.hash === CONTEXT_COMPACTION_HASH ? 'context' : takePendingSettingsSection()
-    if (requested === 'context') focusCompaction.current = true
-    return settingsSectionId(requested) ?? 'general'
-  })
+  // Opening at the old 'context' section, or with the compaction hash, focuses the compaction select on Agents.
+  const [initialRequest] = useState(() => window.location.hash === CONTEXT_COMPACTION_HASH ? 'context' : takePendingSettingsSection())
+  const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() => settingsSectionId(initialRequest) ?? 'general')
+  const anchorSeq = useRef(0)
+  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(() =>
+    initialRequest === 'context' ? { anchor: CONTEXT_COMPACTION_ANCHOR, seq: 0 } : null)
+  /** Why a search result's setting is not on its page; `focus` when nothing else took focus. */
+  const [anchorNote, setAnchorNote] = useState<{ text: string; focus: boolean } | null>(null)
   // Account always exists: it shows Activity, plus Mousse ID when this build has the service.
   const activeSection: SettingsSectionId = selectedSection
   useEffect(() => {
@@ -115,21 +115,39 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const section = settingsSectionId(requested)
       if (section) {
         takePendingSettingsSection()
-        if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) focusCompaction.current = true
+        setAnchorNote(null)
+        if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) {
+          setPendingAnchor({ anchor: CONTEXT_COMPACTION_ANCHOR, seq: ++anchorSeq.current })
+        }
         setActiveSection(section)
       }
     }
     window.addEventListener('mousse:settings-section', openSection)
     return () => window.removeEventListener('mousse:settings-section', openSection)
   }, [])
+
+  // A search result (or the compaction link) lands on its setting once the page shows it. A setting
+  // the page does not show (it needs a model, a sign-in…) lands on what it needs, with a line saying why.
+  const contentRef = useRef<HTMLDivElement>(null)
+  const noteRef = useRef<HTMLParagraphElement>(null)
+  const settingsReady = Boolean(settings && options)
   useEffect(() => {
-    if (activeSection !== 'agents' || !settings || !focusCompaction.current) return
-    focusCompaction.current = false
-    document.getElementById('agents-context-compaction')?.focus()
-    if (window.location.hash === CONTEXT_COMPACTION_HASH) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.search)
-    }
-  }, [activeSection, settings])
+    const root = contentRef.current
+    if (!pendingAnchor || !settingsReady || !root) return
+    return landOnSettingsAnchor(root, pendingAnchor.anchor, {
+      onMissing: (text, focused) => setAnchorNote({ text, focus: !focused }),
+      onFound: () => setAnchorNote(null),
+      onDone: () => {
+        setPendingAnchor((current) => (current === pendingAnchor ? null : current))
+        if (pendingAnchor.anchor === CONTEXT_COMPACTION_ANCHOR && window.location.hash === CONTEXT_COMPACTION_HASH) {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
+      }
+    })
+  }, [pendingAnchor, activeSection, settingsReady])
+  useEffect(() => {
+    if (anchorNote?.focus) noteRef.current?.focus()
+  }, [anchorNote])
 
   const refreshProviderData = useCallback(async () => {
     const opts = await window.mousse.settings.getOptions()
@@ -284,18 +302,39 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const [navQuery, setNavQuery] = useState('')
-  const goToSection = (id: SettingsSectionId) => {
+  const searchRef = useRef<HTMLInputElement>(null)
+  /** Opens a page, then brings `anchor` (a search result's setting) into view and focuses it. */
+  const goToSection = (id: SettingsSectionId, anchor?: string) => {
+    const arrive = () => {
+      setActiveSection(id)
+      setAnchorNote(null)
+      if (anchor) setPendingAnchor({ anchor, seq: ++anchorSeq.current })
+    }
     // Only the integrations editors hold unsaved drafts; ask before leaving that section.
     if (activeSection !== 'integrations' || id === 'integrations') {
-      setActiveSection(id)
+      arrive()
       return
     }
-    void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setActiveSection(id) })
+    void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) arrive() })
   }
+  const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor)
   const reviewPending = useStorageReviewPending()
-  const navSections = VISIBLE_SETTINGS_SECTIONS
-    .filter((section) => matchesSettingsQuery(section, navQuery))
-  const activeSectionLabel = SETTINGS_SECTIONS.find((section) => section.id === activeSection)?.label ?? 'Settings'
+  const searching = navQuery.trim() !== ''
+  const mousseIdAvailable = useMousseIdAvailable()
+  const results = useMemo(() => searchSettings(navQuery, VISIBLE_SETTINGS_SECTIONS, searchIndex(mousseIdAvailable)), [navQuery, mousseIdAvailable])
+  const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
+  const activeSectionInfo = sectionOf(activeSection)
+  const activeSectionLabel = activeSectionInfo.label
+  /** Up and Down move through the results; Up from the first goes back to the search field. */
+  const moveInResults = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>('.settings-nav-result')]
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    const next = at + (event.key === 'ArrowDown' ? 1 : -1)
+    event.preventDefault()
+    if (next < 0) searchRef.current?.focus()
+    else items[Math.min(next, items.length - 1)]?.focus()
+  }
 
   const settingsNav = (
     <nav className="settings-nav" aria-label="Settings sections">
@@ -303,12 +342,45 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         className="settings-nav-search"
         value={navQuery}
         ariaLabel="Search settings"
+        inputRef={searchRef}
         onChange={setNavQuery}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && navSections[0]) goToSection(navSections[0].id)
+          if (event.key === 'Enter' && results[0]) {
+            event.preventDefault()
+            openResult(results[0])
+          } else if (event.key === 'ArrowDown' && results[0]) {
+            event.preventDefault()
+            event.currentTarget.closest('.settings-nav')?.querySelector<HTMLElement>('.settings-nav-result')?.focus()
+          }
         }}
       />
-      {navSections.map((section, index, visible) => {
+      {searching && results.length > 0 && (
+        <div className="settings-nav-results" role="group" aria-label="Search results" onKeyDown={moveInResults}>
+          {results.map((result) => {
+            const section = sectionOf(result.section)
+            const Icon = section.icon
+            return (
+              <button
+                key={result.anchor ?? result.section}
+                type="button"
+                className="settings-nav-item settings-nav-result"
+                aria-label={result.anchor ? `${result.title}, ${section.label}` : result.title}
+                onClick={() => openResult(result)}
+              >
+                <span className="settings-nav-item-icon" data-hue={section.hue}>
+                  <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+                {/* The whole title wraps: results such as the worktree removal rules differ only at the end. */}
+                <span className="settings-nav-result-text">
+                  <span className="settings-nav-result-title">{result.title}</span>
+                  {result.anchor && <span className="settings-nav-result-page">{section.label}</span>}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+      {!searching && VISIBLE_SETTINGS_SECTIONS.map((section, index, visible) => {
         const Icon = section.icon
         const active = activeSection === section.id
         const startsGroup = index === 0 || visible[index - 1].group !== section.group
@@ -331,14 +403,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           </Fragment>
         )
       })}
-      {navSections.length === 0 && <p className="settings-nav-empty">No matching settings</p>}
+      {searching && results.length === 0 && <p className="settings-nav-empty">No matching settings</p>}
       <DownloadsIndicator variant="nav" />
     </nav>
   )
 
   if (!settings || !options) {
     return (
-      <div className="settings-page overlay-page" hidden={!settingsOpen}>
+      <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
         {settingsHeader}
         <div className="settings-body">
           {settingsNav}
@@ -360,14 +432,19 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
 
   return (
-    <div className="settings-page overlay-page" hidden={!settingsOpen}>
+    <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
       {settingsHeader}
 
       <div className="settings-body">
         {settingsNav}
 
-        <div className="settings-content" key={activeSection}>
+        <div className="settings-content" key={activeSection} ref={contentRef}>
           <SettingsPageTitle title={activeSectionLabel} />
+          {anchorNote && (
+            <p ref={noteRef} className="settings-page-note" role="status" tabIndex={-1}>
+              {anchorNote.text}
+            </p>
+          )}
           {activeSection === 'storage' && <StorageSettings />}
           {activeSection === 'general' && (
             <GeneralSettings settings={settings} onUpdate={updateSettings} />
