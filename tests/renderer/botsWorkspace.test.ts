@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BotActivationSummary, BotApprovalView, BotSummary } from '../../src/shared/bots/personal/definition'
 import type { BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
 import { BOTS_PERSONAL_METHODS } from '../../src/shared/bots/personal/methods'
-import { ActivationRow, ApprovalDialog, BotsWorkspace, EscalationRow, keepFolderAccess, shellNote } from '../../src/renderer/components/bots/BotsWorkspace'
+import { ActivationRow, ApprovalDialog, BotsWorkspace, EscalationRow, keepFolderAccess, newBotDefinition, shellNote } from '../../src/renderer/components/bots/BotsWorkspace'
 import { createPersonalBotsClient, type PersonalBotsClient } from '../../src/renderer/services/personalBotsClient'
 import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
 import { GUI_REQUIRED_METHODS } from '../../src/main/mms/guiDaemonCompatibility'
@@ -118,20 +118,41 @@ describe('Bots tab: activity rows', () => {
 })
 
 describe('Bots tab: escalation inbox', () => {
-  it('offers allow for this bot, allow this time and deny', async () => {
+  it('leads with Allow once and Deny; Allow for this bot waits under More options', async () => {
     const onAnswer = vi.fn()
     act(() => root.render(createElement(EscalationRow, { escalation: escalation(), botName: 'Site editor', busy: false, onAnswer })))
     expect(document.body.textContent).toContain('Site editor asks: Read files in /home/me/blog')
+    expect(button('Allow once')!.className).toContain('btn-primary')
+    expect(button('Allow for this bot')).toBeUndefined()
+    const more = button('More options')!
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => more.click())
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    // The broader option names exactly what it adds.
+    expect(button('Allow for this bot')!.title).toBe('Adds “Read files in /home/me/blog” to what this bot may always do')
+    await act(async () => button('Allow once')!.click())
     await act(async () => button('Allow for this bot')!.click())
-    await act(async () => button('Allow this time')!.click())
     await act(async () => button('Deny')!.click())
-    expect(onAnswer.mock.calls).toEqual([['allow_bot'], ['allow_once'], ['deny']])
+    expect(onAnswer.mock.calls).toEqual([['allow_once'], ['allow_bot'], ['deny']])
   })
 
-  it('a work-time wall asks for minutes and sends milliseconds', async () => {
+  it('a limit with an amount allows it once, and More options sets another amount', async () => {
+    const onAnswer = vi.fn()
+    act(() => root.render(createElement(EscalationRow, { escalation: escalation({ kind: 'budget', permission: { budget: { key: 'maxToolCalls', amount: 20 } }, permissionText: '20 more tool calls' }), botName: 'Site editor', busy: false, onAnswer })))
+    await act(async () => button('Allow once')!.click())
+    expect(onAnswer).toHaveBeenLastCalledWith('allow_once', 20)
+    await act(async () => button('More options')!.click())
+    expect(button('Allow for this bot')).toBeUndefined()
+    await act(async () => button('Allow 20 more this time')!.click())
+    expect(onAnswer).toHaveBeenLastCalledWith('allow_more', 20)
+  })
+
+  it('a work-time wall with no amount asks for minutes at once and sends milliseconds', async () => {
     const onAnswer = vi.fn()
     act(() => root.render(createElement(EscalationRow, { escalation: escalation({ kind: 'budget', permission: { budget: { key: 'maxActiveMs' } }, permissionText: 'More work time' }), botName: 'Site editor', busy: false, onAnswer })))
     expect(button('Allow for this bot')).toBeUndefined()
+    expect(button('Allow once')).toBeUndefined()
+    expect(button('More options')).toBeUndefined()
     await act(async () => button('Allow 15 min more this time')!.click())
     expect(onAnswer).toHaveBeenCalledWith('allow_more', 15 * 60_000)
   })
@@ -154,6 +175,29 @@ describe('Bots tab: approval', () => {
     expect(button('Approve')!.disabled).toBe(false)
   })
 
+  it('is the app dialog, groups tools, folders and limits, and Escape closes without approving', () => {
+    const onApprove = vi.fn()
+    const onClose = vi.fn()
+    const view: BotApprovalView = {
+      ...approval(true),
+      added: [
+        { kind: 'tool', text: 'Edit files' },
+        { kind: 'workspace', text: 'Read and edit files in /home/me/site' },
+        { kind: 'budget', text: '30 minutes of work' }
+      ]
+    }
+    act(() => root.render(createElement(ApprovalDialog, { name: 'Site editor', approval: view, busy: false, onApprove, onClose })))
+    expect(document.querySelector('.modal-overlay[role="dialog"]')).not.toBeNull()
+    const group = (label: string) => document.querySelector(`section[aria-label="${label}"]`)?.textContent
+    expect(group('Tools')).toBe('ToolsEdit files')
+    expect(group('Folders')).toBe('FoldersRead and edit files in /home/me/site')
+    expect(group('Limits per run')).toBe('Limits per run30 minutes of work')
+    expect(group('Where it runs')).toContain('can hold these permissions')
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onApprove).not.toHaveBeenCalled()
+  })
+
   it('the shell note names the bot\'s folders', () => {
     expect(shellNote(['/home/me/site'])).toContain('Tools installed system-wide, or inside /home/me/site, still work.')
   })
@@ -170,6 +214,31 @@ describe('Bots tab: list', () => {
     expect(document.querySelector('.bots__badge')?.textContent).toBe('1')
     expect(document.body.textContent).toContain('Waiting for you')
     expect(document.querySelectorAll('.bots__escalation')).toHaveLength(1)
+  })
+
+  it('Delete asks in the app dialog; Escape keeps the bot, Delete removes it', async () => {
+    const bot: BotSummary = { id: 'site-editor', name: 'Site editor', role: '', draftHash: 'h'.repeat(64), revision: 'h'.repeat(64), grant: { digest: 'd'.repeat(64), approvedAt: 'now' }, needsApproval: [], openEscalations: 0 }
+    const definition = newBotDefinition('Site editor', undefined)
+    const remove = vi.fn(async () => undefined)
+    const client = {
+      list: vi.fn(async () => [bot]),
+      escalations: vi.fn(async () => []),
+      get: vi.fn(async () => ({ id: bot.id, draft: definition, draftHash: bot.draftHash, published: definition, summary: bot, approval: null })),
+      activations: vi.fn(async () => []),
+      remove
+    } as unknown as PersonalBotsClient
+    const confirm = vi.spyOn(window, 'confirm')
+    await act(async () => root.render(createElement(BotsWorkspace, { client, providers: [], skills: [] })))
+    await act(async () => document.querySelector<HTMLButtonElement>('.bots__row')!.click())
+    await act(async () => button('Delete')!.click())
+    expect(document.body.textContent).toContain('Delete “Site editor”?')
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(document.querySelector('.modal-overlay')).toBeNull()
+    expect(remove).not.toHaveBeenCalled()
+    await act(async () => button('Delete')!.click())
+    await act(async () => document.querySelector<HTMLButtonElement>('.modal [data-action="confirm"]')!.click())
+    expect(remove).toHaveBeenCalledWith('site-editor')
+    expect(confirm).not.toHaveBeenCalled()
   })
 })
 
