@@ -25,7 +25,7 @@ export function EditorSshSettingsView({
   const control = editorSshSwitch(status)
   const problem = status.problem ? editorSshProblemWords(status.problem, status.includeLine, status.userConfig) : ''
   return (
-    <SettingsGroup title="Editors" icon={Code2} className="devices-group">
+    <SettingsGroup anchor="devices-editors" title="Editors" icon={Code2} className="devices-group">
       <SettingsRow
         title={TITLE}
         description={control.description}

@@ -58,7 +58,7 @@ export function MousseIdAccount({ onSetUp }: { onSetUp: () => void }) {
 
   return (
     <>
-      <SettingsGroup title="Mousse ID" icon={UserCircle} className="account-group">
+      <SettingsGroup anchor="account-mousse-id" title="Mousse ID" icon={UserCircle} className="account-group">
         <SettingsRow
           title={title}
           description={description}

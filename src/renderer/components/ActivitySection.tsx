@@ -27,7 +27,7 @@ export function ActivitySection() {
 
   if (!stats) {
     return (
-      <SettingsGroup title="Activity" icon={Activity}>
+      <SettingsGroup anchor="account-activity" title="Activity" icon={Activity}>
         <p className="settings-muted activity-loading">{loadFailed ? 'Couldn’t load activity.' : 'Loading activity…'}</p>
       </SettingsGroup>
     )
