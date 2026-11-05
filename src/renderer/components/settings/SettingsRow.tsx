@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from 'react'
 import { ChevronRight, type IconComponent } from '../../lib/icons'
+import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
 
 /**
  * Settings primitives. Layout rules live at the top of styles/settings.css:
@@ -27,6 +28,7 @@ export function SettingsGroup({
   description,
   action,
   id,
+  anchor,
   className,
   children
 }: {
@@ -37,6 +39,8 @@ export function SettingsGroup({
   /** Optional control aligned with the heading, e.g. a switch for the whole group. */
   action?: ReactNode
   id?: string
+  /** Where a settings search result lands (lib/settingsSearch.ts). */
+  anchor?: string
   className?: string
   children?: ReactNode
 }) {
@@ -46,6 +50,7 @@ export function SettingsGroup({
       id={id}
       className={`settings-group${className ? ` ${className}` : ''}`}
       aria-labelledby={title ? headingId : undefined}
+      data-settings-anchor={anchor}
     >
       {(title || action) && (
         <div className="settings-group-head">
@@ -77,11 +82,14 @@ export function SettingsRow({
   titleId,
   disabled,
   indent,
+  anchor,
   className,
   children,
   ...rest
 }: {
   title: ReactNode
+  /** Where a settings search result lands (lib/settingsSearch.ts): Enter focuses the row's control. */
+  anchor?: string
   /** Small inline action right after the title text, e.g. a reset icon button. */
   titleAction?: ReactNode
   description?: ReactNode
@@ -110,7 +118,7 @@ export function SettingsRow({
     <span id={titleId} className="settings-item-title">{title}</span>
   )
   return (
-    <div className={classes.join(' ')} {...rest}>
+    <div className={classes.join(' ')} data-settings-anchor={anchor} {...rest}>
       <div className="settings-item-text">
         {titleAction ? (
           <div className="settings-item-title-row">
@@ -132,7 +140,10 @@ export interface SegmentedOption<T extends string | number> {
   title?: string
 }
 
-/** Single-choice control; the selected segment is raised. */
+/**
+ * Single-choice control; the selected segment is raised. One tab stop: the arrow keys move
+ * between segments and choose, Home and End go to the ends.
+ */
 export function Segmented<T extends string | number>({
   value,
   options,
@@ -150,6 +161,7 @@ export function Segmented<T extends string | number>({
   ariaLabelledBy?: string
   id?: string
 }) {
+  const anyOn = options.some((option) => option.value === value)
   return (
     <div
       id={id}
@@ -158,8 +170,9 @@ export function Segmented<T extends string | number>({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
       aria-disabled={disabled || undefined}
+      onKeyDown={onRadioGroupKeyDown}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const on = option.value === value
         return (
           <button
@@ -167,6 +180,7 @@ export function Segmented<T extends string | number>({
             type="button"
             role="radio"
             aria-checked={on}
+            tabIndex={radioTabIndex(on, index, anyOn)}
             title={option.title}
             disabled={disabled}
             className={on ? 'on' : undefined}

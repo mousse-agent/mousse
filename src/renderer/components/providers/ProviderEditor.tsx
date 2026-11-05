@@ -79,6 +79,7 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
   return (
     <SettingsRow
       title="Display name"
+      anchor="providers-display-name"
       description={rename.error ? <span className="prov-error">{rename.error}</span> : deviceWideNote(snapshot)}
       control={
         <input

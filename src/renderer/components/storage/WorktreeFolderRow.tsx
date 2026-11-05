@@ -33,6 +33,7 @@ export function WorktreeFolderRow({ status, busy, refusal, onChoose, onReset }: 
   return <SettingsRow
     data-testid="storage-worktree-folder"
     title="Worktree folder"
+    anchor="storage-worktree-folder"
     description={<>
       {folderDescription(status)}
       {refusal && <span className="storage-rule-line storage-error" role="alert" data-testid="storage-worktree-folder-refused">{refusal}</span>}

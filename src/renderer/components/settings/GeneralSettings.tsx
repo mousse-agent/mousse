@@ -9,6 +9,7 @@ import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permis
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
 import { RunSettingsGroup } from './RunSettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
@@ -72,14 +73,16 @@ export function GeneralSettings({
   onCommitAcrylicIntensity
 }: GeneralSettingsProps) {
   const appearance = settings.appearance
-  const setTheme = (theme: ThemeId) => void onUpdate({ appearance: { ...appearance, theme } })
+  const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme) void onUpdate({ appearance: { ...appearance, theme } }) }
+  const themeChosen = options.themes.some((theme) => theme.id === appearance.theme)
+  const accentChosen = options.accentColors.some((color) => color.value === appearance.accentColor)
 
   return (
     <section id="general" className="settings-section">
       <SettingsGroup title="Appearance" icon={Palette}>
-        <SettingsRow title="Color theme">
-          <div className="theme-carousel" role="radiogroup" aria-label="Color theme">
-            {options.themes.map((theme) => {
+        <SettingsRow title="Color theme" anchor="general-theme">
+          <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
+            {options.themes.map((theme, index) => {
               const selected = appearance.theme === theme.id
               return (
                 <div
@@ -87,11 +90,13 @@ export function GeneralSettings({
                   className={`theme-card${selected ? ' selected' : ''}`}
                   onClick={() => setTheme(theme.id)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setTheme(theme.id)
+                    if (e.key !== 'Enter' && e.key !== ' ') return
+                    e.preventDefault()
+                    setTheme(theme.id)
                   }}
                   role="radio"
                   aria-checked={selected}
-                  tabIndex={0}
+                  tabIndex={radioTabIndex(selected, index, themeChosen)}
                 >
                   <ThemePreview themeId={theme.id} />
                   <span className="theme-card-label">{theme.label}</span>
@@ -102,30 +107,37 @@ export function GeneralSettings({
         </SettingsRow>
         <SettingsRow
           title="Accent color"
+          anchor="general-accent"
           control={
-            <div className="accent-grid">
-              {options.accentColors.map((color) => (
-                <button
-                  key={color.id}
-                  type="button"
-                  className={`accent-swatch${appearance.accentColor === color.value ? ' selected' : ''}`}
-                  style={{ backgroundColor: color.value }}
-                  title={color.label}
-                  aria-label={color.label}
-                  aria-pressed={appearance.accentColor === color.value}
-                  onClick={() => void onUpdate({ appearance: { ...appearance, accentColor: color.value } })}
-                />
-              ))}
+            <div className="accent-grid" role="radiogroup" aria-label="Accent color" onKeyDown={onRadioGroupKeyDown}>
+              {options.accentColors.map((color, index) => {
+                const selected = appearance.accentColor === color.value
+                return (
+                  <button
+                    key={color.id}
+                    type="button"
+                    role="radio"
+                    className={`accent-swatch${selected ? ' selected' : ''}`}
+                    style={{ backgroundColor: color.value }}
+                    title={color.label}
+                    aria-label={color.label}
+                    aria-checked={selected}
+                    tabIndex={radioTabIndex(selected, index, accentChosen)}
+                    onClick={() => { if (!selected) void onUpdate({ appearance: { ...appearance, accentColor: color.value } }) }}
+                  />
+                )
+              })}
             </div>
           }
         />
         <SettingsRow
           title="Acrylic glass"
+          anchor="general-acrylic"
           description={<>
-            Translucent window material on every theme. The desktop shows blurred through it on Windows, macOS and KDE Plasma.
+            <span title="The desktop shows blurred through the window on Windows, macOS and KDE Plasma.">Translucent window</span>
             {restartRequired && (
               <>
-                {' '}
+                {' · '}
                 <button type="button" className="theme-restart-link" onClick={onRestart}>
                   Restart to apply
                 </button>
@@ -142,6 +154,7 @@ export function GeneralSettings({
         />
         <SettingsRow
           title="Glass intensity"
+          anchor="general-glass-intensity"
           htmlFor="acrylic-intensity"
           description="Blur and opacity of the glass layers, from solid to glassy."
           disabled={!appearance.acrylic}
@@ -171,6 +184,7 @@ export function GeneralSettings({
         />
         <SettingsRow
           title="Render math"
+          anchor="general-render-math"
           description="Show LaTeX in replies and Markdown previews as formatted equations."
           control={
             <Switch
@@ -185,6 +199,7 @@ export function GeneralSettings({
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"
+          anchor="general-permission-mode"
           description={<span title="What an agent may do in a new chat without asking. Each chat can change it from the composer.">What an agent may do without asking in new chats.</span>}
           control={
             <Select
@@ -202,7 +217,8 @@ export function GeneralSettings({
       <SettingsGroup title="Notifications" icon={Bell}>
         <SettingsRow
           title="Completion sound"
-          description="Play the system sound when an agent finishes."
+          anchor="general-completion-sound"
+          description="Play a sound when an agent finishes or needs you."
           control={
             <Switch
               label="Completion sound"
@@ -213,6 +229,7 @@ export function GeneralSettings({
         />
         <SettingsRow
           title="All threads on my other computers"
+          anchor="general-remote-notifications"
           description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Notify when any thread on another computer needs you or finishes.</span>}
           control={
             <Switch
@@ -286,8 +303,12 @@ function AboutRow() {
     case 'installing':
       control = <button type="button" className="settings-btn" disabled><Loader2 size={14} className="spin" />Installing…</button>
       break
+    case 'disabled':
+      // Updates are off in this build: the version and the reason, no button that cannot work.
+      control = undefined
+      break
     default:
-      control = <button type="button" className="settings-btn" disabled={state.phase === 'disabled' || state.phase === 'checking'}
+      control = <button type="button" className="settings-btn" disabled={state.phase === 'checking'}
         onClick={() => void updateActions.check()}>
         <RefreshCw size={14} className={state.phase === 'checking' ? 'spin' : undefined} />
         {state.phase === 'checking' ? 'Checking…' : 'Check for updates'}
@@ -298,6 +319,7 @@ function AboutRow() {
     <>
       <SettingsRow
         title={version ? `Mousse ${version}` : 'Mousse'}
+        anchor="general-updates"
         description={status && <span role="status" className={updateStatusClass(state)}>{status}</span>}
         control={control}
       >
