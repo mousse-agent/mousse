@@ -28,7 +28,7 @@
   flex-wrap: wrap;
 }
 
-.agent-defs__header h1,
+.agent-defs__header h2,
 .agent-defs__title {
   margin: 0;
   font-size: 16px;

@@ -1,7 +1,7 @@
 import { Plus, Star, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { AGENT_RUNTIME_KINDS } from '../../../shared/agents/types'
-import { EmptyState } from '../ui/EmptyState'
+import { RefreshToolsButton } from '../automations/LibraryParts'
+import { Select } from '../ui/Select'
 import { SearchInput } from '../ui/SearchInput'
 import { AgentCard } from './AgentCard'
 import {
@@ -14,7 +14,9 @@ import { parseAgentImportFile } from './importBundle'
 import {
   EMPTY_LIBRARY_QUERY,
   filterAgentLibrary,
+  isLibraryFiltered,
   uniqueLibraryModels,
+  uniqueLibraryRuntimes,
   uniqueLibraryTags,
   type AgentLibraryQuery
 } from './libraryFilter'
@@ -28,6 +30,9 @@ export interface AgentsLibraryProps {
   onCreated?: (id: string) => void
   activeRunsSlot?: ReactNode
   selectedId?: string
+  /** Connects the configured MCP servers and reads their tools again, for the editors' tool lists. */
+  onRefreshTools?: () => void
+  refreshingTools?: boolean
 }
 
 export function AgentsLibrary({
@@ -38,7 +43,9 @@ export function AgentsLibrary({
   onOpen,
   onCreated,
   activeRunsSlot,
-  selectedId
+  selectedId,
+  onRefreshTools,
+  refreshingTools = false
 }: AgentsLibraryProps) {
   const [uncontrolledQuery, setUncontrolledQuery] = useState<AgentLibraryQuery>(EMPTY_LIBRARY_QUERY)
   const query = controlledQuery ?? uncontrolledQuery
@@ -86,8 +93,13 @@ export function AgentsLibrary({
   }, [client, profileId])
 
   const visible = useMemo(() => filterAgentLibrary(items, query), [items, query])
-  const tags = uniqueLibraryTags(items)
-  const models = uniqueLibraryModels(items)
+  // Filters offer only what the library holds, and one stays while it is set so it can be cleared.
+  const library = useMemo(() => items.filter((item) => !item.archived), [items])
+  const tags = uniqueLibraryTags(library)
+  const models = uniqueLibraryModels(library)
+  const runtimes = uniqueLibraryRuntimes(library)
+  const empty = !loading && !error && library.length === 0
+  const filtered = isLibraryFiltered(query)
 
   const createAgent = async () => {
     const startedProfileId = profileId
@@ -132,10 +144,11 @@ export function AgentsLibrary({
   return (
     <div className="agent-defs" data-agent-library="" data-profile-id={profileId}>
       <header className="agent-defs__header">
-        <h1>Agents</h1>
-        {!loading && <span className="agent-defs__status">{visible.length} {visible.length === 1 ? 'agent' : 'agents'}</span>}
+        <h2>Agents</h2>
+        {!loading && !empty && <span className="agent-defs__status">{visible.length} {visible.length === 1 ? 'agent' : 'agents'}</span>}
         <div className="agent-defs__actions">
           {activeRunsSlot}
+          {onRefreshTools ? <RefreshToolsButton refreshing={refreshingTools} onRefresh={onRefreshTools} /> : null}
           <button type="button" className="btn" onClick={() => fileRef.current?.click()} aria-label="Import agent">
             <Upload size={14} /> Import
           </button>
@@ -150,54 +163,72 @@ export function AgentsLibrary({
           </button>
         </div>
       </header>
-      <div className="agent-library-toolbar">
-        <SearchInput value={query.search} onChange={(search) => setQuery({ ...query, search })} placeholder="Search agents" />
-        <select aria-label="Filter by tag" value={query.tag} onChange={(event) => setQuery({ ...query, tag: event.target.value })}>
-          <option value="">All tags</option>
-          {tags.map((tag) => (
-            <option key={tag} value={tag}>
-              {tag}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Filter by runtime"
-          value={query.runtime}
-          onChange={(event) => setQuery({ ...query, runtime: event.target.value as AgentLibraryQuery['runtime'] })}
-        >
-          <option value="all">All runtimes</option>
-          {AGENT_RUNTIME_KINDS.map((kind) => (
-            <option key={kind} value={kind}>
-              {AGENT_RUNTIME_LABELS[kind]}
-            </option>
-          ))}
-        </select>
-        <select aria-label="Filter by model" value={query.model} onChange={(event) => setQuery({ ...query, model: event.target.value })}>
-          <option value="">All models</option>
-          {models.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.label}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Sort agents"
-          value={query.sort}
-          onChange={(event) => setQuery({ ...query, sort: event.target.value as AgentLibraryQuery['sort'] })}
-        >
-          <option value="updated">Recently edited</option>
-          <option value="name">Name</option>
-          <option value="lastRun">Last run</option>
-        </select>
-        <button
-          type="button"
-          className={`btn btn-sm ${query.favoritesOnly ? 'active' : ''}`}
-          aria-pressed={query.favoritesOnly}
-          onClick={() => setQuery({ ...query, favoritesOnly: !query.favoritesOnly })}
-        >
-          <Star size={14} /> Favorites
-        </button>
-      </div>
+      {empty ? null : (
+        <div className="agent-library-toolbar">
+          <SearchInput value={query.search} onChange={(search) => setQuery({ ...query, search })} placeholder="Search agents" />
+          {tags.length > 0 || query.tag ? (
+            <Select
+              className="automation-filter"
+              size="small"
+              ariaLabel="Filter by tag"
+              value={query.tag}
+              onChange={(tag) => setQuery({ ...query, tag })}
+              options={[{ value: '', label: 'All tags' }, ...withCurrent(tags, query.tag).map((tag) => ({ value: tag, label: tag }))]}
+            />
+          ) : null}
+          {runtimes.length > 1 || query.runtime !== 'all' ? (
+            <Select<AgentLibraryQuery['runtime']>
+              className="automation-filter"
+              size="small"
+              ariaLabel="Filter by runtime"
+              value={query.runtime}
+              onChange={(runtime) => setQuery({ ...query, runtime })}
+              options={[
+                { value: 'all', label: 'All runtimes' },
+                ...withCurrent(runtimes, query.runtime === 'all' ? '' : query.runtime).map((kind) => ({ value: kind, label: AGENT_RUNTIME_LABELS[kind] }))
+              ]}
+            />
+          ) : null}
+          {models.length > 1 || query.model ? (
+            <Select
+              className="automation-filter"
+              size="small"
+              ariaLabel="Filter by model"
+              value={query.model}
+              onChange={(model) => setQuery({ ...query, model })}
+              options={[
+                { value: '', label: 'All models' },
+                ...models.map((model) => ({ value: model.id, label: model.label })),
+                ...(query.model && !models.some((model) => model.id === query.model) ? [{ value: query.model, label: query.model }] : [])
+              ]}
+            />
+          ) : null}
+          {library.length > 1 ? (
+            <Select<AgentLibraryQuery['sort']>
+              className="automation-filter"
+              size="small"
+              ariaLabel="Sort agents"
+              value={query.sort}
+              onChange={(sort) => setQuery({ ...query, sort })}
+              options={[
+                { value: 'updated', label: 'Recently edited' },
+                { value: 'name', label: 'Name' },
+                { value: 'lastRun', label: 'Last run' }
+              ]}
+            />
+          ) : null}
+          {library.some((item) => item.favorite) || query.favoritesOnly ? (
+            <button
+              type="button"
+              className={`btn btn-sm ${query.favoritesOnly ? 'active' : ''}`}
+              aria-pressed={query.favoritesOnly}
+              onClick={() => setQuery({ ...query, favoritesOnly: !query.favoritesOnly })}
+            >
+              <Star size={14} fill={query.favoritesOnly ? 'currentColor' : 'none'} /> Favorites
+            </button>
+          ) : null}
+        </div>
+      )}
       <input
         ref={fileRef}
         type="file"
@@ -222,18 +253,18 @@ export function AgentsLibrary({
         <div className="agent-defs--error" role="alert">
           {error}
         </div>
+      ) : empty ? (
+        // New agent and Import sit in the header; the empty library adds no second create button.
+        <p className="automation-empty-line" data-library-empty="">No agents yet.</p>
       ) : visible.length === 0 ? (
-        <div className="agent-defs--empty">
-          <EmptyState
-            title={items.length === 0 ? 'No agents yet' : 'No agents match these filters'}
-            description={items.length === 0 ? 'Create an agent to give it a prompt, model, and tools.' : 'Try clearing search or filters.'}
-            action={
-              <button type="button" className="btn btn-primary" onClick={() => items.length === 0 ? void createAgent() : setQuery({ ...EMPTY_LIBRARY_QUERY })}>
-                {items.length === 0 ? 'New agent' : 'Clear filters'}
-              </button>
-            }
-          />
-        </div>
+        <p className="automation-empty-line" data-library-no-match="">
+          No agents match.
+          {filtered ? (
+            <button type="button" className="btn btn-sm" data-action="clear-filters" onClick={() => setQuery({ ...EMPTY_LIBRARY_QUERY, sort: query.sort })}>
+              Clear filters
+            </button>
+          ) : null}
+        </p>
       ) : (
         <div className="agent-library-grid">
           {visible.map((item) => (
@@ -243,4 +274,9 @@ export function AgentsLibrary({
       )}
     </div>
   )
+}
+
+/** A filter's choices plus its current value, when that value is no longer in the library. */
+function withCurrent<T extends string>(choices: readonly T[], current: T | ''): T[] {
+  return current && !choices.includes(current) ? [...choices, current] : [...choices]
 }
