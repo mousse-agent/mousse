@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
+import { motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
@@ -799,17 +800,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return;
       }
       cancelScroll();
-      const reduceMotion =
-        typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (reduceMotion) {
+      // Animation speed (or the OS reduced-motion setting) scales the glide; Off jumps.
+      const scale = motionScale();
+      if (scale === 0) {
         container.scrollTop = targetTop;
         return;
       }
       // Custom eased glide — native smooth scroll is janky over long
       // distances. Distance-based duration keeps short hops snappy.
-      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22);
+      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22) * scale;
       const startedAt = performance.now();
       const step = (now: number) => {
         const t = Math.min(1, (now - startedAt) / duration);
