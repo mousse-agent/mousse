@@ -1,15 +1,18 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { errorText } from './scheduledLabels'
+import { errorText, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
 import { modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
+import { Select, type SelectOption } from '../ui/Select'
 import {
+  draftPreset,
   heldPermissionMode,
   loweredPermission,
   modeChoices,
   permissionChoices,
+  presetFields,
   takesPermissionMode,
   showsWorkspace,
   validateDraft,
@@ -25,6 +28,11 @@ const SCHEDULE_KINDS: Array<{ value: ScheduleKind; label: string }> = [
   { value: 'cron', label: 'Cron' },
   { value: 'once', label: 'Once' },
   { value: 'manual', label: 'Manual' }
+]
+
+const PRESET_OPTIONS: ReadonlyArray<SelectOption<SchedulePreset>> = [
+  ...SCHEDULE_PRESETS.map((preset) => ({ value: preset.value, label: preset.label })),
+  { value: 'custom', label: 'Custom' }
 ]
 
 export const MODE_NOTE =
@@ -53,6 +61,8 @@ export function JobEditor({
   onCancel: () => void
 }) {
   const [draft, setDraft] = useState<JobDraft>(initial)
+  // Custom stays chosen even when what is typed happens to match a preset.
+  const [custom, setCustom] = useState(() => draftPreset(initial) === 'custom')
   const [attempted, setAttempted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
@@ -78,13 +88,45 @@ export function JobEditor({
   const knownThread = projectThreads.some((thread) => thread.id === draft.threadId)
   const workspaceShown = showsWorkspace(draft) || draft.workspaceKind === 'worktree'
   const threadLocked = draft.workspaceKind === 'worktree' && draft.projectId !== ''
+  const preset: SchedulePreset = custom ? 'custom' : draftPreset(draft)
+  const presetSummary = SCHEDULE_PRESETS.find((item) => item.value === preset)?.summary
+
+  const choosePreset = (next: SchedulePreset) => {
+    if (next === 'custom') {
+      // The custom fields open on what the preset saves, ready to change.
+      setCustom(true)
+      return
+    }
+    setCustom(false)
+    patch(presetFields(next))
+  }
+
+  const modelOptions: SelectOption[] = [
+    { value: '', label: 'Default model' },
+    ...(draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
+      ? [{ value: draft.modelKey, label: `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)` }]
+      : []),
+    ...catalog.models.flatMap((group) => group.choices.map((choice) => ({ value: choice.key, label: choice.label, group: group.label })))
+  ]
+  const projectOptions: SelectOption[] = [
+    { value: '', label: 'No project' },
+    ...catalog.projects.map((project) => ({ value: project.id, label: project.name })),
+    ...(draft.projectId && !catalog.projects.some((project) => project.id === draft.projectId) ? [{ value: draft.projectId, label: 'Unknown project' }] : [])
+  ]
+  const threadOptions: SelectOption[] = [
+    { value: '', label: threadLocked ? 'The thread that owns the worktree' : 'A new thread for each run' },
+    ...(!threadLocked && draft.threadId && !knownThread ? [{ value: draft.threadId, label: 'Unknown thread' }] : []),
+    ...projectThreads.map((thread) => ({ value: thread.id, label: thread.name }))
+  ]
 
   const submit = async () => {
     setAttempted(true)
     const problems = Object.keys(errors) as DraftField[]
     if (problems.length > 0) {
       const target = formRef.current?.querySelector<HTMLElement>(`[data-field="${problems[0]}"]`)
-      target?.focus()
+      // A group (the custom schedule) takes focus on its chosen item.
+      const focusable = target?.matches('input, textarea, button') ? target : target?.querySelector<HTMLElement>('[aria-checked="true"], button, input')
+      focusable?.focus()
       return
     }
     setBusy(true)
@@ -111,6 +153,10 @@ export function JobEditor({
     'aria-invalid': shown[name] ? true : undefined,
     'aria-describedby': shown[name] ? id(`${name}-error`) : undefined
   })
+  const selectField = (name: DraftField) => ({
+    ariaInvalid: Boolean(shown[name]),
+    ariaDescribedBy: shown[name] ? id(`${name}-error`) : undefined
+  })
   const fieldError = (name: DraftField) =>
     shown[name] ? <p className="scheduled-field-error" id={id(`${name}-error`)} role="alert">{shown[name]}</p> : null
 
@@ -135,95 +181,105 @@ export function JobEditor({
       </div>
 
       <div className="scheduled-field">
-        <span className="scheduled-label" id={id('schedule')}>Schedule</span>
-        <div className="scheduled-segmented" role="radiogroup" aria-labelledby={id('schedule')} {...field('schedule')}>
-          {SCHEDULE_KINDS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={draft.scheduleKind === option.value}
-              tabIndex={draft.scheduleKind === option.value ? 0 : -1}
-              className={`scheduled-segment${draft.scheduleKind === option.value ? ' active' : ''}`}
-              onClick={() => patch({ scheduleKind: option.value })}
-              onKeyDown={(event) => {
-                if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
-                event.preventDefault()
-                event.stopPropagation()
-                const index = SCHEDULE_KINDS.findIndex((item) => item.value === draft.scheduleKind)
-                const next = SCHEDULE_KINDS[(index + (event.key === 'ArrowRight' ? 1 : -1) + SCHEDULE_KINDS.length) % SCHEDULE_KINDS.length]
-                patch({ scheduleKind: next.value })
-                const group = event.currentTarget.parentElement
-                requestAnimationFrame(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus())
-              }}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-        {fieldError('schedule')}
-        {draft.scheduleKind === 'interval' ? (
-          <div className="scheduled-inline">
-            <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
-            <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
-          </div>
+        <label className="scheduled-label" htmlFor={id('preset')}>Schedule</label>
+        <Select id={id('preset')} className="scheduled-select narrow" value={preset} options={PRESET_OPTIONS} onChange={choosePreset} />
+        {presetSummary ? <p className="scheduled-note" data-testid="schedule-summary">{presetSummary}</p> : null}
+        {custom ? (
+          <>
+            <div className="scheduled-segmented" role="radiogroup" aria-label="Custom schedule" {...field('schedule')}>
+              {SCHEDULE_KINDS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.scheduleKind === option.value}
+                  tabIndex={draft.scheduleKind === option.value ? 0 : -1}
+                  className={`scheduled-segment${draft.scheduleKind === option.value ? ' active' : ''}`}
+                  onClick={() => patch({ scheduleKind: option.value })}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    const index = SCHEDULE_KINDS.findIndex((item) => item.value === draft.scheduleKind)
+                    const next = SCHEDULE_KINDS[(index + (event.key === 'ArrowRight' ? 1 : -1) + SCHEDULE_KINDS.length) % SCHEDULE_KINDS.length]
+                    patch({ scheduleKind: next.value })
+                    const group = event.currentTarget.parentElement
+                    requestAnimationFrame(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus())
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {fieldError('schedule')}
+            {draft.scheduleKind === 'interval' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('minutes')}>Minutes between runs</label>
+                <input id={id('minutes')} className="scheduled-input narrow" inputMode="numeric" value={draft.minutes} {...field('minutes')} onChange={(event) => patch({ minutes: event.target.value })} />
+              </div>
+            ) : null}
+            {fieldError('minutes')}
+            {draft.scheduleKind === 'cron' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('expr')}>Cron expression</label>
+                <input
+                  id={id('expr')}
+                  className="scheduled-input"
+                  placeholder="0 9 * * *"
+                  title="Minute, hour, day of month, month, day of week"
+                  data-field="expr"
+                  aria-invalid={shown.expr ? true : undefined}
+                  aria-describedby={shown.expr ? id('expr-error') : id('expr-hint')}
+                  value={draft.expr}
+                  onChange={(event) => patch({ expr: event.target.value })}
+                />
+                <p className="scheduled-note" id={id('expr-hint')}>In this computer&apos;s time.</p>
+              </div>
+            ) : null}
+            {fieldError('expr')}
+            {draft.scheduleKind === 'once' ? (
+              <div className="scheduled-inline">
+                <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
+                <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
+              </div>
+            ) : null}
+            {fieldError('runAt')}
+            {draft.scheduleKind === 'manual' ? <p className="scheduled-note">Runs only when you press Run now{job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}.</p> : null}
+          </>
         ) : null}
-        {fieldError('minutes')}
-        {draft.scheduleKind === 'cron' ? (
-          <div className="scheduled-inline">
-            <label className="scheduled-label" htmlFor={id('expr')}>Cron expression</label>
-            <input id={id('expr')} className="scheduled-input" placeholder="0 9 * * *" value={draft.expr} {...field('expr')} onChange={(event) => patch({ expr: event.target.value })} />
-          </div>
-        ) : null}
-        {fieldError('expr')}
-        {draft.scheduleKind === 'once' ? (
-          <div className="scheduled-inline">
-            <label className="scheduled-label" htmlFor={id('runAt')}>Run at</label>
-            <input id={id('runAt')} className="scheduled-input narrow" type="datetime-local" value={draft.runAt} {...field('runAt')} onChange={(event) => patch({ runAt: event.target.value })} />
-          </div>
-        ) : null}
-        {fieldError('runAt')}
-        {draft.scheduleKind === 'manual' ? <p className="scheduled-note">Runs only when you press Run now{job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}.</p> : null}
       </div>
 
       <div className="scheduled-field-grid">
         <div className="scheduled-field">
           <label className="scheduled-label" htmlFor={id('model')}>Model</label>
-          <select id={id('model')} className="scheduled-input" value={draft.modelKey} onChange={(event) => patch({ modelKey: event.target.value })}>
-            <option value="">Default model</option>
-            {draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey)) ? (
-              <option value={draft.modelKey}>{modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)</option>
-            ) : null}
-            {catalog.models.map((group) => (
-              <optgroup key={group.label} label={group.label}>
-                {group.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.label}</option>)}
-              </optgroup>
-            ))}
-          </select>
+          <Select id={id('model')} className="scheduled-select" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />
         </div>
         <div className="scheduled-field">
           <label className="scheduled-label" htmlFor={id('mode')}>Mode</label>
-          <select id={id('mode')} className="scheduled-input" value={draft.mode} onChange={(event) => patch({ mode: event.target.value as JobDraft['mode'] })}>
-            {modeChoices(draft).map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-          </select>
+          <Select<JobDraft['mode']>
+            id={id('mode')}
+            className="scheduled-select"
+            value={draft.mode}
+            options={modeChoices(draft)}
+            onChange={(mode) => patch({ mode })}
+          />
         </div>
       </div>
       {draft.mode === '' ? <p className="scheduled-note" data-testid="mode-note">{MODE_NOTE}</p> : null}
 
       {takesPermissionMode(draft) ? (
-        <div className="scheduled-field">
+        <div className="scheduled-field" data-field="permission">
           <label className="scheduled-label" htmlFor={id('permission')}>
             {isPermissionMode(draft.permissionMode) ? <PermissionModeLabel mode={draft.permissionMode} size={13}>Permissions</PermissionModeLabel> : 'Permissions'}
           </label>
-          <select
+          <Select<JobDraft['permissionMode']>
             id={id('permission')}
-            className="scheduled-input"
+            className="scheduled-select"
             value={draft.permissionMode}
-            {...field('permission')}
-            onChange={(event) => patch({ permissionMode: event.target.value as JobDraft['permissionMode'] })}
-          >
-            {permissionChoices(draft, catalog, job).map((choice) => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>)}
-          </select>
+            options={permissionChoices(draft, catalog, job)}
+            {...selectField('permission')}
+            onChange={(permissionMode) => patch({ permissionMode })}
+          />
           {fieldError('permission')}
           <p className="scheduled-note" data-testid="permission-note">
             {held.exact
@@ -240,53 +296,44 @@ export function JobEditor({
       <div className="scheduled-field-grid">
         <div className="scheduled-field">
           <label className="scheduled-label" htmlFor={id('project')}>Project</label>
-          <select
+          <Select
             id={id('project')}
-            className="scheduled-input"
+            className="scheduled-select"
             value={draft.projectId}
-            onChange={(event) => {
-              const projectId = event.target.value
+            options={projectOptions}
+            onChange={(projectId) => {
               const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
               patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
             }}
-          >
-            <option value="">No project</option>
-            {catalog.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-            {draft.projectId && !catalog.projects.some((project) => project.id === draft.projectId) ? <option value={draft.projectId}>Unknown project</option> : null}
-          </select>
+          />
         </div>
         <div className="scheduled-field">
           <label className="scheduled-label" htmlFor={id('thread')}>Target thread</label>
-          <select
+          <Select
             id={id('thread')}
-            className="scheduled-input"
+            className="scheduled-select"
             value={threadLocked ? '' : draft.threadId}
+            options={threadOptions}
             disabled={threadLocked}
-            onChange={(event) => patch({ threadId: event.target.value })}
-          >
-            <option value="">{threadLocked ? 'The thread that owns the worktree' : 'A new thread for each run'}</option>
-            {!threadLocked && draft.threadId && !knownThread ? <option value={draft.threadId}>Unknown thread</option> : null}
-            {projectThreads.map((thread) => <option key={thread.id} value={thread.id}>{thread.name}</option>)}
-          </select>
+            onChange={(threadId) => patch({ threadId })}
+          />
         </div>
       </div>
 
       {workspaceShown ? (
-        <div className="scheduled-field">
+        <div className="scheduled-field" data-field="workspace">
           <label className="scheduled-label" htmlFor={id('workspace')}>Workspace</label>
-          <select
+          <Select<WorkspaceKind>
             id={id('workspace')}
-            className="scheduled-input"
+            className="scheduled-select"
             value={draft.workspaceKind}
-            {...field('workspace')}
-            onChange={(event) => {
-              const workspaceKind = event.target.value as WorkspaceKind
+            options={workspaceChoices(draft)}
+            {...selectField('workspace')}
+            onChange={(workspaceKind) => {
               // A job on a worktree runs on the thread that owns it: leaving that drops the owner from the form.
               patch({ workspaceKind, ...(draft.workspaceKind === 'worktree' && workspaceKind !== 'worktree' ? { threadId: '' } : {}) })
             }}
-          >
-            {workspaceChoices(draft).map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-          </select>
+          />
           {fieldError('workspace')}
           {draft.workspaceKind === 'worktree' ? (
             <div className="scheduled-inline">
@@ -303,8 +350,8 @@ export function JobEditor({
 
       {failure ? <p className="scheduled-item-error" role="alert" data-testid="save-error">{failure}</p> : null}
       <div className="scheduled-form-actions">
-        <button type="button" className="scheduled-btn ghost" onClick={onCancel}>Cancel</button>
-        <button type="submit" className="scheduled-btn primary" disabled={busy}>{job ? 'Save' : 'Create'}</button>
+        <button type="button" className="settings-btn" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="settings-btn" disabled={busy}>{job ? 'Save' : 'Create'}</button>
       </div>
     </form>
   )

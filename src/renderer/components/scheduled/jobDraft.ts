@@ -20,6 +20,7 @@ import type {
   ScheduleKind,
   Thread
 } from '../../../shared/types'
+import { presetOf, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
 
 /** What the editor offers to choose from. */
 export interface ScheduledCatalog {
@@ -106,7 +107,8 @@ export function newDraft(): JobDraft {
     prompt: '',
     scheduleKind: 'interval',
     runAt: toLocalInput(undefined),
-    minutes: '30',
+    // Hourly: the first preset.
+    minutes: '60',
     expr: '0 9 * * *',
     modelKey: '',
     mode: '',
@@ -210,6 +212,19 @@ export function workspaceChoices(draft: JobDraft): Array<{ value: WorkspaceKind;
   if (draft.mode !== 'plan') choices.push({ value: 'newWorktree', label: 'New worktree per run (recommended)' })
   choices.push({ value: 'worktree', label: 'Existing worktree' })
   return choices
+}
+
+/** The preset the draft's schedule matches, as it would be saved; anything else is custom. */
+export function draftPreset(draft: JobDraft): SchedulePreset {
+  if (draft.scheduleKind === 'interval') return presetOf({ kind: 'interval', minutes: Number(draft.minutes.trim()) })
+  if (draft.scheduleKind === 'cron') return presetOf({ kind: 'cron', expr: draft.expr })
+  return 'custom'
+}
+
+/** The draft fields a preset sets; the other schedule fields keep what was typed. */
+export function presetFields(preset: Exclude<SchedulePreset, 'custom'>): Partial<JobDraft> {
+  const schedule = SCHEDULE_PRESETS.find((item) => item.value === preset)!.schedule
+  return schedule.kind === 'interval' ? { scheduleKind: 'interval', minutes: String(schedule.minutes) } : { scheduleKind: 'cron', expr: schedule.expr }
 }
 
 export function scheduleOf(draft: JobDraft): JobSchedule {
