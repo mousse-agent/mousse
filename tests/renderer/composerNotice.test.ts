@@ -78,13 +78,13 @@ describe('the notice store', () => {
     expect(listener).toHaveBeenCalledTimes(1)
   })
 
-  it('stacks only the lost service above a blocking notice; otherwise it is one line like the rest', () => {
+  it('stacks only the lost service above a waiting approval; otherwise it is one row like the rest', () => {
     const store = new ComposerNoticeStore()
-    const service: ComposerNoticeProps = { tone: 'error', title: 'Service lost', stacksAbove: true }
-    const approval: ComposerNoticeProps = { tone: 'warning', title: 'Approval', blocking: true }
+    const service: ComposerNoticeProps = { tone: 'error', title: 'Service lost', priority: 'service' }
+    const approval: ComposerNoticeProps = { tone: 'warning', title: 'Approval', priority: 'approval' }
     store.set('send', notice('error', 'Send failed'))
     store.set('service', service)
-    // No blocking notice: the newest error wins, nothing stacks.
+    // No approval: the lost service wins, nothing stacks.
     expect(store.top()?.title).toBe('Service lost')
     expect(store.above()).toBeNull()
     store.set('approval', approval)
@@ -94,7 +94,12 @@ describe('the notice store', () => {
     store.set('service', null)
     expect(store.top()?.title).toBe('Approval')
     expect(store.above()).toBeNull()
+    // A paused run outranks the approval, so the lost service shows alone.
     store.set('service', service)
+    store.set('paused', { tone: 'warning', title: 'Paused', priority: 'paused' })
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+    store.set('paused', null)
     store.set('approval', null)
     expect(store.top()?.title).toBe('Service lost')
     expect(store.above()).toBeNull()
@@ -198,26 +203,28 @@ describe('the background service notice', () => {
   })
 })
 
-describe('the transcript under a notice', () => {
-  const polish = readFileSync(resolve(process.cwd(), 'src/renderer/styles/polish.css'), 'utf8')
+describe('the dock on the composer', () => {
+  const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
   const body = (selector: string) => {
-    const start = polish.indexOf(`${selector} {`)
+    const start = css.indexOf(`${selector} {`)
     expect(start, selector).toBeGreaterThanOrEqual(0)
-    return polish.slice(start, polish.indexOf('}', start))
+    return css.slice(start, css.indexOf('}', start))
   }
 
-  it('keeps its end, fade, Go to latest and prompt rail clear of the notice line', () => {
-    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot)'))
-      .toMatch(/--chat-notice-stack:\s*42px;[\s\S]*--chat-notice-fade:\s*24px;/)
-    // Two stacked lines (the lost service above an approval) reserve two lines.
-    expect(body('.chat:not(.chat--empty) .mousse-chat-shell:has(> .chat-composer-stack .composer-notice-slot > .composer-notice + .composer-notice)'))
-      .toMatch(/--chat-notice-stack:\s*84px;/)
-    expect(body('.chat:not(.chat--empty) .an-message-list > div')).toContain('var(--chat-notice-stack, 0px)')
-    const mask = polish.slice(polish.indexOf('--transcript-mask:'), polish.indexOf('-webkit-mask-image', polish.indexOf('--transcript-mask:')))
-    expect(mask).toMatch(/#000 max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - 32px\)\)/)
-    expect(mask).toMatch(/transparent max\(28px, calc\(100% - var\(--chat-composer-stack, 160px\) - var\(--chat-notice-stack, 0px\) - var\(--chat-notice-fade, 0px\) \+ 24px\)\)/)
-    expect(body('.chat-jump')).toContain('var(--chat-notice-stack, 0px)')
-    expect(body('.chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail')).toContain('var(--chat-notice-stack, 0px)')
+  it('docks the notice line and the queue the same way: the composer\'s surface, flush on its top edge', () => {
+    const dock = body('.chat-input-area > :is(.composer-notice-slot, .queued-messages)')
+    expect(dock).toMatch(/margin:\s*0;/)
+    expect(dock).toMatch(/border:\s*1px solid var\(--ui-line-strong\);\s*border-bottom:\s*0;/)
+    expect(dock).toMatch(/border-radius:\s*16px 16px 0 0;/)
+    expect(dock).toMatch(/background:\s*var\(--ui-raised\);/)
+    expect(body('.app .chat-input-area:has(> .composer-notice-slot, > .queued-messages):not(:has(.composer-workspace-toolbar)) .composer'))
+      .toMatch(/border-top-left-radius:\s*0;\s*border-top-right-radius:\s*0;/)
+  })
+
+  it('sits in the composer stack, so the transcript keeps clear of it without an offset of its own', () => {
+    expect(body('.composer-notice-slot')).not.toMatch(/position:\s*absolute/)
+    const polish = readFileSync(resolve(process.cwd(), 'src/renderer/styles/polish.css'), 'utf8')
+    expect(polish).not.toContain('--chat-notice-stack')
   })
 })
 

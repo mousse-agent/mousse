@@ -1208,7 +1208,6 @@ export function OrchestratorChat() {
         {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
         {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
         <ComposerNoticeProvider>
-        <ComposerNoticeSlot />
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }}
@@ -1261,6 +1260,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* The dock on the composer's top edge: the top notice, or the queue; one at a time. */}
+        <ComposerNoticeSlot />
         <QueuedMessages
           threadId={activeThreadId}
           optimisticItems={optimisticQueueItems}

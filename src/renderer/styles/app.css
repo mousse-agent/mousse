@@ -1134,24 +1134,61 @@ html.platform-darwin .titlebar-left {
   }
 }
 
-/* Queued messages stack — visually attached above the composer */
+/* The dock on the composer's top edge: the notice line (ComposerNoticeSlot) or the queued-messages strip,
+   one at a time. It is the composer's width, surface, hairline and top light, with the composer's top
+   corners, and sits flush on it; the composer's top corners square off under it, so the two read as one
+   card. A dock that appears fades in; the queue fades out after a brief reveal (`is-leaving`). */
+.chat-input-area {
+  --composer-dock-fade: 160ms;
+  --composer-dock-glint: rgba(255, 255, 255, 0.11);
+}
+
+html[data-theme='blacksphere-plus'] .chat-input-area {
+  --composer-dock-glint: rgba(255, 255, 255, 0.14);
+}
+
+html[data-theme='high-contrast'] .chat-input-area {
+  --composer-dock-glint: transparent;
+}
+
+.chat-input-area > :is(.composer-notice-slot, .queued-messages) {
+  position: relative;
+  /* Over the composer's drop shadow, which would otherwise darken the dock's lower edge. */
+  z-index: 1;
+  margin: 0;
+  border: 1px solid var(--ui-line-strong);
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+  background: var(--ui-raised);
+  box-shadow: inset 0 1px 0 var(--composer-dock-glint);
+  overflow: visible;
+  animation: composer-dock-in var(--composer-dock-fade) ease-out;
+  transition: opacity var(--composer-dock-fade) ease, border-color 0.18s;
+}
+
+.chat-input-area:has(.composer:focus-within) > :is(.composer-notice-slot, .queued-messages) {
+  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
+}
+
+.chat-input-area > .queued-messages.is-leaving {
+  opacity: 0;
+}
+
+/* On a new thread the workspace row is the composer's own tab; the dock sits above it and the composer
+   keeps its corners. */
+.app .chat-input-area:has(> .composer-notice-slot, > .queued-messages):not(:has(.composer-workspace-toolbar)) .composer {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+@keyframes composer-dock-in {
+  from { opacity: 0; }
+}
+
 .queued-messages {
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin: 0 0 -1px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 14px 14px 0 0;
-  background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  overflow: visible;
-}
-
-.chat-input-area:has(.queued-messages) .composer {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
 }
 
 .queued-messages-list {
@@ -1346,19 +1383,11 @@ html.platform-darwin .titlebar-left {
   cursor: not-allowed;
 }
 
-/* The one notice line above the composer (ComposerNotice). It floats over the transcript's bottom edge, so
-   a notice appearing never moves the composer. Colour is on the tone icon only; the line is a lit surface. */
+/* The notice in the dock on the composer's top edge (ComposerNoticeSlot). The dock's surface, shared with
+   the queued-messages strip, is with the queue's rules above. Colour is on the tone icon only. */
 .composer-notice-slot {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: calc(100% + 6px);
-  z-index: 4;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  pointer-events: none;
   container: composer-notice / inline-size;
 }
 
@@ -1366,21 +1395,17 @@ html.platform-darwin .titlebar-left {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 100%;
   min-height: 36px;
   box-sizing: border-box;
-  padding: 4px 4px 4px 12px;
-  border-radius: var(--ui-control-radius, 8px);
-  background: var(--bg-secondary);
-  box-shadow: var(--ui-specular), 0 6px 20px rgba(0, 0, 0, 0.2);
+  padding: 4px 6px 4px 14px;
   color: var(--text-primary);
   font-size: 12.5px;
   line-height: 1.35;
-  pointer-events: auto;
 }
 
-html[data-theme='high-contrast'] .composer-notice {
-  outline: 1px solid var(--ui-line);
+/* Two notices (the lost service over an approval) are two rows of the one dock. */
+.composer-notice + .composer-notice {
+  border-top: 1px solid var(--ui-line);
 }
 
 .composer-notice-icon {
@@ -1499,12 +1524,6 @@ html[data-theme='high-contrast'] .composer-notice {
 .composer-notice-icon-btn[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
-}
-
-/* On a new chat the notice takes the place of the logo and the title, which sit where it shows. */
-.chat-input-area:has(> .composer-notice-slot) > .chat-empty-logo,
-.chat-input-area:has(> .composer-notice-slot) > .chat-empty-title {
-  visibility: hidden;
 }
 
 /* Discard, confirmed from a notice: the destructive button says so in red text. */
