@@ -94,6 +94,8 @@ export class BotChatService {
     const key = `create:${input.clientRequestId}`
     const made = this.store.activationByKey(key)
     if (made) return { bot: this.summaryOf(made.botId) }
+    // The first bot of an owner with a Claude subscription adds "Claude for bots" (§5.9 item 7).
+    await this.engine.prepareBotRunner()
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
     const name = given || (await this.nameFor(botId, description))
     const definition: BotDefinition = {

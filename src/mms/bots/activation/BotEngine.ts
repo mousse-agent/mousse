@@ -138,6 +138,11 @@ export interface BotEngineHost {
   clearContext?(threadId: string): void
   /** Archives a thread (#681): a deleted bot's threads, kept 30 days before the purge. */
   archiveThread?(threadId: string): Promise<unknown> | void
+  /**
+   * Adds the bot runner entry when the owner's setup calls for one (`harness.ensureBotRunner`,
+   * §5.9 item 7): awaited at each bot's creation, before its model is chosen. A failure only logs.
+   */
+  botRunner?(): Promise<unknown>
   /** One model call on a selection (`harness.oneShot`): naming a new bot. */
   oneShot?(input: { selection: ProviderSelection; prompt: string; signal: AbortSignal }): Promise<string>
   /**
@@ -3126,6 +3131,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * One model call for a bot (naming it): on the model its activations would resolve to, within
    * `timeoutMs`. Undefined when no model can run it or the call failed.
    */
+  /** At a bot's creation: the bot runner entry, when the owner's setup calls for one (`BotEngineHost.botRunner`). */
+  async prepareBotRunner(): Promise<void> {
+    try {
+      await this.host.botRunner?.()
+    } catch (error) {
+      console.warn('[bots] could not add the bot runner entry', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   async oneShotFor(botId: string, prompt: string, timeoutMs: number): Promise<string | undefined> {
     const models = this.host.models
     const oneShot = this.host.oneShot

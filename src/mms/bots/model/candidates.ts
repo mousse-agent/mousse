@@ -2,6 +2,7 @@ import { botModelTier, catalogEntryFor } from '../../../shared/bots/personal/mod
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, RunPolicy } from '../../../shared/harness/types'
 import type { ModelCatalog } from '../../../shared/modelCatalog'
+import { CLAUDE_BOT_RUNNER_ID } from '../../harness/claude/locked'
 import type { BotRuntimeHold } from '../seams'
 import type { BotModelCandidate } from './chooseModel'
 
@@ -81,5 +82,5 @@ export function signInCandidate(input: Pick<BotCandidateInput, 'snapshots' | 'ho
     snapshot.auth.canSignIn === true &&
     input.hold.canHoldBot(snapshot.instanceId, input.policy).ok
   )
-  return (waiting.find((snapshot) => snapshot.instanceId === 'claude:bots') ?? waiting[0])?.instanceId
+  return (waiting.find((snapshot) => snapshot.instanceId === CLAUDE_BOT_RUNNER_ID) ?? waiting[0])?.instanceId
 }

@@ -611,6 +611,8 @@ export class MmsProfileServices {
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
+      // "Claude for bots" (§5.9 item 7): added at a bot's creation when the owner's Claude subscription is signed in.
+      botRunner: () => harness.ensureBotRunner(),
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
         selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },

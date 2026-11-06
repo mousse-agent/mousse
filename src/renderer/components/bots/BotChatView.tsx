@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { ArrowUp, CircleAlert, Loader2, Paperclip, Square, X } from '../../lib/icons'
 import type { BotChatMessage, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
-import { openSettingsSection } from '../../lib/settingsNavigation'
+import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { MarkdownPreview } from '../editors/MarkdownPreview'
 import { BotFace } from './face/BotFace'
 import { BotChips, BotChipView } from './BotChips'
@@ -99,7 +99,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   useEffect(() => { anchor.current = { height: 0, atEnd: true } }, [bot.id])
 
   const act = (action: NonNullable<BotError['action']>) => {
-    if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
+    // Sign in opens that entry's card (the bot runner, "Claude for bots"); Set up opens the list.
+    if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
+    else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
     else void store().resume(bot.id)
   }
   const attach = async () => {

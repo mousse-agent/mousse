@@ -298,16 +298,29 @@ describe('locked Claude Code: who runs bots', () => {
   })
 
   it('no locked entry holds a bot, or gets exact tool control, without recorded evidence (item 14)', () => {
-    // No Claude record (Pi RPC's own records do not count for Claude Code).
-    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude')).toEqual([])
+    // Claude's records: `tools` on Linux, for the two versions the real-CLI suite passed on, with
+    // the items it asserts (Pi RPC's own records do not count for Claude Code). No `sandbox` record.
+    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude').map(({ kind, platform, cliVersion, items }) => ({ kind, platform, cliVersion, items: [...items] }))).toEqual([
+      { kind: 'tools', platform: 'linux', cliVersion: '2.1.291', items: [1, 2, 3, 4, 5, 7] },
+      { kind: 'tools', platform: 'linux', cliVersion: '2.1.306', items: [1, 2, 3, 4, 5, 7] }
+    ])
     for (const platform of ['linux', 'darwin', 'win32'] as const) {
       const driver = claudeCodeDriver({ platform, managedPolicy: () => false })
-      expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(false)
+      // Only Linux has a record: a locked entry there holds a bot; nowhere does an unlocked one.
+      expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(platform === 'linux')
       expect(driver.botAuthority!({ home: 'private' }), platform).toBe(false)
+      // A version with no record (one Claude Code updated itself to) gets no exact tool control, anywhere.
       expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.0')).toMatchObject({ toolControl: 'approval_only', containment: 'weak', budgets: 'unsupported', spendLimits: 'unsupported', childPolicy: 'enforced' })
+      expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.307').toolControl, platform).toBe('approval_only')
+      // A recorded version: exact on Linux only, and never strong (no sandbox record, so no shell).
+      expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.306'), platform).toMatchObject(platform === 'linux' ? { toolControl: 'exact', containment: 'weak' } : { toolControl: 'approval_only', containment: 'weak' })
       // The user's own entry is unchanged.
       expect(driver.caps({ home: 'default' }, '2.1.0')).toBe(CLAUDE_CODE_CAPS)
     }
+    // A record must hold every item the real-CLI suite asserts.
+    const partial: ContainmentEvidence[] = [{ driver: 'claude', kind: 'tools', cliVersion: '2.1.0', platform: 'linux', items: [1, 2, 3, 4, 7], recordedAt: '2026-10-27T00:00:00Z' }]
+    expect(claudeLockedHoldsBots('linux', false, partial)).toBe(false)
+    expect(claudeLockedCaps(CLAUDE_CODE_CAPS, { platform: 'linux', cliVersion: '2.1.0', managedPolicy: false, evidence: partial }).toolControl).toBe('approval_only')
     const evidence: ContainmentEvidence[] = [
       { driver: 'claude', kind: 'tools', cliVersion: '2.1.0', platform: 'linux', items: [1, 2, 3, 4, 5, 6, 7], recordedAt: '2026-10-27T00:00:00Z' },
       { driver: 'claude', kind: 'sandbox', cliVersion: '2.1.0', platform: 'linux', items: [8, 9, 10, 11, 12, 13, 14, 16, 17], recordedAt: '2026-10-27T00:00:00Z' }

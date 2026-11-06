@@ -28,9 +28,9 @@ import {
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
-import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { CLAUDE_BOT_RUNNER_NAME, CLAUDE_BOT_RUNNER_SLUG, CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
-import { compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { CLAUDE_LOCKED_TOOLS_ITEMS, compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
@@ -295,8 +295,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     caps: (config, installedVersion, _facts, instanceId) =>
       claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : claudeCodeCaps(installedVersion),
     // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
-    // this platform (`CONTAINMENT_EVIDENCE`) and no organisation policy applies; no record exists yet.
+    // this platform (`CONTAINMENT_EVIDENCE`: Linux so far) and no organisation policy applies.
     botAuthority: (config, instanceId) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
+    // "Claude for bots" (`claude:bots`): added when the owner's Claude subscription is signed in.
+    botRunner: { slug: CLAUDE_BOT_RUNNER_SLUG, displayName: CLAUDE_BOT_RUNNER_NAME },
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },
@@ -543,7 +545,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
               if (!options.onLockedProcess) return { ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL }
               if (await readManaged(context.instanceId)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
               const version = (await service.cliConfig()).version
-              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }, evidence))
+              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version, items: CLAUDE_LOCKED_TOOLS_ITEMS }, evidence))
                 return { ok: false, reason: `Mousse has no evidence that Claude Code ${version ?? '(unknown version)'} holds a bot to its permissions here.` }
               const sandbox = claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available'
               return { ok: true, shellContained: sandbox && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version }, evidence) }

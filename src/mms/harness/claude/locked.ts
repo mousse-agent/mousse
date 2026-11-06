@@ -11,7 +11,7 @@ import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
-import { hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /**
@@ -28,6 +28,15 @@ import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /** The instance profile that runs bots. */
 export const CLAUDE_LOCKED_PROFILE = 'locked'
+
+/**
+ * The bot runner entry (Bot Phase 1 §5.9 item 7): the locked entry Mousse adds at the first bot
+ * creation when the owner has a Claude subscription and no locked entry. It signs in once, in its
+ * own home; the owner's `~/.claude` sign-in is never copied into it.
+ */
+export const CLAUDE_BOT_RUNNER_SLUG = 'bots'
+export const CLAUDE_BOT_RUNNER_ID = `claude:${CLAUDE_BOT_RUNNER_SLUG}`
+export const CLAUDE_BOT_RUNNER_NAME = 'Claude for bots'
 
 /** One `query` is one dispatch: a backstop on its model turns, not a policy claim. */
 export const CLAUDE_LOCKED_MAX_TURNS = 100
@@ -67,7 +76,7 @@ export function claudeSandboxFact(platform: NodeJS.Platform, onPath: (name: stri
  */
 export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Platform; cliVersion?: string; managedPolicy: boolean; evidence?: readonly ContainmentEvidence[] }): HarnessCaps {
   const proven = (kind: 'tools' | 'sandbox') => !input.managedPolicy && input.cliVersion !== undefined &&
-    hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion }, input.evidence)
+    hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion, ...(kind === 'tools' ? { items: CLAUDE_LOCKED_TOOLS_ITEMS } : {}) }, input.evidence)
   return Object.freeze({
     ...base,
     planMode: false,
@@ -83,12 +92,13 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
 
 /**
  * Whether a locked instance holds a bot to its grant on this platform: once the gate and ledger
- * (`tools`, items 1–7) have evidence here, and no managed Claude Code policy applies. The sandbox's
- * evidence is needed only for shell (`shellContained`, per turn); the version is checked by the caps
- * (`claudeLockedCaps`) and again when a turn starts.
+ * (`tools`, `CLAUDE_LOCKED_TOOLS_ITEMS`) have evidence here, and no managed Claude Code policy
+ * applies. The sandbox's evidence is needed only for shell (`shellContained`, per turn); the version
+ * is checked by the caps (`claudeLockedCaps`) and again when a turn starts, so a Claude Code that
+ * updated itself to a version with no record holds no bot until one is added.
  */
 export function claudeLockedHoldsBots(platform: NodeJS.Platform, managedPolicy: boolean, evidence?: readonly ContainmentEvidence[]): boolean {
-  return !managedPolicy && hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform }, evidence)
+  return !managedPolicy && hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, items: CLAUDE_LOCKED_TOOLS_ITEMS }, evidence)
 }
 
 /** What `resolveSettings` reports: whether any managed (policy) tier is present, whatever its origin. */

@@ -19,6 +19,7 @@ import {
   useRunningOperation
 } from '../../lib/providerSnapshots'
 import { useLocalProjects } from '../../hooks/useLocalProjects'
+import { takePendingProvider } from '../../lib/settingsNavigation'
 import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
 import { ApiSetupRow } from './ApiSections'
@@ -98,7 +99,13 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const { snapshots: deviceSnapshots } = useProviderSnapshots(DEVICE_SCOPE)
   useLegacyFavoritesImport()
 
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // A bot's Sign in opens Providers on one entry's card, before or after the page mounted.
+  const [selectedId, setSelectedId] = useState<string | null>(() => takePendingProvider() ?? null)
+  useEffect(() => {
+    const pick = () => { const instanceId = takePendingProvider(); if (instanceId) setSelectedId(instanceId) }
+    window.addEventListener('mousse:settings-provider', pick)
+    return () => window.removeEventListener('mousse:settings-provider', pick)
+  }, [])
   const [addOpen, setAddOpen] = useState(false)
   const [addOptions, setAddOptions] = useState<ProviderAddOption[]>([])
   const [signIn, setSignIn] = useState<SignInSession | null>(null)

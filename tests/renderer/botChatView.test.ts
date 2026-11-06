@@ -97,6 +97,23 @@ describe('the transcript', () => {
     expect(useAppStore.getState().settingsOpen).toBe(true)
   })
 
+  it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
+    const { takePendingProvider } = await import('../../src/renderer/lib/settingsNavigation')
+    const requested: string[] = []
+    const listen = (event: Event) => requested.push(String((event as CustomEvent).detail))
+    window.addEventListener('mousse:settings-provider', listen)
+    try {
+      fake.chats.inbox = [message(1, { kind: 'error', text: 'Sign in so I can work.', error: { text: 'Sign in so I can work.', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } })]
+      await open()
+      await click(button('Sign in', transcript().querySelector('article')!))
+      expect(useAppStore.getState().settingsOpen).toBe(true)
+      expect(requested).toEqual(['claude:bots'])
+      expect(takePendingProvider()).toBe('claude:bots')
+    } finally {
+      window.removeEventListener('mousse:settings-provider', listen)
+    }
+  })
+
   it('reports the bot it shows, and reads up to the last message', async () => {
     fake.bots = [{ ...inbox, unread: 2 }]
     fake.chats.inbox = [message(5), message(6)]
