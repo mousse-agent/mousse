@@ -74,7 +74,7 @@ describe('Settings > General > Runs', () => {
     expect(host.querySelector('[role="switch"][aria-label="Resume after usage limits reset"]')).toBeNull()
     expect(host.textContent).not.toContain('Automatic resumes in a row')
     expect(host.textContent).toContain('Continues a paused run when the limit resets.')
-    expect(tooltips()).toContain('waits until you press Resume now')
+    expect(tooltips()).toContain('waits until you press Try now')
     expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 3 times', 'Up to 5 times'])
   })
 
