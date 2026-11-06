@@ -12,6 +12,8 @@ export interface AgentDefinitionsWorkspaceProps {
   activeRunsSlot?: ReactNode
   active?: boolean
   onRequestAttention?: () => void
+  onRefreshTools?: () => void
+  refreshingTools?: boolean
 }
 
 export function AgentDefinitionsWorkspace({
@@ -20,7 +22,9 @@ export function AgentDefinitionsWorkspace({
   catalogs,
   activeRunsSlot,
   active = true,
-  onRequestAttention
+  onRequestAttention,
+  onRefreshTools,
+  refreshingTools
 }: AgentDefinitionsWorkspaceProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState<AgentLibraryQuery>(EMPTY_LIBRARY_QUERY)
@@ -56,6 +60,8 @@ export function AgentDefinitionsWorkspace({
       onOpen={setOpenId}
       onCreated={setOpenId}
       activeRunsSlot={activeRunsSlot}
+      onRefreshTools={onRefreshTools}
+      refreshingTools={refreshingTools}
     />
   )
 }

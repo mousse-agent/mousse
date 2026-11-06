@@ -58,6 +58,8 @@ export interface AppearanceSettings {
   threadProjectColors: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
   animationSpeed: AnimationSpeed
+  /** What a turn that changed files shows at its end. */
+  turnChangedFiles: TurnChangedFilesMode
 }
 
 export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
@@ -74,6 +76,15 @@ export const ANIMATION_SPEED_SCALE: Readonly<Record<AnimationSpeed, number>> = {
 
 export function isAnimationSpeed(value: unknown): value is AnimationSpeed {
   return typeof value === 'string' && (ANIMATION_SPEEDS as readonly string[]).includes(value)
+}
+
+/** One summary line (file list collapsed), the full list expanded, or nothing. */
+export type TurnChangedFilesMode = 'summary' | 'list' | 'off'
+
+export const TURN_CHANGED_FILES_MODES: readonly TurnChangedFilesMode[] = ['summary', 'list', 'off']
+
+export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode {
+  return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
 }
 
 export interface NotificationSettings {
@@ -104,12 +115,12 @@ export interface ContextSettings {
 }
 
 export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label: string }[] = [
+  { value: 'model-max', label: 'Auto' },
   { value: 128000, label: '128k' },
   { value: 256000, label: '256k' },
   { value: 384000, label: '384k' },
   { value: 512000, label: '512k' },
-  { value: 1024000, label: '1024k' },
-  { value: 'model-max', label: 'Model Max Context' }
+  { value: 1024000, label: '1024k' }
 ]
 
 /** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
@@ -609,7 +620,8 @@ export function getDefaultSettings(): MousseSettings {
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
-      animationSpeed: 'normal'
+      animationSpeed: 'normal',
+      turnChangedFiles: 'summary'
     },
     notifications: {
       threadCompletionSound: true,
@@ -730,7 +742,8 @@ export function normalizeAppearance(
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
       typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
-    animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed
+    animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
+    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles)
   }
 }
 
