@@ -71,6 +71,9 @@ interface ThreadMeta {
   runsOn?: ThreadRunsOn
   /** See `Thread.localOnly`. Written only with the first `meta.json`. */
   localOnly?: true
+  /** See `Thread.expiresAt`. */
+  expiresAt?: string
+  expiryStopsRun?: true
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
@@ -322,6 +325,9 @@ export class ThreadDataStore extends EventEmitter {
       runsOn?: ThreadRunsOn
       /** See `Thread.localOnly`. */
       localOnly?: boolean
+      /** See `Thread.expiresAt`; checked by the caller. */
+      expiresAt?: string
+      expiryStopsRun?: boolean
     }
   ): Thread {
     const id = opts?.id ?? uuidv4()
@@ -348,6 +354,8 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
     if (opts?.localOnly === true) meta.localOnly = true
+    if (opts?.expiresAt) meta.expiresAt = opts.expiresAt
+    if (opts?.expiresAt && opts.expiryStopsRun === true) meta.expiryStopsRun = true
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's
@@ -615,7 +623,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)

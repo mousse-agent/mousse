@@ -16,7 +16,10 @@ it('animates real sidebar layout, clips behind the rail, reverses safely, and re
       build({ entryPoints: [resolve('tests/fixtures/sidebar-motion/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"development"' }, logLevel: 'silent' }),
       build({ entryPoints: [resolve('tests/fixtures/sidebar-motion/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'], logLevel: 'silent' })
     ])
-    writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>body{margin:0}*{box-sizing:border-box}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
+    // The pane's transitions use polish.css's motion tokens; without them the transition is invalid and the
+    // pane jumps. These mirror its :root values, and lib/motion.ts still overrides the scale on <html>.
+    const motionTokens = ':root{--ui-motion-scale:1;--ui-dur-fast:calc(120ms * var(--ui-motion-scale));--ui-dur:calc(160ms * var(--ui-motion-scale));--ui-dur-slow:calc(200ms * var(--ui-motion-scale))}'
+    writeFileSync(join(directory, 'index.html'), `<!doctype html><meta charset="utf-8"><style>body{margin:0}*{box-sizing:border-box}${motionTokens}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>`)
     const env = { ...process.env, MOUSSE_SIDEBAR_MOTION_DIRECTORY: directory }
     delete env.ELECTRON_RUN_AS_NODE
     child = spawn(electron as unknown as string, [join(directory, 'main.mjs')], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] })

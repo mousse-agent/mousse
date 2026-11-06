@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 
+import { expiresAtAfter, expiresInLabel } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
@@ -257,7 +258,7 @@ function ThreadCardBody({
   onCancelRename,
   onStartRename
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
   projectName?: string
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
@@ -336,6 +337,7 @@ function ThreadCardBody({
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
             {thread.localOnly && <Lock size={11} strokeWidth={2} className="thread-private-icon" aria-label="Private" />}
+            {thread.expiresAt && <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}><Clock size={11} strokeWidth={2} aria-label="Deletes itself" /></span>}
             {thread.name}
           </span>
         )}
@@ -852,6 +854,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     void setPinned(target.type, target.id, !target.pinned)
   }
 
+  const handleSetExpiry = async (ms: number | null) => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const { target } = contextMenu
+    closeContextMenu()
+    try {
+      await window.mousse.threads.setExpiry(target.id, ms === null ? null : expiresAtAfter(ms), target.expiryStopsRun === true)
+    } catch (error) {
+      console.error('Setting when the thread is deleted failed', error)
+    }
+  }
+
   const handleArchive = () => {
     if (!contextMenu || contextMenu.target.type !== 'thread') return
     const { target } = contextMenu
@@ -1114,7 +1127,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = {
       type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
-      ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {})
+      ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {}),
+      ...(thread.expiresAt ? { expiresAt: thread.expiresAt, ...(thread.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}),
+      canExpire: !thread.node && !thread.lineage
     }
     const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`
     // The tooltip of a title that does not fit. The project is the row's parent or on the card; a row names its
@@ -1252,6 +1267,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         {thread.localOnly && (
           <span className="thread-private-icon" title="Private: stays on this computer">
             <Lock size={12} strokeWidth={2} aria-label="Private" />
+          </span>
+        )}
+
+        {thread.expiresAt && (
+          <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(thread.expiresAt)}`}>
+            <Clock size={12} strokeWidth={2} aria-label="Deletes itself" />
           </span>
         )}
 
@@ -1876,6 +1897,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onNewThreadFromPullRequest={handleNewThreadFromPullRequest}
           {...projectOpeners(contextMenu.target)}
           onCopyPath={contextMenu.target.path ? handleCopyPath : undefined}
+
+          onSetExpiry={(ms) => void handleSetExpiry(ms)}
 
         />
 

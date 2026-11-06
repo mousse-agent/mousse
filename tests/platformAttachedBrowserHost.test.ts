@@ -98,6 +98,10 @@ describe('AttachedBrowserHost production ownership', () => {
       'browser.attachments.unregister'
     ])
     expect(owner.sent.some((event) => event.channel === 'browser:automation-state')).toBe(true)
+    // The renderer shows the agent's tab in the thread it names.
+    expect(owner.sent).toContainEqual({ channel: 'browser:automation-state', payload: expect.objectContaining({
+      owner: 'agent', sessionId: payload.session.id, uiTabId: 'local_tab', threadId: 'thread_host'
+    }) })
 
     const orphanPage = { ...guestPage, destroyed: false, loaderId: 'loader_2', frameId: 'frame_2' }
     const orphanGuest = new Contents(12, owner, orphanPage)

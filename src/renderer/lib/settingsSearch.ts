@@ -39,6 +39,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'When a thread finishes', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'completion sound', 'toast', 'system notification', 'done'] },
   { title: 'When a thread needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'question', 'approval', 'toast', 'sound'] },
   { title: 'When a thread stops', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
+  { title: 'Delete private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },
   { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
 

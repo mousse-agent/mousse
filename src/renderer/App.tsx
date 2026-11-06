@@ -293,7 +293,7 @@ export default function App() {
     // The bound profile's shortcut overrides and new-chat worktree default; later changes arrive through settings.onChanged below.
     window.mousse.settings.get().then(applyIfCurrent((settings) => {
       setShortcuts(settings.shortcuts ?? {})
-      useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings.runs).worktreeByDefault)
+      useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
@@ -357,7 +357,7 @@ export default function App() {
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
         setShortcuts(settings?.shortcuts ?? {})
-        useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings?.runs).worktreeByDefault)
+        useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
       })),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),

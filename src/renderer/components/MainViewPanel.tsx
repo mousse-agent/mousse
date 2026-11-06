@@ -12,7 +12,7 @@ import { OpenSurfacePicker } from './OpenSurfaceMenu'
 import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 
 export function MainViewPanel() {
-  const mainView = useAppStore((s) => s.mainView)
+  const selectedView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
@@ -28,15 +28,13 @@ export function MainViewPanel() {
     browsers: browsers.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
     documents
   })
-  if (items.length === 0) {
-    return (
-      <div className="keep-mounted-pane">
-        <OpenSurfacePicker />
-      </div>
-    )
-  }
+  // A thread without surfaces shows the picker, but every thread's terminals and
+  // browser guests stay mounted: an agent's tab must load and attach while hidden.
+  const empty = items.length === 0
+  const mainView = empty ? null : selectedView
 
   const transientPanel = (() => {
+    if (empty) return <OpenSurfacePicker />
     switch (mainView) {
       case 'git': return <GitPanel />
       case 'review': return <ReviewPanel />
@@ -61,7 +59,7 @@ export function MainViewPanel() {
       {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'browser' && (
         <div className="keep-mounted-pane">{transientPanel}</div>
       )}
-      <ComputerSurfaceNote />
+      {!empty && <ComputerSurfaceNote />}
     </KeepMountedStack>
   )
 }

@@ -314,6 +314,7 @@ import {
   type NativeMessageCheckpoint
 } from './nativeContext'
 import { isLocalOnlyThread } from '../../shared/threadLineage'
+import { isThreadExpired } from '../../shared/threadExpiry'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
@@ -3950,6 +3951,19 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
+    // A thread whose expiry passed is being deleted: nothing queued or recovered starts in it.
+    if (this.isExpired(effect.threadId)) {
+      const { runId } = (effect.payload ?? {}) as { runId?: unknown }
+      if (typeof runId === 'string') {
+        this.markRun(runId, (engine, id) => {
+          if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'cancelled', { error: 'thread_expired' })
+        })
+        const entry = this.turnResults.get(runId)
+        const run = this.runEngine?.getRun(runId)
+        if (entry && run) this.skipUnstartableTurn(entry.payload, entry, run)
+      }
+      return
+    }
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     // Work started on the thread's behalf, or a scheduled occurrence, never runs beside a pause.
     if (this.cancelStartOnPausedThread(effect)) return
@@ -4932,6 +4946,13 @@ export class OrchestratorService extends EventEmitter {
     const parent = this.getOrCreateSession(parentThreadId)
     const path = parent.sharedWorkspace?.path ?? parent.workspace?.projectPath ?? parent.projectCwd
     return path ? { path, parentThreadId } : null
+  }
+
+  /** Whether the expiry of `threadId` (its own, or its root thread's) has passed (`Thread.expiresAt`). */
+  isExpired(threadId: string): boolean {
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    return Boolean(thread && isThreadExpired(thread, thread.lineage ? store!.listAllThreads() : undefined))
   }
 
   /** Whether `threadId` is a private thread or below one (`Thread.localOnly`). */
@@ -8936,6 +8957,8 @@ export class OrchestratorService extends EventEmitter {
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
     if (runsOn)
       throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
+    if (this.isExpired(threadId))
+      throw new DomainRpcError('thread_expired', 'This thread has expired and is being deleted.', { threadId })
 
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {
@@ -10259,6 +10282,8 @@ export class OrchestratorService extends EventEmitter {
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
           },
+          ...(contextSettings.compactionEnabled && typeof contextSettings.compactionTokens === 'number'
+            ? { compactionTokens: contextSettings.compactionTokens } : {}),
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
             return nativeAgentHistory(this.nativeContext)
@@ -11227,6 +11252,8 @@ export class OrchestratorService extends EventEmitter {
       : this.boundSession
     this.assertNotBotThread(session.threadId)
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
+    // An expired thread is being deleted: Retry starts nothing in it.
+    if (session.threadId && this.isExpired(session.threadId)) return false
     const request = session.failedConnectionRequest
     // A request sent under a device's limit is retried under it, whoever presses Retry.
     const limit = session.failedConnectionLimit ?? undefined
@@ -11919,6 +11946,7 @@ export class OrchestratorService extends EventEmitter {
       // A bot's thread is never written into from outside: only the bot's own dispatches run there (PR 6 §6).
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
+      if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being deleted.' }
       // A turn sent from outside this computer: agents in it reach no other thread through the profile's
       // setting, now or in any later turn, and what they delegate inherits the limit (SPEC §15.1).
       try {

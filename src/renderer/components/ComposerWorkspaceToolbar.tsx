@@ -1,11 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { ExpiryIcon, ExpiryMenu } from './ExpiryMenu'
+import { expiryDurationLabel, expiryShortLabel } from '../../shared/threadExpiry'
 import { Check, ChevronDown, Folder, FolderPlus, Laptop, Lock, Server } from '../lib/icons'
 import type { NodeId } from '../../shared/net'
 import type { Project } from '../../shared/types'
 import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import type { Device } from '../lib/netDevices'
-import type { ComposerWorkspace } from '../lib/newThread'
+import { workspaceWithProject, type ComposerWorkspace } from '../lib/newThread'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
 import { Segmented, type SegmentedOption } from './settings/SettingsRow'
@@ -33,7 +35,7 @@ export interface ComposerDeviceProps {
   onOpenRemoteProject: (path: string) => Promise<string | undefined>
 }
 
-export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device, onChange, onPrivateChange, onOpenProject, onError }: {
+export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device, onChange, onPrivateChange, onExpiryChange, onOpenProject, onError }: {
   projects: Project[]
   workspace: ComposerWorkspace
   disabled: boolean
@@ -41,6 +43,8 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
   onChange: (workspace: ComposerWorkspace) => void
   /** Turns Private on or off for the new chat (`Thread.localOnly`). Without it the toggle is not shown. */
   onPrivateChange?: (localOnly: boolean) => void
+  /** Picks when the new chat deletes itself (`ms` after it is created, or null for never). Without it the menu is not shown. */
+  onExpiryChange?: (ms: number | null, stopsRun: boolean) => void
   onOpenProject: () => Promise<void>
   onError: (message: string) => void
 }) {
@@ -135,12 +139,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
                 data-project-id={entry.id}
                 title={'path' in entry ? entry.path : undefined}
                 onClick={() => {
-                  onChange({
-                    projectId: entry.id || undefined,
-                    worktreeEnabled: Boolean(entry.id && workspace.worktreeEnabled),
-                    ...(workspace.node ? { node: workspace.node } : {}),
-                    ...(workspace.localOnly ? { localOnly: true } : {})
-                  })
+                  onChange(workspaceWithProject(workspace, entry.id || undefined))
                   closeMenu()
                 }}
               >
@@ -217,6 +216,18 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
         >
           <Lock size={16} strokeWidth={1.8} aria-hidden="true" />
         </button>
+      )}
+      {onExpiryChange && !workspace.node && (
+        <ExpiryMenu
+          triggerClassName={`composer-icon-btn composer-workspace-expiry${workspace.expiryMs !== undefined ? ' active' : ''}`}
+          triggerTitle={workspace.expiryMs !== undefined ? `Deletes itself ${expiryDurationLabel(workspace.expiryMs)} after it starts` : 'Delete this thread after a while'}
+          trigger={<><ExpiryIcon />{workspace.expiryMs !== undefined && <span className="composer-workspace-expiry-label">{expiryShortLabel(workspace.expiryMs)}</span>}</>}
+          selectedMs={workspace.expiryMs}
+          hasExpiry={false}
+          stopsRun={workspace.expiryStopsRun === true}
+          disabled={disabled || opening}
+          onPick={onExpiryChange}
+        />
       )}
     </div>
   )

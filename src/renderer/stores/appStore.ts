@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import type { ExpiryPreset } from '../../shared/threadExpiry'
+import type { RunSettings } from '../../shared/settings'
 import type { ComposerWorkspace } from '../lib/newThread'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
@@ -196,6 +198,10 @@ interface AppState {
   /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
   worktreeByDefault: boolean
   setWorktreeByDefault: (worktreeByDefault: boolean) => void
+  /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
+  privateThreadExpiry: ExpiryPreset | 'never'
+  /** The new-chat defaults from Settings → Runs. */
+  setRunDefaults: (runs: Pick<RunSettings, 'worktreeByDefault' | 'privateThreadExpiry'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -473,6 +479,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   composerWorkspaceDrafts: {},
   worktreeByDefault: true,
   setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
+  privateThreadExpiry: 'never',
+  setRunDefaults: ({ worktreeByDefault, privateThreadExpiry }) => set({ worktreeByDefault, privateThreadExpiry }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)

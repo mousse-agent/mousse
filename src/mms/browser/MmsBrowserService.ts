@@ -301,7 +301,9 @@ export class MmsBrowserService {
   selectedTarget(threadId: string): BrowserSelectedTarget | undefined {
     let uiTabId = this.selectedByThread.get(threadId)
     if (!uiTabId && this.access.status().allowed) {
-      const available = [...this.live.values()].find((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
+      // The thread's own tab wins over a tab shared by every thread.
+      const free = [...this.live.values()].filter((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
+      const available = free.find((tab) => tab.threadId === threadId) ?? free[0]
       if (available) {
         available.selectedThreadId = threadId
         this.selectedByThread.set(threadId, available.uiTabId)

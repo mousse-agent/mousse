@@ -42,3 +42,102 @@
   flex-shrink: 0;
   color: var(--private-tint);
 }
+
+/* Thread expiry (`Thread.expiresAt`). */
+.thread-mode-bar {
+  flex-wrap: wrap;
+  column-gap: 14px;
+}
+
+.thread-mode-bar-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.thread-mode-bar-expiry {
+  color: var(--ui-faint);
+}
+
+.thread-mode-bar-expiry[data-expired] {
+  color: var(--warning, var(--text-secondary));
+}
+
+.thread-mode-bar-button {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.thread-mode-bar-button:hover:not(:disabled),
+.thread-mode-bar-button.open {
+  background: var(--ui-hover);
+}
+
+.thread-mode-bar-error {
+  color: var(--danger, var(--warning, var(--text-secondary)));
+}
+
+/* The composer's icon buttons are a fixed 30px square; this one also shows the length, so it grows. */
+.app .chat-input-area .composer-icon-btn.composer-workspace-expiry,
+.composer-workspace-expiry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  min-width: 30px;
+  padding-inline: 6px;
+}
+
+.composer-workspace-expiry.active {
+  color: var(--private-tint);
+}
+
+.composer-workspace-expiry-label {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.expiry-menu-custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.expiry-menu-custom input {
+  width: 56px;
+}
+
+.expiry-menu-units {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.expiry-menu-units button.active {
+  background: var(--ui-hover);
+}
+
+.expiry-menu-custom input,
+.expiry-menu-custom button {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--ui-raised, transparent);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.thread-expiry-icon {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}

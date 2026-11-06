@@ -1076,6 +1076,14 @@ export interface Thread {
    */
   localOnly?: true
   /**
+   * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
+   * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.
+   * Absent: the thread never expires. Set when the thread is created or later, extended or removed before then.
+   */
+  expiresAt?: string
+  /** At expiry a run in progress is stopped; without it the thread waits for the run to end. */
+  expiryStopsRun?: true
+  /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
    * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own

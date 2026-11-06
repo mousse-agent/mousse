@@ -37,7 +37,7 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
         const pendingRequest = state.pending?.find((item) => item.threadId === threadId)
         setRequestId(state.allowed ? undefined : pendingRequest?.requestId)
         setError('')
-        // Mount the browser provisioner even when this fresh thread has no surfaces.
+        // Show the browser while this thread waits for access or for its agent's tab.
         if ((!state.allowed && pendingRequest) || (state.allowed && state.tabRequests?.some((item) => item.threadId === threadId))) openBrowser()
       } catch (cause) {
         if (current() && expectedRevision === revision.current) setError(String((cause as { message?: string })?.message || cause))

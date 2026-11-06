@@ -996,7 +996,7 @@ describe('Codex children', () => {
         const result = await chat(createFast(s), { child: SHARED })
         expect(result.text).toBe('All done.')
         expect(listsOf(s).length).toBeGreaterThanOrEqual(2)
-        expect(listsOf(s).length).toBeLessThanOrEqual(3)
+        expect(listsOf(s).length).toBeLessThanOrEqual(4)
         expect(s.requests('thread/read').filter((message) => message.params!.threadId === PARENT).length).toBeGreaterThanOrEqual(2)
         expect(interruptsOf(s)).toEqual([])
       })

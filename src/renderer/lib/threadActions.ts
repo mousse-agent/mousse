@@ -1,5 +1,6 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
-import { workspaceWithPrivate } from './newThread'
+import { expiryPresetMs } from '../../shared/threadExpiry'
+import { composerWorkspaceFor, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
 import type { Thread } from '../../shared/types'
@@ -38,9 +39,14 @@ export async function createAndSelectPrivateThread(): Promise<void> {
     findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
     await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
-  // A reused draft may have had Private turned off in its composer; the command means private.
+  // The command means private, with the private-chat expiry from Settings unless one was picked; a reused draft
+  // may have had Private turned off in its composer.
   const draft = store.composerWorkspaceDrafts[thread.id]
-  if (draft && !draft.localOnly) store.setComposerWorkspaceDraft(thread.id, workspaceWithPrivate(draft, true, store.projects.filter((entry) => !entry.node)))
+  if (!draft?.localOnly) {
+    const defaultMs = store.privateThreadExpiry === 'never' ? undefined : expiryPresetMs(store.privateThreadExpiry)
+    const base = draft ?? composerWorkspaceFor(undefined, thread, store.worktreeByDefault)
+    store.setComposerWorkspaceDraft(thread.id, workspaceWithPrivate(base, true, store.projects.filter((entry) => !entry.node), defaultMs))
+  }
   await selectThread(thread.id)
 }
 

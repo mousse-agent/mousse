@@ -66,6 +66,7 @@ vi.mock('../src/main/ipc/registerGuiIpc', () => ({
   registerGuiIpc: () => { startup.ipc = true },
   attachWindowListeners: () => { startup.chrome = true }
 }))
+vi.mock('../src/main/fonts/registerFontIpc', () => ({ registerFontIpc: vi.fn() }))
 vi.mock('../src/main/browser/BrowserViewManager', () => ({ BrowserViewManager: class {} }))
 vi.mock('../src/main/browser/AttachedBrowserHost', () => ({ AttachedBrowserHost: class {} }))
 vi.mock('../src/main/appIcon', () => ({ applyAppIcon: vi.fn(), getAppIconPath: () => undefined }))

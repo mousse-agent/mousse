@@ -1504,16 +1504,17 @@ export function registerGuiIpc(
   }
 
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
-  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined) => ({
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
     ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
     ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {}),
     // A private thread stays on this computer; the daemon refuses one sent to another computer.
-    ...(opts?.localOnly === true ? { localOnly: true } : {})
+    ...(opts?.localOnly === true ? { localOnly: true } : {}),
+    ...(typeof opts?.expiresAt === 'string' ? { expiresAt: opts.expiresAt, ...(opts.expiryStopsRun === true ? { expiryStopsRun: true } : {}) } : {})
   })
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
       createParams(name, projectId, opts)
@@ -1524,7 +1525,7 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
         createParams(name, projectId, opts)
@@ -1662,6 +1663,14 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.setPermissionMode',
       { threadId, mode }
+    )
+    broadcast('threads:updated', res.threads)
+    return res.thread
+  })
+  registerHandler('threads:setExpiry', async (_e, threadId: string, expiresAt: string | null, stopsRun?: boolean) => {
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+      'threads.setExpiry',
+      { threadId, expiresAt, ...(stopsRun === true ? { stopsRun: true } : {}) }
     )
     broadcast('threads:updated', res.threads)
     return res.thread
