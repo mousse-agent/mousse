@@ -18,7 +18,7 @@ export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'schedule_add', 'schedule_remove', 'schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS
 ]
 
 /** Every new bot's app tools: the web, and its own tools. */

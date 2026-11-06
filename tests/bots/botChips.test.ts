@@ -21,7 +21,7 @@ describe('chipForCall: live chips, worded as attempts', () => {
     expect(chipForCall('edit', { file_path: '/home/me/Notes/today.md' }, ctx)).toEqual({ icon: 'edit', text: 'changing files', highlight: 'Notes', live: true })
     expect(chipForCall('write', { path: `${ctx.filesFolder}/summary.md` }, ctx)).toEqual({ icon: 'edit', text: 'saving a file', highlight: 'summary.md', live: true })
     expect(chipForCall('write', { path: `${ctx.scratch}/tmp.txt` }, ctx)).toMatchObject({ text: 'working on a draft' })
-    expect(chipForCall('schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx)).toMatchObject({ icon: 'schedule', text: 'setting a schedule' })
+    expect(chipForCall('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx)).toMatchObject({ icon: 'schedule', text: 'setting a schedule' })
     expect(chipForCall('memory_search', { query: 'Maya' }, ctx)).toEqual({ icon: 'memory', text: 'looking back', highlight: 'Maya', live: true })
     expect(chipForCall('set_depth', { depth: 'deep', scope: 'now' }, ctx)).toMatchObject({ icon: 'think', text: 'taking more time' })
     expect(chipForCall('set_depth', { depth: 'quick', scope: 'now' }, ctx)).toMatchObject({ text: 'going quicker' })
@@ -61,11 +61,11 @@ describe('rollUpChips: settled chips', () => {
   })
 
   it('a new schedule is an outcome chip with its label, once it returned', () => {
-    const add: BotChipCall = { tool: 'schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'inbox' }, result: { scheduleId: 's1', label: 'every weekday · 09:00' } }
+    const add: BotChipCall = { tool: 'bot_schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'inbox' }, result: { scheduleId: 's1', label: 'every weekday · 09:00' } }
     expect(rollUpChips([add], ctx)).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
     // Failed or not returned: no chip claims it.
     expect(rollUpChips([{ ...add, result: { error: 'too many' } }, { ...add, result: undefined }], ctx)).toEqual([])
-    expect(rollUpChips([{ tool: 'schedule_list', input: {} }], ctx)).toEqual([])
+    expect(rollUpChips([{ tool: 'bot_schedule_list', input: {} }], ctx)).toEqual([])
   })
 
   it('memory saves and forgets are "remembered · …" and "forgot · …", one chip each', () => {
@@ -152,8 +152,8 @@ describe('BotActivitySink', () => {
     const { activity } = sink()
     activity.onAllowed(at, { tool: 'memory_save', input: { text: 'Invoices go to ~/Documents/Invoices', kind: 'note' } })
     activity.onAppResult({ botId: 'b1', activationId: 'a1', dispatchId: '' }, 'memory_save', { id: 'm1', version: 1, gauge: 'core 40/2,000' })
-    activity.onAllowed(at, { tool: 'schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'x' } })
-    activity.onAppResult({ botId: 'b1', activationId: 'a1', dispatchId: '' }, 'schedule_add', { scheduleId: 's1', label: 'every weekday · 09:00' })
+    activity.onAllowed(at, { tool: 'bot_schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'x' } })
+    activity.onAppResult({ botId: 'b1', activationId: 'a1', dispatchId: '' }, 'bot_schedule_add', { scheduleId: 's1', label: 'every weekday · 09:00' })
     expect(activity.drain('d1')).toEqual([
       { icon: 'memory', text: 'remembered', highlight: 'Invoices go to ~/Documents/Invoices' },
       { icon: 'schedule', text: 'every weekday · 09:00' }

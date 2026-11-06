@@ -17,7 +17,7 @@ export interface BotChipContext {
 
 /** One allowed call of a dispatch, in the order it was made. */
 export interface BotChipCall {
-  /** Neutral built-in name (`read`, `edit` …) or app-tool name (`web_search`, `schedule_add` …). */
+  /** Neutral built-in name (`read`, `edit` …) or app-tool name (`web_search`, `bot_schedule_add` …). */
   tool: string
   input: unknown
   /** An app tool's result, when it returned (outcome chips). */
@@ -123,9 +123,9 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       const domain = domainOf(args.url)
       return { kind: 'fetch', icon: 'web', live: 'reading a page', ...(domain ? { detail: domain } : {}) }
     }
-    case 'schedule_add': return { kind: 'schedule', icon: 'schedule', live: 'setting a schedule' }
-    case 'schedule_remove': return { kind: 'unschedule', icon: 'schedule', live: 'removing a schedule' }
-    case 'schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its schedules' }
+    case 'bot_schedule_add': return { kind: 'schedule', icon: 'schedule', live: 'setting a schedule' }
+    case 'bot_schedule_remove': return { kind: 'unschedule', icon: 'schedule', live: 'removing a schedule' }
+    case 'bot_schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its schedules' }
     case 'memory_save': return { kind: 'remember', icon: 'memory', live: 'remembering' }
     case 'memory_forget': return { kind: 'forget', icon: 'memory', live: 'forgetting' }
     case 'set_depth': {
