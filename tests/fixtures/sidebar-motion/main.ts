@@ -32,7 +32,6 @@ void (async () => {
     await wait('!!window.sidebarFixture && !!document.querySelector(".sidebar-focus")')
     const initial = await run('window.sidebarFixture.measure()')
     const selected = await run(`(() => ({
-      dot: getComputedStyle(document.querySelector('.threads-sidebar-selected-dot')).display,
       status: getComputedStyle(document.querySelector('.threads-sidebar-status-dot')).display,
       project: getComputedStyle(document.querySelector('.threads-sidebar-project-row')).backgroundColor,
       thread: getComputedStyle(document.querySelector('.threads-sidebar-thread.active')).backgroundColor,

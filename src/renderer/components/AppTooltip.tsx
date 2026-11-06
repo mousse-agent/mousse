@@ -82,6 +82,8 @@ export function AppTooltip() {
   const [text, setText] = useState<string | null>(null)
   const [anchor, setAnchor] = useState<Anchor | null>(null)
   const [place, setPlace] = useState<{ top: number; left: number } | null>(null)
+  // Opt-in: an element marked `data-tooltip-one-line` keeps its tooltip on one wider line.
+  const [oneLine, setOneLine] = useState(false)
 
   useLayoutEffect(() => {
     const tip = tipRef.current
@@ -141,6 +143,7 @@ export function AppTooltip() {
       hostRef.current = element
       pendingRef.current = null
       setText(value)
+      setOneLine(element.hasAttribute('data-tooltip-one-line'))
       setAnchor(anchorFor(element))
       setPlace(null)
     }
@@ -240,7 +243,7 @@ export function AppTooltip() {
   return (
     <div
       ref={tipRef}
-      className="app-tooltip"
+      className={oneLine ? 'app-tooltip app-tooltip--one-line' : 'app-tooltip'}
       role="tooltip"
       style={{
         top: place?.top ?? -9999,

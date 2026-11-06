@@ -19,14 +19,14 @@ describe('folder names', () => {
 })
 
 describe('terminal tab locations', () => {
-  it('keeps two terminals with the same number in different folders apart, from the folder the app started them in', () => {
-    const tabs = [tab('a', 'Terminal 2', '/work/mousse'), tab('b', 'Terminal 2', '/work/mousse-wt/fix-login')]
+  it('keeps two terminals with the same name in different folders apart, from the folder the app started them in', () => {
+    const tabs = [tab('a', 'dev server', '/work/mousse'), tab('b', 'dev server', '/work/mousse-wt/fix-login')]
     const locations = terminalLocations(tabs.map(({ id, cwd }) => ({ id, cwd })))
     const items = surfaceTabItems({ opened: ['terminal'], terminals: tabs, browsers: [], documents: [], terminalLocations: locations })
-    expect(items.map((item) => item.label)).toEqual(['Terminal 2', 'Terminal 2'])
+    expect(items.map((item) => item.label)).toEqual(['dev server', 'dev server'])
     expect(items.map((item) => item.detail)).toEqual(['mousse', 'fix-login'])
-    expect(items[0].title).toBe('Terminal 2 · /work/mousse')
-    expect(items[1].title).toBe('Terminal 2 · /work/mousse-wt/fix-login')
+    expect(items[0].title).toBe('dev server · /work/mousse')
+    expect(items[1].title).toBe('dev server · /work/mousse-wt/fix-login')
   })
 
   it('adds the parent when two folders on one computer share a name', () => {

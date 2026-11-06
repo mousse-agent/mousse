@@ -8,9 +8,11 @@
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { GitSectionView, PullRequestList } from '../../src/renderer/components/sideCard/GitSection'
 import { pullRequestList, pullRequestRow, type PullRequestFoundRow } from '../../src/renderer/components/sideCard/gitSectionLogic'
+import { useRetiredWorktreeNote } from '../../src/renderer/components/sideCard/useRetiredWorktreeNote'
+import { retiredWorktreeNote } from '../../src/renderer/lib/storageCopy'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../../src/renderer/stores/gitStatusStore'
 import type { GitPullRequestInfo, PullRequestDetail } from '../../src/shared/pullRequests'
@@ -140,6 +142,39 @@ describe('the side card Git section, mounted', () => {
 
     await mount({ threadId: 't2' })
     expect(toggle()?.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('says when cleanup removed the thread\'s worktree, while it is checking and once it is shown', async () => {
+    const note = 'Worktree removed by cleanup on 1/2/2026; it is restored when you use the thread'
+    await mount({ collapsedLabel: 'Checking…', retiredNote: note })
+    expect(host.querySelector('.side-card-git-retired')?.textContent).toBe(note)
+    await mount({ retiredNote: note })
+    expect(host.querySelector('.side-card-git-retired')?.textContent).toBe(note)
+    await mount({})
+    expect(host.querySelector('.side-card-git-retired')).toBeNull()
+  })
+
+  it('reads the retirement from the workspace status, and again once the folder has resolved', async () => {
+    const getStatus = vi.fn<(threadId: string) => Promise<unknown>>(async () => ({ retiredByCleanup: { at: '2026-10-30T09:00:00.000Z', rule: 'worktree-inactive' } }))
+    vi.stubGlobal('mousse', { workspace: { getStatus } })
+    onTestFinished(() => { vi.unstubAllGlobals() })
+    const shown: (string | null)[] = []
+    const Probe = ({ threadId, settled }: { threadId: string | null; settled: boolean }) => {
+      shown.push(useRetiredWorktreeNote(threadId, settled))
+      return null
+    }
+    await act(async () => root.render(createElement(Probe, { threadId: 't1', settled: false })))
+    expect(getStatus).toHaveBeenCalledWith('t1')
+    expect(shown.at(-1)).toBe(retiredWorktreeNote('2026-10-30T09:00:00.000Z'))
+    expect(shown.at(-1)).toMatch(/^Worktree removed by cleanup on .+; it is restored when you use the thread$/)
+
+    getStatus.mockResolvedValue({})
+    await act(async () => root.render(createElement(Probe, { threadId: 't1', settled: true })))
+    expect(getStatus).toHaveBeenCalledTimes(2)
+    expect(shown.at(-1)).toBeNull()
+
+    await act(async () => root.render(createElement(Probe, { threadId: null, settled: true })))
+    expect(shown.at(-1)).toBeNull()
   })
 
   it('shows the newest pull request and the rest behind Show N more', async () => {

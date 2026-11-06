@@ -5,10 +5,13 @@ const ITEM_SELECTOR = '[role="menuitem"], [role="menuitemradio"]'
 /**
  * Items the keyboard can reach, in document order. Rows marked `aria-disabled`
  * stay reachable so their reason can be heard; natively disabled ones are skipped.
+ * An open submenu (marked `data-submenu`) keeps its items to itself.
  */
 export function menuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) return []
-  return Array.from(menu.querySelectorAll<HTMLElement>(ITEM_SELECTOR)).filter((item) => !item.matches(':disabled'))
+  const own = menu.matches('[data-submenu]') ? menu : null
+  return Array.from(menu.querySelectorAll<HTMLElement>(ITEM_SELECTOR))
+    .filter((item) => !item.matches(':disabled') && item.closest('[data-submenu]') === own)
 }
 
 /** The index a key moves to, or undefined for keys that do not move. Empty menus never move. */

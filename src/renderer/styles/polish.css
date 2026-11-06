@@ -23,6 +23,14 @@
   pointer-events: none;
 }
 
+/* A tooltip that must not wrap, such as a project's "name · path"; its text is already shortened to fit. */
+.app-tooltip--one-line {
+  max-width: min(480px, calc(100vw - 16px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
 /* ---------- Tokens ---------- */
 :root {
   /* One gutter and one row inset: every sidebar label, row and heading starts
@@ -251,13 +259,20 @@ html[data-theme='high-contrast'] {
   --threads-sidebar-row-height: var(--ui-row-height);
 }
 
-.app .threads-sidebar-open-project:hover {
+.app .threads-sidebar-toolbar-button {
+  border-radius: var(--ui-row-radius);
+}
+
+.app .threads-sidebar-toolbar-button:hover {
   background: var(--ui-hover);
+}
+
+.app .threads-sidebar-tabs-row {
+  margin: 8px var(--ui-gutter);
 }
 
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 8px var(--ui-gutter);
   padding: 2px;
   border: 1px solid var(--ui-line);
   border-radius: 10px;
@@ -265,10 +280,8 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tab {
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
-  padding: 0;
+  height: 28px;
+  min-height: 28px;
   border-radius: var(--ui-row-radius);
   transition: background 0.15s, color 0.15s;
 }
@@ -278,13 +291,6 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tab.active {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: auto;
-  padding: 0 10px;
-  white-space: nowrap;
   background: var(--ui-raised);
   box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
@@ -466,15 +472,6 @@ html[data-theme='high-contrast'] {
 
 .app .threads-sidebar-show-more:hover {
   background: var(--ui-hover);
-}
-
-.app .threads-sidebar-open-project {
-  min-height: var(--ui-row-height);
-  gap: 8px;
-  margin: 2px var(--ui-gutter);
-  padding: 0 var(--ui-row-x);
-  border-radius: var(--ui-row-radius);
-  font-size: 13px;
 }
 
 .app .threads-sidebar-recent,
@@ -952,11 +949,6 @@ html .threads-context-menu-item-danger:focus-visible {
   color: var(--danger);
 }
 
-html .thread-hover-card {
-  border-color: var(--ui-line-strong);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
-}
-
 /* ---------- Settings and overlay pages ---------- */
 html .settings-nav {
   border-color: var(--ui-line);
@@ -1028,8 +1020,7 @@ textarea:focus {
 }
 
 html .chat-dialog,
-html .chat-network-dialog,
-html .thread-hover-card {
+html .chat-network-dialog {
   background-image: var(--ui-sheen);
   background-repeat: no-repeat;
 }

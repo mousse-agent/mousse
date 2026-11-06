@@ -1,4 +1,9 @@
+import { RefreshCw } from '../lib/icons'
+import { LOADER_DELAY_MS, useShownAfter } from './ui/DelayedLoader'
 import './workspace-loading.css'
+
+/** A load that finishes sooner than this shows nothing, so a fast start does not flash a skeleton. */
+export const WORKSPACE_SKELETON_DELAY_MS = LOADER_DELAY_MS
 
 interface WorkspaceLoadingProps {
   error?: string | null
@@ -7,12 +12,18 @@ interface WorkspaceLoadingProps {
   conversationOnly?: boolean
 }
 
-/** Content placeholders; the real titlebar and navigation remain available. */
+/**
+ * Content placeholders; the real titlebar and navigation remain available. No text while loading:
+ * the skeleton appears only once the load takes longer than `WORKSPACE_SKELETON_DELAY_MS`.
+ * A failure shows one error block with Retry in the same place.
+ */
 export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false }: WorkspaceLoadingProps) {
+  const skeleton = useShownAfter(WORKSPACE_SKELETON_DELAY_MS)
+
   return (
     <div className={`workspace-loading${conversationOnly ? ' workspace-loading-conversation-only' : ''}`}
       aria-busy={!error} data-workspace-loading={conversationOnly ? 'content' : 'connection'}>
-      {!conversationOnly && sidebarWidth !== undefined && <aside className="workspace-loading-sidebar"
+      {skeleton && !conversationOnly && sidebarWidth !== undefined && <aside className="workspace-loading-sidebar"
         style={{ width: sidebarWidth }} aria-hidden="true">
         <div className="workspace-loading-line workspace-loading-heading" />
         {[0, 1, 2, 3, 4].map((row) => <div key={row} className="workspace-loading-row">
@@ -20,18 +31,17 @@ export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnl
         </div>)}
       </aside>}
       <section className="workspace-loading-content">
-        {error ? <div className="workspace-loading-status" role="alert">
-          <p>Could not connect to workspace</p>
+        {error ? <div className="workspace-loading-error" role="alert">
+          <p className="workspace-loading-error-title">
+            {conversationOnly ? 'Could not load workspace' : 'Could not connect to workspace'}
+          </p>
           <p className="workspace-loading-detail">{error}</p>
-          <button type="button" onClick={onRetry}>Retry</button>
-        </div> : <>
-          <div className="workspace-loading-status" role="status">
-            {conversationOnly ? 'Loading workspace…' : 'Connecting to workspace…'}
-          </div>
-          <div className="workspace-loading-composer" aria-hidden="true">
-            <span className="workspace-loading-line" /><span className="workspace-loading-icon" />
-          </div>
-        </>}
+          <button type="button" className="workspace-loading-retry" onClick={onRetry}>
+            <RefreshCw size={14} aria-hidden="true" />Retry
+          </button>
+        </div> : skeleton && <div className="workspace-loading-composer" aria-hidden="true">
+          <span className="workspace-loading-line" /><span className="workspace-loading-icon" />
+        </div>}
       </section>
     </div>
   )
