@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ChatComposer, type VoiceMessage } from '../../../src/renderer/components/ChatComposer'
+import { ComposerNoticeProvider, ComposerNoticeSlot } from '../../../src/renderer/components/ComposerNotice'
 import { StorageSettings } from '../../../src/renderer/components/StorageSettings'
 import { OrchestratorChat } from '../../../src/renderer/components/OrchestratorChat'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
@@ -132,13 +133,13 @@ function Fixture() {
       <button onClick={() => setView('chat')}>Show chat</button>
       <button onClick={() => setView('none')}>Unmount components</button>
     </nav>
-    {view === 'voice' && <ChatComposer input={input} onInputChange={setInput} attachedFiles={[]}
+    {view === 'voice' && <ComposerNoticeProvider><ComposerNoticeSlot /><ChatComposer input={input} onInputChange={setInput} attachedFiles={[]}
       onAttachedFilesChange={() => {}} voiceMessages={voices} onVoiceMessagesChange={setVoices}
       enabledSkills={[]} providers={[]}
       selectedProviderId="" selectedModelId="" modelMenuOpen={false} onModelMenuOpenChange={() => {}}
       onModelSelect={() => {}} onOpenSettings={() => {}} contextOpen={false} onContextOpenChange={() => {}}
       contextUsage={{ percent: 0, used: 0, limit: 100, modelName: null, source: 'estimated', categories: [] }}
-      onSend={() => {}} disableSkillsPicker />}
+      onSend={() => {}} disableSkillsPicker /></ComposerNoticeProvider>}
     {view === 'storage' && <StorageSettings />}
     {view === 'chat' && <OrchestratorChat />}
     <output data-voice-count>{voices.length} voice attachments</output>

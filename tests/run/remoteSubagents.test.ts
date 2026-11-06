@@ -262,6 +262,9 @@ describe('remote subagents (issue #469)', () => {
     const sends = mac.calls.filter((call) => call.method === 'orchestrator.send')
     expect(sends).toHaveLength(2)
     expect(sends[1].params).toMatchObject({ threadId: 'far-thread-1', content: 'And iOS?' })
+    // A follow-up asks that computer to refuse while the thread is paused by a usage limit; the first task never does.
+    expect(sends[0].params).not.toHaveProperty('refuseWhilePaused')
+    expect(sends[1].params).toMatchObject({ refuseWhilePaused: true })
     expect(mac.methods().filter((method) => method === 'threads.create')).toHaveLength(1)
     expect(out.merge).toMatchObject({ merged: false, note: expect.stringContaining('another computer') })
     expect(d.engine.remoteSubagents.get(out.more.delegationId)).toMatchObject({ remoteThreadId: 'far-thread-1', remoteRunId: 'far-run-2', state: 'running' })
