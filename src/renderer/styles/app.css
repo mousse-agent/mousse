@@ -4178,6 +4178,37 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   flex-shrink: 0;
 }
 
+.git-toolbar-computer {
+  flex: none;
+  min-width: 0;
+}
+
+/* The diff header: the open file, then the whitespace switch and Push, Commit and Create PR. */
+.git-diff-toolbar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.git-diff-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-diff-message {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.git-diff-message.git-diff-error {
+  color: var(--danger);
+}
+
 /* Sections size from these (see sectionStyle in gitPanelLogic.ts). If every section is at its
    floor and the panel is shorter still, the whole list scrolls rather than hiding one. */
 .git-changes {
@@ -4237,6 +4268,12 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .git-section-divider:hover,
 .git-section-divider:active {
   background: rgba(var(--accent-rgb), 0.35);
+}
+
+.git-section-divider:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .git-section-header {
@@ -4306,7 +4343,8 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-file-row:hover .git-row-actions,
-.git-file-row:focus-within .git-row-actions {
+.git-file-row:focus-within .git-row-actions,
+.git-file-row:has(.row-menu-btn[aria-expanded='true']) .git-row-actions {
   display: flex;
 }
 
@@ -4325,7 +4363,37 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   color: var(--text-primary);
 }
 
-.git-row-action[data-action='discard']:hover:not(:disabled) {
+.git-row-action.row-menu-btn[aria-expanded='true'] {
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--text-primary);
+}
+
+.git-row-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* The question before a discard: what goes, then which files and how long a copy is kept. */
+.git-discard-dialog .modal {
+  width: min(440px, calc(100vw - 32px));
+}
+
+.git-discard-lead {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-detail {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-dialog .btn-danger {
   color: var(--danger);
 }
 

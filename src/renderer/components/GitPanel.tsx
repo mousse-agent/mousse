@@ -4,13 +4,21 @@ import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { gitScopeFor } from '../lib/activeProject'
 import { useActiveProjectLocation } from '../hooks/useActiveProjectPath'
+import { useActiveThreadPullRequest } from '../hooks/useActiveThreadPullRequest'
+import { useTransientError } from '../hooks/useTransientError'
 import { useAppStore } from '../stores/appStore'
 import { useGitStatus } from '../stores/gitStatusStore'
+import { ThreadComputerBadge } from './ComputerBadge'
+import { DiscardConfirmDialog, type DiscardQuestion } from './git/DiscardConfirmDialog'
+import { GitActionButtons, useGitActionRunner } from './git/GitActionButtons'
 import { GitChangesList, type SelectedFile } from './git/GitChangesList'
 import { runRowAction, runSync, type RowRequest, type SyncRequest } from './git/gitPanelActions'
 import {
+  discardConfirmLabel,
   IDLE_SYNC_ACTIVITY,
   resizeSectionPair,
+  keyedSectionRatio,
+  sectionPairRatio,
   sectionStyle,
   selectionAfterAction,
   type GitSectionId,
@@ -24,7 +32,12 @@ import { GitSyncBar } from './git/GitSyncBar'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
+import { usePullRequestPushTarget } from './sideCard/usePullRequestPushTarget'
+import { gitActionRowModel } from './sideCard/gitSectionLogic'
 import { folderName } from '../lib/folderLabel'
+
+/** How long a notice from Commit, Push or Create PR stays: it can carry something to act on. */
+const NOTICE_MS = 15_000
 
 export function CommitsSection({
   commits,
@@ -100,15 +113,25 @@ export function GitPanel() {
   const [selected, setSelected] = useState<SelectedFile | null>(null)
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  // The pull request and branch actions of the thread in view: the same reads the side card makes.
+  const activeThreadId = useAppStore((state) => state.activeThreadId)
+  const activeThread = useAppStore((state) => state.threads.find((item) => item.id === state.activeThreadId))
+  const source = useActiveThreadPullRequest(activeThreadId)
+  const pullRequestPushTarget = usePullRequestPushTarget(source.location.workspaceThreadId, source.link)
+  const [actionError, setActionError] = useTransientError()
+  const [actionNotice, setActionNotice] = useTransientError(NOTICE_MS)
+  // The question a discard is waiting on, answered in the app's own dialog, and how to give the answer back.
+  const [discardQuestion, setDiscardQuestion] = useState<DiscardQuestion | null>(null)
+  const discardAnswerRef = useRef<((confirmed: boolean) => void) | null>(null)
   const [activity, setActivity] = useState<SyncActivity>(IDLE_SYNC_ACTIVITY)
   const [rowError, setRowError] = useState('')
   // What the last discard kept, and how to bring a file back.
   const [rowNotice, setRowNotice] = useState('')
   // Paths the last discard left as they are, because they changed after Discard was pressed.
   const [rowLeft, setRowLeft] = useState('')
-  // One Git action at a time: the ref answers a second click before the state has rendered.
-  const [busy, setBusy] = useState(false)
-  const busyRef = useRef(false)
+  // One Git action at a time across the file rows, Fetch and Pull, and Commit, Push and Create PR.
+  const { running, begin, end } = useGitActionRunner()
+  const busy = running !== null
   const [githubStatus, setGithubStatus] = useState<GitHubAvailability | null>(null)
   const [githubBusy, setGithubBusy] = useState(false)
   const [githubError, setGithubError] = useState('')
@@ -122,6 +145,18 @@ export function GitPanel() {
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
   const draggingDivider = useRef<{ upper: GitSectionId; lower: GitSectionId } | null>(null)
 
+  // Resolves once the person answers; the file action holds the lock until then, so nothing else starts meanwhile.
+  const askDiscard = useCallback((message: string, action: DiscardQuestion['action']) => new Promise<boolean>((resolve) => {
+    discardAnswerRef.current = resolve
+    setDiscardQuestion({ message, action })
+  }), [])
+  const answerDiscard = useCallback((confirmed: boolean) => {
+    const answer = discardAnswerRef.current
+    discardAnswerRef.current = null
+    setDiscardQuestion(null)
+    answer?.(confirmed)
+  }, [])
+
   useEffect(() => {
     setSelected(null)
     setGithubError('')
@@ -130,9 +165,13 @@ export function GitPanel() {
     setRowError('')
     setRowNotice('')
     setRowLeft('')
+    setActionError(null)
+    setActionNotice(null)
+    // A question about the files of another folder is no longer the one on screen.
+    answerDiscard(false)
     // Heights dragged for one folder's lists say nothing about another's.
     setSectionFlex({})
-  }, [folderId])
+  }, [answerDiscard, folderId, setActionError, setActionNotice])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
   useEffect(() => {
@@ -142,21 +181,18 @@ export function GitPanel() {
     )
   }, [status])
 
-  const withBusy = useCallback(async (run: () => Promise<void>) => {
-    if (busyRef.current) return
-    busyRef.current = true
-    setBusy(true)
+  const withBusy = useCallback(async (action: 'files' | 'sync', run: () => Promise<void>) => {
+    if (!begin(action)) return
     try {
       await run()
     } finally {
-      busyRef.current = false
-      setBusy(false)
+      end()
     }
-  }, [])
+  }, [begin, end])
 
   const runSyncAction = useCallback((request: SyncRequest) => {
     if (!folderId) return
-    void withBusy(() => runSync(folderId, scope, request, setActivity))
+    void withBusy('sync', () => runSync(folderId, scope, request, setActivity))
   }, [folderId, scope, withBusy])
 
   const runFileRequest = useCallback((request: RowRequest) => {
@@ -166,8 +202,11 @@ export function GitPanel() {
     setRowLeft('')
     // The open file as it was when the button was pressed: the refresh after the action drops a row that moved, so it is read first.
     const before = selectedRef.current
-    void withBusy(async () => {
-      const outcome = await runRowAction(folderId, scope, request, { discardKeptForMs: status?.discardKeptForMs })
+    void withBusy('files', async () => {
+      const outcome = await runRowAction(folderId, scope, request, {
+        discardKeptForMs: status?.discardKeptForMs,
+        confirm: (message) => askDiscard(message, discardConfirmLabel(request.files === 'all' ? [] : request.files))
+      })
       if (outcome.kind === 'failed') {
         setRowError(outcome.message)
       } else if (outcome.kind === 'done') {
@@ -179,7 +218,7 @@ export function GitPanel() {
         setSelected((current) => (current === null || current === before ? followed : current))
       }
     })
-  }, [folderId, scope, status?.discardKeptForMs, withBusy])
+  }, [askDiscard, folderId, scope, status?.discardKeptForMs, withBusy])
 
   const onRowAction = useCallback((action: RowAction, file: GitFileChange) => {
     runFileRequest({ action, files: [file] })
@@ -256,20 +295,22 @@ export function GitPanel() {
     }
   }, [cloneDestination, cloneRepository, refreshGitHubStatus])
 
+  // The first drag or key press takes each shown section's current height as its weight, so nothing
+  // jumps when the sections stop fitting their content.
+  const withMeasuredSizes = useCallback((prev: SectionSizes): SectionSizes => {
+    const next: SectionSizes = { ...prev }
+    for (const [id, el] of Object.entries(sectionElsRef.current) as [GitSectionId, HTMLDivElement | null][]) {
+      if (el && next[id] === undefined) next[id] = el.getBoundingClientRect().height
+    }
+    return next
+  }, [])
+
   const onDividerMouseDown = useCallback((upper: GitSectionId, lower: GitSectionId) => {
-    // The first drag takes each shown section's current height as its weight, so nothing jumps
-    // when the sections stop fitting their content.
-    setSectionFlex((prev) => {
-      const next: SectionSizes = { ...prev }
-      for (const [id, el] of Object.entries(sectionElsRef.current) as [GitSectionId, HTMLDivElement | null][]) {
-        if (el && next[id] === undefined) next[id] = el.getBoundingClientRect().height
-      }
-      return next
-    })
+    setSectionFlex(withMeasuredSizes)
     draggingDivider.current = { upper, lower }
     document.body.style.cursor = 'row-resize'
     document.body.style.userSelect = 'none'
-  }, [])
+  }, [withMeasuredSizes])
 
   useEffect(() => {
     const onMouseMove = (event: MouseEvent) => {
@@ -302,6 +343,15 @@ export function GitPanel() {
       window.removeEventListener('mouseup', onMouseUp)
     }
   }, [])
+
+  // Arrow keys, Home and End on a divider: measure first (as a drag does), then move the pair.
+  const onDividerResize = useCallback((upper: GitSectionId, lower: GitSectionId, key: string) => {
+    setSectionFlex((prev) => {
+      const measured = withMeasuredSizes(prev)
+      const ratio = keyedSectionRatio(sectionPairRatio(measured, upper, lower), key)
+      return ratio === null ? prev : resizeSectionPair(measured, upper, lower, ratio)
+    })
+  }, [withMeasuredSizes])
 
   const bindSectionRef = (id: GitSectionId) => (el: HTMLDivElement | null) => {
     sectionElsRef.current[id] = el
@@ -356,15 +406,31 @@ export function GitPanel() {
           flex={sectionFlex}
           bindSectionRef={bindSectionRef}
           onDividerMouseDown={onDividerMouseDown}
+          onDividerResize={onDividerResize}
         />
         <CommitsSection commits={commits} flex={sectionFlex.commits} sectionRef={bindSectionRef('commits')} />
       </>
     )
   }
 
+  // Commit, Push and Create PR act on the folder the side card shows; a folder of no project has none of them.
+  const actionsReady = folderId !== null && source.path === folderId && status?.isRepo === true
+  const actionModel = actionsReady
+    ? gitActionRowModel({
+      path: folderId,
+      scope,
+      projectId,
+      ownThreadId: source.ownThreadId,
+      status,
+      commitCount: source.git.commits.length,
+      pullRequest: source.lookup,
+      pullRequestPushTarget
+    })
+    : null
   const branchName = status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')
   // The folder the branch is in stays named beside it, so two folders on the same branch are told apart.
   const folder = folderName(projectPath)
+  // Where the actions run: the branch, the folder, the thread's own worktree when it is one; the computer's badge follows.
   const where = [branchName, projectPath, workspaceThreadId ? "Thread's worktree" : null].filter(Boolean).join(' · ')
 
   return (
@@ -380,6 +446,7 @@ export function GitPanel() {
                 <span className="git-toolbar-folder-name">{folder}</span>
               </span>
             )}
+            {activeThread?.node && <ThreadComputerBadge thread={activeThread} withName className="git-toolbar-computer" />}
           </div>
           <button
             type="button"
@@ -387,6 +454,7 @@ export function GitPanel() {
             onClick={() => void refresh()}
             disabled={loading}
             title="Refresh"
+            aria-label="Refresh Git status"
           >
             <RefreshCw size={14} strokeWidth={2} />
           </button>
@@ -412,12 +480,31 @@ export function GitPanel() {
       </ResizablePanelSidebar>
 
       <div className="git-diff">
-        <div className="panel-toolbar">
+        <div className="panel-toolbar git-diff-toolbar">
           <span className="panel-toolbar-path">
             {selected ? `${selected.staged ? 'Staged' : 'Unstaged'}: ${selected.path}` : 'Diff'}
           </span>
           <WhitespaceToggle />
+          {actionModel && folderId && (
+            <GitActionButtons
+              host="git-panel"
+              path={folderId}
+              scope={scope}
+              git={source.git}
+              model={actionModel}
+              running={running}
+              begin={begin}
+              end={end}
+              onActionError={setActionError}
+              onNotice={setActionNotice}
+              className="git-diff-actions"
+              label={`Git actions for ${where}`}
+            />
+          )}
         </div>
+        {actionModel?.pushButton?.note && <p className="git-diff-message">{actionModel.pushButton.note}</p>}
+        {actionError && <p className="git-diff-message git-diff-error" role="alert" title={actionError}>{actionError}</p>}
+        {actionNotice && <p className="git-diff-message" role="status" title={actionNotice}>{actionNotice}</p>}
         {selected && !reviewTarget ? (
           <div className="git-diff-empty">This folder does not belong to a project, so its diff is not available.</div>
         ) : (
@@ -429,6 +516,7 @@ export function GitPanel() {
           />
         )}
       </div>
+      <DiscardConfirmDialog question={discardQuestion} onAnswer={answerDiscard} />
     </div>
   )
 }
