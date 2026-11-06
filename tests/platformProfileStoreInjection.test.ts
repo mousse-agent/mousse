@@ -189,6 +189,7 @@ describe('explicit profile store roots', () => {
       started: true,
       stopOperation: undefined as Promise<void> | undefined,
       profileId: 'profile-fixture',
+      homeDir: join(tmpdir(), 'mousse-profile-fixture'),
       beginShutdown: () => { calls.push('begin') },
       undoRetention: { stop: async () => { calls.push('undoRetention') } },
       pullRequestWatch: { stop: () => undefined },

@@ -55,9 +55,9 @@ export async function openThreadFromPullRequest(input: StartPullRequestThreadInp
 
 /** Moves to the next (1) or previous (-1) thread in the sidebar's order, wrapping at the ends. */
 export async function selectAdjacentThread(direction: 1 | -1): Promise<void> {
-  const { projects, threads, threadsSidebarView, activeThreadId } = useAppStore.getState()
+  const { projects, threads, threadsSidebarView, threadFeedOrder, activeThreadId } = useAppStore.getState()
   const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
-  const ids = orderedThreadIds({ projects, threads, view: threadsSidebarView, excluded })
+  const ids = orderedThreadIds({ projects, threads, view: threadsSidebarView, excluded, arranged: threadFeedOrder })
   if (ids.length === 0) return
   // A subagent thread has no row of its own; its parent's row is the one that is highlighted.
   const current = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null

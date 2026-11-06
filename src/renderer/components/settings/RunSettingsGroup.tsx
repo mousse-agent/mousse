@@ -10,16 +10,29 @@ export function capChoices(current: number): number[] {
   return [...new Set<number>([...USAGE_LIMIT_CAP_CHOICES, current])].sort((a, b) => a - b)
 }
 
+/** The resume select's value for Off. */
+const OFF = 'off'
+
+function capLabel(cap: number): string {
+  return cap === 1 ? 'Once' : `Up to ${cap} times`
+}
+
 /**
  * Settings → General → Runs: where new chats start, and whether a run paused by a usage limit continues by
- * itself, and how often in a row.
+ * itself, and how often in a row. Resuming is one select: Off, or how many times in a row. Off keeps the
+ * saved count, so turning it back on offers the same one.
  */
 export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['runs']; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const cap = runs.usageLimitPauseCap
+  const value = runs.resumeAfterUsageLimit ? String(cap) : OFF
+  const tooltip = runs.resumeAfterUsageLimit
+    ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Try now.`
+    : 'A run paused by a usage limit waits until you press Try now.'
   return (
     <SettingsGroup title="Runs" icon={Pause}>
       <SettingsRow
         title="Start new chats in a worktree"
+        anchor="general-worktree-default"
         description={<span title="Each new chat in a project gets its own Git worktree, so its changes stay apart from the project folder until you publish them. A new chat can still change this from the composer before its first message.">New chats in a project work in their own worktree.</span>}
         control={
           <Switch
@@ -31,26 +44,21 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
       />
       <SettingsRow
         title="Resume after usage limits reset"
-        description={<span title={`Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row. Runs already paused are not resumed; press Try now.`}>Continues a paused run when the limit resets.</span>}
-        control={
-          <Switch
-            label="Resume after usage limits reset"
-            checked={runs.resumeAfterUsageLimit}
-            onChange={(resumeAfterUsageLimit) => void onUpdate({ runs: { ...runs, resumeAfterUsageLimit } })}
-          />
-        }
-      />
-      <SettingsRow
-        title="Automatic resumes in a row"
-        description="After this many resumes that hit the limit again, the run stops with an error instead of pausing."
-        disabled={!runs.resumeAfterUsageLimit}
+        anchor="general-resume"
+        description={<span title={tooltip}>Continues a paused run when the limit resets.</span>}
         control={
           <Select
-            ariaLabel="Automatic resumes in a row"
-            value={String(cap)}
-            disabled={!runs.resumeAfterUsageLimit}
-            onChange={(value) => { if (Number(value) !== cap) void onUpdate({ runs: { ...runs, usageLimitPauseCap: Number(value) } }) }}
-            options={capChoices(cap).map((value) => ({ value: String(value), label: String(value) }))}
+            ariaLabel="Resume after usage limits reset"
+            value={value}
+            onChange={(next) => {
+              if (next === value) return
+              if (next === OFF) void onUpdate({ runs: { ...runs, resumeAfterUsageLimit: false } })
+              else void onUpdate({ runs: { ...runs, resumeAfterUsageLimit: true, usageLimitPauseCap: Number(next) } })
+            }}
+            options={[
+              { value: OFF, label: 'Off' },
+              ...capChoices(cap).map((choice) => ({ value: String(choice), label: capLabel(choice) }))
+            ]}
           />
         }
       />

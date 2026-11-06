@@ -1,5 +1,5 @@
 import type { CommandContext, OverlayScope } from '../../shared/commands'
-import { isTurnActivePhase } from '../../shared/types'
+import { isTurnStoppable } from '../../shared/types'
 import type { useAppStore } from '../stores/appStore'
 
 type AppSnapshot = ReturnType<typeof useAppStore.getState>
@@ -37,14 +37,14 @@ export function commandContextFromDom(
   overlays: OverlayState
 ): CommandContext {
   const stack = overlays.ignore ? overlays.stack.filter((scope) => scope !== overlays.ignore) : overlays.stack
-  const phase = state.activeThreadId ? state.turnStates[state.activeThreadId]?.phase : undefined
+  const turn = state.activeThreadId ? state.turnStates[state.activeThreadId] : undefined
   return {
     platform: state.appInfo?.platform ?? '',
     inTextInput: Boolean(target?.closest(TEXT_FIELD_SELECTOR)),
     inTerminal: Boolean(target?.closest('.xterm')),
     overlay: overlays.modalOpen ? 'modal' : (stack[stack.length - 1] ?? null),
     threadOpen: state.activeThreadId !== null,
-    runActive: phase !== undefined && isTurnActivePhase(phase),
+    runActive: isTurnStoppable(turn),
     mainAreaOpen: state.mainAreaOpen,
     projectsMode: state.sidebarMode === 'projects',
     inFilesPanel: Boolean(target?.closest('.files-panel')),

@@ -98,6 +98,13 @@ describe('commandContextFromDom app state', () => {
     expect(commandContextFromDom(null, state({ turnStates: {} }), noOverlay).runActive).toBe(false)
   })
 
+  it('counts a turn waiting on an approval or an answer as a run Stop can end', () => {
+    const waiting = (turnId: string | null) => ({ 'thread-1': { threadId: 'thread-1', phase: 'awaiting_input', turnId } as CommandStateSlice['turnStates'][string] })
+    expect(commandContextFromDom(null, state({ turnStates: waiting('turn-1') }), noOverlay).runActive).toBe(true)
+    // A question with no turn behind it has nothing to stop.
+    expect(commandContextFromDom(null, state({ turnStates: waiting(null) }), noOverlay).runActive).toBe(false)
+  })
+
   it('has no thread, run or platform before they are known', () => {
     const context = commandContextFromDom(null, state({ activeThreadId: null, appInfo: null }), noOverlay)
     expect(context).toMatchObject({ threadOpen: false, runActive: false, platform: '' })

@@ -150,7 +150,7 @@ describe('a usage limit pauses the run', () => {
     const { thread, run } = await paused(d, pi)
     expect(run.outcome!.pause).toMatchObject({ autoResume: false })
     expect(effectsOf(d, run.runId, 'run.resume')).toEqual([])
-    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Press Try now or send a message to continue.')
+    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Press Try now to continue. Messages you send wait in the queue until then.')
     await new Promise((resolve) => setTimeout(resolve, RESET_MS + 300))
     expect(d.engine.getRun(run.runId)!.status).toBe('paused')
     expect(pi.turns).toHaveLength(1)
@@ -344,7 +344,7 @@ describe('a usage limit pauses the run', () => {
       const second = boot(home, [pi], { pid: 2 })
       await waitFor(() => second.engine.getRun(run.runId)!.outcome!.pause!.stale === true, 'the stale ruling')
       expect(second.engine.getRun(run.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, stale: true } } })
-      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off. Press Try now or send a message to continue.')
+      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off. Press Try now to continue. Messages you send wait in the queue until then.')
       expect(pi.turns).toHaveLength(1)
       // The run is still paused, so the thread still shows it, now with no timer to wait for.
       expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId, pause: { runId: run.runId, autoResume: false, stale: true } })
@@ -384,16 +384,154 @@ describe('a usage limit pauses the run', () => {
   })
 
   describe('a message sent during the pause', () => {
-    it('a person\'s message ends it: the timer goes and the message runs once', async () => {
+    /** A person's message from the composer, sent while the thread is paused. */
+    const personSends = (d: Phase6Daemon, threadId: string, text: string, id: string) =>
+      d.orch.send(text, false, { threadId, clientRequestId: id, source: 'gui' })
+
+    it('a person\'s message joins the queue: the pause and its timer stay, and nothing new runs', async () => {
       const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
       const d = boot(newHome(), [pi])
       const { thread, run } = await paused(d, pi)
-      await d.orch.send('try another way', false, { threadId: thread.id, clientRequestId: 'person-1', source: 'gui' })
 
-      expect(d.engine.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'user_message' } } })
-      expect(effectsOf(d, run.runId, 'run.resume').map((effect) => effect.status)).toEqual(['cancelled'])
+      const response = await personSends(d, thread.id, 'try another way', 'person-1')
+
+      expect(response).toMatchObject({ queued: true, heldByPause: true, queueItem: { content: 'try another way', state: 'pending' } })
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(d.engine.getRun(run.runId)!.outcome!.pause!.endedBy).toBeUndefined()
+      expect(effectsOf(d, run.runId, 'run.resume').map((effect) => effect.status)).toEqual(['pending'])
+      expect(d.engine.getRun(response.runId!)).toMatchObject({ status: 'queued', source: 'gui' })
+      expect(d.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId })
+      expect(queueOf(d, thread.id).map((item) => [item.content, item.runId])).toEqual([['try another way', response.runId]])
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work'])
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+    })
+
+    it('the same message sent again stays held: one queue item, not in the transcript, the thread still paused', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      const first = await personSends(d, thread.id, 'try another way', 'person-1')
+
+      const again = await personSends(d, thread.id, 'try another way', 'person-1')
+
+      expect(again).toMatchObject({ queued: true, heldByPause: true, replayed: true, runId: first.runId, queueItem: { id: first.queueItem!.id, content: 'try another way' } })
+      expect(queueOf(d, thread.id).map((item) => item.runId)).toEqual([first.runId])
+      expect(runsOf(d, thread.id)).toHaveLength(2)
+      expect(d.engine.getRun(first.runId!)!.status).toBe('queued')
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(d.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId })
+      expect(pi.turns).toHaveLength(1)
+    })
+
+    it('a follow-up from a parent on another computer is refused, and the pause stays', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+
+      await expect(d.orch.send('one more thing', false, { threadId: thread.id, clientRequestId: 'remote-subagent:d1', source: 'gui', refuseWhilePaused: true })).rejects.toMatchObject({ code: 'thread_paused' })
+
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(runsOf(d, thread.id)).toHaveLength(1)
+      expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('a Stop ends the pause and releases the held messages at once', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      await personSends(d, thread.id, 'try another way', 'person-1')
+
+      await d.orch.stopThread(thread.id, 'user')
+      await waitFor(() => pi.turns.length === 2 && settled(d, thread.id), 'the held message')
+
       expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', 'try another way'])
-      expect(d.orch.getTurnState(thread.id).phase).toBe('completed')
+      expect(d.engine.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'stop' } } })
+      expect(effectsOf(d, run.runId, 'run.resume').map((effect) => effect.status)).toEqual(['cancelled'])
+      expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('a pause that ends between the message being admitted and queued does not leave it waiting', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+
+      // The pause ends after the engine held the message and before the service queued it: no drain was scheduled for it.
+      await d.orch.send('try another way', false, { threadId: thread.id, clientRequestId: 'person-1', source: 'gui', onAdmitted: () => { d.engine.endPause(run.runId, 'cancel') } })
+      await waitFor(() => pi.turns.length === 2 && settled(d, thread.id), 'the message')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', 'try another way'])
+      expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('a restart keeps the held messages: the continue turn runs first, then they are sent', async () => {
+      const home = newHome()
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const first = boot(home, [pi], { pid: 1 })
+      const { thread, run } = await paused(first, pi)
+      const held = await personSends(first, thread.id, 'try another way', 'person-1')
+      await first.crash()
+
+      const second = boot(home, [pi], { pid: 2 })
+      second.orch.restorePausedTurnStates()
+      expect(second.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(second.engine.getRun(held.runId!)!.status).toBe('queued')
+      expect(queueOf(second, thread.id).map((item) => [item.content, item.runId])).toEqual([['try another way', held.runId]])
+      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(pi.turns).toHaveLength(1)
+
+      await second.orch.resumePausedRun(run.runId)
+      await waitFor(() => pi.turns.length === 3 && settled(second, thread.id), 'the continue turn and the held message')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT, 'try another way'])
+      expect(queueOf(second, thread.id)).toEqual([])
+    })
+
+    it('Resume now continues the run first, then sends the queued messages in order', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      await personSends(d, thread.id, 'try another way', 'person-1')
+      await personSends(d, thread.id, 'and add a test', 'person-2')
+
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => pi.turns.length === 4 && settled(d, thread.id), 'the continue turn and both messages')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT, 'try another way', 'and add a test'])
+      expect(d.engine.getRun(run.runId)!.outcome!.pause).toMatchObject({ endedBy: 'resume_now' })
+      expect(runsOf(d, thread.id).map((record) => [record.source, record.status])).toEqual([
+        ['protocol', 'interrupted'], ['gui', 'completed'], ['gui', 'completed'], ['resume_now', 'completed']
+      ])
+      expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('at the reset the run continues by itself, then the queued message is sent', async () => {
+      const pi = scripted([{ fail: () => limit() }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      await personSends(d, thread.id, 'try another way', 'person-1')
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+
+      await waitFor(() => pi.turns.length === 3 && settled(d, thread.id), 'the continue turn and the message')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT, 'try another way'])
+      expect(d.engine.getRun(run.runId)!.outcome!.pause).toMatchObject({ endedBy: 'resume' })
+      expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('Cancel drops the paused run and the queued message is sent at once', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      await personSends(d, thread.id, 'try another way', 'person-1')
+
+      await d.orch.cancelPausedRun(run.runId)
+      await waitFor(() => pi.turns.length === 2 && settled(d, thread.id), 'the message')
+
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', 'try another way'])
+      expect(d.engine.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { pause: { endedBy: 'cancel' } } })
+      expect(effectsOf(d, run.runId, 'run.resume').map((effect) => effect.status)).toEqual(['cancelled'])
       expect(queueOf(d, thread.id)).toEqual([])
     })
 
@@ -915,7 +1053,7 @@ describe('a usage limit pauses the run', () => {
       expect(pauseProviderName('openai')).toBe('OpenAI')
       expect(pauseProviderName('anthropic')).toBe('Anthropic')
       expect(pauseProviderName(undefined)).toBeUndefined()
-      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Press Try now or send a message to continue\.$/)
+      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Press Try now to continue\. Messages you send wait in the queue until then\.$/)
     })
 
     it('the Bridge is not sent a turn.paused event: older peers reject event types they do not know', () => {

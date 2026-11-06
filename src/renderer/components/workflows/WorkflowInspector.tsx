@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import {
   EFFECT_CLASSES,
   JOIN_POLICIES,
@@ -10,6 +10,7 @@ import { AgentDefinitionPicker } from '../agentDefinitions/AgentDefinitionPicker
 import { AgentDefinitionReadOnlySummary } from '../agentDefinitions/AgentDefinitionReadOnlySummary'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'
 import { MarkdownDocumentEditor } from '../editors/MarkdownDocumentEditor'
+import { Select, type SelectOption } from '../ui/Select'
 import { BindingEditor } from './BindingEditor'
 import { ExpressionEditor } from './ExpressionEditor'
 import { JsonObjectEditor } from './JsonObjectEditor'
@@ -152,20 +153,13 @@ export function WorkflowInspector({
         <input value={node.id} disabled readOnly />
       </label>
       <details className="wf-details"><summary>Execution settings</summary>
-      <label className="wf-field">
-        Effect
-        <select
-          disabled={readOnly}
-          value={node.effect ?? entry?.defaultEffect ?? 'pure'}
-          onChange={(event) => patch({ effect: event.target.value as WorkflowNode['effect'] })}
-        >
-          {EFFECT_CLASSES.map((effect) => (
-            <option key={effect} value={effect}>
-              {effect}
-            </option>
-          ))}
-        </select>
-      </label>
+      <SelectField
+        label="Effect"
+        disabled={readOnly}
+        value={node.effect ?? entry?.defaultEffect ?? 'pure'}
+        onChange={(effect) => patch({ effect })}
+        options={EFFECT_CLASSES.map((effect) => ({ value: effect, label: effect }))}
+      />
       <label className="wf-field">
         Timeout (ms)
         <input
@@ -305,125 +299,94 @@ function NodeConfigFields({
       )
     case 'tool':
       return (
-        <label className="wf-field">
-          Built-in tool
-          <select
-            disabled={readOnly}
-            value={toolId(config)}
-            onChange={(event) => set('tool', { id: event.target.value })}
-          >
-            <option value="">Select tool</option>
-            {catalogs.builtinTools.map((tool) => (
-              <option key={tool.id} value={tool.id}>
-                {tool.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SelectField
+          label="Built-in tool"
+          disabled={readOnly}
+          value={toolId(config)}
+          placeholder="Select tool"
+          onChange={(id) => set('tool', { id })}
+          options={catalogs.builtinTools.map((tool) => ({ value: tool.id, label: tool.label }))}
+        />
       )
     case 'mcp-tool':
       return (
         <>
-          <label className="wf-field">
-            MCP server
-            <select disabled={readOnly} value={String(config.serverId ?? '')} onChange={(event) => set('serverId', event.target.value)}>
-              <option value="">Select server</option>
-              {catalogs.mcpServers.map((server) => (
-                <option key={server.serverId} value={server.serverId}>
-                  {server.name}
-                  {server.tools.every((tool) => !tool.available) ? ' (unavailable)' : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="wf-field">
-            Tool
-            <select disabled={readOnly} value={String(config.toolName ?? '')} onChange={(event) => set('toolName', event.target.value)}>
-              <option value="">Select tool</option>
-              {(catalogs.mcpServers.find((server) => server.serverId === config.serverId)?.tools ?? []).map((tool) => (
-                <option key={tool.toolName} value={tool.toolName} disabled={!tool.available}>
-                  {tool.toolName}
-                  {tool.available ? '' : ' (missing)'}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SelectField
+            label="MCP server"
+            disabled={readOnly}
+            value={String(config.serverId ?? '')}
+            placeholder="Select server"
+            onChange={(serverId) => set('serverId', serverId)}
+            options={catalogs.mcpServers.map((server) => ({
+              value: server.serverId,
+              label: `${server.name}${server.tools.every((tool) => !tool.available) ? ' (unavailable)' : ''}`
+            }))}
+          />
+          <SelectField
+            label="Tool"
+            disabled={readOnly}
+            value={String(config.toolName ?? '')}
+            placeholder="Select tool"
+            onChange={(toolName) => set('toolName', toolName)}
+            options={(catalogs.mcpServers.find((server) => server.serverId === config.serverId)?.tools ?? []).map((tool) => ({
+              value: tool.toolName,
+              label: `${tool.toolName}${tool.available ? '' : ' (missing)'}`,
+              disabled: !tool.available
+            }))}
+          />
         </>
       )
     case 'load-skill':
       return (
-        <label className="wf-field">
-          Skill
-          <select
-            disabled={readOnly}
-            value={skillId(config)}
-            onChange={(event) => {
-              const skill = catalogs.skills.find((item) => item.id === event.target.value)
-              set('skill', { id: event.target.value, revision: skill?.revision ?? '' })
-            }}
-          >
-            <option value="">Select skill</option>
-            {catalogs.skills.map((skill) => (
-              <option key={skill.id} value={skill.id} disabled={!skill.available}>
-                {skill.name}
-                {skill.available ? '' : ' (missing)'}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SelectField
+          label="Skill"
+          disabled={readOnly}
+          value={skillId(config)}
+          placeholder="Select skill"
+          onChange={(id) => {
+            const skill = catalogs.skills.find((item) => item.id === id)
+            set('skill', { id, revision: skill?.revision ?? '' })
+          }}
+          options={catalogs.skills.map((skill) => ({
+            value: skill.id,
+            label: `${skill.name}${skill.available ? '' : ' (missing)'}`,
+            disabled: !skill.available
+          }))}
+        />
       )
     case 'join':
       return (
         <>
-          <label className="wf-field">
-            Parallel node
-            <select
-              disabled={readOnly}
-              value={String(config.parallelNodeId ?? '')}
-              onChange={(event) => set('parallelNodeId', event.target.value)}
-            >
-              <option value="">Select</option>
-              {manifest.nodes
-                .filter((item) => item.type === 'parallel')
-                .map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.id}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label className="wf-field">
-            Join policy
-            <select disabled={readOnly} value={String(config.policy ?? 'all-success')} onChange={(event) => set('policy', event.target.value)}>
-              {JOIN_POLICIES.map((policy) => (
-                <option key={policy} value={policy}>
-                  {policy}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SelectField
+            label="Parallel node"
+            disabled={readOnly}
+            value={String(config.parallelNodeId ?? '')}
+            placeholder="Select"
+            onChange={(parallelNodeId) => set('parallelNodeId', parallelNodeId)}
+            options={manifest.nodes.filter((item) => item.type === 'parallel').map((item) => ({ value: item.id, label: item.id }))}
+          />
+          <SelectField
+            label="Join policy"
+            disabled={readOnly}
+            value={String(config.policy ?? 'all-success')}
+            onChange={(policy) => set('policy', policy)}
+            options={JOIN_POLICIES.map((policy) => ({ value: policy, label: policy }))}
+          />
         </>
       )
     case 'subworkflow':
       return (
-        <label className="wf-field">
-          Subworkflow
-          <select
-            disabled={readOnly}
-            value={subworkflowId(config)}
-            onChange={(event) => {
-              const item = catalogs.subworkflows.find((entry) => entry.id === event.target.value)
-              set('workflow', { id: event.target.value, revision: item?.revision ?? '' })
-            }}
-          >
-            <option value="">Select workflow</option>
-            {catalogs.subworkflows.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SelectField
+          label="Subworkflow"
+          disabled={readOnly}
+          value={subworkflowId(config)}
+          placeholder="Select workflow"
+          onChange={(id) => {
+            const item = catalogs.subworkflows.find((entry) => entry.id === id)
+            set('workflow', { id, revision: item?.revision ?? '' })
+          }}
+          options={catalogs.subworkflows.map((item) => ({ value: item.id, label: item.name }))}
+        />
       )
     case 'delay':
       return (
@@ -493,30 +456,32 @@ function ScriptConfigFields({
   const fileInputs = Array.isArray(config.fileInputs) ? config.fileInputs : []
   return (
     <>
-      <label className="wf-field">
-        Runtime
-        <select disabled={readOnly} value={String(config.runtime ?? 'node')} onChange={(event) => set('runtime', event.target.value)}>
-          <option value="node">Node</option>
-          <option value="python">Python</option>
-          <option value="powershell">PowerShell</option>
-          <option value="bash">Bash</option>
-        </select>
-      </label>
+      <SelectField
+        label="Runtime"
+        disabled={readOnly}
+        value={String(config.runtime ?? 'node')}
+        onChange={(runtime) => set('runtime', runtime)}
+        options={[
+          { value: 'node', label: 'Node' },
+          { value: 'python', label: 'Python' },
+          { value: 'powershell', label: 'PowerShell' },
+          { value: 'bash', label: 'Bash' }
+        ]}
+      />
       <label className="wf-field">
         Asset path
         <input disabled={readOnly} value={String(config.file ?? '')} onChange={(event) => set('file', event.target.value)} />
       </label>
-      <label className="wf-field">
-        Execution mode
-        <select
-          disabled={readOnly}
-          value={String(config.executionMode ?? 'trusted-local')}
-          onChange={(event) => set('executionMode', event.target.value)}
-        >
-          <option value="trusted-local">Trusted local (reviewed code, not a sandbox)</option>
-          <option value="sandboxed" disabled>Sandbox unavailable in this installation</option>
-        </select>
-      </label>
+      <SelectField
+        label="Execution mode"
+        disabled={readOnly}
+        value={String(config.executionMode ?? 'trusted-local')}
+        onChange={(executionMode) => set('executionMode', executionMode)}
+        options={[
+          { value: 'trusted-local', label: 'Trusted local (reviewed code, not a sandbox)' },
+          { value: 'sandboxed', label: 'Sandbox unavailable in this installation', disabled: true }
+        ]}
+      />
       <label className="wf-field">
         argv (one per line)
         <textarea
@@ -579,35 +544,33 @@ function AgentConfigFields({
 
   return (
     <>
-      <label className="wf-field">
-        Agent kind
-        <select
-          disabled={readOnly}
-          value={kind}
-          onChange={(event) => setAgent({ ...agent, kind: event.target.value, definitionId: event.target.value === 'main' ? undefined : agent.definitionId })}
-        >
-          <option value="main">Main agent</option>
-          <option value="user">User agent</option>
-        </select>
-      </label>
+      <SelectField
+        label="Agent kind"
+        disabled={readOnly}
+        value={kind}
+        onChange={(next) => setAgent({ ...agent, kind: next, definitionId: next === 'main' ? undefined : agent.definitionId })}
+        options={[
+          { value: 'main', label: 'Main agent' },
+          { value: 'user', label: 'User agent' }
+        ]}
+      />
       {kind === 'user' ? (
         <>
-          <label className="wf-field">
-            Revision
-            <select
-              disabled={readOnly}
-              value={pin}
-              onChange={(event) =>
-                setAgent({
-                  ...agent,
-                  revision: event.target.value === 'head' ? 'head' : typeof agent.revision === 'string' && agent.revision !== 'head' ? agent.revision : ''
-                })
-              }
-            >
-              <option value="head">Follow head</option>
-              <option value="pinned">Pin revision</option>
-            </select>
-          </label>
+          <SelectField
+            label="Revision"
+            disabled={readOnly}
+            value={pin}
+            onChange={(next) =>
+              setAgent({
+                ...agent,
+                revision: next === 'head' ? 'head' : typeof agent.revision === 'string' && agent.revision !== 'head' ? agent.revision : ''
+              })
+            }
+            options={[
+              { value: 'head', label: 'Follow head' },
+              { value: 'pinned', label: 'Pin revision' }
+            ]}
+          />
           {pin === 'pinned' ? (
             <label className="wf-field">
               Pinned revision
@@ -648,6 +611,31 @@ function AgentConfigFields({
         onChange={(value) => onChange({ ...config, outputSchema: value })}
       />
     </>
+  )
+}
+
+/** A labelled field with the shared themed select; the visible label names it. */
+function SelectField<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  disabled,
+  placeholder
+}: {
+  label: string
+  value: T
+  options: readonly SelectOption<T>[]
+  onChange: (value: T) => void
+  disabled?: boolean
+  placeholder?: string
+}) {
+  const labelId = useId()
+  return (
+    <div className="wf-field">
+      <span id={labelId}>{label}</span>
+      <Select<T> ariaLabelledBy={labelId} value={value} options={options} onChange={onChange} disabled={disabled} placeholder={placeholder} />
+    </div>
   )
 }
 

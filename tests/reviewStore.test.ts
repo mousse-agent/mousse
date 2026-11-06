@@ -27,6 +27,25 @@ describe('review store', () => {
     expect(byThread.t2).toMatchObject({ scope: { kind: 'thread' }, selectedPath: 'src/b.ts' })
   })
 
+  it('opens a turn at a file named by the agent path, and selects it once the list maps it', () => {
+    const store = useReviewStore.getState()
+    store.openTurn('t1', 'run:1', '/wt/t1/src/app.ts')
+    expect(useReviewStore.getState().byThread.t1).toMatchObject({ scope: { kind: 'turn', turnId: 'run:1' }, pendingFile: { path: '/wt/t1/src/app.ts' } })
+    store.resolvePendingFile('t1', 'src/app.ts')
+    const state = useReviewStore.getState().byThread.t1
+    expect(state.selectedPath).toBe('src/app.ts')
+    expect(state.pendingFile).toBeUndefined()
+    // No line to scroll to: the diff opens at its top.
+    expect(state.reveal).toBeUndefined()
+  })
+
+  it('drops a file left from an earlier click when a turn opens without one', () => {
+    const store = useReviewStore.getState()
+    store.openThread('t1', 'src/app.ts')
+    store.openTurn('t1', 'run:2')
+    expect(useReviewStore.getState().byThread.t1.pendingFile).toBeUndefined()
+  })
+
   it('saves view state per thread and path', () => {
     const store = useReviewStore.getState()
     store.saveViewState('t1', 'a.ts', { scrollTop: 10 })

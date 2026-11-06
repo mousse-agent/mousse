@@ -1,0 +1,85 @@
+/* The shared closable tab strip (components/ui/TabBar.tsx), used by Files and Documents.
+   The selected tab is a filled, lit background; never an edge bar. */
+.ui-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-subtle);
+  scrollbar-width: thin;
+}
+
+.ui-tabs:focus { outline: none; }
+/* An empty strip takes no room but keeps focus after the last tab closes. */
+.ui-tabs:empty { padding: 0; border-bottom: 0; }
+
+.ui-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  max-width: 220px;
+  height: 28px;
+  border-radius: var(--ui-row-radius, 6px);
+  color: var(--text-secondary);
+}
+
+.ui-tab:hover:not(.active) { background: var(--ui-hover); }
+
+.ui-tab.active {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
+  box-shadow: var(--ui-specular);
+}
+
+.ui-tab-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 10px;
+  border: 0;
+  border-radius: inherit;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ui-tab-select:focus-visible,
+.ui-tab-close:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: -2px;
+}
+
+.ui-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-tab-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.ui-tab-close:hover { opacity: 1; background: var(--ui-hover); }
+
+html[data-theme='high-contrast'] .ui-tab.active {
+  background: var(--ui-selected);
+  box-shadow: none;
+}
