@@ -285,7 +285,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'permissionLimits' | 'refreshModels' | 'forgetConversation'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -299,7 +299,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
         await service.status()
         await service.refreshModels()
       },
-      forgetConversation: (threadId) => service.forgetConversation(threadId)
+      forgetConversation: (threadId) => service.forgetConversation(threadId),
+      // Codex compacts with no focus of its own.
+      compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.signal)
     }
   }
 

@@ -16,6 +16,7 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
 import { removeInlineSkillToken } from '../../shared/composerCommands'
+import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -73,6 +74,9 @@ import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ServiceLostNotice } from './ServiceLostNotice'
+import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -357,7 +361,7 @@ export function OrchestratorChat() {
   }, [messages])
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is
-  // injected mid-turn. Show the steered text as a pill above the composer so
+  // injected mid-turn. Show the steered text as a notice above the composer so
   // the steer is visible in the transcript even before the next drain.
   useEffect(() => {
     const unsub = window.mousse.orchestrator.onTurnSteered?.((payload) => {
@@ -370,13 +374,13 @@ export function OrchestratorChat() {
   useEffect(() => {
     setLastSteer(null)
   }, [activeThreadId])
-  // Clear the pill once the steered user message lands in the transcript.
+  // The "Steered" notice hides once the steered message lands in the transcript, or when the turn ends.
   useEffect(() => {
     if (!lastSteer) return
-    if (messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
+    if (!turnActive || messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
       setLastSteer(null)
     }
-  }, [messages, lastSteer])
+  }, [messages, lastSteer, turnActive])
 
   // Quick-action approvals render inline on the PlanTool-style card instead
   // of the generic question modal. Bridge the pending question (requestId)
@@ -854,6 +858,15 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
+        // A message sent while a run is paused by a usage limit waits in the queue: it is shown there, not in the transcript.
+        if (result.heldByPause && optimisticMessageId) {
+          const current = useAppStore.getState().messages
+          useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
+          if (result.queueItem) {
+            const held = result.queueItem
+            setOptimisticQueueItems((items) => [...items.filter((item) => item.id !== held.id), held])
+          }
+        }
         if (result.error) {
           // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
           if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
@@ -952,6 +965,23 @@ export function OrchestratorChat() {
     })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
+  // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
+  const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
+    threadId: newChat ? null : activeThreadId,
+    turnActive: turnActive || loading,
+    hasAttachments,
+    openUsage: () => window.dispatchEvent(new Event('mousse:open-usage')),
+    stop: handleStop,
+    steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
+    newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
+    clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
+    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
+    rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
+    // The sidebar cancels the event when it opened the thread's rename box.
+    openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true }))
+  })
+
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
@@ -986,31 +1016,22 @@ export function OrchestratorChat() {
     if (!stillVisible()) return
     const trimmed = text.trim()
 
-    // Desktop-local commands must be handled before they can become an ordinary
-    // agent prompt. The usage dialog intentionally contains every configured provider.
-    if (trimmed.toLowerCase() === '/usage' && images.length === 0) {
-      setInput('')
-      window.dispatchEvent(new Event('mousse:open-usage'))
-      return
-    }
-
-    // Immediate mid-run controls
-    if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
-      setInput('')
-      await handleStop()
-      return
-    }
-    if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
-      const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
-      if (!steerText) return
-      setInput('')
-      const steered = await window.mousse.orchestrator.steer(
-        steerText,
-        activeThreadId ?? undefined
-      )
-      if (steered) return
-      // No active turn: treat as a normal user message (next-turn guidance).
-      text = steerText
+    // Composer commands run here before they can become an ordinary agent prompt
+    // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
+    const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
+    const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    if (command) {
+      if (command.kind === 'done') {
+        setInput('')
+        return
+      }
+      if (command.kind === 'keep') return
+      if (command.kind === 'refused') {
+        if (stillVisible()) setSendError(command.message)
+        return
+      }
+      // A /steer no turn took: next-turn guidance, sent as an ordinary message.
+      text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Alt+Enter during a run: the text goes into the running turn instead of the queue.
       const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
@@ -1022,13 +1043,6 @@ export function OrchestratorChat() {
     }
 
     if (!text && images.length === 0) return
-
-    const newThreadMatch = trimmed.match(/^\/new(?:\s+(.+))?$/)
-    if (newThreadMatch && images.length === 0) {
-      setInput('')
-      await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
-      return
-    }
 
     // Questions open above the composer: the message answers the question the card shows, and the card
     // moves on to the next unanswered one. Answering the last one submits all the answers, once.
@@ -1291,31 +1305,29 @@ export function OrchestratorChat() {
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
+        <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
-          ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
-              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
-          : <ComputerNotice message={sendError} />)}
-        {!sendError && !connectionFailed && <PromptUndoNotice />}
-        {connectionFailed && (
-          <div className="connection-failed-pill" role="alert">
-            <span>Connection Failed</span>
-            <button
-              type="button"
-              onClick={() => {
-                setConnectionFailed(false)
-                setLoading(true)
-                void window.mousse.orchestrator
-                  .retryConnection(activeThreadId ?? undefined)
-                  .then((started) => {
-                    if (!started) setLoading(false)
-                    else void refreshTurnActive()
-                  })
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+          ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
+              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }}
+              onDismiss={() => { setSendError(null); setSendChanges(null) }} />
+          : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
+        <PromptUndoNotice />
+        <PausedRunNotice threadId={activeThreadId} />
+        <ServiceLostNotice
+          lost={connectionFailed}
+          onReconnect={() => {
+            setConnectionFailed(false)
+            setLoading(true)
+            void window.mousse.orchestrator
+              .retryConnection(activeThreadId ?? undefined)
+              .then((started) => {
+                if (!started) setLoading(false)
+                else void refreshTurnActive()
+              })
+          }}
+          onDismiss={() => setConnectionFailed(false)}
+        />
+        <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
           aria-hidden={!showQuestions || undefined}
@@ -1354,6 +1366,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* The dock on the composer's top edge: the top notice, or the queue; one at a time. */}
+        <ComposerNoticeSlot />
         <QueuedMessages
           threadId={activeThreadId}
           optimisticItems={optimisticQueueItems}
@@ -1390,13 +1404,6 @@ export function OrchestratorChat() {
             })()
           }}
         />
-        {lastSteer && (
-          <div className="steer-pill" role="status" aria-label="Steered into active turn">
-            <span className="steer-pill-label">Steered into active turn</span>
-            <span className="steer-pill-text">{lastSteer.text.length > 160 ? `${lastSteer.text.slice(0, 157)}…` : lastSteer.text}</span>
-            <button type="button" className="steer-pill-dismiss" aria-label="Dismiss steer notice" onClick={() => setLastSteer(null)}>×</button>
-          </div>
-        )}
 
             {newChat && (
               <ComposerWorkspaceToolbar
@@ -1460,6 +1467,7 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
+        </ComposerNoticeProvider>
         {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
           <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
         )}

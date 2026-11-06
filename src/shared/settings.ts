@@ -107,21 +107,45 @@ export function normalizePermissionSettings(raw?: Partial<PermissionSettings> | 
   return { defaultMode: raw?.defaultMode === undefined ? DEFAULT_PERMISSION_MODE : normalizePermissionMode(raw.defaultMode) }
 }
 
-export type ContextCompactionTokens = 128000 | 256000 | 384000 | 512000 | 1024000 | 'model-max'
+/** A whole number of tokens from the minimum to the maximum below, or the model's own window. */
+export type ContextCompactionTokens = number | 'model-max'
 
 export interface ContextSettings {
   compactionEnabled: boolean
   compactionTokens: ContextCompactionTokens
 }
 
-export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label: string }[] = [
-  { value: 'model-max', label: 'Auto' },
-  { value: 128000, label: '128k' },
-  { value: 256000, label: '256k' },
-  { value: 384000, label: '384k' },
-  { value: 512000, label: '512k' },
-  { value: 1024000, label: '1024k' }
-]
+export const CONTEXT_COMPACTION_MIN_TOKENS = 32_000
+export const CONTEXT_COMPACTION_MAX_TOKENS = 2_000_000
+
+/** The sizes the compact-context menu offers; any other size in range can be typed. */
+export const CONTEXT_COMPACTION_PRESETS: readonly number[] = [128_000, 256_000, 512_000, 1_000_000]
+
+export function isContextCompactionSize(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= CONTEXT_COMPACTION_MIN_TOKENS && value <= CONTEXT_COMPACTION_MAX_TOKENS
+}
+
+/** A size as people write it: `300k`, `1M`, `1.5M`, or the digits when it is not a round number. */
+export function formatContextCompactionSize(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 100_000 === 0) return `${tokens / 1_000_000}M`
+  if (tokens % 1000 === 0) return `${tokens / 1000}k`
+  return tokens.toLocaleString('en-US')
+}
+
+/**
+ * A typed size: `300k`, `300000`, `300,000`, `0.3m`, `1M`, optionally followed by `tokens`.
+ * Undefined when it is not a whole number of tokens in range.
+ */
+export function parseContextCompactionSize(text: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?|\.\d+)([km])?(?:tokens?)?$/.exec(text.toLowerCase().replace(/[\s,_]/g, ''))
+  if (!match) return undefined
+  const exact = Number(match[1]) * (match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1000 : 1)
+  const tokens = Math.round(exact)
+  // Whole tokens only; the rounding just absorbs float noise such as 0.3 × 1M.
+  if (Math.abs(exact - tokens) > 1e-6) return undefined
+  return isContextCompactionSize(tokens) ? tokens : undefined
+}
 
 /** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
 export const DEFAULT_CONTEXT_COMPACTION_TOKENS: ContextCompactionTokens = 'model-max'
@@ -133,16 +157,42 @@ export const DEFAULT_CONTEXT_COMPACTION_TOKENS: ContextCompactionTokens = 'model
 export const CONTEXT_COMPACTION_DEFAULT_MARKER = 'modelMaxDefault'
 
 export function normalizeContextSettings(raw?: Partial<ContextSettings> | null): ContextSettings {
+  // A size from an older build or a hand-edited file that is out of range or not whole: the default.
+  const tokens: unknown = raw?.compactionTokens
   return {
     compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
-    compactionTokens: CONTEXT_COMPACTION_OPTIONS.some(({ value }) => value === raw?.compactionTokens)
-      ? raw!.compactionTokens! : DEFAULT_CONTEXT_COMPACTION_TOKENS
+    compactionTokens: tokens === 'model-max' || isContextCompactionSize(tokens) ? tokens : DEFAULT_CONTEXT_COMPACTION_TOKENS
   }
 }
 
 export function resolveContextCompactionTokens(selected: ContextCompactionTokens, modelMaxContext: number): number {
   const maximum = Number.isFinite(modelMaxContext) && modelMaxContext > 0 ? modelMaxContext : 128000
   return selected === 'model-max' ? maximum : Math.min(selected, maximum)
+}
+
+/** Room kept free under a model's window so the summary request itself fits. */
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
+/** Without a smaller size, compaction starts at this share of the window. */
+export const EXACT_COMPACTION_USAGE_RATIO = 0.95
+
+/**
+ * The active-context size at which a thread compacts, for a model with this window and an optional
+ * chosen size. Infinity when the window is unknown. The daemon compacts at this point, and Settings
+ * shows it.
+ */
+export function contextCompactionPoint(
+  contextWindow: number,
+  configuredThreshold?: number,
+  reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS
+): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return Infinity
+  const requestedReserve = Math.max(0, Math.min(reserveTokens, contextWindow - 1))
+  const reserve = contextWindow > requestedReserve * 2 ? requestedReserve : 0
+  const watermark = Math.floor(contextWindow * EXACT_COMPACTION_USAGE_RATIO)
+  const configured = configuredThreshold && configuredThreshold > 0
+    ? Math.min(configuredThreshold, contextWindow)
+    : watermark
+  return Math.min(watermark, configured, contextWindow - reserve)
 }
 
 /**
