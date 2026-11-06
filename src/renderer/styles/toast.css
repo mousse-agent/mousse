@@ -1,0 +1,400 @@
+/*
+ * The toast stack (components/ui/Toast.tsx), bottom right of the window.
+ * Closed: the newest toast in front, two more peeking out behind it.
+ * Hovered or focused: the stack opens into a list, each toast with its own close button,
+ * and "Clear all" above it. Lit from above like every raised surface (--ui-specular, --ui-sheen).
+ */
+.ui-toaster {
+  --toast-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --toast-surface: color-mix(in srgb, var(--floating-surface, var(--surface-strong)) 86%, transparent);
+  --toast-drop: 0 18px 44px -14px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.18);
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: var(--z-floating, 50000);
+  width: min(328px, calc(100vw - 24px));
+  transition: height 0.4s var(--toast-ease);
+}
+
+html[data-theme='light'] .ui-toaster {
+  --toast-surface: color-mix(in srgb, #ffffff 90%, transparent);
+  --toast-drop: 0 16px 40px -14px rgba(20, 16, 30, 0.22), 0 2px 8px rgba(20, 16, 30, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .ui-toaster {
+    --toast-surface: color-mix(in srgb, #ffffff 90%, transparent);
+    --toast-drop: 0 16px 40px -14px rgba(20, 16, 30, 0.22), 0 2px 8px rgba(20, 16, 30, 0.08);
+  }
+}
+
+.ui-toaster-list {
+  position: relative;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-toast-item {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  transform-origin: 50% 100%;
+  transition: transform 0.42s var(--toast-ease), opacity 0.3s ease, height 0.42s var(--toast-ease);
+}
+
+/* Behind the front toast in the closed stack: only a lit edge shows. */
+.ui-toast-item.is-muted {
+  overflow: hidden;
+  border-radius: var(--ui-card-radius, 12px);
+}
+
+.ui-toast-item.is-muted .ui-toast-card > * {
+  opacity: 0;
+}
+
+.ui-toast-item.is-muted .ui-toast-card {
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+.ui-toast-item.is-muted + .ui-toast-item.is-muted .ui-toast-card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Behind cards show only their own faint lip, not the full specular light. */
+.ui-toast-item.is-muted .ui-toast-card::before,
+.ui-toast-item.is-muted .ui-toast-card::after {
+  opacity: 0;
+}
+
+.ui-toast-swipe {
+  touch-action: pan-y;
+  transition: transform 0.32s var(--toast-ease), opacity 0.32s ease;
+}
+
+.ui-toast-swipe.is-dragging {
+  transition: none;
+  cursor: grabbing;
+}
+
+.ui-toast-card {
+  --tone: var(--text-secondary);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 7px 8px 7px 12px;
+  overflow: hidden;
+  /* A faint edge only: the specular light draws the top, "lit, not outlined". */
+  border: 1px solid color-mix(in srgb, var(--text-primary) 4%, transparent);
+  border-radius: var(--ui-card-radius, 12px);
+  background: var(--toast-surface);
+  -webkit-backdrop-filter: blur(22px) saturate(1.6);
+  backdrop-filter: blur(22px) saturate(1.6);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.35;
+  box-shadow: var(--toast-drop);
+  animation: ui-toast-in 0.46s var(--toast-ease) both;
+}
+
+/*
+ * The light from above, drawn as overlays so its strength can change without touching each
+ * theme's tokens: the sheen (::before) and the specular glint and lip (::after).
+ * Closed stack 65%, open stack 25%, the hovered toast in an open stack 50%.
+ */
+.ui-toast-card::before,
+.ui-toast-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.65;
+  transition: opacity 0.25s ease;
+}
+
+.ui-toast-card::before {
+  background: var(--ui-sheen, none);
+}
+
+.ui-toast-card::after {
+  box-shadow: var(--ui-specular, none);
+}
+
+.ui-toaster.is-expanded .ui-toast-card::before,
+.ui-toaster.is-expanded .ui-toast-card::after {
+  opacity: 0.25;
+}
+
+.ui-toaster.is-expanded .ui-toast-item:hover .ui-toast-card::before,
+.ui-toaster.is-expanded .ui-toast-item:hover .ui-toast-card::after {
+  opacity: 0.5;
+}
+
+.ui-toast-card > * {
+  position: relative;
+  transition: opacity 0.2s ease;
+}
+
+.ui-toast-two-line {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.ui-toast-success { --tone: var(--success); }
+.ui-toast-attention { --tone: var(--status-input, var(--accent)); }
+.ui-toast-paused { --tone: var(--warning); }
+.ui-toast-error { --tone: var(--danger); }
+
+/* The status mark: the sidebar's status dot, in the status colour with a soft ring. */
+.ui-toast-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 18px;
+}
+
+.ui-toast-two-line .ui-toast-mark {
+  align-self: flex-start;
+}
+
+.ui-toast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 18%, transparent);
+}
+
+.ui-toast-neutral .ui-toast-dot {
+  background: var(--ui-faint, var(--text-secondary));
+  box-shadow: none;
+}
+
+.ui-toast-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.ui-toast-open {
+  margin: -4px 0 -4px -4px;
+  padding: 4px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.ui-toast-open:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-toast-openable {
+  transition: background-color 0.18s ease;
+}
+
+.ui-toast-openable:hover {
+  background-color: color-mix(in srgb, var(--toast-surface) 100%, var(--text-primary) 5%);
+}
+
+.ui-toast-title,
+.ui-toast-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-toast-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.ui-toast-two-line .ui-toast-message {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.ui-toast-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.ui-toast-action {
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ui-toast-action:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.13);
+}
+
+.ui-toast-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ui-toast-action:focus-visible,
+.ui-toast-close:focus-visible,
+.ui-toaster-clear:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-toast-close {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--ui-faint, var(--text-secondary));
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.18s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+/* The corner: how long ago, and in the same place the close button once the stack opens. */
+.ui-toast-corner {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center end;
+  min-width: 24px;
+}
+
+.ui-toast-corner > * {
+  grid-area: 1 / 1;
+}
+
+.ui-toast-time {
+  min-width: 24px;
+  padding: 0;
+  text-align: center;
+  color: var(--ui-faint, var(--text-secondary));
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  /* Optically centred where the close button sits: lowercase text rides low on a 24px line. */
+  line-height: 20px;
+  padding-bottom: 3px;
+  transition: opacity 0.18s ease;
+}
+
+/* Close buttons show once the stack is open, or on the toast that has keyboard focus. */
+.ui-toaster.is-expanded .ui-toast-close,
+.ui-toaster:not(:has(.ui-toast-item + .ui-toast-item)):hover .ui-toast-close,
+.ui-toast-card:focus-within .ui-toast-close,
+.ui-toast-close:focus-visible {
+  opacity: 1;
+}
+
+.ui-toaster.is-expanded .ui-toast-time,
+.ui-toaster:not(:has(.ui-toast-item + .ui-toast-item)):hover .ui-toast-time,
+.ui-toast-card:focus-within .ui-toast-time {
+  opacity: 0;
+}
+
+.ui-toast-close:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* "Clear all", above the open stack. */
+.ui-toaster-head {
+  position: absolute;
+  /* "Clear all" ends on the column of close buttons. */
+  right: 11px;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  animation: ui-toaster-head-in 0.3s var(--toast-ease) both;
+}
+
+.ui-toaster-clear {
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--ui-control-radius, 7px);
+  background: none;
+  color: var(--ui-faint, var(--text-secondary));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.ui-toaster-clear:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* A closed toast fades out toward the edge it leaves by. */
+.ui-toast-ghost {
+  pointer-events: none;
+}
+
+.ui-toast-ghost .ui-toast-card {
+  animation: ui-toast-out 0.22s ease-in forwards;
+}
+
+@keyframes ui-toast-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale(0.96);
+  }
+}
+
+@keyframes ui-toast-out {
+  to {
+    opacity: 0;
+    transform: translate3d(28px, 0, 0) scale(0.97);
+  }
+}
+
+@keyframes ui-toaster-head-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-toaster,
+  .ui-toast-item,
+  .ui-toast-swipe {
+    transition-duration: 0.01s;
+  }
+
+  .ui-toast-card,
+  .ui-toaster-head,
+  .ui-toast-ghost .ui-toast-card {
+    animation-duration: 0.01s;
+  }
+}

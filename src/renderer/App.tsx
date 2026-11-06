@@ -21,8 +21,11 @@ import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
+import { ToastHost } from './components/ui/Toast'
+import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 
 import { openSurface } from './lib/surfaces'
+import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
 import { normalizeRunSettings } from '../shared/settings'
@@ -346,7 +349,12 @@ export default function App() {
       }),
       window.mousse.documents.onOpened(({ title, markdown }) => {
         openDocument(title, markdown)
-      })
+      }),
+      // A thread's notification was clicked: open that thread.
+      window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId))),
+      // A thread the person is not looking at finished, needs them, or stopped.
+      window.mousse.app.onThreadToast(applyIfCurrent(showThreadToast)),
+      watchOpenedThreadToasts()
     ]
 
     // Subscribe before requesting the first selected-thread snapshot. Initial
@@ -590,6 +598,8 @@ export default function App() {
       </div>
 
       <CommandPalette />
+
+      <ToastHost />
 
     </div>
 
