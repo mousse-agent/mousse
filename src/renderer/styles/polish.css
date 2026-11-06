@@ -251,23 +251,13 @@ html[data-theme='high-contrast'] {
   --threads-sidebar-row-height: var(--ui-row-height);
 }
 
-.app .threads-sidebar-toolbar {
-  padding: 6px var(--ui-gutter) 2px;
-  gap: 2px;
-}
-
-.app .threads-sidebar-toolbar-button {
-  border-radius: var(--ui-row-radius);
-}
-
-.app .threads-sidebar-toolbar-button:hover,
 .app .threads-sidebar-open-project:hover {
   background: var(--ui-hover);
 }
 
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 2px var(--ui-gutter) 8px;
+  margin: 8px var(--ui-gutter);
   padding: 2px;
   border: 1px solid var(--ui-line);
   border-radius: 10px;

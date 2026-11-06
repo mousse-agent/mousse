@@ -242,6 +242,23 @@ export function contextCompactionPoint(
 }
 
 /**
+ * Where a thread compacts under the Compact context setting. A size compacts at `contextCompactionPoint`
+ * of the model's window when it is known, else of the size itself; Auto (`model-max`) waits for a known
+ * window. Undefined when compaction is off or the point is not known yet. The daemon compacts here and
+ * the context popover shows it.
+ */
+export function settingCompactionPoint(
+  context: Pick<ContextSettings, 'compactionEnabled' | 'compactionTokens'>,
+  knownWindow?: number
+): number | undefined {
+  if (!context.compactionEnabled) return undefined
+  const size = typeof context.compactionTokens === 'number' ? context.compactionTokens : knownWindow
+  if (size === undefined) return undefined
+  const point = contextCompactionPoint(knownWindow ?? size, size)
+  return Number.isFinite(point) ? point : undefined
+}
+
+/**
  * What an agent calling the Mousse MCP server may do on threads other than its own and its
  * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
  * read other threads, `manage` also change them.

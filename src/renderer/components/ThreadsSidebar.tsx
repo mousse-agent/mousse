@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Search, Shield } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield } from '../lib/icons'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
@@ -16,10 +16,9 @@ import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { createAndSelectProjectThread, selectThread } from '../lib/threadActions'
 import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
-import { openPalette } from '../commands/paletteActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
@@ -542,11 +541,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     setExpandedProjects((prev) => new Set(prev).add(projectId))
     await createAndSelectProjectThread(projectId)
   }, { retry: true })
-
-  const openSearch = () => {
-    if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
-    else openPalette('messages')
-  }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -1145,15 +1139,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   return (
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
-
-      <div className="threads-sidebar-toolbar">
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
-          <Search size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void runWithToast('start a thread', createAndSelectThread, { retry: true }) }} title={workspaceMode === 'chats' ? 'New chat' : 'New thread'} aria-label={workspaceMode === 'chats' ? 'New chat' : 'New thread'}>
-          <Edit size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-      </div>
 
       <div className="threads-sidebar-tabs" role="tablist" aria-label="Sidebar" onKeyDown={onTabKeyDown}>
         {([

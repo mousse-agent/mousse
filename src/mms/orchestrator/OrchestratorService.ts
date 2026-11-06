@@ -25,6 +25,7 @@ import {
   normalizeRunSettings,
   resolveContextCompactionTokens,
   resolveModelForMode,
+  settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
@@ -304,13 +305,11 @@ import {
   compactNativeContext,
   createNativeContext,
   appendNativeMessage,
-  DEFAULT_COMPACTION_RESERVE_TOKENS,
   estimateActiveContextTokens,
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
   normalizeNativeContext,
-  shouldCompactNativeContext,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
@@ -7932,8 +7931,11 @@ export class OrchestratorService extends EventEmitter {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
+      let driver: string | undefined
       try {
-        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
+        const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
+        caps = resolved.caps
+        driver = resolved.driver
       } catch {
         caps = undefined
       }
@@ -7961,7 +7963,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      return {
+        ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
+        // Pi compacts its own session near the window (only the on/off is passed to it); the other
+        // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
+        ...(driver === 'pi' ? { compactedByRuntime: true } : {})
+      }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
@@ -10216,16 +10223,14 @@ export class OrchestratorService extends EventEmitter {
           prepareNativeContext: (provider, model) => {
             const capacity = this.nativeContext.nativeProviderModel
             const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
-            const threshold = typeof contextSettings.compactionTokens === 'number'
-              ? contextSettings.compactionTokens : knownLimit
             const previous = session.lastMeasuredContextSignature === `${provider}:${model}`
               ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
               : 0
             const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
             // When the runtime has not reported capacity yet, a numeric Mousse threshold
             // still applies; model-max waits for an actual provider window.
-            if (!contextSettings.compactionEnabled || threshold === undefined ||
-                !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
+            const compactsAt = settingCompactionPoint(contextSettings, knownLimit)
+            if (compactsAt === undefined || !Number.isFinite(activeTokens) || activeTokens < compactsAt) return null
             onCompaction('start')
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
