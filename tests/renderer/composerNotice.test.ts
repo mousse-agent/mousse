@@ -77,6 +77,33 @@ describe('the notice store', () => {
     store.set('gone', null)
     expect(listener).toHaveBeenCalledTimes(1)
   })
+
+  it('stacks only the lost service above a waiting approval; otherwise it is one row like the rest', () => {
+    const store = new ComposerNoticeStore()
+    const service: ComposerNoticeProps = { tone: 'error', title: 'Service lost', priority: 'service' }
+    const approval: ComposerNoticeProps = { tone: 'warning', title: 'Approval', priority: 'approval' }
+    store.set('send', notice('error', 'Send failed'))
+    store.set('service', service)
+    // No approval: the lost service wins, nothing stacks.
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+    store.set('approval', approval)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()?.title).toBe('Service lost')
+    // An ordinary error still waits behind the approval.
+    store.set('service', null)
+    expect(store.top()?.title).toBe('Approval')
+    expect(store.above()).toBeNull()
+    // A paused run outranks the approval, so the lost service shows alone.
+    store.set('service', service)
+    store.set('paused', { tone: 'warning', title: 'Paused', priority: 'paused' })
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+    store.set('paused', null)
+    store.set('approval', null)
+    expect(store.top()?.title).toBe('Service lost')
+    expect(store.above()).toBeNull()
+  })
 })
 
 describe('the notice slot', () => {
@@ -96,6 +123,14 @@ describe('the notice slot', () => {
     expect(title()).toBe('Turn undone')
     expect(host.querySelector('[role="status"]')).not.toBeNull()
     expect(byName(host, 'Redo')).toBeDefined()
+  })
+
+  it('draws the lost service on its own line above a waiting approval, each marked with its priority', () => {
+    render(
+      source('approval', { tone: 'warning', title: 'Approval', priority: 'approval' }),
+      source('service', { tone: 'error', title: 'Service lost', priority: 'service' })
+    )
+    expect(shown().map((line) => [line.dataset.priority, line.getAttribute('aria-label')])).toEqual([['service', 'Service lost'], ['approval', 'Approval']])
   })
 
   it('a notice that resolves leaves the slot empty', () => {

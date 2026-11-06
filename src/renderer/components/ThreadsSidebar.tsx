@@ -15,6 +15,7 @@ import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
+import { openPalette } from '../commands/paletteActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
@@ -348,9 +349,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const upsertThread = useAppStore((s) => s.upsertThread)
 
-  // The Search threads dialog is mounted once, in the navigation rail.
-  const searchOpen = useAppStore((s) => s.threadSearchOpen)
-  const setThreadSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
+  // Search threads opens the command palette, mounted once in the app shell.
+  const searchOpen = useAppStore((s) => s.paletteOpen)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
@@ -514,7 +514,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const openSearch = () => {
     if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
-    else setThreadSearchOpen(true)
+    else openPalette('messages')
   }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
