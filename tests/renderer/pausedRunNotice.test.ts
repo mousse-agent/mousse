@@ -54,7 +54,7 @@ function view(patch: Partial<PausedRunNoticeInput> = {}) {
 describe('the paused run notice', () => {
   it('one line: the limit and when it resumes; the time left and the limit\'s name in the tooltip; only Try now and Cancel', () => {
     view()
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes \S+(\s?[AP]M)?$/)
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes \S+(\s?[AaPp][Mm])?$/)
     expect(line()!.title).toBe("Resumes in 2h 15m. Claude's 5-hour limit was reached. Continues by itself at reset.")
     expect(notice()!.dataset.tone).toBe('warning')
     expect(names()).toEqual(['Try now', 'Cancel'])
@@ -66,12 +66,12 @@ describe('the paused run notice', () => {
 
   it('says an estimated time is approximate', () => {
     view({ pause: pause({ estimated: true }) })
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes around \S+(\s?[AP]M)?$/)
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes around \S+(\s?[AaPp][Mm])?$/)
   })
 
   it('with no timer it says when the limit resets, not that it resumes', () => {
     view({ pause: pause({ autoResume: false }) })
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resets \S+(\s?[AP]M)?$/)
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resets \S+(\s?[AaPp][Mm])?$/)
     expect(line()!.title).toBe("Resets in 2h 15m. Claude's 5-hour limit was reached. It won't continue by itself. Press Try now once it resets.")
   })
 
