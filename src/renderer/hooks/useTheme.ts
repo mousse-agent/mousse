@@ -11,6 +11,7 @@ import { setTurnChangedFiles } from '../lib/turnChangedFilesSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setAnimationSpeed } from '../lib/motion'
+import { applyFrostedComposer } from '../lib/frostedComposer'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -199,6 +200,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
   applyFontSettings(normalized)
   setAnimationSpeed(normalized.animationSpeed)
+  applyFrostedComposer(normalized)
 }
 
 /** Chat display settings that live under appearance: math and the changed-files summary. */

@@ -1036,6 +1036,10 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-secondary);
 }
 
+.frosted-composer-value {
+  min-width: 4ch;
+}
+
 .acrylic-intensity-dial {
   -webkit-appearance: none;
   appearance: none;

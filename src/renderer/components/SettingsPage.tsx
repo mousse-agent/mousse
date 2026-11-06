@@ -1,12 +1,14 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
+import { applyFrostedComposer } from '../lib/frostedComposer'
 import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
 import type {
+  FrostedComposerSlider,
   MousseSettings,
   MousseSettingsUpdate,
   SettingsOptions
@@ -248,6 +250,38 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     }, 120)
   }, [settings])
 
+  /** Frosted composer sliders: the same live preview and debounced save as glass intensity. */
+  const frostedCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const frostedCommitGen = useRef(0)
+  useEffect(
+    () => () => {
+      if (frostedCommitTimer.current) clearTimeout(frostedCommitTimer.current)
+    },
+    []
+  )
+
+  const previewFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const appearance = { ...prev.appearance, [key]: value }
+      applyFrostedComposer(appearance)
+      return { ...prev, appearance }
+    })
+  }, [])
+
+  const commitFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
+    if (frostedCommitTimer.current) clearTimeout(frostedCommitTimer.current)
+    const gen = ++frostedCommitGen.current
+    frostedCommitTimer.current = setTimeout(() => {
+      frostedCommitTimer.current = null
+      // Only this field: the daemon merges it, so a slow save cannot undo another change.
+      void window.mousse.settings.set({ appearance: { [key]: value } as Partial<MousseSettings['appearance']> } as MousseSettingsUpdate).then((updated) => {
+        if (gen !== frostedCommitGen.current) return
+        setSettings(updated)
+      })
+    }, 120)
+  }, [])
+
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
       const current = nextSettings.provider
@@ -458,6 +492,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onRestart={handleRestart}
               onPreviewAcrylicIntensity={previewAcrylicIntensity}
               onCommitAcrylicIntensity={commitAcrylicIntensity}
+              onPreviewFrostedComposer={previewFrostedComposer}
+              onCommitFrostedComposer={commitFrostedComposer}
             />
           )}
           {activeSection === 'integrations' && (
