@@ -13,10 +13,12 @@ import {
   sectionAction,
   sectionPairRatio,
   STATUS_NAMES,
+  sectionStyle,
   type ChangeSectionId,
   type GitSectionId,
   type RowAction,
   type SectionAction,
+  type SectionSizes,
   type SelectedFile
 } from './gitPanelLogic'
 
@@ -61,7 +63,8 @@ interface ChangeSectionProps {
   busy: boolean
   onRowAction: (action: RowAction, file: GitFileChange) => void
   onSectionAction: (action: SectionAction, files: GitFileChange[]) => void
-  flex: number
+  /** The weight a dragged divider gave this section; none until then, so it fits its rows. */
+  flex: number | undefined
   sectionRef?: (el: HTMLDivElement | null) => void
 }
 
@@ -72,7 +75,7 @@ interface ChangeSectionProps {
 export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRowAction, onSectionAction, flex, sectionRef }: ChangeSectionProps) {
   const sectionButton = sectionAction(id, scope)
   return (
-    <div className="git-section" data-section={id} style={{ flex: `${flex} 1 0` }} ref={sectionRef}>
+    <div className="git-section" data-section={id} style={sectionStyle(id, items.length, flex)} ref={sectionRef}>
       <div className="git-section-header">
         <div className="git-section-title">{SECTION_TITLES[id]}</div>
         {sectionButton && (
@@ -147,11 +150,14 @@ interface GitChangesListProps {
   busy: boolean
   onRowAction: (action: RowAction, file: GitFileChange) => void
   onSectionAction: (action: SectionAction, files: GitFileChange[]) => void
-  flex: Record<GitSectionId, number>
+  flex: SectionSizes
   bindSectionRef?: (id: GitSectionId) => (el: HTMLDivElement | null) => void
   onDividerMouseDown?: (upper: GitSectionId, lower: GitSectionId) => void
-  /** Moves the divider between two sections to `ratio`, the upper one's share of the pair. */
-  onDividerResize?: (upper: GitSectionId, lower: GitSectionId, ratio: number) => void
+  /**
+   * Moves the divider between two sections by a key (arrows, Home, End). The panel measures the pair
+   * first when either section still sizes to its content, as a drag does.
+   */
+  onDividerResize?: (upper: GitSectionId, lower: GitSectionId, key: string) => void
 }
 
 const CHANGE_SECTIONS: readonly { id: ChangeSectionId; group: 'conflicts' | 'staged' | 'unstaged' | 'untracked' }[] = [
@@ -181,10 +187,9 @@ export function GitChangesList({ changes, selected, onSelect, scope, busy, onRow
         className="git-section-divider"
         onMouseDown={() => onDividerMouseDown?.(upper, lower)}
         onKeyDown={(event) => {
-          const next = onDividerResize ? keyedSectionRatio(ratio, event.key) : null
-          if (next === null) return
+          if (!onDividerResize || keyedSectionRatio(ratio, event.key) === null) return
           event.preventDefault()
-          onDividerResize?.(upper, lower, next)
+          onDividerResize(upper, lower, event.key)
         }}
         role="separator"
         tabIndex={onDividerResize ? 0 : undefined}

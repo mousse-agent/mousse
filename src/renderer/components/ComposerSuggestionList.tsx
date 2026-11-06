@@ -14,7 +14,7 @@ interface ComposerSuggestionListProps {
   onHover: (index: number) => void
   onPick: (index: number) => void
   /** Shown instead of rows when there are none. */
-  emptyText?: string
+  emptyText?: ReactNode
   /** A status line under the rows ("Indexing files…"). */
   footer?: ReactNode
   /** Keeps the scroll-into-view refs the composer owns. */

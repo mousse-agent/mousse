@@ -123,8 +123,12 @@ export function StorageSettings() {
   const dismissReview = () => void run(async () => { await window.mousse.storage.reviewDismiss() })
   const hasRule = Boolean(policy && trash && storagePolicyHasRule(policy, trash))
 
+  // Space first, then the cleanup that frees it; the rules that clean up on their own follow.
   return <section className="settings-section storage-settings">
     {reviewRecommended && policy && <RecommendedRulesNotice busy={busy} onTurnOn={() => savePolicy(recommendedPolicy(policy))} onDismiss={dismissReview} />}
+    <StorageUsageSection refreshKey={usageKey} />
+    <StorageCleanupSection hasRule={hasRule} onDone={() => { setUsageKey((key) => key + 1); void reload().catch(showRefreshError) }} />
+
     <StoragePolicyRows
       trash={trash}
       policy={policy}
@@ -139,8 +143,5 @@ export function StorageSettings() {
       worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} refusal={folderRefusal} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
     />
     {error && <p className="storage-error" role="alert">{error}</p>}
-
-    <StorageUsageSection refreshKey={usageKey} />
-    <StorageCleanupSection hasRule={hasRule} onDone={() => { setUsageKey((key) => key + 1); void reload().catch(showRefreshError) }} />
   </section>
 }

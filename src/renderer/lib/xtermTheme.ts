@@ -1,5 +1,5 @@
 import type { ITheme, Terminal } from '@xterm/xterm'
-import { CODE_FONT } from './typography'
+import { codeFontStack, subscribeAppFonts } from './appFonts'
 
 const XTERM_THEME_BASE = {
   foreground: '#f0def1',
@@ -23,7 +23,10 @@ const XTERM_THEME_BASE = {
   brightWhite: '#f4e5f4'
 } as const
 
-export const XTERM_FONT = CODE_FONT
+/** xterm cannot read CSS variables; this is the code font setting's resolved stack. */
+export function xtermFont(): string {
+  return codeFontStack()
+}
 
 function readTerminalBackground(): string {
   if (document.documentElement.dataset.acrylic === 'true') return '#00000000'
@@ -31,18 +34,32 @@ function readTerminalBackground(): string {
   return value || '#1a1228'
 }
 
-export function followXtermAppearance(terminal: Terminal): void {
+/**
+ * Keep a terminal's colours and font in step with the theme and the code font setting. A new font
+ * changes the cell size, so `refit` (the terminal's own fit-and-resize path) runs after it.
+ */
+export function followXtermAppearance(terminal: Terminal, refit?: () => void): void {
   const observer = new MutationObserver(() => {
     terminal.options.theme = getXtermTheme()
   })
+  let unsubscribe: (() => void) | undefined
   terminal.loadAddon({
     activate() {
       observer.observe(document.documentElement, {
         attributes: true,
         attributeFilter: ['data-acrylic', 'data-theme', 'style']
       })
+      // Reassigning the same family after a font finishes loading makes xterm measure it again.
+      unsubscribe = subscribeAppFonts(() => {
+        terminal.options.fontFamily = ''
+        terminal.options.fontFamily = xtermFont()
+        refit?.()
+      })
     },
-    dispose() { observer.disconnect() }
+    dispose() {
+      observer.disconnect()
+      unsubscribe?.()
+    }
   })
 }
 

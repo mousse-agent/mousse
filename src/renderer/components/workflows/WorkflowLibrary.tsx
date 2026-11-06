@@ -1,5 +1,6 @@
 import { Plus, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { EmptyState } from '../ui/EmptyState'
 import { SearchInput } from '../ui/SearchInput'
 import { isWorkflowClientError, type WorkflowDefinitionsClient, type WorkflowLibraryItem } from './client'
@@ -198,8 +199,8 @@ export function WorkflowLibrary({
         </div>
       ) : null}
       {loading ? (
-        <div className="wf-loading" role="status">
-          Loading workflows…
+        <div className="wf-loading">
+          <DelayedLoader label="Loading workflows" />
         </div>
       ) : unavailable ? (
         <div className="wf-error" role="alert">

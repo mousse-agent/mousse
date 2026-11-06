@@ -365,6 +365,15 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       metadata: msg.responseMetadata ? { ...msg.responseMetadata } : undefined,
     } as unknown as UIMessage
 
+    // A failed turn ends with Mousse's line carrying the error: it shows as the turn's error, where Retry is.
+    if (msg.role === 'system' && msg.error) {
+      base.role = 'assistant'
+      base.parts = [{ type: 'error', title: 'Request failed', message: msg.error.message || msg.content } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     // Thinking -> tool-Thinking so ThinkingTool renders with shimmer
     if (msg.kind === 'thinking' && msg.thinking) {
       const state = msg.thinking.status === 'processing' ? 'input-available' : 'output-available'
@@ -449,6 +458,22 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       if (msg.kind === 'warning') base.metadata = { ...base.metadata as object, notice: true }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
       base.role = 'assistant'
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    // Answers to the agent's questions are a step of the agent's turn (one row that opens to each
+    // question and its answer), not a message from the user. Older answers carry only the text and
+    // stay a user message: typed text can look the same, so it is not parsed.
+    if (msg.role === 'user' && msg.questionAnswers?.length) {
+      base.role = 'assistant'
+      base.parts = [{
+        type: 'tool-QuestionAnswers',
+        toolCallId: msg.id,
+        state: 'output-available',
+        input: { questions: msg.questionAnswers },
+      } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
       continue

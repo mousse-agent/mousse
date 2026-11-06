@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
+import { Cloud, Download, Folder, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { gitScopeFor } from '../lib/activeProject'
@@ -17,33 +17,40 @@ import {
   discardConfirmLabel,
   IDLE_SYNC_ACTIVITY,
   resizeSectionPair,
+  keyedSectionRatio,
+  sectionPairRatio,
+  sectionStyle,
   selectionAfterAction,
   type GitSectionId,
   type RowAction,
   type SectionAction,
+  type SectionSizes,
   type SyncActivity
 } from './git/gitPanelLogic'
 import { GitOperationStatus } from './git/GitOperationStatus'
 import { GitSyncBar } from './git/GitSyncBar'
+import { DelayedLoader } from './ui/DelayedLoader'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
 import { usePullRequestPushTarget } from './sideCard/usePullRequestPushTarget'
 import { gitActionRowModel } from './sideCard/gitSectionLogic'
+import { folderName } from '../lib/folderLabel'
 
 /** How long a notice from Commit, Push or Create PR stays: it can carry something to act on. */
 const NOTICE_MS = 15_000
 
-function CommitsSection({
+export function CommitsSection({
   commits,
   flex,
   sectionRef
 }: {
   commits: GitCommit[]
-  flex: number
+  /** The weight a dragged divider gave the list; none until then, so it takes the rest of the panel. */
+  flex: number | undefined
   sectionRef?: (el: HTMLDivElement | null) => void
 }) {
   return (
-    <div className="git-section" style={{ flex: `${flex} 1 0` }} ref={sectionRef}>
+    <div className="git-section" data-section="commits" style={sectionStyle('commits', commits.length, flex)} ref={sectionRef}>
       <div className="git-section-title">Commits</div>
       <div className="git-section-list">
         {commits.length === 0 ? (
@@ -133,13 +140,8 @@ export function GitPanel() {
   const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>('private')
   const [cloneRepository, setCloneRepository] = useState('')
   const [cloneDestination, setCloneDestination] = useState('')
-  const [sectionFlex, setSectionFlex] = useState<Record<GitSectionId, number>>({
-    staged: 1,
-    changes: 1,
-    untracked: 1,
-    conflicts: 1,
-    commits: 1
-  })
+  // Empty until a divider is dragged: every section fits its content.
+  const [sectionFlex, setSectionFlex] = useState<SectionSizes>({})
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
   const draggingDivider = useRef<{ upper: GitSectionId; lower: GitSectionId } | null>(null)
 
@@ -167,6 +169,8 @@ export function GitPanel() {
     setActionNotice(null)
     // A question about the files of another folder is no longer the one on screen.
     answerDiscard(false)
+    // Heights dragged for one folder's lists say nothing about another's.
+    setSectionFlex({})
   }, [answerDiscard, folderId, setActionError, setActionNotice])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
@@ -291,11 +295,22 @@ export function GitPanel() {
     }
   }, [cloneDestination, cloneRepository, refreshGitHubStatus])
 
+  // The first drag or key press takes each shown section's current height as its weight, so nothing
+  // jumps when the sections stop fitting their content.
+  const withMeasuredSizes = useCallback((prev: SectionSizes): SectionSizes => {
+    const next: SectionSizes = { ...prev }
+    for (const [id, el] of Object.entries(sectionElsRef.current) as [GitSectionId, HTMLDivElement | null][]) {
+      if (el && next[id] === undefined) next[id] = el.getBoundingClientRect().height
+    }
+    return next
+  }, [])
+
   const onDividerMouseDown = useCallback((upper: GitSectionId, lower: GitSectionId) => {
+    setSectionFlex(withMeasuredSizes)
     draggingDivider.current = { upper, lower }
     document.body.style.cursor = 'row-resize'
     document.body.style.userSelect = 'none'
-  }, [])
+  }, [withMeasuredSizes])
 
   useEffect(() => {
     const onMouseMove = (event: MouseEvent) => {
@@ -329,9 +344,14 @@ export function GitPanel() {
     }
   }, [])
 
-  const onDividerResize = useCallback((upper: GitSectionId, lower: GitSectionId, ratio: number) => {
-    setSectionFlex((prev) => resizeSectionPair(prev, upper, lower, ratio))
-  }, [])
+  // Arrow keys, Home and End on a divider: measure first (as a drag does), then move the pair.
+  const onDividerResize = useCallback((upper: GitSectionId, lower: GitSectionId, key: string) => {
+    setSectionFlex((prev) => {
+      const measured = withMeasuredSizes(prev)
+      const ratio = keyedSectionRatio(sectionPairRatio(measured, upper, lower), key)
+      return ratio === null ? prev : resizeSectionPair(measured, upper, lower, ratio)
+    })
+  }, [withMeasuredSizes])
 
   const bindSectionRef = (id: GitSectionId) => (el: HTMLDivElement | null) => {
     sectionElsRef.current[id] = el
@@ -339,7 +359,7 @@ export function GitPanel() {
 
   const renderSidebarBody = () => {
     if (!folderId) return <div className="git-empty">No project open</div>
-    if (loading) return <div className="git-empty">Loading…</div>
+    if (loading) return <div className="git-empty"><DelayedLoader label="Loading Git status" /></div>
     if (!status?.isRepo) return (
       <div className="github-setup">
         <div className="github-setup-heading"><Cloud size={16} /> Not a Git repository</div>
@@ -408,8 +428,10 @@ export function GitPanel() {
     })
     : null
   const branchName = status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')
-  // Where the actions run: the branch, the thread's own worktree when it is one, and the computer when it is another.
-  const where = [branchName, workspaceThreadId ? "Thread's worktree" : null, projectPath].filter(Boolean).join(' · ')
+  // The folder the branch is in stays named beside it, so two folders on the same branch are told apart.
+  const folder = folderName(projectPath)
+  // Where the actions run: the branch, the folder, the thread's own worktree when it is one; the computer's badge follows.
+  const where = [branchName, projectPath, workspaceThreadId ? "Thread's worktree" : null].filter(Boolean).join(' · ')
 
   return (
     <div className="git-panel">
@@ -418,7 +440,12 @@ export function GitPanel() {
           <div className="git-toolbar-info" title={where}>
             <GitBranch size={14} aria-hidden="true" />
             <span className="git-toolbar-branch">{branchName}</span>
-            {workspaceThreadId && <span className="git-toolbar-folder">worktree</span>}
+            {folder && (
+              <span className="git-toolbar-folder">
+                <Folder size={12} strokeWidth={2} aria-hidden="true" />
+                <span className="git-toolbar-folder-name">{folder}</span>
+              </span>
+            )}
             {activeThread?.node && <ThreadComputerBadge thread={activeThread} withName className="git-toolbar-computer" />}
           </div>
           <button

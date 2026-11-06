@@ -122,7 +122,8 @@ export type AgentChatProps = {
   error?: Error;
 
   classNames?: Partial<ChatClassNames>;
-  slots?: Partial<ChatSlots>;
+  /** The composer comes from the host: `InputBar` is required. */
+  slots: Pick<ChatSlots, "InputBar"> & Partial<ChatSlots>;
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
 
   /** Attachment configuration */
