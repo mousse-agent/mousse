@@ -148,7 +148,7 @@ export interface AgentAccessSettings {
   /** `manage` only: an agent may answer a pending approval on another thread. */
   answerApprovals: boolean
   /**
-   * "Allow agents to create Subagents on other Devices". Off, the default, refuses every remote subagent
+   * "Let agents start subagents on your other devices". Off, the default, refuses every remote subagent
    * whatever `computers` lists; the list is kept, so turning it back on restores the same computers.
    */
   remoteSubagents: boolean
