@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from '../lib/icons'
+import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
+import { EmptyThreadHeading } from './EmptyThreadHeading'
+import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -24,12 +27,19 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
-import { MousseLogoOutline } from './MousseLogoOutline'
-import { APPROVAL_COMPOSER_PLACEHOLDER, ComposerQuestionModal, describeAnswerOutcome } from './ComposerQuestionModal'
-import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
+import {
+  APPROVAL_COMPOSER_PLACEHOLDER,
+  ComposerQuestionModal,
+  QUESTION_COMPOSER_PLACEHOLDER,
+  describeAnswerOutcome,
+  questionComposerSend,
+  type QuestionCardHandle
+} from './ComposerQuestionModal'
+import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile, isImageMimeType } from '../utils/imageAttachments'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
+import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -105,6 +115,14 @@ function selectionKey(selection: { instanceId?: string; llmProvider: string; pic
   return `${selection.instanceId ?? ''}\u0000${selection.llmProvider}\u0000${selection.pickerId}`
 }
 
+/**
+ * The model catalogue to keep after a read: the current one when the read returned the same providers
+ * and models, so a repeated read does not hand the picker a new list.
+ */
+function keepCatalog(current: LlmProviderOption[], next: LlmProviderOption[]): LlmProviderOption[] {
+  return JSON.stringify(current) === JSON.stringify(next) ? current : next
+}
+
 /** The thread's model is exactly the wanted one: the same account, model and reasoning level. */
 function sameModel(
   has: { instanceId?: string; llmProvider: string; model: string; effort?: string } | undefined,
@@ -159,6 +177,8 @@ export function OrchestratorChat() {
   const workspacePending = useAppStore(isWorkspacePending)
   const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
   const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
+  // Picked once per chat, so it holds while typing; another chat may get another line.
+  const emptyHeadline = useMemo(() => emptyThreadHeadline(new Date(), activeThreadId ?? '__blank__'), [activeThreadId])
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -398,11 +418,15 @@ export function OrchestratorChat() {
     }
   }, [pendingQuestions, shownMessages, submitQuickActionDecision])
 
-  // The question tool replaces the composer while active: the input bar
-  // collapses away and re-expands after submit. Both directions animate so
-  // there is no layout jump. Inline quick-action approvals keep the composer
-  // visible (the decision UI lives on the card itself).
+  // The question card opens above the composer, which stays usable: a message sent while the
+  // questions are open answers the one the card shows. The card's height animates in and out so there
+  // is no layout jump. Inline quick-action approvals have no card (the decision UI lives on the card itself).
   const showQuestions = Boolean(pendingQuestions && !quickActionApproval)
+  // Agent questions (not an approval request, whose message denies it) take the composer's message as an answer.
+  const questionsTakeMessage = showQuestions && !pendingQuestions?.approval
+  // The card's handle for answering its shown question, and whether that answer would be the last one (and submit).
+  const questionCardRef = useRef<QuestionCardHandle | null>(null)
+  const [questionAnswerSubmits, setQuestionAnswerSubmits] = useState(false)
   useEffect(() => {
     if (!showQuestions) return
     setRenderQuestions(true)
@@ -425,9 +449,12 @@ export function OrchestratorChat() {
   useEffect(() => {
     if (!showQuestions) return
     const timer = window.setTimeout(() => {
+      // Someone typing in the composer keeps it; an empty, unfocused composer hands focus to the first choice.
+      const composerInput = inputAreaRef.current?.querySelector<HTMLTextAreaElement>('.composer-input')
+      if (composerInput && (document.activeElement === composerInput || composerInput.value.trim())) return
       inputAreaRef.current
         ?.querySelector<HTMLElement>(
-          '.composer-question-modal button:not([disabled]), .composer-question-modal input'
+          '.composer-question-modal .composer-question-choice[tabindex="0"]'
         )
         ?.focus()
     }, 320)
@@ -509,7 +536,7 @@ export function OrchestratorChat() {
       window.mousse.settings.get(),
       window.mousse.settings.getOptions()
     ])
-    setCatalog(options.llmProviders)
+    setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
     const selectedModel = composerSelection({ threadModel: activeThreadModelOverride, profileDefault: settings.provider, providers: providersRef.current })
@@ -553,13 +580,22 @@ export function OrchestratorChat() {
   const remoteAppliedRef = useRef<{ context: string; shown: string } | undefined>(undefined)
   const refreshSelectionRef = useRef(refreshSelection)
   refreshSelectionRef.current = refreshSelection
+  // Coming back from another computer reads this computer's settings again. The read also replaces the
+  // model catalogue, which `providers` is built from, so this runs on a change of computer only: keyed on
+  // `providers` it re-read settings after every read, without end. The first read is the settings effect's.
+  const wasRemoteRef = useRef(false)
   useEffect(() => {
-    if (!remoteNode) {
-      remoteAppliedRef.current = undefined
-      void refreshSelectionRef.current()
+    if (remoteNode) {
+      wasRemoteRef.current = true
       return
     }
-    if (!remoteOptions.loaded) return
+    remoteAppliedRef.current = undefined
+    if (!wasRemoteRef.current) return
+    wasRemoteRef.current = false
+    void refreshSelectionRef.current()
+  }, [remoteNode])
+  useEffect(() => {
+    if (!remoteNode || !remoteOptions.loaded) return
     const own = remoteDraft ? undefined : activeThreadModelOverride
     const remote = remoteDefaultRef.current
     const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
@@ -588,7 +624,7 @@ export function OrchestratorChat() {
       void window.mousse.settings
         .getOptions()
         .then((options) => {
-          if (request === catalogRequest) setCatalog(options.llmProviders)
+          if (request === catalogRequest) setCatalog((current) => keepCatalog(current, options.llmProviders))
         })
         .catch(() => undefined)
     })
@@ -821,7 +857,8 @@ export function OrchestratorChat() {
           ])
         }
         if (result.error) {
-          setSendError(sendErrorLine(result.error))
+          // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
+          if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
           // Admission succeeded: the prompt is already saved in the transcript.
@@ -903,6 +940,20 @@ export function OrchestratorChat() {
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
+  // Retry and Continue on the last turn send through the normal path, never while a run is going.
+  const resendBusy = turnActive || loading
+  const turnActions = useMemo<TurnActions | null>(() => {
+    if (!activeThreadId) return null
+    return createTurnActions({
+      // Read at use: depending on the transcript would rebuild this on every streamed token.
+      prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
+      send: (content, images) => {
+        if (resendBusy || !useAppStore.getState().workspaceReady) return
+        void sendMessage(content, chatMode, images, activeThreadId)
+      }
+    })
+  }, [activeThreadId, resendBusy, sendMessage, chatMode])
+
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
@@ -979,6 +1030,37 @@ export function OrchestratorChat() {
       setInput('')
       await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
       return
+    }
+
+    // Questions open above the composer: the message answers the question the card shows, and the card
+    // moves on to the next unanswered one. Answering the last one submits all the answers, once.
+    // A message with images cannot be an answer; it is sent as usual, which skips the questions.
+    const asked = questionsTakeMessage ? pendingQuestions : null
+    const card = questionCardRef.current
+    if (asked && card && text && questionComposerSend(images.length > 0, false).answers) {
+      const answers = card.answerWithMessage(text)
+      if (!answers) {
+        clearComposer()
+        return
+      }
+      const outcome = await window.mousse.orchestrator.answerQuestionsDetailed(
+        asked.requestId,
+        answers,
+        questionAnswerThreadId(asked, activeThreadId)
+      )
+      setPendingQuestions((current) => (current?.requestId === asked.requestId ? null : current))
+      if (outcome.ok) {
+        clearComposer()
+        return
+      }
+      // Another client answered first or the request was closed: say so and keep the message.
+      const refusal = describeAnswerOutcome(outcome)
+      if (refusal) {
+        setSendError(refusal)
+        return
+      }
+      // The questions closed before the answer arrived: the message goes to the thread as usual.
+      if (!stillVisible()) return
     }
 
     if (newChat) {
@@ -1116,6 +1198,15 @@ export function OrchestratorChat() {
     [projects, workspace.node]
   )
 
+  /** Opens a folder as a project and makes it the new chat's project. */
+  const openProjectForDraft = async () => {
+    const project = await window.mousse.projects.open()
+    const state = useAppStore.getState()
+    if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
+    if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
+    setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
+  }
+
   /** Picks where the new chat runs; the project carries over only if the target lists the same Git repository. */
   const selectRunOnDevice = (node: NodeId | undefined) => {
     if (node === workspace.node) return
@@ -1194,14 +1285,14 @@ export function OrchestratorChat() {
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
         permissionRequests={permissionRequests.controls}
+        turnActions={turnActions}
         composer={(
       <div
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
-        {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
-        {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
+        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
@@ -1236,6 +1327,8 @@ export function OrchestratorChat() {
               <ComposerQuestionModal
                 key={questionsSnapshot.requestId}
                 pending={questionsSnapshot}
+                handleRef={questionCardRef}
+                onComposerSubmitsChange={setQuestionAnswerSubmits}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
                   const threadId = questionAnswerThreadId(questionsSnapshot, activeThreadId)
@@ -1307,12 +1400,6 @@ export function OrchestratorChat() {
           </div>
         )}
 
-        <div
-          className={`composer-collapse${showQuestions ? ' is-collapsed' : ''}`}
-          aria-hidden={showQuestions || undefined}
-          {...(showQuestions ? { inert: true } : {})}
-        >
-          <div className="composer-collapse-inner">
             {newChat && (
               <ComposerWorkspaceToolbar
                 key={`${profileId}:${activeThreadId ?? '__blank__'}`}
@@ -1328,13 +1415,7 @@ export function OrchestratorChat() {
                   onOpenRemoteProject: openProjectOnRunOnDevice
                 }}
                 onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                onOpenProject={async () => {
-                  const project = await window.mousse.projects.open()
-                  const state = useAppStore.getState()
-                  if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
-                  if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
-                  setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
-                }}
+                onOpenProject={openProjectForDraft}
                 onError={setSendError}
               />
             )}
@@ -1366,7 +1447,12 @@ export function OrchestratorChat() {
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
-              placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : ''}
+              placeholder={!workspaceReady ? ''
+                : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
+                  : permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
+              sendLabel={questionsTakeMessage
+                ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
+                : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
@@ -1376,8 +1462,9 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
-          </div>
-        </div>
+        {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
+          <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
+        )}
       </div>
         )}
       />

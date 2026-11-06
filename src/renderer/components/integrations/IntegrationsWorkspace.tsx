@@ -111,6 +111,7 @@ function ScopedWorkspace({ client, profileId, projectId, onTestSkill, policy, sk
   return <div className="skills-mcp-lists" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
     {error ? <p className="skills-mcp-error" role="alert">{error} <button type="button" className="settings-icon-btn" title="Try again" aria-label="Try again" onClick={() => void load(true)}><RotateCcw size={14} /></button></p> : null}
     <SettingsGroup
+      anchor="integrations-skills"
       title="Skills"
       icon={Sparkles}
       description="Instructions an agent loads when a task calls for them."
@@ -124,6 +125,7 @@ function ScopedWorkspace({ client, profileId, projectId, onTestSkill, policy, sk
     </SettingsGroup>
     {loading ? null : <OtherAppsGroup kind="skills" rows={skillGroups.otherApps} />}
     <SettingsGroup
+      anchor="integrations-mcp"
       title="MCP servers"
       icon={Plug}
       description="Servers that give agents extra tools."

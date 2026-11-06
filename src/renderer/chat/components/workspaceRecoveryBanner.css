@@ -84,17 +84,6 @@
   box-shadow: var(--ui-focus-ring);
 }
 
-.chat-workspace-recovery-btn-primary {
-  border-color: transparent;
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.chat-workspace-recovery-btn-primary:hover {
-  background: var(--gradient-accent);
-  filter: brightness(1.08);
-}
-
 .chat-workspace-recovery-btn[aria-disabled="true"] {
   opacity: 0.55;
   cursor: default;

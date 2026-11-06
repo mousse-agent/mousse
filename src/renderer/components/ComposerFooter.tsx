@@ -3,13 +3,10 @@ import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
-import { listingServes } from '../../shared/providerInstances'
-import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import { shortModelName } from '../../shared/modelNames'
-import { carryReasoningLevel, PermissionChip, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
+import { modelPickerRunSettings, PermissionChip, runFasterSpeed, runLevelText } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
-import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
+import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
 import { formatBinding } from '../../shared/commands'
@@ -71,6 +68,8 @@ export interface ComposerFooterProps {
   /** A recording is being turned into text; the microphone and send buttons wait. */
   transcribing?: boolean
   onSend?: () => void
+  /** What the send button says it does, when not "Send message" / "Queue message" (such as answering open questions). */
+  sendLabel?: string
   onStop?: () => void
   onStartRecording?: () => void
   onStopRecording?: () => void
@@ -119,7 +118,8 @@ export function ComposerFooter({
   onImplementPlan,
   implementPlanDisabled = false,
   allowAttachWhileLoading = false,
-  permission
+  permission,
+  sendLabel
 }: ComposerFooterProps) {
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
@@ -159,35 +159,9 @@ export function ComposerFooter({
     modelButtonRef.current?.focus()
   }
 
-  // The picker's run settings column: the highlighted model's, with the chosen level carried over.
-  // With no level chosen (or one this model does not offer) none is carried: the next model runs at its own default.
-  const chosen = parseThinkingSuffixFromModelId(selectedModelId).effort
-  const carried = chosen && chosen === shownReasoningLevel(selection) ? chosen : undefined
-  const listingOf = (target: ModelPickTarget) => providers.find((entry) => listingServes(entry, { instanceId: target.instanceId, llmProvider: target.providerId }))
-  const resolveTarget = (target: ModelPickTarget): RunSettingsTarget => {
-    const pick = { providerId: target.providerId, modelId: target.modelId, models: listingOf(target)?.models ?? [] }
-    if (target.selected) return { ...pick, instanceId: target.instanceId, selected: true }
-    const { modelId, dropped } = carryReasoningLevel(pick, carried)
-    return { ...pick, modelId, instanceId: target.instanceId, selected: false, ...(dropped ? { dropped } : {}) }
-  }
-  const runSettings = {
-    pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
-    // Beside the list: the highlighted model's reasoning levels, whenever any model the picker lists has
-    // levels, so the column stays in place while you search or switch providers.
-    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
-      if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
-      return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
-    },
-    // Under the picker: the highlighted model's speed. The permission mode has its own chip beside the model button.
-    footer: (target: ModelPickTarget | undefined) => {
-      const resolved = target ? resolveTarget(target) : undefined
-      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
-      if (!resolved || !speeds) return null
-      return <div className="model-picker-footer-start">
-        <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onModelSelect} onClose={closePicker} />
-      </div>
-    }
-  }
+  // The picker's run settings: the highlighted model's level and speed, with the chosen level carried over.
+  // The permission mode has its own chip beside the model button, so the picker's footer holds only the speed.
+  const runSettings = modelPickerRunSettings({ providers, selection, onSelect: onModelSelect, onClose: closePicker })
   const emptyModelMenuStyle = useFloatingPosition({
     open: modelMenuOpen && providers.length === 0,
     anchorRef: modelButtonRef,
@@ -387,8 +361,8 @@ export function ComposerFooter({
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={loading ? queueTitle : 'Send'}
-            aria-label={loading ? 'Queue message' : 'Send message'}
+            title={sendLabel ?? (loading ? queueTitle : 'Send')}
+            aria-label={sendLabel ?? (loading ? 'Queue message' : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}
           >
