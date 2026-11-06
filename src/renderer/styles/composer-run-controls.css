@@ -4,6 +4,7 @@
 .composer-run-controls {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -182,88 +183,62 @@
   box-shadow: var(--ui-specular), var(--ui-focus-ring);
 }
 
-/* Permission: the thread's mode as a quiet button; its menu opens above, right-aligned. */
-.model-picker-permission-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 8px 0 10px;
-  border-radius: var(--ui-control-radius);
-  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  transition: background 0.12s, color 0.12s;
-}
-
-.model-picker-permission-btn:hover,
-.model-picker-permission-btn.open {
+/* Permission chip: the thread's mode as an icon left of the model button. Neutral for every mode but
+   Full access, whose icon takes the warning colour; the chip itself is never filled with colour. */
+.composer-permission-chip.open {
   background: var(--ui-hover);
   color: var(--text-primary);
 }
 
-.model-picker-permission-btn:focus-visible {
+.composer-permission-chip.is-full,
+.composer-permission-chip.is-full:hover:not(:disabled) {
+  color: var(--warning);
+}
+
+.composer-permission-chip:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
 }
 
-.model-picker-permission-btn.is-limited .model-picker-permission-icon {
-  color: var(--warning);
-}
-
-.model-picker-permission-menu {
-  position: absolute;
-  right: 8px;
-  bottom: calc(100% + 6px);
-  z-index: 2;
+/* Its menu: the run menu material, the modes in one container, the chosen one a lighter chip. */
+.composer-mode-menu.composer-permission-menu {
   width: 300px;
   padding: 8px;
-  border: 1px solid var(--ui-line-strong);
-  border-radius: var(--ui-menu-radius);
-  background: var(--ui-raised);
-  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
-.model-picker-permission-menu .composer-mode-menu-heading {
+.composer-permission-menu .composer-mode-menu-heading {
   padding: 0 0 6px;
 }
 
-/* The modes in one container, the chosen one a lighter chip. */
-.model-picker-permission-menu .composer-run-menu-permission-row {
+.composer-permission-menu .composer-run-menu-permission-row {
   padding: 2px;
   gap: 2px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--text-primary) 5%, transparent);
 }
 
-.model-picker-permission-menu .composer-run-menu-permission {
+.composer-permission-menu .composer-run-menu-permission {
   height: 28px;
 }
 
-.model-picker-permission-menu .composer-run-menu-permission-line {
+.composer-permission-menu .composer-run-menu-permission-line {
   min-height: 0;
   padding: 8px 0 0;
   font-size: 12px;
 }
 
-.model-picker-permission-menu .composer-run-menu-permission-name {
+.composer-permission-menu .composer-run-menu-permission-name {
   display: block;
   margin: 0 0 2px;
   font-size: 13.5px;
   font-weight: 600;
 }
 
-/* The run menu (an assigned model's, and Settings'): the shared menu material with even padding; wide
-   enough for the permission line.
+/* The run menu (Settings' reasoning picker): the shared menu material with even padding.
    It shows every option without scrolling: only the window bounds it (the floating layer keeps 8px
    from each edge), not the shared menu's 280px cap, which app.css sets after this file. */
 .composer-mode-menu.composer-run-menu {
   max-height: calc(100vh - 16px);
-}
-
-.composer-run-menu.has-permissions {
-  width: 248px;
 }
 
 :is(.composer-run-menu, .model-picker-run) .composer-mode-menu-section {
