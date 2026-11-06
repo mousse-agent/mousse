@@ -9,6 +9,12 @@ export function openSettingsSection(section: string): void {
   window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: section }))
 }
 
+/**
+ * Where an old link to the Account page (`account`, or the older `profile`) goes: Mousse ID sign-in
+ * at the top of Devices when this build has the service, otherwise Activity, the rest of that page.
+ */
+export const accountSection = (mousseId: boolean): 'connections' | 'activity' => mousseId ? 'connections' : 'activity'
+
 /** The section requested before the settings page mounted, consumed once. */
 export function takePendingSettingsSection(): string | undefined {
   const section = pendingSection
