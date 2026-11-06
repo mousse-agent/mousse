@@ -182,7 +182,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
  * Search, Todo, ...). Anything else stays a generic MCP row.
  */
 const RICH_TOOL_TYPES = new Set([
-  'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+  'Read', 'Edit', 'MultiEdit', 'Write', 'Bash', 'Grep', 'Glob',
   'TodoWrite', 'PlanWrite', 'ExitPlanMode',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
   'Question', 'Thinking', 'cloning', 'QuickAction',
@@ -452,7 +452,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
-    if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction') {
+    if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
+      if (msg.kind === 'context_cleared') base.metadata = { ...base.metadata as object, contextCleared: true }
       if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true }
       // A line from Mousse itself (uncommitted changes it could not put back), not part of the agent's answer.
       if (msg.kind === 'warning') base.metadata = { ...base.metadata as object, notice: true }

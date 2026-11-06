@@ -1,16 +1,22 @@
 import { outdatedComputerName } from '../../shared/bridge/computerErrors'
 import { openSettingsSection } from '../lib/settingsNavigation'
+import { useComposerNotice, type ComposerNoticeProps } from './ComposerNotice'
 
 /**
- * A line above the composer that says why something did not go out. When the computer that runs the
- * thread is too old to do the action, the line offers to open Devices, where its update steps are.
+ * Why something did not go out, as the composer's notice. When the computer that runs the thread is too
+ * old to do the action, it offers to open Devices, where its update steps are.
  */
-export function ComputerNotice({ message }: { message: string }) {
+export function computerNotice(message: string, onDismiss?: () => void): ComposerNoticeProps {
   const outdated = outdatedComputerName({ message })
-  return (
-    <div className="connection-failed-pill" role="alert">
-      <span>{message}</span>
-      {outdated && <button type="button" onClick={() => openSettingsSection('connections')}>Update {outdated}…</button>}
-    </div>
-  )
+  return {
+    tone: 'error',
+    title: message,
+    ...(outdated ? { actions: [{ label: `Update ${outdated}…`, onClick: () => openSettingsSection('connections') }] } : {}),
+    ...(onDismiss ? { onDismiss } : {})
+  }
+}
+
+export function ComputerNotice({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
+  useComposerNotice(computerNotice(message, onDismiss))
+  return null
 }
