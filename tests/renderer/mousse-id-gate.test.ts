@@ -91,3 +91,71 @@ describe('Devices loading', () => {
     expect((await readDevices(true)).hosted).toEqual({ configured: true, connected: true })
   })
 })
+
+describe('Mousse ID sign-in', () => {
+  const original = (globalThis as { window?: unknown }).window
+  afterEach(async () => {
+    const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
+    useMousseIdStore.getState().cancelSignIn()
+    ;(globalThis as { window?: unknown }).window = original
+  })
+
+  it('a sign-in cancelled before its callback was ready opens nothing and leaves the next sign-in going', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdStore')
+    const net = { enabled: true, self: { node: 'n', isAuthority: true }, keystore: 'unlocked', protected: true, routes: [], peers: [] }
+    let begun = 0
+    const request = vi.fn((method: string) => {
+      if (method === 'net.plus.discover') return Promise.resolve({ apiOrigin: 'https://id.example' })
+      if (method === 'net.plus.login.begin') {
+        begun += 1
+        return Promise.resolve({ id: `login-${begun}`, verificationUri: `https://id.example/approve/${begun}`, expiresAt: Date.now() + 600_000, pollIntervalMs: 60_000 })
+      }
+      // The browser approval never comes back during this test.
+      if (method === 'net.plus.login.finish') return new Promise(() => undefined)
+      if (method === 'net.status') return Promise.resolve(net)
+      return Promise.resolve({})
+    })
+    const callbacks: Array<(value: { id: string; url: string }) => void> = []
+    const cancelCallback = vi.fn(async () => undefined)
+    const open = vi.fn()
+    ;(globalThis as { window?: unknown }).window = {
+      open,
+      mousse: {
+        platformRequest: { request },
+        app: { getInfo: async () => ({ deviceName: 'Laptop' }) },
+        mousseId: {
+          config: async () => undefined,
+          startCallback: () => new Promise((resolve) => { callbacks.push(resolve) }),
+          waitCallback: () => new Promise(() => undefined),
+          cancelCallback
+        }
+      }
+    }
+    useMousseIdStore.setState({ profileId: useAppStore.getState().profileId, loaded: true, runtimeOrigin: 'https://id.example', net: net as never, busy: false, pending: undefined, error: '' })
+    const state = () => useMousseIdStore.getState()
+
+    await state().signIn()
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1))
+    state().cancelSignIn()
+    await state().signIn()
+    await vi.waitFor(() => expect(callbacks).toHaveLength(2))
+    callbacks[1]!({ id: 'callback-2', url: 'http://127.0.0.1:1/2' })
+    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1))
+
+    // The first sign-in's callback is ready only now, after it was cancelled.
+    callbacks[0]!({ id: 'callback-1', url: 'http://127.0.0.1:1/1' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(String(open.mock.calls[0]![0])).toContain('/approve/2')
+    expect(cancelCallback).toHaveBeenCalledWith('callback-1')
+    expect(cancelCallback).not.toHaveBeenCalledWith('callback-2')
+    expect(state().busy).toBe(true)
+    expect(state().pending?.id).toBe('login-2')
+
+    // Cancelling now cancels the second sign-in, which this window still holds.
+    state().cancelSignIn()
+    expect(cancelCallback).toHaveBeenCalledWith('callback-2')
+  })
+})

@@ -41,6 +41,8 @@ interface OpenFileState {
   error: string | null
   diskContent?: string
   initialLoadFailed?: boolean
+  /** The last background refresh failed: `error` says so until a refresh reads the file again. */
+  refreshFailed?: boolean
   assetUrl?: string
   assetSignature?: string
 }
@@ -59,6 +61,11 @@ function basename(path: string): string {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** A refresh read the file again after one failed: its error goes, unless a failed save shows its own. */
+function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
+  return file.saveState === 'error' ? { refreshFailed: false } : { refreshFailed: false, error: null }
 }
 
 function assetSignature(data: ArrayLike<number>, mimeType: string): string {
@@ -265,13 +272,15 @@ export function FilesPanel() {
           void window.mousse.fs.readAsset(path, undefined, file.threadId).then((asset) => {
             const current = filesRef.current[key]
             const signature = assetSignature(asset.data, asset.mimeType)
-            if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.assetSignature === signature) return
+            if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId) return
+            if (current.refreshFailed) patchFile(key, refreshRecovered(current))
+            if (current.assetSignature === signature) return
             const bytes = Uint8Array.from(asset.data)
             const url = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
             if (current.assetUrl) URL.revokeObjectURL(current.assetUrl)
             patchFile(key, { assetUrl: url, assetSignature: signature, error: null })
           }).catch((error) => {
-            if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}` })
+            if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
           })
           continue
         }
@@ -281,15 +290,16 @@ export function FilesPanel() {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
           if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
+          if (current.refreshFailed) patchFile(key, refreshRecovered(current))
           const result = reconcileExternalContent(current.savedContent, current.content, diskContent)
           if (result.kind === 'replace') patchFile(key, { content: result.content, savedContent: result.content, error: null, saveState: 'saved' })
           if (result.kind === 'conflict') {
             queues.current.get(key)?.cancel()
             saveBlockers.current.add(key)
-            patchFile(key, { diskContent: result.diskContent, saveState: 'conflict', error: 'This file changed on disk. Your edits were kept.' })
+            patchFile(key, { diskContent: result.diskContent, saveState: 'conflict', error: 'This file changed on disk. Your edits were kept.', refreshFailed: false })
           }
         }).catch((error) => {
-          if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}` })
+          if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
         })
       }
     }, REVALIDATE_MS)

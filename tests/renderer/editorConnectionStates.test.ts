@@ -37,7 +37,12 @@ vi.mock('../../src/renderer/lib/settingsNavigation', () => ({ openDevice: (node:
 vi.mock('../../src/renderer/components/sideCard/EditorSshToast', () => ({ EditorSshToast: () => null }))
 vi.mock('../../src/renderer/components/devices/ApproveSshRouteDialog', () => ({ ApproveSshRouteDialog: () => null }))
 
-const { OpenInRemoteEditor } = await import('../../src/renderer/components/sideCard/EditorMenuButton')
+vi.mock('../../src/renderer/hooks/useActiveProjectPath', () => ({
+  useActiveProjectLocation: () => ({ projectId: 'project-1', path: null, key: null, workspaceThreadId: null })
+}))
+
+const { OpenInEditor, OpenInRemoteEditor } = await import('../../src/renderer/components/sideCard/EditorMenuButton')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 const NODE = 'nod_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 const SELF = 'nod_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -303,5 +308,48 @@ describe('the editor item of a thread on another computer, state by state', () =
       act(() => root.unmount())
       root = createRoot(host)
     }
+  })
+})
+
+describe('the editor item when the thread in view changes', () => {
+  let host: HTMLDivElement
+  let root: Root
+  const settle = async () => {
+    for (let round = 0; round < 6; round += 1) await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
+  }
+  const buttons = () => [...host.querySelectorAll<HTMLButtonElement>('button')].map((item) => item.textContent?.trim())
+
+  beforeEach(() => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    state.route = 'mousse'
+    state.devices = [{ node: SELF, self: true, name: 'This computer', state: 'open' }, { node: NODE, name: 'Computer B', state: 'open', platform: 'linux' }]
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  it('does not show what an open started in the previous thread came to', async () => {
+    let refuse!: () => void
+    const openRemote = vi.fn(() => new Promise<RemoteOpenResult>((resolve) => { refuse = () => resolve({ ok: false, reason: 'connection', failure: 'editor_off' }) }))
+    ;(window as unknown as { mousse: unknown }).mousse = { editors: { openRemote, askAccess: vi.fn(), list: async () => [code] } }
+    const remote = (id: string) => ({ id, node: NODE, projectId: 'project-1' })
+    useAppStore.setState({ profileId: 'p1', threads: [remote(THREAD), remote(`${NODE}:t2`)] as never, activeThreadId: THREAD })
+    act(() => root.render(createElement(OpenInEditor)))
+    await settle()
+    const open = [...host.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.trim() === 'Open in VS Code')!
+    await act(async () => { open.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
+    expect(host.textContent).toContain('Checking')
+
+    act(() => useAppStore.setState({ activeThreadId: `${NODE}:t2` }))
+    await settle()
+    refuse()
+    await settle()
+    expect(host.textContent).not.toContain('Checking')
+    expect(buttons()).toContain('Open in VS Code')
+    expect(buttons().some((label) => label?.startsWith('Ask'))).toBe(false)
   })
 })

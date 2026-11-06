@@ -70,14 +70,16 @@ function png(): string {
   return pngBase64
 }
 
-/** A turn whose first group, long text and second group let the viewport edge cut through it. */
+/**
+ * A turn whose group of tool calls and long answer let the viewport edge cut through it. A finished turn shows its
+ * activity above its answer, so the next group down is the next turn's.
+ */
 function straddlingTurn(index: number): UIMessage[] {
   const paragraphs = Array.from({ length: 12 }, (_, p) => `anchor-paragraph-${p + 1} ${prose(index + p, 420)}`)
   return [
     user(index),
     ...toolGroup(`s-first-${index}`, 2, 5),
     assistant(`a-${index}`, [text(paragraphs.join('\n\n'))]),
-    ...toolGroup(`s-second-${index}`, 2, 5),
   ]
 }
 

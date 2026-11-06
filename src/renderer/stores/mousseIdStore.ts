@@ -147,6 +147,8 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     const profileId = get().profileId
     const controller = new AbortController()
     current = { controller }
+    // Cancel, or a sign-in started after this one, takes `current`: this one then leaves the shared state alone.
+    const owns = () => !current || current.controller === controller
     set({ busy: true, error: '' })
     const deviceName = (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device'
     let net = get().net
@@ -157,7 +159,8 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
       try {
         net = await prepareNetworking(net, deviceName)
       } catch (cause) {
-        if (current?.controller === controller) current = undefined
+        if (!owns()) return 'started'
+        current = undefined
         const conflict = errorCode(cause) === 'conflict'
         set({
           busy: false,
@@ -176,6 +179,8 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
       let callbackId: string | undefined
       try {
         const configuration = await request<Omit<PlusConfiguration, 'accountId'>>('net.plus.discover', { apiOrigin: origin })
+        // A cancelled sign-in must not begin one: beginning replaces the sign-in a newer attempt started.
+        if (controller.signal.aborted) throw new PlusSignInError('cancelled', 'Sign-in cancelled.')
         const begin = {
           configuration,
           deviceName,
@@ -197,6 +202,8 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
         // The approval page sends the browser back here; polling still covers browsers that can't.
         const callback = await window.mousse.mousseId?.startCallback().catch(() => undefined)
         callbackId = callback?.id
+        // Cancelled while the callback was starting: open nothing (the callback is stopped below).
+        if (controller.signal.aborted || current?.controller !== controller) throw new PlusSignInError('cancelled', 'Sign-in cancelled.')
         current = { controller, callbackId }
         const { sleep, wake } = createWakeableSleep()
         if (callback) {
@@ -214,12 +221,13 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           sleep
         })
       } catch (cause) {
-        if (!(cause instanceof PlusSignInError && cause.code === 'cancelled') && get().profileId === profileId)
+        if (!(cause instanceof PlusSignInError && cause.code === 'cancelled') && owns() && get().profileId === profileId)
           set({ error: signInErrorMessage(cause, origin, get().net) })
       } finally {
         stopCallback(callbackId)
+        const owner = owns()
         if (current?.controller === controller) current = undefined
-        if (get().profileId === profileId) {
+        if (owner && get().profileId === profileId) {
           set({ pending: undefined, busy: false })
           await get().refresh()
         }

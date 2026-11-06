@@ -66,6 +66,16 @@ export async function runRowAction(
   }
 }
 
+/**
+ * Wraps a setter so a result that arrives after the panel moved to another folder is dropped:
+ * the panel shows the folder it is on now, not the one an action started in.
+ */
+export function whileFolder<T>(folder: { readonly current: string | null }, startedIn: string, set: (value: T) => void): (value: T) => void {
+  return (value) => {
+    if (folder.current === startedIn) set(value)
+  }
+}
+
 const CANCELLED_TEXT = { fetch: 'Fetch cancelled', pull: 'Pull cancelled', abort: 'Abort cancelled' } as const
 
 export type SyncRequest =
