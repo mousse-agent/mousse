@@ -98,7 +98,7 @@ describe('Settings > General > Runs', () => {
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
   })
 
-  it('starts new chats in a worktree by default, and turning it off saves it without touching the rest', () => {
+  it('starts new threads in a worktree by default, and turning it off saves it without touching the rest', () => {
     const { updates } = show()
     expect(worktreeToggle().getAttribute('aria-checked')).toBe('true')
     click(worktreeToggle())

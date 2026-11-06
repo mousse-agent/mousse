@@ -2740,6 +2740,28 @@ html[data-theme='high-contrast'] .chat-input-area {
   50% { opacity: 0.65; }
 }
 
+/* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */
+.context-usage-ring {
+  color: var(--accent-hover);
+}
+
+.context-usage-ring.is-warning {
+  color: var(--warning);
+}
+
+.context-usage-ring.is-danger {
+  color: var(--danger);
+}
+
+.context-usage-ring-track {
+  stroke: currentColor;
+  stroke-opacity: 0.2;
+}
+
+.context-usage-ring-arc {
+  stroke: currentColor;
+}
+
 /* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
 .context-usage-popover {
   position: absolute;
@@ -2806,25 +2828,12 @@ html[data-theme='high-contrast'] .chat-input-area {
   color: var(--text-primary);
 }
 
+/* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
 .context-usage-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.context-usage-percent {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
+  margin-bottom: -4px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
-}
-
-.context-usage-total {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+  color: var(--ui-faint);
 }
 
 /* Filled against the model's capacity; the empty track is the room left. */

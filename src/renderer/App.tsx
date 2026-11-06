@@ -23,6 +23,7 @@ import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
 import { ToastHost } from './components/ui/Toast'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
+import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 
 import { openSurface } from './lib/surfaces'
 import { selectThread } from './lib/threadActions'
@@ -351,7 +352,10 @@ export default function App() {
         openDocument(title, markdown)
       }),
       // A thread's notification was clicked: open that thread.
-      window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId)))
+      window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId))),
+      // A thread the person is not looking at finished, needs them, or stopped.
+      window.mousse.app.onThreadToast(applyIfCurrent(showThreadToast)),
+      watchOpenedThreadToasts()
     ]
 
     // Subscribe before requesting the first selected-thread snapshot. Initial
