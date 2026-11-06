@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { returnTrashedThreadsToArchive, TRASH_TO_ARCHIVE_MARKER } from '../src/mms/lifecycle/trashToArchive'
+import { returnTrashedThreadsToArchive, TRASH_TO_ARCHIVE_ATTEMPTS, TRASH_TO_ARCHIVE_MARKER } from '../src/mms/lifecycle/trashToArchive'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -39,7 +39,7 @@ describe('threads in the old trash go back to Archived', () => {
       { id: 'owned', parent: 'owner', state: 'trashed' }
     ])
     const result = await returnTrashedThreadsToArchive(p.deps)
-    expect(result).toEqual({ done: true, skipped: false, restored: ['owner', 'owned'], failed: [] })
+    expect(result).toEqual({ done: true, skipped: false, restored: ['owner', 'owned'], failed: [], waiting: [], gaveUp: [] })
     expect(p.restored).toEqual(['owner', 'owned'])
     // Which of them a person started is the caller's decision.
     expect(p.archived).toEqual(['owner', 'owned'])
@@ -50,7 +50,7 @@ describe('threads in the old trash go back to Archived', () => {
     const p = profile([{ id: 'first', state: 'trashed' }, { id: 'later', state: 'active' }])
     await returnTrashedThreadsToArchive(p.deps)
     p.store.update('later', (record) => { record.state = 'trashed' })
-    expect(await returnTrashedThreadsToArchive(p.deps)).toEqual({ done: true, skipped: true, restored: [], failed: [] })
+    expect(await returnTrashedThreadsToArchive(p.deps)).toEqual({ done: true, skipped: true, restored: [], failed: [], waiting: [], gaveUp: [] })
     expect(p.restored).toEqual(['first'])
     expect(p.store.require('later').state).toBe('trashed')
   })
@@ -61,14 +61,24 @@ describe('threads in the old trash go back to Archived', () => {
     const restore = p.deps.restore
     p.deps.restore = async (taskId: string) => { if (taskId === 'stuck' && fail) throw new Error('busy'); await restore(taskId) }
     const first = await returnTrashedThreadsToArchive(p.deps)
-    expect(first).toEqual({ done: false, skipped: false, restored: ['fine'], failed: [{ taskId: 'stuck', error: 'busy' }] })
+    expect(first).toEqual({ done: false, skipped: false, restored: ['fine'], failed: [{ taskId: 'stuck', error: 'busy' }], waiting: ['stuck'], gaveUp: [] })
     expect(JSON.parse(readFileSync(p.marker, 'utf8'))).toMatchObject({ status: 'pending', taskIds: ['fine', 'stuck'] })
     // A delete in progress between the two starts: not part of the move.
     p.store.update('later', (record) => { record.state = 'trashed' })
     fail = false
     const second = await returnTrashedThreadsToArchive(p.deps)
-    expect(second).toEqual({ done: true, skipped: false, restored: ['stuck'], failed: [] })
+    expect(second).toEqual({ done: true, skipped: false, restored: ['stuck'], failed: [], waiting: [], gaveUp: [] })
     expect(p.store.require('later').state).toBe('trashed')
     expect(existsSync(p.marker)).toBe(true)
+  })
+
+  it('stops blocking after a restore fails at several starts: done, and that thread is left in the trash', async () => {
+    const p = profile([{ id: 'broken', state: 'trashed' }])
+    p.deps.restore = async () => { throw new Error('the folder is missing') }
+    for (let start = 1; start < TRASH_TO_ARCHIVE_ATTEMPTS; start++)
+      expect(await returnTrashedThreadsToArchive(p.deps)).toMatchObject({ done: false, waiting: ['broken'], gaveUp: [] })
+    expect(await returnTrashedThreadsToArchive(p.deps)).toMatchObject({ done: true, waiting: [], gaveUp: ['broken'] })
+    expect(JSON.parse(readFileSync(p.marker, 'utf8'))).toMatchObject({ status: 'done', gaveUp: ['broken'] })
+    expect(p.store.require('broken').state).toBe('trashed')
   })
 })

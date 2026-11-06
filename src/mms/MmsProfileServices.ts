@@ -114,10 +114,7 @@ import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
-  'threads.delete',
-  'threads.trash',
-  'threads.restore',
-  'threads.purge'
+  'threads.delete'
 ])
 
 /**
@@ -131,7 +128,7 @@ const LIFECYCLE_EXEMPT_METHODS = new Set([
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.usage',
-  // Deleting a bot trashes its home thread once its runs stopped; its own request is not other work.
+  // Deleting a bot deletes its home thread once its runs stopped; its own request is not other work.
   'bots.definitions.delete'
 ])
 
@@ -1013,11 +1010,14 @@ export class MmsProfileServices {
     expectedGeneration?: number
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
-    return this.lifecycle.restore({
+    const record = await this.lifecycle.restore({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId),
       expectedGeneration
     })
+    // Its delete is over: the consent recorded for it can never be used again.
+    if (record.state === 'active') this.threadDeletes.forgetIntent(taskId)
+    return record
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
@@ -1147,14 +1147,18 @@ export class MmsProfileServices {
   }
 
   /** Finishes the deletes a crash or a lock cut short (see `ThreadDeleter.finishCutShort`); run at start, after the move above is done. */
-  finishCutShortDeletes(): ReturnType<ThreadDeleter['finishCutShort']> {
-    return this.threadDeletes.finishCutShort()
+  finishCutShortDeletes(skip?: ReadonlySet<string>): ReturnType<ThreadDeleter['finishCutShort']> {
+    return this.threadDeletes.finishCutShort(skip)
   }
 
-  /** Archives a thread a person started; a subagent thread or a thread another owns (a bot's) is left as it is. */
+  /**
+   * Archives a thread a person started, or a subagent thread whose parent chain is gone (it is then listed on its
+   * own). A subagent thread under its parent, or a thread another owns (a bot's), is left as it is.
+   */
   private archiveIfStartedByPerson(taskId: string): void {
     const thread = this.threads.getThread(taskId)
-    if (!thread || thread.settledAt || thread.lineage || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
+    const root = thread?.lineage?.rootThreadId
+    if (!thread || thread.settledAt || (root && root !== taskId && this.threads.getThread(root)) || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
     this.threads.setThreadSettled(taskId, true)
   }
 
@@ -1167,11 +1171,10 @@ export class MmsProfileServices {
     try {
       const returned = await this.returnTrashToArchive()
       if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
-      if (returned.done) {
-        const finished = await this.finishCutShortDeletes()
-        const kept = finished.filter((entry) => entry.outcome === 'kept')
-        if (kept.length) console.warn('some deletes that were cut short could not be finished; trying again at the next start', { kept })
-      }
+      // While the move is still bringing threads back, those are left to it; everything else is finished now.
+      const finished = await this.finishCutShortDeletes(new Set(returned.waiting))
+      const kept = finished.filter((entry) => entry.outcome === 'kept')
+      if (kept.length) console.warn('some threads in the trash could not be finished or put back; trying again at the next start', { kept })
     } catch (error) {
       console.warn('threads in the trash could not be moved to Archived or finished', { error: error instanceof Error ? error.message : String(error) })
     }

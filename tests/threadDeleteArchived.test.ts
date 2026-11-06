@@ -154,6 +154,37 @@ describe('threads.delete', () => {
     } finally { await f.close() }
   })
 
+  it('never purges a thread in the trash with no recorded delete: it goes back to Archived', async () => {
+    const f = await lifecycleHarness()
+    try {
+      // An older build's trash, left in progress at the upgrade: nothing to discard, and no delete was asked for here.
+      const thread = f.services.threads.createThread('Left in the old trash')
+      await f.services.trashThread(thread.id)
+      expect(await f.services.finishCutShortDeletes()).toEqual([{ taskId: thread.id, outcome: 'archived' }])
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+    } finally { await f.close() }
+  })
+
+  it("drops a delete's consent when its thread is restored, so a later trash cannot reuse it", async () => {
+    const f = await lifecycleHarness()
+    try {
+      const thread = f.services.threads.createThread('Restored after a cut-short delete')
+      soleCopy(f.services, thread.id)
+      await f.rpc.request('threads.settle', { threadId: thread.id, settled: true })
+      vi.spyOn(f.services.lifecycle.cleanup, 'purge').mockRejectedValueOnce(new Error('the process ended'))
+      await expect(f.rpc.request('threads.delete', { threadId: thread.id, discard: true })).rejects.toThrow()
+      const intents = join(f.services.threads.lifecycleStore.root, 'delete-intents.json')
+      expect(JSON.parse(readFileSync(intents, 'utf8'))[thread.id]).toMatchObject({ human: true, discard: true })
+      await f.services.restoreThread(thread.id)
+      expect(JSON.parse(readFileSync(intents, 'utf8'))[thread.id]).toBeUndefined()
+      // Trashed again without a delete: the start puts it back, its only copy kept.
+      await f.services.trashThread(thread.id)
+      expect(await f.services.finishCutShortDeletes()).toEqual([{ taskId: thread.id, outcome: 'archived' }])
+      expect(readFileSync(join(f.services.threads.getThreadDir(thread.id), 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
+    } finally { await f.close() }
+  })
+
   it("keeps Mousse's own delete of a thread with unpublished work in Archived instead of failing", async () => {
     const f = await lifecycleHarness()
     try {
@@ -168,16 +199,19 @@ describe('threads.delete', () => {
   })
 })
 
-describe('threads.trash', () => {
-  it('refuses a thread that is not archived, from the app and the CLI', async () => {
+describe('the steps of a delete', () => {
+  it('are not protocol methods: no client can trash, restore, purge or set an automatic emptying', async () => {
     const f = await lifecycleHarness()
     try {
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'in use' })
+      f.services.threads.setThreadSettled(thread.id, true)
       for (const client of [f.rpc, cli]) {
-        await expect(client.request('threads.trash', { threadId: thread.id })).rejects.toMatchObject({ code: 'thread_not_archived', message: 'Archive the thread before deleting it.' })
+        for (const method of ['threads.trash', 'threads.restore', 'threads.purge']) await expect(client.request(method, { threadId: thread.id })).rejects.toThrow()
+        await expect(client.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })).rejects.toThrow()
       }
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+      expect(f.services.lifecycle.cleanup.policy().automaticPurge).toBe(false)
     } finally { await f.close() }
   })
 })

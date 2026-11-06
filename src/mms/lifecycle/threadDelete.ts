@@ -162,7 +162,12 @@ export class ThreadDeleter {
         await this.check(id, intent)
       }
     } catch (error) {
-      await this.putBack(members)
+      // Only what this delete trashed goes back, and the thread itself when it was left by an earlier one: a member
+      // another delete is working on stays with that delete.
+      const back = continuing && !trashedHere.includes(threadId) ? [threadId, ...trashedHere] : trashedHere
+      await this.putBack(back)
+      // The others keep no consent from this refused delete; a delete still working on them holds its own in memory.
+      for (const id of members) if (!back.includes(id)) this.withdrawConsent(id)
       if (options.internal && error instanceof DomainRpcError && error.code === 'thread_has_unpublished_work') {
         // Mousse's own delete keeps a thread with unpublished work in Archived, where the person decides.
         return this.deps.store.require(threadId)
@@ -197,7 +202,10 @@ export class ThreadDeleter {
     this.setIntent(taskId, undefined)
   }
 
-  /** A refused delete: every member still in the trash goes back where it was. */
+  /**
+   * A refused delete: these members go back where they were. One that cannot be put back keeps no consent to
+   * discard, so the next start never purges unpublished work the dialog said was kept.
+   */
   private async putBack(members: readonly string[]): Promise<void> {
     for (const id of members) {
       if (this.deps.store.get(id)?.state === 'trashed') {
@@ -205,18 +213,39 @@ export class ThreadDeleter {
           console.warn('a refused delete could not put a thread back; the next start tries again', { threadId: id, error: error instanceof Error ? error.message : String(error) })
         })
       }
-      if (this.deps.store.get(id)?.state !== 'trashed') this.setIntent(id, undefined)
+      if (this.deps.store.get(id)?.state === 'trashed') this.withdrawConsent(id)
+      else this.setIntent(id, undefined)
     }
   }
 
+  private withdrawConsent(taskId: string): void {
+    const intent = this.readIntents()[taskId]
+    if (intent && (intent.human || intent.discard)) this.setIntent(taskId, { ...intent, human: false, discard: false })
+  }
+
+  /** A restored thread's delete is over: its recorded consent can never be used again. */
+  forgetIntent(taskId: string): void {
+    if (this.readIntents()[taskId]) this.setIntent(taskId, undefined)
+  }
+
+  private dropIntentUnlessTrashed(taskId: string): void {
+    const state = this.deps.store.get(taskId)?.state
+    if (state !== 'trashed' && state !== 'purge-started') this.forgetIntent(taskId)
+  }
+
   /**
-   * At start, after the one-time move of the old trash to Archived: a thread still in the trash is a delete that was
-   * cut short. It is finished as it was asked; when that is not allowed (unpublished work without the person's
-   * consent) it goes back to Archived. One with a blocker (a drive that is not connected) waits for the next start.
+   * At start: a thread in the trash with a recorded delete is a delete that was cut short. It is finished as it was
+   * asked; when that is not allowed (unpublished work without the person's consent) it goes back to Archived. A
+   * thread in the trash with no recorded delete (an older build's trash, one the move to Archived could not bring
+   * back) is never purged: it goes back to Archived, or stays where it is when it cannot. One with a blocker (a
+   * drive that is not connected) waits for the next start. `skip` names threads the move is still bringing back.
    */
-  async finishCutShort(): Promise<Array<{ taskId: string; outcome: 'purged' | 'archived' | 'kept'; reason?: string }>> {
+  async finishCutShort(skip: ReadonlySet<string> = new Set()): Promise<Array<{ taskId: string; outcome: 'purged' | 'archived' | 'kept'; reason?: string }>> {
     const results: Array<{ taskId: string; outcome: 'purged' | 'archived' | 'kept'; reason?: string }> = []
-    const tried = new Set<string>()
+    // Consent recorded for a delete that is over (the thread was restored, or is gone) is dropped.
+    const intents = this.readIntents()
+    for (const taskId of Object.keys(intents)) this.dropIntentUnlessTrashed(taskId)
+    const tried = new Set<string>(skip)
     for (let progress = true; progress;) {
       progress = false
       const records = this.deps.store.list()
@@ -226,7 +255,15 @@ export class ThreadDeleter {
       for (const record of tops) {
         tried.add(record.taskId)
         progress = true
-        const intent = this.readIntents()[record.taskId] ?? { human: false, discard: false, at: new Date().toISOString() }
+        const intent = this.readIntents()[record.taskId]
+        if (!intent) {
+          await this.putBack([record.taskId])
+          if (this.deps.store.get(record.taskId)?.state === 'active') {
+            try { this.deps.archive(record.taskId) } catch { /* It is listed again either way. */ }
+            results.push({ taskId: record.taskId, outcome: 'archived' })
+          } else results.push({ taskId: record.taskId, outcome: 'kept', reason: 'no delete was asked for, and it could not be put back' })
+          continue
+        }
         try {
           await this.check(record.taskId, intent)
         } catch (error) {
