@@ -121,7 +121,7 @@ describe('context ring', () => {
     expect(dialog?.getAttribute('aria-label')).toBe('Context usage: 62% · 124K of 200K tokens')
     const summary = dialog?.querySelector('.context-usage-summary')
     expect(summary?.textContent).toBe('62% · 124K of 200K')
-    expect(summary?.nextElementSibling?.classList.contains('context-usage-bar')).toBe(true)
+    expect(summary?.nextElementSibling?.querySelector('.context-usage-bar')).not.toBeNull()
     expect(dialog?.textContent).toContain('Prompt cache')
   })
 
@@ -135,6 +135,7 @@ describe('context ring', () => {
 describe('compaction on the ring', () => {
   const at = (compactionTokens: number | 'model-max'): CompactionSetting => ({ compactionEnabled: true, compactionTokens })
   const tick = () => document.querySelector('.context-usage-ring-tick')
+  const barMark = () => document.querySelector<HTMLElement>('.context-usage-bar-compaction')
   const compactionLine = () => document.querySelector('.context-usage-compaction-text')?.textContent
 
   it('ticks the ring at the compaction point and names it in the tooltip', () => {
@@ -157,6 +158,20 @@ describe('compaction on the ring', () => {
     render(usage(124_000, 1_000_000, { compactedByRuntime: true }), { compaction: at(300_000) })
     expect(tick()).toBeNull()
     expect(ring()?.title).toBe('12% · 124K of 1M')
+  })
+
+  it('marks the same point on the popover bar', () => {
+    render(usage(124_000, 1_000_000), { compaction: at(300_000), open: true })
+    expect(barMark()?.style.left).toBe('30%')
+
+    render(usage(124_000, 1_000_000), { compaction: { compactionEnabled: false, compactionTokens: 300_000 }, open: true })
+    expect(barMark()).toBeNull()
+
+    render(usage(124_000, 1_000_000, { compactedByRuntime: true }), { compaction: at(300_000), open: true })
+    expect(barMark()).toBeNull()
+
+    render(usage(124_000, 1_000_000), { open: true })
+    expect(barMark()).toBeNull()
   })
 
   it('caps a size beyond the window as the daemon does', () => {
@@ -189,6 +204,7 @@ describe('compaction on the ring', () => {
     const { onContextOpenChange } = render(usage(124_000, 1_000_000), { compaction: at(300_000), open: true })
     const change = document.querySelector<HTMLButtonElement>('.context-usage-compaction-change')
     expect(change?.textContent).toBe('Change')
+    expect(change?.classList.contains('btn-ghost')).toBe(true)
     act(() => change?.click())
     expect(onContextOpenChange).toHaveBeenCalledWith(false)
     expect(navigation.openSettingsSection).toHaveBeenCalledWith('context')

@@ -2704,10 +2704,16 @@ html.platform-darwin .titlebar-left {
   stroke: currentColor;
 }
 
-/* Where the context compacts: a quiet tick across the stroke (a hair past the ring), in the text colour so it reads on the arc and the track. */
+/* Where the context compacts: an accent tick across the stroke. It stands past the ring on both
+   sides, so it still reads where the arc has passed it in the same colour. */
 .context-usage-ring-tick {
-  stroke: var(--text-secondary);
-  stroke-opacity: 0.7;
+  stroke: var(--accent);
+}
+
+html[data-theme='light'] .context-usage-ring-tick,
+html[data-theme='light'] .context-usage-bar-compaction {
+  stroke: var(--accent-deep);
+  background: var(--accent-deep);
 }
 
 /* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
@@ -2767,6 +2773,21 @@ html.platform-darwin .titlebar-left {
 }
 
 /* Filled against the model's capacity; the empty track is the room left. */
+/* Holds the bar and the compaction mark, which stands 2px proud of the clipped bar. */
+.context-usage-bar-track {
+  position: relative;
+}
+
+.context-usage-bar-compaction {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
 .context-usage-bar {
   display: flex;
   gap: 2px;
@@ -2836,24 +2857,17 @@ html.platform-darwin .titlebar-left {
   font-variant-numeric: tabular-nums;
 }
 
+/* The shared small ghost button (btn btn-ghost btn-sm), a little tighter to fit the line. */
 .context-usage-compaction-change {
   flex-shrink: 0;
-  margin: -3px -6px -3px 0;
-  padding: 3px 6px;
-  border-radius: var(--ui-menu-row-radius);
-  font-size: 12px;
-  color: var(--text-secondary);
-  transition: background 0.12s, color 0.12s;
-}
-
-.context-usage-compaction-change:hover {
-  background: var(--ui-hover);
+  margin: -3px 0;
+  padding: 3px 10px;
   color: var(--text-primary);
 }
 
 .context-usage-compaction-change:focus-visible {
-  outline: 2px solid rgba(var(--accent-rgb), 0.6);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .context-usage-notes {

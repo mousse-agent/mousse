@@ -130,6 +130,7 @@ export function ContextUsagePopover({
 
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
   const barScale = Math.max(usage.limit, segmentTotal)
+  const compactionFraction = compactionTickFraction(compaction, usage)
   // Settings, Agents, focused on the Compact context row.
   const changeCompaction = () => {
     onClose()
@@ -154,17 +155,26 @@ export function ContextUsagePopover({
 
         <div className="context-usage-summary">{contextUsageSummary(usage)}</div>
 
-        <div className="context-usage-bar" aria-hidden="true">
-          {usage.categories.map((category) => (
+        <div className="context-usage-bar-track" aria-hidden="true">
+          <div className="context-usage-bar">
+            {usage.categories.map((category) => (
+              <div
+                key={category.label}
+                className="context-usage-bar-segment"
+                style={{
+                  width: barScale > 0 ? `${(category.tokens / barScale) * 100}%` : 0,
+                  backgroundColor: category.color
+                }}
+              />
+            ))}
+          </div>
+          {/* The same point as the ring's tick, outside the clipped bar so it can stand a little proud of it. */}
+          {compactionFraction !== undefined && barScale > 0 && (
             <div
-              key={category.label}
-              className="context-usage-bar-segment"
-              style={{
-                width: barScale > 0 ? `${(category.tokens / barScale) * 100}%` : 0,
-                backgroundColor: category.color
-              }}
+              className="context-usage-bar-compaction"
+              style={{ left: `${(compactionFraction * usage.limit / barScale) * 100}%` }}
             />
-          ))}
+          )}
         </div>
 
         <ul className="context-usage-breakdown">
@@ -182,7 +192,7 @@ export function ContextUsagePopover({
             <span className="context-usage-compaction-text">{contextCompactionText(compaction)}</span>
             <button
               type="button"
-              className="context-usage-compaction-change"
+              className="btn btn-ghost btn-sm context-usage-compaction-change"
               title="Settings › Agents › Compact context"
               aria-label="Change Compact context"
               onClick={changeCompaction}
@@ -263,11 +273,11 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
           {tickFraction !== undefined && (
             <line
               className="context-usage-ring-tick"
-              x1={tickAt(6.5).x}
-              y1={tickAt(6.5).y}
-              x2={tickAt(10.5).x}
-              y2={tickAt(10.5).y}
-              strokeWidth="1.5"
+              x1={tickAt(5).x}
+              y1={tickAt(5).y}
+              x2={tickAt(11.5).x}
+              y2={tickAt(11.5).y}
+              strokeWidth="2"
               strokeLinecap="round"
             />
           )}
