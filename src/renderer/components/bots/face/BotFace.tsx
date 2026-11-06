@@ -1,5 +1,9 @@
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { BotState } from '../../../../shared/bots/personal/chat'
-import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, normalizeBotLook, type BotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { useMotionScale } from '../../../lib/motion'
+import { sharedFaceRenderer, sharedFaceRendererStatus, subscribeSharedFaceRenderer, type FaceHandle, type FaceSpec } from './faceRenderer'
+import './face.css'
 
 /**
  * A bot's face (Bot Phase 1 §5.12, bot-ui §4.3): its clay mouse, whose pose shows the state.
@@ -21,26 +25,107 @@ export interface BotFaceProps {
   className?: string
 }
 
+export const BOT_FACE_STATES: readonly BotFaceState[] = ['idle', 'working', 'needs_you', 'stuck', 'paused', 'happy']
+const DEFAULT_SIZE = 40
+const MIN_SIZE = 16
+const MAX_SIZE = 256
+
+export interface NormalizedFaceProps {
+  look: KnownBotLook
+  state: BotFaceState
+  size: number
+  view: 'head' | 'full'
+}
+
+/** The face this build draws: unknown looks and states read as the defaults, sizes are whole pixels in range. */
+export function normalizeFaceProps(props: Pick<BotFaceProps, 'look' | 'state' | 'size' | 'view'>): NormalizedFaceProps {
+  const size = Number.isFinite(props.size) && props.size > 0 ? Math.round(Math.min(MAX_SIZE, Math.max(MIN_SIZE, props.size))) : DEFAULT_SIZE
+  return {
+    look: normalizeBotLook(props.look),
+    state: BOT_FACE_STATES.includes(props.state) ? props.state : 'idle',
+    size,
+    view: props.view === 'full' ? 'full' : 'head'
+  }
+}
+
+function a11y(label: string | undefined) {
+  return label ? ({ role: 'img', 'aria-label': label } as const) : ({ 'aria-hidden': true } as const)
+}
+
 /**
- * TODO(WP5): the live WebGL mouse on one shared canvas (`faceRenderer.ts`), falling back to
- * `BotFaceStill` when WebGL is missing or context creation fails.
+ * The live mouse, drawn by the shared WebGL renderer (`faceRenderer.ts`). Falls back to
+ * `BotFaceStill` when WebGL is missing, context creation fails or the shader doesn't compile.
  */
 export function BotFace(props: BotFaceProps) {
-  return <BotFaceStill {...props} />
+  const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
+  const [broken, setBroken] = useState(false)
+  if (broken || status === 'unavailable' || status === 'failed') return <BotFaceStill {...props} />
+  return <BotFaceLive {...props} onBroken={() => setBroken(true)} />
+}
+
+function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }) {
+  const { look, state, size, view } = normalizeFaceProps(props)
+  const motionOff = useMotionScale() === 0
+  const still = props.still === true || motionOff
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const handleRef = useRef<FaceHandle | null>(null)
+  const spec: FaceSpec = { look, state, size, view, still }
+  const specRef = useRef(spec)
+  specRef.current = spec
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current
+    const handle = canvas ? sharedFaceRenderer()?.register(canvas, specRef.current) ?? null : null
+    if (!handle) {
+      onBroken()
+      return
+    }
+    handleRef.current = handle
+    return () => {
+      handle.dispose()
+      handleRef.current = null
+    }
+    // Registered once per mount; changes go through update() below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useLayoutEffect(() => {
+    handleRef.current?.update(specRef.current)
+  }, [look.colour, look.accessory, state, size, view, still])
+
+  return (
+    <span
+      className={`bot-face bot-face-live${props.className ? ` ${props.className}` : ''}`}
+      style={{ width: size, height: size }}
+      data-state={state}
+      data-view={view}
+      data-colour={look.colour}
+      data-accessory={look.accessory}
+      data-still={still ? 'true' : undefined}
+      {...a11y(props.label)}
+    >
+      <canvas ref={canvasRef} className="bot-face-canvas" aria-hidden />
+      {state === 'paused' && (
+        <span className="bot-face-z" style={{ fontSize: Math.max(8, Math.round(size * 0.18)) }} aria-hidden>
+          z
+        </span>
+      )}
+    </span>
+  )
 }
 
 /**
  * The still fallback, with no WebGL: a round head in the look's colour, with ears and eyes, and a
  * badge in the accessory's colour. Unknown look values draw as the default.
  */
-export function BotFaceStill({ look, state, size, view, label, className }: BotFaceProps) {
-  const known = normalizeBotLook(look)
+export function BotFaceStill(props: BotFaceProps) {
+  const { look: known, state, size, view } = normalizeFaceProps(props)
   const body = BOT_COLOUR_HEX[known.colour]
   const accessory = BOT_ACCESSORY_HEX[known.accessory]
   const asleep = state === 'paused'
   return (
     <svg
-      className={`bot-face bot-face-still${className ? ` ${className}` : ''}`}
+      className={`bot-face bot-face-still${props.className ? ` ${props.className}` : ''}`}
       width={size}
       height={size}
       viewBox="0 0 40 40"
@@ -49,7 +134,7 @@ export function BotFaceStill({ look, state, size, view, label, className }: BotF
       data-colour={known.colour}
       data-accessory={known.accessory}
       style={{ flex: 'none', opacity: asleep ? 0.6 : 1 }}
-      {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })}
+      {...a11y(props.label)}
     >
       <circle cx="10" cy="11" r="7" fill={body} />
       <circle cx="30" cy="11" r="7" fill={body} />
