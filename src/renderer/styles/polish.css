@@ -45,6 +45,9 @@
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
   --ui-selected: rgba(var(--accent-rgb), 0.15);
+  /* Opaque selection fill (selected settings page, selected theme): the
+     accent tints the raised material enough to read at a glance. */
+  --ui-selected-fill: color-mix(in srgb, var(--accent) 18%, var(--ui-raised));
   --ui-line: color-mix(in srgb, var(--text-primary) 8%, transparent);
   --ui-line-strong: color-mix(in srgb, var(--text-primary) 14%, transparent);
   --ui-faint: color-mix(in srgb, var(--text-primary) 48%, transparent);
@@ -106,6 +109,8 @@
 
 html[data-theme='light'] {
   --ui-raised: #ffffff;
+  /* White barely differs from the light page, so selection shades it instead. */
+  --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
   --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
   --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
   --ui-glint: transparent;
@@ -136,6 +141,7 @@ html[data-theme='light'] {
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] {
     --ui-raised: #ffffff;
+    --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
     --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
     --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
     --ui-glint: transparent;
@@ -177,11 +183,18 @@ html[data-theme='blacksphere-plus'] {
   --ui-aura-strength: 0.16;
 }
 
+/* Solarized text is dim: an accent tint either vanishes or drops the selected
+   label under 4.5:1, so selection lifts the page neutrally. */
+html[data-theme='solarized-dark'] {
+  --ui-selected-fill: color-mix(in srgb, var(--text-primary) 13.5%, var(--surface-base));
+}
+
 html[data-theme='high-contrast'] {
   --ui-line: rgba(255, 255, 255, 0.4);
   --ui-line-strong: rgba(255, 255, 255, 0.6);
   --ui-aura-strength: 0;
   --ui-selected: rgba(var(--accent-rgb), 0.3);
+  --ui-selected-fill: var(--ui-selected);
   --ui-specular: inset 0 0 0 0 transparent;
   --ui-specular-accent: inset 0 0 0 0 transparent;
   --ui-glint: transparent;
@@ -949,7 +962,7 @@ html .settings-nav-item:hover {
 }
 
 html .settings-nav-item.active {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
+  background: var(--ui-selected-fill);
   box-shadow: var(--ui-specular);
   font-weight: 550;
 }
