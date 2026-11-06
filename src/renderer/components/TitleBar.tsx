@@ -1,5 +1,6 @@
 import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen, Search } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
+import { openPalette } from '../commands/paletteActions'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
@@ -115,7 +116,7 @@ export function TitleBar() {
               variant="titlebar"
               onClick={() => {
                 if (chatsMode) useChatsStore.setState({ searchOpen: true })
-                else useAppStore.getState().setThreadSearchOpen(true)
+                else openPalette('messages')
               }}
             />
           </div>

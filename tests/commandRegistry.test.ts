@@ -363,9 +363,9 @@ describe('runCommand', () => {
     expect(runCommand('thread.new', 'menu')).toBe(false)
     closePalette()
 
-    const closeSearch = pushOverlay('thread-search')
+    const closePicker = pushOverlay('model-picker')
     expect(runCommand('thread.new', 'palette')).toBe(false)
-    closeSearch()
+    closePicker()
     expect(run).toHaveBeenCalledTimes(1)
   })
 

@@ -348,8 +348,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const upsertThread = useAppStore((s) => s.upsertThread)
 
-  // The Search threads dialog is mounted once, in the navigation rail.
-  const searchOpen = useAppStore((s) => s.threadSearchOpen)
+  // Search threads opens the command palette, mounted once in the app shell.
+  const searchOpen = useAppStore((s) => s.paletteOpen)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   // The project the user last opened or closed. Only that group animates; one revealed for the thread

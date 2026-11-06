@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useState } from "react";
+import { createContext, memo, useContext, useEffect, useState } from "react";
 import type { UIMessage } from "ai";
 import { ChevronDown, Edit, Shield, Terminal } from "../../../../lib/icons";
 import { ALWAYS_OPTION_LABEL, ALWAYS_OPTION_NOTE } from "../../../../../shared/permissionKeys";
@@ -36,11 +36,19 @@ export type PermissionRequestData = {
 /** The option ids of a waiting request: allow once, allow always (when offered) and deny. */
 export type PermissionOptions = { allow: string; always?: string; deny: string };
 
-/** What the inline row of a waiting permission request needs to answer it. */
+/**
+ * What answers a waiting permission request: its inline row, and the cue above the composer while
+ * the row is out of view. Both share `chosen`, so the request is answered once.
+ */
 export type PermissionRequestControls = {
   options: PermissionOptions;
   approval?: PendingApprovalInfo;
+  /** The option already sent from this window, while its answer settles; the buttons wait. */
+  chosen?: string | null;
+  /** Sends the answer; ignored once an option is chosen. */
   onAnswer: (optionId: string) => void;
+  /** The row says whether it is on screen, so the composer's cue knows when to show. */
+  onInView?: (inView: boolean) => void;
 };
 
 /** The waiting permission requests this client can answer, by request id. */
@@ -263,6 +271,30 @@ function waitingNotes(approval: PendingApprovalInfo | undefined): string[] {
 
 const ICONS = { command: Terminal, edit: Edit, tool: Shield } as const;
 
+/** The icon of a request's kind, read from its summary verb. */
+export function permissionIcon(verb: string): (typeof ICONS)[keyof typeof ICONS] {
+  return ICONS[verb === "Run" ? "command" : verb === "Edit" ? "edit" : "tool"];
+}
+
+/** Reports whether the row is on screen (at least half of it in the transcript's viewport). */
+function useReportInView(element: HTMLElement | null, onInView: ((inView: boolean) => void) | undefined) {
+  useEffect(() => {
+    if (!element || !onInView || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[entries.length - 1];
+        if (entry) onInView(entry.isIntersecting && entry.intersectionRatio >= 0.5);
+      },
+      { root: element.closest(".an-message-list"), threshold: [0, 0.5, 1] },
+    );
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      onInView(false);
+    };
+  }, [element, onInView]);
+}
+
 /** One permission request in the turn: a short line with the answer buttons, or the answer it got. */
 export const PermissionRequestRow = memo(function PermissionRequestRow({
   data,
@@ -271,21 +303,22 @@ export const PermissionRequestRow = memo(function PermissionRequestRow({
 }) {
   const controls = usePermissionRequest(data.requestId);
   const [expanded, setExpanded] = useState(false);
-  const [chosen, setChosen] = useState<string | null>(null);
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
   const summary = permissionSummary(data.prompt, data.action);
-  const kind = summary.verb === "Run" ? "command" : summary.verb === "Edit" ? "edit" : "tool";
-  const Icon = ICONS[kind];
+  const Icon = permissionIcon(summary.verb);
   const live = data.status === "pending" ? controls : null;
+  const chosen = live?.chosen ?? null;
   const answer = permissionAnswerLabel(data);
   const tone = data.status === "answered" ? (data.decision === "allow" ? "allow" : "reject") : "none";
   const notes = live ? waitingNotes(live.approval) : [];
+  useReportInView(live ? element : null, live?.onInView);
   const answerWith = (optionId: string) => {
     if (!live || chosen) return;
-    setChosen(optionId);
     live.onAnswer(optionId);
   };
   return (
     <div
+      ref={setElement}
       className="permission-request"
       role="group"
       aria-label="Permission request"

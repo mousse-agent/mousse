@@ -1,10 +1,8 @@
 import { useEffect } from 'react'
 import { Gauge, Settings, Workflow, type LucideIcon } from '../lib/icons'
-import { activeRailPage, closeRailPages, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
+import { activeRailPage, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
-import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
-import { ThreadSearchDialog } from './ThreadSearchDialog'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import '../styles/navigation-rail.css'
 
@@ -16,10 +14,6 @@ export function NavigationRail() {
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
-  const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
-  const switchToThread = useAppStore((s) => s.switchToThread)
-  const searchOpen = useAppStore((s) => s.threadSearchOpen)
-  const setSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
 
   const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen })
   const reviewPending = useStorageReviewPending()
@@ -49,23 +43,12 @@ export function NavigationRail() {
   }
 
   return (
-    <>
-      <nav className="navigation-rail" aria-label="Mousse navigation">
-        {shortcut('automations', 'Automations', Workflow)}
-        <div className="navigation-rail-separator" role="separator" />
-        {shortcut('usage', 'Subscription usage', Gauge)}
-        {shortcut('settings', 'Settings', Settings)}
-        <DownloadsIndicator variant="rail" />
-      </nav>
-      <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {
-        void confirmNavigation().then((allowed) => {
-          if (!allowed) return
-          closeRailPages()
-          switchToThread(threadId)
-          void window.mousse.threads.select(threadId)
-          setThreadsSidebarOpen(true)
-        })
-      }} />
-    </>
+    <nav className="navigation-rail" aria-label="Mousse navigation">
+      {shortcut('automations', 'Automations', Workflow)}
+      <div className="navigation-rail-separator" role="separator" />
+      {shortcut('usage', 'Subscription usage', Gauge)}
+      {shortcut('settings', 'Settings', Settings)}
+      <DownloadsIndicator variant="rail" />
+    </nav>
   )
 }
