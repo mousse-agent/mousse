@@ -264,31 +264,39 @@ export class StorageUsageService {
     if (this.started) return
     this.started = true
     this.stopping = false
-    // The repeating timer counts from the first timed scan, so a pass is not measured twice in a row.
-    const first = setTimeout(() => {
-      this.timers.delete(first)
-      this.interval = setInterval(() => { void this.background() }, this.deps.intervalMs ?? SCAN_INTERVAL_MS)
-      this.interval.unref()
-      void this.background()
-    }, this.firstScanDelay())
-    first.unref()
-    this.timers.add(first)
+    this.scheduleTimedScan(this.deps.firstScanDelayMs ?? FIRST_SCAN_DELAY_MS)
+  }
+
+  private scheduleTimedScan(ms: number): void {
+    const timer = setTimeout(() => { this.timers.delete(timer); this.timedScan() }, ms)
+    timer.unref()
+    this.timers.add(timer)
   }
 
   /**
-   * How long after a start the first timed scan waits. A complete pass in the cache is measured again
-   * only when it is as old as the scan interval: a restart does not walk every worktree again minutes
-   * after the last pass. An unfinished pass, or none, carries on after the usual short delay.
+   * The first timed scan after a start. A complete pass is measured again only when it is as old as the
+   * scan interval, so a restart does not walk every worktree again minutes after the last pass; until
+   * then it waits. An unfinished pass, or none, carries on now. The repeating timer counts from here,
+   * so a pass is not measured twice in a row. The cache is read here, not at the start.
    */
-  private firstScanDelay(): number {
-    const delay = this.deps.firstScanDelayMs ?? FIRST_SCAN_DELAY_MS
+  private timedScan(): void {
+    if (this.stopping) return
+    const fresh = this.freshFor()
+    if (fresh > 0) { this.scheduleTimedScan(fresh); return }
+    this.interval = setInterval(() => { void this.background() }, this.deps.intervalMs ?? SCAN_INTERVAL_MS)
+    this.interval.unref()
+    void this.background()
+  }
+
+  /** How long the complete pass stays fresh; zero or less when it is due, unfinished or absent. */
+  private freshFor(): number {
     this.load()
-    if (!this.loadedComplete || !this.results.size) return delay
+    if (!this.isComplete() || this.discovery || !this.results.size) return 0
     let oldest = Infinity
     for (const result of this.results.values()) if (result.measuredAt < oldest) oldest = result.measuredAt
     // A measurement dated in the future (the clock went back) counts as fresh.
     const age = Math.max(0, this.now() - oldest)
-    return Math.max(delay, (this.deps.intervalMs ?? SCAN_INTERVAL_MS) - age)
+    return (this.deps.intervalMs ?? SCAN_INTERVAL_MS) - age
   }
 
   /** Stops the timers and the walk in progress (at its next entry), and waits for it to end. */
