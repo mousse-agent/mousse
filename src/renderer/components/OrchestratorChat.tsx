@@ -867,8 +867,9 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
-        // A message sent while a run is paused by a usage limit waits in the queue: it is shown there, not in the transcript.
-        if (result.heldByPause && optimisticMessageId) {
+        // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
+        // queue: it is shown there, not also in the transcript.
+        if (result.queued && optimisticMessageId) {
           const current = useAppStore.getState().messages
           useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
           if (result.queueItem) {
@@ -1293,13 +1294,24 @@ export function OrchestratorChat() {
   const composerHasContent = input.trim().length > 0 || attachedFiles.length > 0
 
   const retryConnection = () => {
+    const retryProfile = profileId
+    const retryThread = activeThreadId
+    // The busy state and the notice belong to the shown thread: an answer for another one changes neither.
+    const shown = () => useAppStore.getState().profileId === retryProfile && useAppStore.getState().activeThreadId === retryThread
     setConnectionFailed(false)
     setLoading(true)
     void window.mousse.orchestrator
-      .retryConnection(activeThreadId ?? undefined)
+      .retryConnection(retryThread ?? undefined)
       .then((started) => {
+        if (!shown()) return
         if (!started) setLoading(false)
         else void refreshTurnActive()
+      })
+      .catch(() => {
+        // The service could not be asked: still not reachable.
+        if (!shown()) return
+        setLoading(false)
+        setConnectionFailed(true)
       })
   }
 
