@@ -245,6 +245,55 @@ export function rowActionLabel(action: RowAction, file: GitFileChange): string {
   }
 }
 
+/** What each status letter means, for its tooltip and the row's accessible name. */
+export const STATUS_NAMES: Record<GitFileChange['status'], string> = {
+  modified: 'Modified',
+  added: 'Added',
+  deleted: 'Deleted',
+  renamed: 'Renamed',
+  copied: 'Copied',
+  untracked: 'Untracked',
+  ignored: 'Ignored',
+  conflicted: 'Conflicted'
+}
+
+/** The More menu's item for a file: deleting an untracked file, else throwing its changes away. */
+export function discardMenuLabel(file: GitFileChange): string {
+  return file.status === 'untracked' ? 'Delete file…' : 'Discard changes…'
+}
+
+/** The confirming button of a discard: Delete when every file is untracked and goes for good, else Discard. */
+export function discardConfirmLabel(files: readonly GitFileChange[]): 'Delete' | 'Discard' {
+  return files.length > 0 && files.every((file) => file.status === 'untracked') ? 'Delete' : 'Discard'
+}
+
+/** One arrow press moves a divider by this share of the pair. */
+export const SECTION_RATIO_STEP = 0.05
+
+/** The upper section's share of the two around a divider; a pair where either has no weight yet reads as even. */
+export function sectionPairRatio(sizes: Readonly<SectionSizes>, upper: GitSectionId, lower: GitSectionId): number {
+  const a = sizes[upper]
+  const b = sizes[lower]
+  if (a === undefined || b === undefined || a + b <= 0) return 0.5
+  return a / (a + b)
+}
+
+/** Where a key moves a divider: arrows by a step (down gives the upper section more), Home and End to the limits. Null for other keys. */
+export function keyedSectionRatio(ratio: number, key: string): number | null {
+  switch (key) {
+    case 'ArrowDown':
+      return ratio + SECTION_RATIO_STEP
+    case 'ArrowUp':
+      return ratio - SECTION_RATIO_STEP
+    case 'Home':
+      return SECTION_RATIO_MIN
+    case 'End':
+      return SECTION_RATIO_MAX
+    default:
+      return null
+  }
+}
+
 const DISCARD_LIST_LIMIT = 10
 
 /**
