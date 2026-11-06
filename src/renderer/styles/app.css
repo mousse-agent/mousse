@@ -1088,16 +1088,19 @@ html.platform-darwin .titlebar-left {
 
 /* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
 /* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
-.chat-empty-add-project {
+.chat-empty-action {
   --space-4: 4px;
   --space-12: 12px;
-  --space-16: 16px;
   display: flex;
   height: 28px;
   width: fit-content;
-  margin: var(--space-16) auto 0;
   border-radius: var(--ui-control-radius);
   font-size: 12.5px;
+}
+
+/* Add project under an empty thread's composer; Create agent in the empty Agents tab (chats.css). */
+.chat-empty-add-project {
+  margin: 16px auto 0;
 }
 
 /* Queued messages stack — visually attached above the composer */

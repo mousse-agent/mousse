@@ -6,7 +6,7 @@ export const offersAddProject = (projectCount: number, node: string | undefined)
 /** The one action of an empty new chat with no projects: a plain button centred under the composer. */
 export function EmptyThreadAddProject({ onAdd }: { onAdd: () => void }) {
   return (
-    <button type="button" className="settings-btn chat-empty-add-project" onClick={onAdd}>
+    <button type="button" className="settings-btn chat-empty-action chat-empty-add-project" onClick={onAdd}>
       <FolderPlus size={14} aria-hidden="true" />Add project
     </button>
   )

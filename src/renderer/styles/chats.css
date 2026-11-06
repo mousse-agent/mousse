@@ -21,7 +21,8 @@
 .chat-section-actions { display: flex; align-items: center; gap: 2px; }
 /* The empty roster's one action: a neutral settings button sized like "Add project" under the first-launch composer. */
 /* Outside .settings-page it carries the spacing tokens of its anatomy (glyph gap, padding). */
-.chat-empty-create-agent { --space-4: 4px; --space-12: 12px; display: flex; height: 28px; width: fit-content; margin: 0 var(--ui-row-x, 8px) 14px; border-radius: var(--ui-control-radius); font-size: 12.5px; }
+/* Shares its size with Add project (.chat-empty-action in app.css). */
+.chat-empty-create-agent { margin: 0 var(--ui-row-x, 8px) 14px; }
 .chat-recent-section { border-top: 1px solid rgba(var(--accent-pale-rgb), .1); margin-top: 16px; padding-top: 1px; }
 .chat-search { display: flex; align-items: center; border: 1px solid rgba(var(--accent-pale-rgb), .15); border-radius: 7px; margin: 0 6px 10px; padding: 5px; }
 .chat-search input { background: transparent; border: 0; min-width: 0; width: 100%; color: var(--text-primary); font-size: 12px; outline: 0; }
