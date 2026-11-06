@@ -39,12 +39,10 @@ html:not(.platform-darwin) .app {
 }
 
 .app .threads-sidebar { --threads-sidebar-row-height: 28px; }
-.app .threads-sidebar-toolbar { padding: 5px 8px 2px; }
-.app .threads-sidebar-toolbar-button { border-radius: 5px; }
 
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 4px 8px 8px;
+  margin: 8px;
   padding: 2px;
   border-radius: 7px;
   background: transparent;

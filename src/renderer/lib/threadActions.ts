@@ -1,6 +1,7 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
-import { findUnstartedThread } from '../../shared/threadTitle'
+import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
+import type { Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -36,6 +37,34 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)
+}
+
+/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+export async function addProjectAndStartThread(): Promise<void> {
+  const project = await window.mousse.projects.open()
+  if (!project) return
+  await createAndSelectProjectThread(project.id)
+}
+
+/** The open thread when it has a sidebar row (started); a draft has nothing to rename, pin or archive yet. */
+export function openStartedThread(): Thread | null {
+  const { activeThreadId, threads } = useAppStore.getState()
+  const thread = activeThreadId ? threads.find((candidate) => candidate.id === activeThreadId) : undefined
+  return thread && isThreadStarted(thread) ? thread : null
+}
+
+/** Pins the open thread, or unpins it when it is pinned. */
+export async function togglePinOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread) return
+  await window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+}
+
+/** Archives the open thread; it stays open. */
+export async function archiveOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread || thread.settledAt) return
+  await window.mousse.threads.settle(thread.id, true)
 }
 
 /**
