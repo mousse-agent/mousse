@@ -76,6 +76,11 @@ const ADAPTER_TYPES: Record<string, keyof WorkflowExecutionAdapters> = {
   'browser-task': 'browser'
 }
 
+/** Finished runs do not change state again. `unknown-effect` is not finished: it can still be reconciled or cancelled. */
+function isFinishedRunState(state: WorkflowRunState): boolean {
+  return state === 'succeeded' || state === 'failed' || state === 'cancelled'
+}
+
 type ExecutionWait = {
   kind: 'wait'
   state: Extract<WorkflowRunState, 'waiting-approval' | 'waiting-input' | 'waiting-condition'>
@@ -416,7 +421,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
       this.assertCurrentWorkspaceResults(manifest, checkpoint)
-      if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
+      if (isFinishedRunState(manifest.state)) {
         return this.snapshot(runId)
       }
       if (manifest.state === 'unknown-effect') {
@@ -572,12 +577,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   async cancel(runId: string, owner: { profileId: string }, reason = 'cancelled'): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const before = this.store.readManifest(runId)
+    if (isFinishedRunState(before.state)) return this.snapshot(runId)
     this.cancellation.restore(this.profileId, before.cancellationId)
     this.cancellation.abort(this.profileId, before.cancellationId, reason)
     const lease = await this.acquireAfterCancellation(runId)
     let snapshot: WorkflowRunSnapshot
     try {
       const manifest = this.store.readManifest(runId)
+      // The run may have finished while this cancel waited for the lease.
+      if (isFinishedRunState(manifest.state)) return this.snapshot(runId)
       for (const open of this.approvals.listOpen(this.profileId, runId)) {
         this.approvals.revoke(open.approvalId, this.profileId, this.iso())
       }
@@ -591,7 +599,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     // durable lease as well, including after a host restart where no in-memory
     // driver remains to propagate the abort.
     for (const child of (await this.list({ profileId: this.profileId })).filter((item) => item.parentRunId === runId)) {
-      if (!['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(child.state)) {
+      if (!isFinishedRunState(child.state) && child.state !== 'unknown-effect') {
         await this.cancel(child.runId, owner, `parent ${runId} ${reason}`)
       }
     }
@@ -652,7 +660,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       this.store.writeCheckpoint(runId, checkpoint, token)
       return this.snapshot(runId)
     }
-    if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
+    if (isFinishedRunState(manifest.state)) {
       this.store.writeManifest(manifest, token)
       this.store.writeCheckpoint(runId, checkpoint, token)
       return this.snapshot(runId)
@@ -742,6 +750,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           return { key, error } as const
         }
       }))
+      // A wait does not stop the batch: the other members' results still apply, and
+      // a failure or finish among them takes precedence over the wait.
+      let pendingWait: WorkflowRunState | undefined
       for (const execution of executions) {
         const key = execution.key
         const inst = checkpoint.instances[key]!
@@ -765,11 +776,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
             const waitLocation = this.findInstance(checkpoint, waitKey)
             if (waitLocation && waitKey !== key) waitLocation.instance.status = 'waiting'
             this.recordWait(checkpoint, { ...result, instanceKey: waitKey }, waitLocation?.instance ?? inst)
-            manifest.state = result.state
-            if (signal.aborted) {
-              this.store.setState(manifest, this.pauseRequested.has(runId) || this.shuttingDown ? 'interrupted' : 'cancelled', this.iso(), 'wait interrupted')
-            }
-            break
+            pendingWait ??= result.state
+            continue
           }
           if (result.kind === 'skip') {
             inst.status = 'skipped'
@@ -846,6 +854,13 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           break
         }
       }
+      if (pendingWait && manifest.state === 'running') {
+        if (signal.aborted) {
+          this.store.setState(manifest, this.pauseRequested.has(runId) || this.shuttingDown ? 'interrupted' : 'cancelled', this.iso(), 'wait interrupted')
+        } else {
+          manifest.state = pendingWait
+        }
+      }
       checkpoint.seq += 1
       this.store.writeCheckpoint(runId, checkpoint, token)
       this.faults?.afterCheckpoint?.(runId)
@@ -878,6 +893,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const inst = checkpoint.instances[intent.instanceKey]
       const nestedEntry = Object.values(checkpoint.nested ?? {}).find((nested) => nested.instances[intent.instanceKey])
       const nestedInst = nestedEntry?.instances[intent.instanceKey]
+      if (durable?.outcome === 'failed' && inst?.status === 'running') {
+        // The failure was recorded durably but never applied to the instance; apply it
+        // the way the live batch loop does instead of leaving the run with work it can never finish.
+        inst.status = 'failed'
+        inst.error = durable.error
+        if (!isFinishedRunState(manifest.state)) this.store.setState(manifest, 'failed', this.iso(), durable.error ?? 'node failed')
+        delete checkpoint.intents![intent.instanceKey]
+        continue
+      }
       if (!durable || durable.outcome !== 'succeeded' || (!inst && !nestedInst)) continue
       if (!inst && nestedInst && nestedEntry) {
         nestedInst.status = 'succeeded'
@@ -2512,7 +2536,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       try {
         lease = await this.acquireAfterCancellation(parent.runId)
         const freshManifest = this.store.readManifest(parent.runId)
-        if (['succeeded', 'failed', 'cancelled'].includes(freshManifest.state)) continue
+        if (isFinishedRunState(freshManifest.state)) continue
         const freshCheckpoint = this.store.readCheckpoint(parent.runId)
         let changed = false
         const waits = freshCheckpoint.waits
@@ -2550,7 +2574,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
             changed = true
             continue
           }
-          if (['succeeded', 'failed', 'cancelled'].includes(child.manifest.state)) {
+          if (isFinishedRunState(child.manifest.state)) {
             delete waits[key]
             const location = this.findInstance(freshCheckpoint, key)
             if (location) {

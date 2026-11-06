@@ -43,4 +43,30 @@ describe('profile-owned quick action execution', () => {
     expect(isTurnActive).not.toHaveBeenCalled()
     expect(useAppStore.getState()).toMatchObject({ profileId: 'bob', activeThreadId: null, loading: false })
   })
+
+  it("does not change another thread's busy state when a send in the current chat settles after a switch", async () => {
+    let resolveSend!: (result: { queued: boolean }) => void
+    const sendToThread = vi.fn(() => new Promise<{ queued: boolean }>((resolve) => { resolveSend = resolve }))
+    const isTurnActive = vi.fn(async () => true)
+    vi.stubGlobal('window', { mousse: { orchestrator: { sendToThread, isTurnActive } } })
+    const now = new Date().toISOString()
+    useAppStore.setState({
+      profileId: 'alice',
+      activeThreadId: 'thread-a',
+      loading: false,
+      threads: [{ id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0 }] as never
+    })
+    const action = createQuickAction({ label: 'Review', kind: 'send-current', payload: 'Review the diff', isBuiltIn: false })
+
+    const running = executeQuickAction(action, 'alice')
+    await vi.waitFor(() => expect(sendToThread).toHaveBeenCalledTimes(1))
+    expect(useAppStore.getState().loading).toBe(true)
+    // The person opens thread B, which is idle.
+    useAppStore.setState({ activeThreadId: 'thread-b', loading: false })
+    resolveSend({ queued: false })
+    await running
+
+    expect(isTurnActive).toHaveBeenCalledWith('thread-a')
+    expect(useAppStore.getState()).toMatchObject({ activeThreadId: 'thread-b', loading: false })
+  })
 })
