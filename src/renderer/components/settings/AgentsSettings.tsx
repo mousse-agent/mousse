@@ -1,17 +1,14 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
+import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
 import { AgentAccessSettings } from './AgentAccessSettings'
+import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
-import { Select } from '../ui/Select'
 import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 import { openSettingsSection } from '../../lib/settingsNavigation'
-
-/** The compact-context select's value for Off. */
-const COMPACTION_OFF = 'off'
 
 /**
  * Settings > Agents: the default model and thread title model, plus context
@@ -47,7 +44,7 @@ export function AgentsSettings({
     Boolean(findListedModel(provider.models, titleModel)))
 
   const context = normalizeContextSettings(settings.context)
-  const compactionValue = context.compactionEnabled ? String(context.compactionTokens) : COMPACTION_OFF
+  const compactionModel = compactionModelOf(providers, settings.provider)
   const experimental = normalizeExperimentalSettings(settings.experimental)
 
   return (
@@ -122,29 +119,10 @@ export function AgentsSettings({
           htmlFor="agents-context-compaction"
           description="Summarizes earlier messages when the active context reaches this size."
           control={
-            // One select: Off, or the size. Off keeps the saved size, so turning it back on offers the same one.
-            <Select
-              id="agents-context-compaction"
-              ariaLabel="Compact context"
-              value={compactionValue}
-              onChange={(next) => {
-                if (next === compactionValue) return
-                if (next === COMPACTION_OFF) {
-                  void updateSettings({ context: { ...context, compactionEnabled: false } })
-                  return
-                }
-                const compactionTokens = next === 'model-max'
-                  ? 'model-max'
-                  : Number(next) as ContextCompactionTokens
-                void updateSettings({ context: { compactionEnabled: true, compactionTokens } })
-              }}
-              options={[
-                { value: COMPACTION_OFF, label: 'Off' },
-                ...CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => ({
-                  value: String(value),
-                  label: value === 'model-max' ? label : `At ${label} tokens`
-                }))
-              ]}
+            <ContextCompactionControl
+              context={context}
+              model={compactionModel}
+              onSave={(next) => void updateSettings({ context: next })}
             />
           }
         />

@@ -82,6 +82,13 @@
   color: var(--danger);
 }
 
+/* The model select while its models load: the shared small spinner, no words. */
+.speech-models-pending {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
 /* "Get more models" dialog. Two views: three picked models compared as columns, then every model
    as a list in the settings row anatomy. Weight and brightness mark the best figure in a row; the
    recommended column sits on one barely lifted panel (background only, no edges or bars). Colour

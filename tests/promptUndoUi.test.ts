@@ -19,13 +19,15 @@ vi.mock('../src/renderer/stores/appStore', () => {
   const state = { get profileId() { return hooks.profileId } }
   return { useAppStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state, subscribe: () => () => undefined }) }
 })
-import { PromptUndoButton, PromptUndoNotice, PromptUndoProvider } from '../src/renderer/components/PromptUndoControls'
+import { PromptUndoButton, PromptUndoProvider, promptUndoNotice, type PromptUndoState } from '../src/renderer/components/PromptUndoControls'
 import { isSessionClosing } from '../src/renderer/lib/errorText'
 
 const target = { actionId: 'action-latest', turnId: 'turn-latest', messageId: 'prompt-latest', journalGeneration: 7 }
 const history = { actions: [], receipts: [], journalGeneration: 7, undoTarget: target }
 let task = 0
 let threadId = ''
+/** The composer notice the current provider state asks for. */
+const notice = () => promptUndoNotice(hooks.context as PromptUndoState)
 const cleanups: Array<() => void> = []
 function render(busy = false) {
   hooks.stateIndex = 0; hooks.refIndex = 0
@@ -82,10 +84,11 @@ it('shows backend failure and leaves the prompt available rather than deleting i
   PromptUndoButton({ messageId: target.messageId }).props.onClick()
   await vi.waitFor(() => expect(hooks.states[2]).toBe('Checkpoint is unavailable'))
   render()
-  const notice = PromptUndoNotice()!
-  expect(notice.props.role).toBe('alert')
-  expect(notice.props.className).toBe('connection-failed-pill')
-  expect(notice.props.children[0].props.children).toBe('Checkpoint is unavailable')
+  const shown = notice()!
+  expect(shown.tone).toBe('error')
+  expect(shown.title).toBe('Checkpoint is unavailable')
+  shown.onDismiss!()
+  expect(hooks.states[2]).toBeNull()
   expect(PromptUndoButton({ messageId: target.messageId }).props.disabled).toBe(false)
   expect(undoLatest).toHaveBeenCalledTimes(1)
 })
@@ -94,11 +97,12 @@ it('uses authoritative conversation redo after Undo hides the prompt', async () 
   const redoTarget = { actionId: 'undone', turnId: target.turnId, journalGeneration: 8 }
   const { redo } = await mount(vi.fn().mockResolvedValue({ ...history, undoTarget: undefined, redoTarget }))
   render()
-  const notice = PromptUndoNotice()!
-  expect(notice.props.className).toContain('connection-failed-pill')
-  const button = notice.props.children.find((child: any) => child?.type === 'button')
-  expect(button.props.children).toBe('Redo last undo')
-  button.props.onClick()
+  const shown = notice()!
+  expect(shown).toMatchObject({ tone: 'info', title: 'Turn undone' })
+  expect(shown.onDismiss).toBeUndefined()
+  const [button] = shown.actions!
+  expect(button).toMatchObject({ label: 'Redo', title: 'Redo last undo', disabled: false })
+  button.onClick()
   await vi.waitFor(() => expect(redo).toHaveBeenCalledExactlyOnceWith(threadId, 8))
 })
 
@@ -109,12 +113,9 @@ it('shows the line an Undo returns with its result, such as the commits it left 
   PromptUndoButton({ messageId: target.messageId }).props.onClick()
   await vi.waitFor(() => expect(hooks.states[4]).toBe(text))
   render()
-  const shown = PromptUndoNotice()!
-  expect(shown.props.role).toBe('status')
-  expect(shown.props.children[0].props.children).toBe(text)
-  const dismiss = shown.props.children.find((child: any) => child?.type === 'button')
-  expect(dismiss.props.children).toBe('Dismiss')
-  dismiss.props.onClick()
+  const shown = notice()!
+  expect(shown).toMatchObject({ tone: 'info', title: text })
+  shown.onDismiss!()
   expect(hooks.states[4]).toBeNull()
 })
 
@@ -150,7 +151,7 @@ it.each([
   expect(PromptUndoButton({ messageId: target.messageId })).toBeNull()
   // The provider adds nothing beside the chat, and the composer notice stays empty.
   expect(tree.props.children).toBeNull()
-  expect(PromptUndoNotice()).toBeNull()
+  expect(notice()).toBeNull()
 })
 
 it('says nothing when Undo fails because the window is closing', async () => {
@@ -161,7 +162,7 @@ it('says nothing when Undo fails because the window is closing', async () => {
   await vi.waitFor(() => expect(hooks.states[1]).toBe(false))
   render()
   expect(hooks.states[2]).toBeNull()
-  expect(PromptUndoNotice()).toBeNull()
+  expect(notice()).toBeNull()
 })
 
 it('shows a failed Undo without the IPC prefix', async () => {
@@ -171,28 +172,19 @@ it('shows a failed Undo without the IPC prefix', async () => {
   await vi.waitFor(() => expect(hooks.states[2]).toBe('Checkpoint is unavailable'))
 })
 
-it('offers Discard for an Undo refused over a conflict, runs it only after confirmation, then undoes again', async () => {
+it('hands an Undo refused over a conflict to the Discard notice, and undoes again once it is resolved', async () => {
   const refusal = { code: 'workspace_conflict', message: 'Thread workspace /w has a merge in progress with conflicts in notes.md. Resolve it or discard the changes, then try again.',
     details: { label: 'Thread workspace', path: '/w', files: ['notes.md'], count: 1, conflict: true, operation: 'merge', discard: true } }
   const undoLatest = vi.fn().mockResolvedValueOnce({ pendingChangesError: refusal }).mockResolvedValue(undefined)
   await mount(vi.fn().mockResolvedValue(history), undoLatest)
-  const discardPendingChanges = vi.fn(async () => ({ backupRef: 'refs/mousse/discarded/x' }))
-  const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValue(true)
-  Object.assign(window, { confirm, mousse: { ...window.mousse, workspace: { discardPendingChanges } } })
   PromptUndoButton({ messageId: target.messageId }).props.onClick()
   await vi.waitFor(() => expect(hooks.states[2]).toBe(refusal.message))
   render()
-  const notice = PromptUndoNotice()!
-  expect(notice.props.details).toEqual(refusal.details)
-  expect(notice.props.message).toBe(refusal.message)
-  const shown = notice.type(notice.props)
-  const buttons = shown.props.children.filter((child: any) => child?.type === 'button')
-  expect(buttons.map((button: any) => button.props.children)).toEqual(['Discard'])
-  buttons[0].props.onClick()
-  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w? This includes uncommitted results of the thread\'s earlier turns. The unfinished merge is ended too.'))
-  expect(discardPendingChanges).not.toHaveBeenCalled()
-  buttons[0].props.onClick()
-  await vi.waitFor(() => expect(discardPendingChanges).toHaveBeenCalledExactlyOnceWith(threadId))
+  // The plain error notice stands down: PendingChangesNotice shows the refusal with Discard.
+  expect(notice()).toBeNull()
+  const state = hooks.context as PromptUndoState
+  expect(state.changes!.details).toEqual(refusal.details)
+  state.changes!.retry()
   await vi.waitFor(() => expect(undoLatest).toHaveBeenCalledTimes(2))
 })
 

@@ -1029,6 +1029,23 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
   }, [])
 
+  // The composer's `/rename` with no title: rename the thread in its row, when the row is on screen.
+  // Handling it cancels the event, so the composer knows not to show its hint instead.
+  useEffect(() => {
+    const onRename = (event: Event) => {
+      const threadId = (event as CustomEvent<{ threadId?: string }>).detail?.threadId
+      const thread = threadId ? threads.find((entry) => entry.id === threadId) : undefined
+      if (!thread) return
+      // Other panels mark elements with the thread id too: only a sidebar row on screen counts.
+      const rows = document.querySelectorAll<HTMLElement>(`.threads-sidebar-thread[data-thread-id="${CSS.escape(thread.id)}"]`)
+      if (![...rows].some((row) => row.offsetParent !== null)) return
+      event.preventDefault()
+      setRenaming({ type: 'thread', id: thread.id, name: thread.name })
+    }
+    window.addEventListener('mousse:rename-thread', onRename)
+    return () => window.removeEventListener('mousse:rename-thread', onRename)
+  }, [threads])
+
   /**
    * `inNeedsMe`: a copy of the row in the "Needs me" group, which filters rows and so does not reorder them.
    * `inTree`: a thread row of the Projects tree (or, with `treeLevel` 1 and `treeTabStop` of its own, of the
