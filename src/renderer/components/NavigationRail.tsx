@@ -3,25 +3,23 @@ import { Gauge, House, Settings, Workflow, type LucideIcon } from '../lib/icons'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
-import { ThreadSearchDialog } from './ThreadSearchDialog'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import '../styles/navigation-rail.css'
 
 export type RailPage = 'home' | 'automations' | 'usage' | 'settings'
 
-/** One rail page at most is current; an open page or search means Home is not. */
+/** One rail page at most is current; an open page means Home is not. */
 export function activeRailPage(state: {
   scheduledOpen: boolean
   usageOpen: boolean
   settingsOpen: boolean
-  threadSearchOpen: boolean
   mainAreaOpen: boolean
   sidebarMode: 'projects' | 'chats'
 }): RailPage | null {
   if (state.settingsOpen) return 'settings'
   if (state.usageOpen) return 'usage'
   if (state.scheduledOpen) return 'automations'
-  if (state.threadSearchOpen || state.mainAreaOpen || state.sidebarMode !== 'projects') return null
+  if (state.mainAreaOpen || state.sidebarMode !== 'projects') return null
   return 'home'
 }
 
@@ -40,9 +38,6 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const switchToThread = useAppStore((s) => s.switchToThread)
-  const searchOpen = useAppStore((s) => s.threadSearchOpen)
-  const setSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
 
   const leaveRailPage = () => {
     setScheduledOpen(false)
@@ -61,7 +56,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
     setThreadsSidebarOpen(true)
     setMainAreaOpen(false)
   }
-  const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen, threadSearchOpen: searchOpen, mainAreaOpen, sidebarMode })
+  const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen, mainAreaOpen, sidebarMode })
   const reviewPending = useStorageReviewPending()
   useEffect(() => { void refreshStorageReview() }, [])
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
@@ -75,24 +70,13 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   )
 
   return (
-    <>
-      <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
-        {shortcut('Home', House, activePage === 'home', () => void showHome())}
-        {shortcut('Automations', Workflow, activePage === 'automations', () => void navigateRail(() => setScheduledOpen(true)))}
-        <div className="navigation-rail-separator" role="separator" />
-        {shortcut('Subscription usage', Gauge, activePage === 'usage', () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
-        {shortcut('Settings', Settings, activePage === 'settings', () => void navigateRail(() => setSettingsOpen(true)))}
-        <DownloadsIndicator variant="rail" />
-      </nav>
-      <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {
-        void confirmNavigation().then((allowed) => {
-          if (!allowed) return
-          leaveRailPage()
-          switchToThread(threadId)
-          void window.mousse.threads.select(threadId)
-          setThreadsSidebarOpen(true)
-        })
-      }} />
-    </>
+    <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
+      {shortcut('Home', House, activePage === 'home', () => void showHome())}
+      {shortcut('Automations', Workflow, activePage === 'automations', () => void navigateRail(() => setScheduledOpen(true)))}
+      <div className="navigation-rail-separator" role="separator" />
+      {shortcut('Subscription usage', Gauge, activePage === 'usage', () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
+      {shortcut('Settings', Settings, activePage === 'settings', () => void navigateRail(() => setSettingsOpen(true)))}
+      <DownloadsIndicator variant="rail" />
+    </nav>
   )
 }
