@@ -330,7 +330,6 @@ export function ComposerFooter({
         {contextShown && <div className="composer-context-anchor">
           <ContextUsageRing
             usage={contextUsage}
-            compaction={compaction}
             onClick={() => onContextOpenChange(!contextOpen)}
             active={contextOpen}
             ref={contextBtnRef}

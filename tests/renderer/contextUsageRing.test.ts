@@ -132,32 +132,15 @@ describe('context ring', () => {
   })
 })
 
-describe('compaction on the ring', () => {
+describe('compaction in the popover', () => {
   const at = (compactionTokens: number | 'model-max'): CompactionSetting => ({ compactionEnabled: true, compactionTokens })
-  const tick = () => document.querySelector('.context-usage-ring-tick')
   const barMark = () => document.querySelector<HTMLElement>('.context-usage-bar-compaction')
   const compactionLine = () => document.querySelector('.context-usage-compaction-text')?.textContent
 
-  it('ticks the ring at the compaction point and names it in the tooltip', () => {
+  it('leaves the ring as it is', () => {
     render(usage(124_000, 1_000_000), { compaction: at(300_000) })
-    const line = tick()
-    expect(line).not.toBeNull()
-    // 30% of the way round, clockwise from the top: right of centre, below the top.
-    expect(Number(line?.getAttribute('x2'))).toBeGreaterThan(10)
-    expect(ring()?.title).toBe('12% · 124K of 1M · compacts at 300K')
-  })
-
-  it('has no tick when compaction is off, the point is past the window, or the setting is not read yet', () => {
-    render(usage(124_000, 1_000_000), { compaction: { compactionEnabled: false, compactionTokens: 300_000 } })
-    expect(tick()).toBeNull()
-
-    render(usage(124_000, 1_000_000))
-    expect(tick()).toBeNull()
-
-    // A runtime that compacts its own context has no point to mark.
-    render(usage(124_000, 1_000_000, { compactedByRuntime: true }), { compaction: at(300_000) })
-    expect(tick()).toBeNull()
     expect(ring()?.title).toBe('12% · 124K of 1M')
+    expect(ring()?.querySelectorAll('svg > *')).toHaveLength(2)
   })
 
   it('marks the same point on the popover bar', () => {
@@ -176,7 +159,7 @@ describe('compaction on the ring', () => {
 
   it('caps a size beyond the window as the daemon does', () => {
     render(usage(124_000, 200_000), { compaction: at(300_000), open: true })
-    expect(tick()).not.toBeNull()
+    expect(barMark()?.style.left).toBe('91.808%')
     expect(compactionLine()).toBe('Compacts at 184K')
   })
 

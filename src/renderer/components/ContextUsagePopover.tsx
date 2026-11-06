@@ -62,8 +62,8 @@ export function contextCompactionText(compaction: ContextCompaction): string {
   return `Compacts at ${formatTokenCount(compaction.tokens)}`
 }
 
-/** Where the ring marks the compaction point, as a share of the window; none when it is not inside it. */
-export function compactionTickFraction(compaction: ContextCompaction | undefined, usage: ContextUsageSnapshot): number | undefined {
+/** Where the usage bar marks the compaction point, as a share of the window; none when it is not inside it. */
+export function compactionMarkFraction(compaction: ContextCompaction | undefined, usage: ContextUsageSnapshot): number | undefined {
   if (compaction?.kind !== 'at' || !(usage.limit > 0) || compaction.tokens >= usage.limit) return undefined
   return compaction.tokens / usage.limit
 }
@@ -130,7 +130,7 @@ export function ContextUsagePopover({
 
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
   const barScale = Math.max(usage.limit, segmentTotal)
-  const compactionFraction = compactionTickFraction(compaction, usage)
+  const compactionFraction = compactionMarkFraction(compaction, usage)
   // Settings, Agents, focused on the Compact context row.
   const changeCompaction = () => {
     onClose()
@@ -168,7 +168,7 @@ export function ContextUsagePopover({
               />
             ))}
           </div>
-          {/* The same point as the ring's tick, outside the clipped bar so it can stand a little proud of it. */}
+          {/* Outside the clipped bar, so the mark can stand a little proud of it. */}
           {compactionFraction !== undefined && barScale > 0 && (
             <div
               className="context-usage-bar-compaction"
@@ -220,25 +220,17 @@ export function ContextUsagePopover({
 interface ContextUsageRingProps {
   /** A snapshot where `contextUsageKnown` holds; the caller renders no ring otherwise. */
   usage: ContextUsageSnapshot
-  /** Where the context compacts: a point inside the window gets a tick on the ring. */
-  compaction?: ContextCompaction
   onClick: () => void
   active: boolean
 }
 
 export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingProps>(
-  function ContextUsageRing({ usage, compaction, onClick, active }, ref) {
+  function ContextUsageRing({ usage, onClick, active }, ref) {
     const radius = 9
     const circumference = 2 * Math.PI * radius
     const percent = Math.min(100, Math.max(0, usage.percent))
     const strokeOffset = circumference - (percent / 100) * circumference
-    const tickFraction = compactionTickFraction(compaction, usage)
-    // The tick crosses the ring's stroke, clockwise from the top like the arc.
-    const tickAngle = tickFraction === undefined ? 0 : tickFraction * 2 * Math.PI - Math.PI / 2
-    const tickAt = (r: number) => ({ x: 10 + r * Math.cos(tickAngle), y: 10 + r * Math.sin(tickAngle) })
-    const summary = tickFraction === undefined || compaction?.kind !== 'at'
-      ? contextUsageSummary(usage)
-      : `${contextUsageSummary(usage)} · compacts at ${formatTokenCount(compaction.tokens)}`
+    const summary = contextUsageSummary(usage)
 
     return (
       <button
@@ -270,17 +262,6 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
             strokeDashoffset={strokeOffset}
             transform="rotate(-90 10 10)"
           />
-          {tickFraction !== undefined && (
-            <line
-              className="context-usage-ring-tick"
-              x1={tickAt(5).x}
-              y1={tickAt(5).y}
-              x2={tickAt(11.5).x}
-              y2={tickAt(11.5).y}
-              strokeWidth="2"
-              strokeLinecap="round"
-            />
-          )}
         </svg>
       </button>
     )
