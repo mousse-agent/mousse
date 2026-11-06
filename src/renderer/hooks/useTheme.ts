@@ -7,6 +7,7 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
+import { setTurnChangedFiles } from '../lib/turnChangedFilesSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setAnimationSpeed } from '../lib/motion'
@@ -200,6 +201,13 @@ function applyAppearance(appearance: AppearanceSettings): void {
   setAnimationSpeed(normalized.animationSpeed)
 }
 
+/** Chat display settings that live under appearance: math and the changed-files summary. */
+function applyChatDisplay(appearance: AppearanceSettings): void {
+  const normalized = normalizeAppearance(appearance)
+  setRenderMath(normalized.renderMath)
+  setTurnChangedFiles(normalized.turnChangedFiles)
+}
+
 async function syncWindowBackground(): Promise<void> {
   try {
     await window.mousse.window.syncBackground()
@@ -241,7 +249,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       const settings = await window.mousse.settings.get()
       if (cancelled) return
       applyAppearance(settings.appearance)
-      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
+      applyChatDisplay(settings.appearance)
       setThreadProjectColors(normalizeAppearance(settings.appearance).threadProjectColors)
       if (applyMaterial) {
         await syncWindowBackground()
@@ -252,7 +260,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
 
     const unsub = window.mousse.settings.onChanged((settings) => {
       applyAppearance(settings.appearance)
-      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
+      applyChatDisplay(settings.appearance)
       setThreadProjectColors(normalizeAppearance(settings.appearance).threadProjectColors)
       if (applyMaterial) {
         void syncWindowBackground()
