@@ -134,6 +134,9 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
  * (`schedules.jobLimits`, read at every use, so the tool text and checks follow a change at once; no tool writes
  * them). Offered over MCP only, like the other tools that act on the profile.
  */
+/** A private thread's job runs only in that thread or its lineage, never in new threads that are shared. */
+const PRIVATE_JOB_REFUSAL = 'This is a private thread: a job that makes a new thread for each run would share that thread with the user\'s other devices. Give threadId (this thread or one of its lineage) so the job runs here.'
+
 export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[] {
   const schedules = host.schedules
   if (!schedules) return []
@@ -309,6 +312,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         }
         const caller = host.threadMeta?.(ctx.caller.threadId)
         if (!caller) throw new Error(`Thread ${ctx.caller.threadId} was not found.`)
+        if (!input.threadId && caller.localOnly === true) throw new Error(PRIVATE_JOB_REFUSAL)
         let projectId = caller.projectId
         if (input.threadId) {
           checkTarget(input.threadId, ctx)
@@ -392,7 +396,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         if (typeof patch.threadId === 'string') {
           checkTarget(patch.threadId, ctx)
           projectId = host.threadMeta?.(patch.threadId)?.projectId
-        } else if (patch.threadId === null) projectId = projectOf(job)
+        } else if (patch.threadId === null) {
+          if (host.threadMeta?.(ctx.caller.threadId)?.localOnly === true) throw new Error(PRIVATE_JOB_REFUSAL)
+          projectId = projectOf(job)
+        }
         const merged = {
           threadId: patch.threadId === undefined ? job.threadId : patch.threadId ?? undefined,
           projectId,

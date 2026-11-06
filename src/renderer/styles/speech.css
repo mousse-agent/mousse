@@ -57,8 +57,20 @@
 }
 
 /* Room for the indicator: the row's content and the hover actions sit left of it. */
+.app .threads-sidebar-thread-container.speaking {
+  --thread-actions-room: 114px;
+}
+
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread {
   padding-right: 44px;
+}
+
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread:not(.threads-sidebar-card) {
+  padding-right: var(--thread-actions-room);
+}
+
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-trailing {
+  right: 46px;
 }
 
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-actions {
@@ -68,6 +80,13 @@
 .speech-settings-error,
 .speech-models-error {
   color: var(--danger);
+}
+
+/* The model select while its models load: the shared small spinner, no words. */
+.speech-models-pending {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
 }
 
 /* "Get more models" dialog. Two views: three picked models compared as columns, then every model
@@ -288,7 +307,7 @@
 .speech-models-progress-fill {
   stroke: var(--accent);
   stroke-linecap: round;
-  transition: stroke-dashoffset 0.2s;
+  transition: stroke-dashoffset var(--ui-dur-slow);
 }
 
 .speech-models-progress > .settings-icon-btn {

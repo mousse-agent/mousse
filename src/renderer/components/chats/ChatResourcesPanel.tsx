@@ -10,7 +10,8 @@ import type { BrowserArtifactReadResult } from '../../../shared/browser/host'
 import type { BrowserViewerSnapshot } from '../../../shared/browser/viewer'
 import { viewerPointToCss } from '../../../shared/browser/viewer'
 import { registerNavigationGuard } from '../../services/navigationGuards'
-import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../../lib/xtermTheme'
+import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
+import { xtermFont, getXtermTheme, followXtermAppearance } from '../../lib/xtermTheme'
 import '@xterm/xterm/css/xterm.css'
 
 type Request = <T>(method: ChatResourceMethod, params?: Record<string, unknown>) => Promise<T>
@@ -120,10 +121,11 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
   const [error, setError] = useState('')
   useEffect(() => {
     if (!container.current) return
-    const term = new Terminal({ allowTransparency: true, fontFamily: XTERM_FONT, fontSize: 12, theme: getXtermTheme(), cursorBlink: true })
-    followXtermAppearance(term)
+    const term = new Terminal({ allowTransparency: true, fontFamily: xtermFont(), fontSize: 12, theme: getXtermTheme(), cursorBlink: true })
     const fit = new FitAddon()
     term.loadAddon(fit); term.open(container.current); fit.fit()
+    const refit = () => { if (!container.current?.clientWidth) return; fit.fit(); if (controlRef.current) void request('chatResources.terminal.resize', { terminalId: terminal.id, columns: Math.min(500, Math.max(2, term.cols)), rows: Math.min(300, Math.max(2, term.rows)) }).catch(() => {}) }
+    followXtermAppearance(term, refit)
     let active = true, busy = false, sequence = 0
     const data = term.onData((value) => { if (controlRef.current) void request('chatResources.terminal.write', { terminalId: terminal.id, data: value }).catch((error) => { if (active) setError(message(error)) }) })
     const poll = async () => {
@@ -140,7 +142,7 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
     }
     void poll()
     const timer = setInterval(() => { void poll() }, 250)
-    const observer = new ResizeObserver(() => { if (!container.current?.clientWidth) return; fit.fit(); if (controlRef.current) void request('chatResources.terminal.resize', { terminalId: terminal.id, columns: Math.min(500, Math.max(2, term.cols)), rows: Math.min(300, Math.max(2, term.rows)) }).catch(() => {}) })
+    const observer = new ResizeObserver(refit)
     observer.observe(container.current)
     return () => { active = false; data.dispose(); observer.disconnect(); clearInterval(timer); term.dispose() }
   }, [request, terminal.id])
@@ -149,6 +151,7 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
 }
 
 function SharedFileEditor({ snapshot, request, presence, operate, otherPresence }: Common & { otherPresence: ChatResourcePresence[] }) {
+  const codeFont = useMonacoCodeFont()
   const [path, setPath] = useState('')
   const [file, setFile] = useState<ChatSharedFile>()
   const [draft, setDraft] = useState('')
@@ -200,5 +203,5 @@ function SharedFileEditor({ snapshot, request, presence, operate, otherPresence 
     if (draftRef.current !== initialDraft && dirtyRef.current && !window.confirm('Discard unsaved shared-file changes?')) return
     setFile(next); setDraft(next.content); setPath(next.path); setConflict(undefined)
   })
-  return <div className="chat-shared-files"><form className="chat-resource-url" onSubmit={(event) => { event.preventDefault(); open(path) }}><FileText size={14} /><input aria-label="Shared file path" placeholder="Relative file path" value={path} onChange={(event) => setPath(event.target.value)} /><button disabled={!path.trim()}>Open</button></form>{snapshot.files.length > 0 && <div className="chat-resource-file-list">{snapshot.files.map((item) => <button key={item.path} className={item.path === file?.path ? 'active' : ''} onClick={() => open(item.path)}>{item.path}</button>)}</div>}{file ? <><div className="chat-resource-actions"><span title={file.path}>{file.path}{dirty ? ' · unsaved' : ''}</span><button disabled={!dirty} onClick={() => void operate(async () => { const epoch = documentEpoch.current; const submittedDraft = draftRef.current; const result = await request<ChatSharedFileWriteResult>('chatResources.file.write', { path: file.path, content: submittedDraft, expectedRevision: file.revision }); if (epoch !== documentEpoch.current || fileRef.current?.path !== file.path) return; if (result.status === 'conflict') setConflict(result.file); else { setFile(result.file); setDraft((current) => current === submittedDraft ? result.file.content : current); setConflict(undefined) } })}>Save</button></div>{conflict && <div className="chat-file-conflict" role="alert"><p>This file changed elsewhere. Your edits are preserved.</p><button onClick={() => { setFile(conflict); setDraft(conflict.content); setConflict(undefined) }}>Load latest</button><button onClick={() => { setFile(conflict); setConflict(undefined) }}>Keep my edits for review</button></div>}<div className="chat-monaco-editor"><Editor path={`mousse-shared/${snapshot.profileId}/${snapshot.groupId}/${file.path}`} value={draft} onChange={(value) => setDraft(value ?? '')} onMount={mount} theme="vs-dark" options={{ minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false, automaticLayout: true }} /></div></> : <p className="chat-empty-hint">Open a group workspace file to edit together. Saves check its revision, and cursors show other viewers.</p>}</div>
+  return <div className="chat-shared-files"><form className="chat-resource-url" onSubmit={(event) => { event.preventDefault(); open(path) }}><FileText size={14} /><input aria-label="Shared file path" placeholder="Relative file path" value={path} onChange={(event) => setPath(event.target.value)} /><button disabled={!path.trim()}>Open</button></form>{snapshot.files.length > 0 && <div className="chat-resource-file-list">{snapshot.files.map((item) => <button key={item.path} className={item.path === file?.path ? 'active' : ''} onClick={() => open(item.path)}>{item.path}</button>)}</div>}{file ? <><div className="chat-resource-actions"><span title={file.path}>{file.path}{dirty ? ' · unsaved' : ''}</span><button disabled={!dirty} onClick={() => void operate(async () => { const epoch = documentEpoch.current; const submittedDraft = draftRef.current; const result = await request<ChatSharedFileWriteResult>('chatResources.file.write', { path: file.path, content: submittedDraft, expectedRevision: file.revision }); if (epoch !== documentEpoch.current || fileRef.current?.path !== file.path) return; if (result.status === 'conflict') setConflict(result.file); else { setFile(result.file); setDraft((current) => current === submittedDraft ? result.file.content : current); setConflict(undefined) } })}>Save</button></div>{conflict && <div className="chat-file-conflict" role="alert"><p>This file changed elsewhere. Your edits are preserved.</p><button onClick={() => { setFile(conflict); setDraft(conflict.content); setConflict(undefined) }}>Load latest</button><button onClick={() => { setFile(conflict); setConflict(undefined) }}>Keep my edits for review</button></div>}<div className="chat-monaco-editor"><Editor path={`mousse-shared/${snapshot.profileId}/${snapshot.groupId}/${file.path}`} value={draft} onChange={(value) => setDraft(value ?? '')} onMount={mount} theme="vs-dark" options={{ minimap: { enabled: false }, fontFamily: codeFont, fontSize: 12, scrollBeyondLastLine: false, automaticLayout: true }} /></div></> : <p className="chat-empty-hint">Open a group workspace file to edit together. Saves check its revision, and cursors show other viewers.</p>}</div>
 }

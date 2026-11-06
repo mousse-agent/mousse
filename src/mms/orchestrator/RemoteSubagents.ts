@@ -311,7 +311,10 @@ export class RemoteSubagents {
         threadId: remoteThreadId,
         content: record.prompt,
         mode: record.chatMode,
-        clientRequestId: `remote-subagent:${record.delegationId}`
+        clientRequestId: `remote-subagent:${record.delegationId}`,
+        // A follow-up on a thread that may be paused by a usage limit refuses, as a follow-up on one computer does.
+        // A thread made for this task has never run, so the first task sends nothing extra to an older computer.
+        ...(record.remoteThreadId ? { refuseWhilePaused: true } : {})
       }, `remote-subagent:${record.delegationId}:send`)
       const runId = isRecord(sent) && typeof sent.runId === 'string' ? sent.runId : undefined
       if (!runId) {
@@ -327,10 +330,11 @@ export class RemoteSubagents {
       const message = messageOf(error)
       this.records.update(record.delegationId, { lastError: message })
       if (TRANSIENT.has(code)) return { ok: 'pending', message }
-      // Refused for good: the task ends here with the reason, and a thread made for it there is removed.
+      // Refused for good: the task ends here with the reason, and a thread made for it there is archived. Deleting
+      // is that computer's own choice; nothing is lost there without it.
       this.setState(record, 'done')
       if (remoteThreadId && !record.remoteThreadId)
-        await this.call(record, 'threads.delete', { threadId: remoteThreadId }).catch(() => undefined)
+        await this.call(record, 'threads.settle', { threadId: remoteThreadId, settled: true }).catch(() => undefined)
       if (onRefusal === 'settle') await this.deps.engine.settleRemoteRun(record.childRunId, 'failed', { error: `${name} refused the task: ${message}` })
       return { ok: false, code, message }
     }

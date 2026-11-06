@@ -26,14 +26,15 @@ export function vocabularyFromDrafts(rows: readonly Pick<DraftRow, 'term' | 'sou
   return normalizeVocabulary(rows.map((row) => ({ term: row.term, soundsLike: parseSoundsLike(row.soundsLike) })))
 }
 
-/** Settings, Speech, Dictation: the names dictation should spell right, edited in a dialog. */
+/**
+ * Settings, Speech, Dictation: the names dictation should spell right, edited in a dialog. Shown
+ * only beside a model that uses them (`usesVocabulary`); the saved list is kept for every model.
+ */
 export function VocabularySetting({
   vocabulary,
-  selection,
   onChange
 }: {
   vocabulary: readonly DictationVocabularyTerm[]
-  selection: DictationSelection | null
   onChange: (vocabulary: DictationVocabularyTerm[]) => void
 }) {
   const [rows, setRows] = useState<DraftRow[] | null>(null)
@@ -66,7 +67,8 @@ export function VocabularySetting({
     <>
       <SettingsRow
         title="Vocabulary"
-        description={usesVocabulary(selection) ? 'Names dictation should spell right.' : 'Names dictation should spell right. Only Parakeet models use them.'}
+        anchor="speech-vocabulary"
+        description="Names dictation should spell right."
         control={
           <button type="button" className="settings-btn" title="Edit vocabulary" onClick={open}>
             {vocabularyCountLabel(vocabulary.length)}

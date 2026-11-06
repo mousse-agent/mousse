@@ -232,32 +232,19 @@
   font-size: 12px;
 }
 
-/* Edit diff follows the app theme tokens (not hardcoded black) so text stays
-   readable in every theme. `html[data-theme]` covers all mousse theme ids
-   (github-dark, blacksphere-plus, …), not just `.dark` / `[data-theme="dark"]`.
+/* An open edit row's diff sits on one subtle surface that follows the app
+   theme tokens (not hardcoded black), so text stays readable in every theme.
    Values are theme vars, so they resolve correctly in light mode too. */
-.dark .an-edit-tool-card,
-[data-theme="dark"] .an-edit-tool-card,
-html[data-theme] .an-edit-tool-card {
-  background-color: var(--an-tool-background);
-}
-
-.dark .an-edit-tool-card .an-edit-diff,
-.dark .an-edit-tool-card .an-edit-diff pre,
-.dark .an-edit-tool-card .an-edit-diff code,
-[data-theme="dark"] .an-edit-tool-card .an-edit-diff,
-[data-theme="dark"] .an-edit-tool-card .an-edit-diff pre,
-[data-theme="dark"] .an-edit-tool-card .an-edit-diff code,
-html[data-theme] .an-edit-tool-card .an-edit-diff,
-html[data-theme] .an-edit-tool-card .an-edit-diff pre,
-html[data-theme] .an-edit-tool-card .an-edit-diff code {
+.an-edit-surface .an-edit-diff,
+.an-edit-surface .an-edit-diff pre,
+.an-edit-surface .an-edit-diff code {
   background-color: var(--an-tool-background) !important;
 }
 
 /* Base diff chrome text uses the theme foreground so gutters and unstyled
    text stay legible on the themed diff background. Token colors from the
    syntax theme still apply on top of this. */
-.an-edit-tool-card .an-edit-diff {
+.an-edit-surface .an-edit-diff {
   color: var(--an-tool-color);
 }
 
@@ -695,7 +682,7 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 
 .permission-request-chevron {
   opacity: 0.6;
-  transition: transform 0.15s;
+  transition: transform var(--ui-dur);
 }
 
 .permission-request-chevron.is-open {
@@ -778,4 +765,25 @@ html[data-theme="high-contrast"] .permission-request-btn-primary {
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A message the reader was taken to (search, the composer's approval cue): its background lights
+   up with the selection tint and fades out. A background only, never an edge bar. */
+.an-message-list .is-located {
+  border-radius: var(--ui-control-radius);
+  animation: chat-located 1.6s ease-out;
+}
+
+@keyframes chat-located {
+  0%,
+  30% {
+    background-color: var(--ui-selected);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .an-message-list .is-located {
+    animation: none;
+    background-color: var(--ui-selected);
+  }
 }

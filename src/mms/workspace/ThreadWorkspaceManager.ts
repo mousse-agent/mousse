@@ -35,6 +35,7 @@ import type {
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { threadBranchNameAsync } from '../../shared/mousseBranches'
+import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}, which callers that cannot wait yet still use. */
@@ -335,7 +336,8 @@ export class ThreadWorkspaceManager {
      * what that write kept or left as it is, as a line for the thread.
      *
      * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
-     * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease.
+     * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease. A private
+     * thread's (`Thread.localOnly`) is `mousse/private-<id>` instead.
      *
      * `onWorktreeMade`: runs once the worktree is made and its files written, still under the repository's lease and
      * before anything else can fail: what Mousse wrote there, as a caller that may have to remove it again reads it.
@@ -362,7 +364,9 @@ export class ThreadWorkspaceManager {
       const primaryHead = await git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
       const head = startSha ? await git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
       // Named once, under the repository's lease, so two threads cannot take the same name.
-      const branch = await threadBranchNameAsync(options.nameFrom, threadId, async (name) => (await tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== '')
+      // A private thread's branch never carries its first message: Git reads from the user's other computers list branch names.
+      const nameFrom = threadFolderIsLocalOnly(this.threadDirectory) ? `private ${threadId.replace(/[^A-Za-z0-9]/g, '').slice(0, 8)}` : options.nameFrom
+      const branch = await threadBranchNameAsync(nameFrom, threadId, async (name) => (await tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== '')
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
       const placement = await placeThreadWorktree({

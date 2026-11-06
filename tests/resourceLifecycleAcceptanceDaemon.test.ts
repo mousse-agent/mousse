@@ -24,7 +24,7 @@ async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolea
   throw new Error('Lifecycle daemon state did not arrive: ' + JSON.stringify(value!))
 }
 
-it('recovers actual daemon crashes immediately after trash AND restore rename, preserving bytes and idle admission', async () => {
+it('finishes at the next start a delete that an actual daemon crash cut short right after its trash rename', async () => {
   const root = mkdtempSync(join(tmpdir(), 'resource-lifecycle-daemon-'))
   const home = join(root, 'home'), control = join(root, 'fault.json'), marker = join(root, 'renamed.json')
   const daemons: Daemon[] = []
@@ -55,7 +55,9 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     const payload = Buffer.from([0, 1, 255, 10, 198, 99])
     writeFileSync(join(original, 'sole-copy.bin'), payload)
     writeFileSync(control, JSON.stringify({ from: original, marker }))
-    await rpc!.request('threads.trash', { threadId: thread.id }).catch(() => undefined)
+    // The app's delete of an archived thread; the process dies right after the trash moved its folder.
+    await rpc!.request('threads.settle', { threadId: thread.id, settled: true })
+    await rpc!.request('threads.delete', { threadId: thread.id }).catch(() => undefined)
     await until(() => first.daemon.done, Boolean)
     expect(existsSync(marker), 'fault must actually intercept the completed rename').toBe(true)
     const moved = JSON.parse(readFileSync(marker, 'utf8'))
@@ -64,34 +66,16 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     await rpc!.close(); rpc = undefined
     writeFileSync(control, '{}')
 
+    // The next start finishes the trash, then the delete it was a step of, as the app asked.
     const second = await launch()
     expect(second.profileId).toBe(first.profileId)
+    const finished = await until(() => JSON.parse(readFileSync(recordPath, 'utf8')) as { state: string; location: string }, (record) => record.state === 'purged')
+    expect(existsSync(finished.location)).toBe(false)
+    expect(existsSync(original)).toBe(false)
     await expect(rpc!.request('threads.get', { threadId: thread.id })).rejects.toThrow()
-    await expect(rpc!.request('threads.purge', { threadId: thread.id })).rejects.toThrow(/operationId/i)
-    await expect(rpc!.request('threads.purge', { threadId: thread.id, operationId: 'unreviewed-crash-purge' })).rejects.toThrow(/preview|review/i)
-    const unreviewed = JSON.parse(readFileSync(recordPath, 'utf8'))
-    expect(unreviewed.state).toBe('trashed')
-    expect(unreviewed.purge).toBeUndefined()
-    expect(readFileSync(join(unreviewed.location, 'sole-copy.bin'))).toEqual(payload)
-    rmSync(marker)
-    writeFileSync(control, JSON.stringify({ to: original, marker }))
-    await rpc!.request('threads.restore', { threadId: thread.id }).catch(() => undefined)
-    await until(() => second.daemon.done, Boolean)
-    expect(existsSync(marker), 'restore must reach its rename boundary').toBe(true)
-    expect(readFileSync(join(original, 'sole-copy.bin'))).toEqual(payload)
-    await rpc!.close(); rpc = undefined
-    writeFileSync(control, '{}')
-
-    await launch()
-    const recovered = await rpc!.request<{ thread: Thread }>('threads.get', { threadId: thread.id })
-    expect(recovered.thread.id).toBe(thread.id)
-    expect(readFileSync(join(original, 'sole-copy.bin'))).toEqual(payload)
-    const owner = JSON.parse(readFileSync(recordPath, 'utf8'))
-    expect(owner.state).toBe('active')
-    expect(owner.generation).toBeGreaterThan(1)
-    for (const lock of ['execution.lease', 'queue.mut.lock', 'thread-data.mut.lock']) expect(existsSync(join(original, lock))).toBe(false)
-    await rpc!.request('threads.rename', { threadId: thread.id, name: 'fresh write after recovery' })
-    expect((await rpc!.request<{ thread: Thread }>('threads.get', { threadId: thread.id })).thread.name).toBe('fresh write after recovery')
+    // The profile takes fresh work after recovery.
+    const { thread: next } = await rpc!.request<{ thread: Thread }>('threads.create', { name: 'fresh write after recovery' })
+    expect((await rpc!.request<{ thread: Thread }>('threads.get', { threadId: next.id })).thread.name).toBe('fresh write after recovery')
   } finally {
     await rpc?.close()
     await Promise.all(daemons.map((daemon) => daemon.kill()))

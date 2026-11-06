@@ -307,7 +307,7 @@ export class StorageCleanupService {
 
   /**
    * One run at a time: a request during a run gets that run's report. The exception is a manual run
-   * ("Clean up now") asked for during a scheduled one: the scheduled run looks at one batch of worktrees
+   * ("Preview cleanup", then confirmed) asked for during a scheduled one: the scheduled run looks at one batch of worktrees
    * and five trash records, so the manual request follows it and gets its own full run. Repeated manual
    * requests share that one queued run.
    */
@@ -415,7 +415,7 @@ export class StorageCleanupService {
     try {
       if (!purge.policy().automaticPurge) {
         const waiting = purge.overdueTaskIds(now, true).length
-        return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, action: 'keep', reason: 'Automatic trash emptying is off', bytes: 0 }] : []
+        return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, action: 'keep', reason: 'A delete that did not finish; it finishes at the next start', bytes: 0 }] : []
       }
       const ids = purge.overdueTaskIds(now)
       if (!ids.length) return []
@@ -1236,7 +1236,7 @@ export class StorageCleanupService {
       const base = this.dispatchWorktreeBase(kept)
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
-      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Clean up now lists it.` }); continue }
+      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Preview cleanup lists it.` }); continue }
       // The ignored files go, as confirmed; Git's own data of the worktree is kept, as a copy the dispatch owns.
       let owner: string | undefined
       try { owner = dispatchKeptFilesOwner(this.deps.store.profileHome, kept.dispatchId) } catch { owner = undefined }
@@ -1375,7 +1375,7 @@ export class StorageCleanupService {
     if (!purge.policy().automaticPurge) {
       // Only worth a line when something in the trash is already past its retention.
       const waiting = purge.overdueTaskIds(now, true).length
-      return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, bytes: 0, outcome: 'kept', reason: 'Automatic trash emptying is off' }] : []
+      return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, bytes: 0, outcome: 'kept', reason: 'A delete that did not finish; it finishes at the next start' }] : []
     }
     const remaining = new Set(snapshot)
     const outcomes: TrashSweepOutcome[] = []

@@ -65,10 +65,6 @@ const laptopUsage = () => ({
 })
 
 const device = (node: string, name: string, state: 'open' | 'closed', self = false) => ({ node, name, caps: ['read'], keyEpoch: 1, expiresAt: 0, self, revoked: false, state })
-const lifecycle = (taskId: string, state: string) => ({
-  schemaVersion: 1, minimumWriterVersion: 1, profileId: 'fixture', taskId, generation: 1, state, originalLocation: `/x/${taskId}`, location: `/x/${taskId}`, locations: [`/x/${taskId}`],
-  operations: [], createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', ...(state === 'trashed' ? { trashedAt: '2026-10-01T00:00:00.000Z' } : {})
-})
 
 const record = <A extends unknown[], R>(method: string, work: (...args: A) => R | Promise<R>) => async (...args: A): Promise<R> => {
   calls.push({ method, args: structuredClone(args) })
@@ -94,8 +90,6 @@ const report = () => ({
 Object.assign(window, {
   mousse: {
     threads: {
-      inventory: async () => ({ lifecycles: [lifecycle('t1', 'active'), lifecycle('t9', 'trashed')], taskNames: { t1: 'Fix storage', t9: 'Old experiment' }, trashPolicy: daemon.trash, trashSweepStatus: { suspended: false } }),
-      configureTrash: record('threads.configureTrash', (next: typeof daemon.trash) => { daemon.trash = { ...daemon.trash, ...next, schemaVersion: 1 } }),
       select: record('threads.select', async (_id: string) => undefined)
     },
     storage: {
@@ -186,8 +180,15 @@ function type(input: HTMLInputElement, value: string): void {
 const press = (element: HTMLElement, key: string) => element.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
 const callsOf = (method: string) => calls.filter((call) => call.method === method)
 const rowsOf = () => $$(tid('storage-usage-row')).map((row) => ({ key: row.dataset.key!, label: (row.querySelector('th')?.textContent ?? '').trim(), bytes: Number(row.dataset.bytes) }))
-// Read from the drawn circles, not from the data the chart was given.
-const arcsOf = () => $$(tid('storage-donut-arc')).map((arc) => ({ key: arc.dataset.key!, length: Number((arc.getAttribute('stroke-dasharray') ?? '').split(' ')[0]), stroke: arc.getAttribute('stroke') }))
+// What one view draws: the total once, the table rows, one donut arc per row with the row's swatch in the arc's colour, and no legend.
+const swatchesMatch = () => $$(tid('storage-usage-row')).every((row) => {
+  const arc = $$(tid('storage-donut-arc')).find((candidate) => candidate.dataset.key === row.dataset.key)
+  const swatch = row.querySelector<HTMLElement>(tid('storage-usage-swatch'))
+  return !!arc && !!swatch && swatch.style.background === arc.getAttribute('stroke')
+})
+const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), arcs: $$(tid('storage-donut-arc')).length, legend: $$('[data-testid="storage-legend-item"]').length, swatchesMatch: swatchesMatch() })
+// The page's sections in document order; the rule-review notice, when shown, is part of it.
+const pageOrder = () => $('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
 const valueOf = (testId: string) => $(tid(testId))?.dataset.value
 const unavailable = () => text(tid('storage-usage-unavailable'))
 
@@ -208,7 +209,7 @@ async function run() {
   // A profile that was already in use sees its own rules, a notice, and nothing turned on for it.
   const review: Record<string, unknown> = {}
   await until(() => $(tid('storage-review-notice')), 'review notice')
-  review.legacy = { notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
+  review.legacy = { order: pageOrder(), notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
   $<HTMLButtonElement>(tid('storage-review-open'))!.click()
   await until(() => $(tid('storage-review-rules')), 'review dialog')
   review.dialog = text(tid('storage-review-rules'))
@@ -232,14 +233,16 @@ async function run() {
 
   // The saved values reach the controls, and the rules say what they delete and never delete.
   evidence.initial = {
-    trash: valueOf('storage-auto-empty-select'), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
-    deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'),
-    ruleRows: ['storage-auto-empty', 'storage-remove-deleted', 'storage-inactive', 'storage-merged', 'storage-captures'].map((id) => ({ id, text: text(tid(id)) })),
+    inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
+    merged: $('#storage-merged-switch')?.getAttribute('aria-checked'),
+    ruleRows: ['storage-inactive', 'storage-merged', 'storage-captures'].map((id) => ({ id, text: text(tid(id)) })),
     worktreesNote: text('#storage-worktrees .settings-group-desc'),
-    groups: ['storage-trash', 'storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
+    groups: ['storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
+    // Threads no longer wait in a trash, and a deleted thread's worktree goes with it: neither has a rule here.
+    noTrashRules: !document.getElementById('storage-trash') && !$(tid('storage-auto-empty')) && !$(tid('storage-remove-deleted')),
     machineSelect: Boolean($(tid('storage-machine-select'))),
     measuredAt: text(tid('storage-measured-at')),
-    projectRows: rowsOf(), projectArcs: arcsOf().length
+    projectRows: rowsOf(), order: pageOrder()
   }
 
   // The worktree folder: the picker's folder is saved by the daemon and read back; Use default goes back, and the
@@ -292,22 +295,13 @@ async function run() {
   $('#storage-merged-switch')!.click()
   await until(() => $('#storage-merged-switch')?.getAttribute('aria-checked') === 'false', 'merged off')
   policy.mergedOff = daemon.policy.worktrees.removeMerged
-  $('#storage-remove-deleted-switch')!.click()
-  await until(() => $('#storage-remove-deleted-switch')?.getAttribute('aria-checked') === 'false', 'deleted threads off')
-  policy.deletedOff = daemon.policy.worktrees.removeWithDeletedThreads
   await pick('storage-captures-select', '90')
   await until(() => valueOf('storage-captures-select') === '90', 'captures 90')
   policy.captures90 = daemon.policy.browser.captureDays
-  await pick('storage-auto-empty-select', '7')
-  await until(() => valueOf('storage-auto-empty-select') === '7', 'trash 7')
-  policy.trash7 = { ...daemon.trash }
-  const trashCustom = await customDays('storage-auto-empty-select', '12')
-  await until(() => valueOf('storage-auto-empty-select') === '12', 'trash 12')
-  policy.trash12 = { ...trashCustom, saved: { ...daemon.trash } }
   policy.otherRulesKept = structuredClone(daemon.policy)
   evidence.policy = policy
 
-  // Clean up now with a rule on: plan first, then confirm, then the report.
+  // Preview cleanup with a rule on: plan first, then confirm, then the report.
   const cleanup: Record<string, unknown> = {}
   cleanup.beforeRun = text(tid('storage-last-run'))
   cleanup.enabled = !$<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled
@@ -359,17 +353,16 @@ async function run() {
   daemon.runMode = 'ok'
   evidence.cleanup = cleanup
 
-  // Disk usage: Group by changes both the table and the chart.
+  // Disk usage: Group by changes the table; the total stays the sum of its rows.
   const usage: Record<string, unknown> = {}
-  const project = { rows: rowsOf(), arcs: arcsOf() }
+  const project = viewOf()
   await pick('storage-groupby-select', 'thread')
   await until(() => rowsOf().some((row) => row.label === 'Fix storage'), 'thread rows')
-  const thread = { rows: rowsOf(), arcs: arcsOf() }
+  const thread = viewOf()
   await pick('storage-groupby-select', 'kind')
   await until(() => rowsOf().some((row) => row.label === 'Worktrees'), 'kind rows')
-  const kind = { rows: rowsOf(), arcs: arcsOf() }
+  const kind = viewOf()
   usage.byGroup = { project, thread, kind }
-  usage.legend = $$(tid('storage-legend-item')).length
   usage.sortedBy = ''
   $<HTMLButtonElement>(tid('storage-sort-name'))!.click()
   await sleep(40)
@@ -402,7 +395,7 @@ async function run() {
   // A remote machine that refuses is Unavailable, never zero.
   await pick('storage-machine-select', 'nod_server')
   await until(() => $(tid('storage-usage-none')), 'server unavailable')
-  usage.server = { text: unavailable(), chart: Boolean($(tid('storage-donut'))), none: text(tid('storage-usage-none')) }
+  usage.server = { text: unavailable(), table: Boolean($(tid('storage-usage-table'))), none: text(tid('storage-usage-none')) }
   // One that is offline is not even asked.
   const phoneBefore = callsOf('bridge.hub.storage').filter((call) => (call.args[0] as { target: string }).target === 'nod_phone').length
   await pick('storage-machine-select', 'nod_phone')
@@ -411,7 +404,7 @@ async function run() {
   // All machines: sums what answered and lists what did not.
   await pick('storage-machine-select', 'all')
   await until(() => unavailable().includes('Server') && unavailable().includes('Phone'), 'all machines answered')
-  const allProject = { rows: rowsOf(), arcs: arcsOf(), unavailable: unavailable(), total: text(tid('storage-usage-total')), machineColumn: Boolean($(tid('storage-sort-machine'))) }
+  const allProject = { rows: rowsOf(), unavailable: unavailable(), total: text(tid('storage-usage-total')), machineColumn: Boolean($(tid('storage-sort-machine'))) }
   await pick('storage-groupby-select', 'kind')
   await until(() => rowsOf().some((row) => row.label === 'Worktrees'), 'all by kind')
   usage.all = { project: allProject, kind: { rows: rowsOf(), machineColumn: Boolean($(tid('storage-sort-machine'))) } }
@@ -422,10 +415,10 @@ async function run() {
   daemon.usageMode = 'malformed'
   $<HTMLButtonElement>(tid('storage-usage-refresh'))!.click()
   await until(() => $(tid('storage-usage-none')), 'malformed refused')
-  usage.malformed = { chart: Boolean($(tid('storage-donut'))), rows: rowsOf().length, text: unavailable(), none: text(tid('storage-usage-none')) }
+  usage.malformed = { table: Boolean($(tid('storage-usage-table'))), rows: rowsOf().length, text: unavailable(), none: text(tid('storage-usage-none')) }
   daemon.usageMode = 'ok'
   $<HTMLButtonElement>(tid('storage-usage-refresh'))!.click()
-  await until(() => $(tid('storage-donut')), 'recovered')
+  await until(() => $(tid('storage-usage-table')), 'recovered')
   await settled()
 
   // Selecting a row goes somewhere.
@@ -465,17 +458,12 @@ async function run() {
   await settled()
   evidence.usage = usage
 
-  // Trash is reviewed from the sidebar; the row says how many threads wait there.
-  evidence.trash = { row: text(tid('storage-auto-empty')), reviewButton: Boolean($(tid('storage-review-trash-button'))), otherThreads: document.body.textContent?.includes('Other threads') ?? false }
-
-  // With every rule off, Clean up now has nothing to do and says so.
-  await pick('storage-auto-empty-select', 'never')
-  await until(() => valueOf('storage-auto-empty-select') === 'never', 'trash never')
+  // With every rule off, Preview cleanup has nothing to do and says so.
   await pick('storage-inactive-select', 'off')
   await pick('storage-captures-select', 'off')
   await until(() => valueOf('storage-captures-select') === 'off', 'captures off')
   const planCallsBefore = callsOf('storage.cleanupPlan').length
-  evidence.noRule = { disabled: $<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled, text: text(tid('storage-cleanup-now')), policy: structuredClone(daemon.policy), trash: { ...daemon.trash } }
+  evidence.noRule = { disabled: $<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled, text: text(tid('storage-cleanup-now')), policy: structuredClone(daemon.policy) }
   $<HTMLButtonElement>(tid('storage-cleanup-button'))!.click()
   await sleep(100)
   evidence.noRule = { ...(evidence.noRule as object), planCallsAdded: callsOf('storage.cleanupPlan').length - planCallsBefore }

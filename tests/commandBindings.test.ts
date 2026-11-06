@@ -6,6 +6,7 @@ import {
   defaultBindingFor,
   findConflicts,
   formatBinding,
+  getCommand,
   normalizeShortcuts,
   parseBinding,
   resolveBinding,
@@ -215,7 +216,9 @@ describe('resolveBindings', () => {
     expect(win.get('B')).toEqual(['surface.browser'])
     expect(win.get('Ctrl+S')).toEqual(['workflow.save'])
     expect(win.has('Ctrl+Z')).toBe(false)
-    expect(win.has('Ctrl+Enter')).toBe(false)
+    expect(win.has('Ctrl+Y')).toBe(false)
+    // The commit box's own Mod+Enter is display-only; the approval command has the chord.
+    expect(win.get('Ctrl+Enter')).toEqual(['approval.allow'])
     expect(resolveBindings({}, 'darwin').get('Cmd+K')).toEqual(['palette.open'])
     expect(resolveBindings({}, 'darwin').get('Ctrl+Tab')).toEqual(['thread.next'])
   })
@@ -278,9 +281,6 @@ describe('resolveCommand', () => {
     expect(resolve('Ctrl+Shift+Backspace', palette)).toBe('run.stop')
     expect(resolve('Ctrl+N', palette)).toBeNull()
 
-    const search = context({ overlay: 'thread-search' })
-    expect(resolve('Ctrl+K', search)).toBeNull()
-    expect(resolve('Ctrl+Shift+Backspace', search)).toBe('run.stop')
   })
 
   it('applies each command\'s own condition', () => {
@@ -312,7 +312,7 @@ describe('resolveCommand', () => {
   })
 
   it('does not run fixed commands', () => {
-    expect(resolve('Ctrl+Enter')).toBeNull()
+    expect(resolve('Ctrl+Y')).toBeNull()
     expect(resolve('Ctrl+Z')).toBeNull()
   })
 
@@ -452,10 +452,18 @@ describe('normalizeShortcuts', () => {
 })
 
 describe('the command table', () => {
-  it('has unique ids and parseable default bindings on every platform', () => {
+  it('has unique ids and parseable default bindings on every platform, or none by design', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
+    const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
+    // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
-      for (const platform of ['win32', 'darwin']) expect(parseBinding(defaultBindingFor(command.id, platform))).not.toBeNull()
+      for (const platform of ['win32', 'darwin']) {
+        const binding = defaultBindingFor(command.id, platform)
+        // A command declared without a key ships unbound; every other default parses.
+        if (command.defaultBinding === null) expect(binding).toBeNull()
+        else expect(parseBinding(binding!)).not.toBeNull()
+      }
     }
   })
 
@@ -491,7 +499,7 @@ describe('the command table', () => {
       expect(resolve(spec, context({ inFilesPanel: false }))).toBeNull()
       expect(resolve(spec, context())).toBeNull()
       expect(resolve(spec, context({ inFilesPanel: true, inTerminal: true }))).toBeNull()
-      for (const overlay of ['palette', 'thread-search', 'modal', 'model-picker'] as const) {
+      for (const overlay of ['palette', 'modal', 'model-picker'] as const) {
         expect(resolve(spec, context({ inFilesPanel: true, overlay }))).toBeNull()
       }
     }
@@ -521,13 +529,37 @@ describe('the command table', () => {
     expect(resolve('Ctrl+F', context({ inTextInput: true }))).toBe('chat.findInThread')
     expect(resolve('Ctrl+F', context({ inTerminal: true }))).toBeNull()
     expect(resolve('Ctrl+F', context({ threadOpen: false }))).toBeNull()
-    for (const overlay of ['palette', 'thread-search', 'modal', 'model-picker'] as const) {
+    for (const overlay of ['palette', 'modal', 'model-picker'] as const) {
       expect(resolve('Ctrl+F', context({ overlay }))).toBeNull()
     }
     expect(resolveCommand(press('Meta+F'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('chat.findInThread')
     expect(resolveCommand(press('Ctrl+F'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBeNull()
     // Nothing is registered until a transcript is mounted: the key is left alone.
     expect(resolveCommand(press('Ctrl+F'), {}, context(), (id: CommandId) => id !== 'chat.findInThread')).toBeNull()
+  })
+
+  it('approves on Mod+Enter from the composer or no field, never from another text field, a terminal or the browser', () => {
+    expect(defaultBindingFor('approval.allow', 'win32')).toBe('CommandOrControl+Enter')
+    expect(resolve('Ctrl+Enter')).toBe('approval.allow')
+    expect(resolve('Ctrl+Enter', context({ inTextInput: true, inComposer: true }))).toBe('approval.allow')
+    expect(resolveCommand(press('Meta+Enter'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('approval.allow')
+    // A commit box or search field keeps its own Mod+Enter.
+    expect(resolve('Ctrl+Enter', context({ inTextInput: true }))).toBeNull()
+    expect(resolve('Ctrl+Enter', context({ inTerminal: true }))).toBeNull()
+    expect(resolve('Ctrl+Enter', context({ threadOpen: false }))).toBeNull()
+    expect(resolve('Ctrl+Enter', context({ overlay: 'modal' }))).toBeNull()
+    // No request waits (the handler is disabled): the composer sends as usual.
+    expect(resolveCommand(press('Ctrl+Enter'), {}, context({ inTextInput: true, inComposer: true }), (id: CommandId) => id !== 'approval.allow')).toBeNull()
+    expect(getCommand('approval.allow').guest).toBe('deny')
+  })
+
+  it('has no default key for Deny, and keeps one the user sets', () => {
+    expect(defaultBindingFor('approval.deny', 'win32')).toBeNull()
+    expect(resolve('Ctrl+Shift+Enter')).toBeNull()
+    expect(resolve('Ctrl+Shift+Enter', context(), { 'approval.deny': 'CommandOrControl+Shift+Enter' })).toBe('approval.deny')
+    // Unbound is its default already: nothing is stored.
+    expect(normalizeShortcuts({ 'approval.deny': null }, 'win32')).toEqual({})
+    expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Shift+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Shift+Enter' })
   })
 })
 

@@ -15,6 +15,7 @@ import ArrowLeft01Icon from '@hugeicons/core-free-icons/ArrowLeft01Icon'
 import ArrowLeft02Icon from '@hugeicons/core-free-icons/ArrowLeft02Icon'
 import ArrowRight01Icon from '@hugeicons/core-free-icons/ArrowRight01Icon'
 import ArrowRight02Icon from '@hugeicons/core-free-icons/ArrowRight02Icon'
+import ArrowTurnForwardIcon from '@hugeicons/core-free-icons/ArrowTurnForwardIcon'
 import ArrowUp01Icon from '@hugeicons/core-free-icons/ArrowUp01Icon'
 import ArrowUp02Icon from '@hugeicons/core-free-icons/ArrowUp02Icon'
 import ArrowUpDoubleIcon from '@hugeicons/core-free-icons/ArrowUpDoubleIcon'
@@ -24,6 +25,7 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
+import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
 import BubbleChatQuestionIcon from '@hugeicons/core-free-icons/BubbleChatQuestionIcon'
@@ -55,6 +57,7 @@ import File02Icon from '@hugeicons/core-free-icons/File02Icon'
 import FileAddIcon from '@hugeicons/core-free-icons/FileAddIcon'
 import FileExportIcon from '@hugeicons/core-free-icons/FileExportIcon'
 import FileScriptIcon from '@hugeicons/core-free-icons/FileScriptIcon'
+import FileVerifiedIcon from '@hugeicons/core-free-icons/FileVerifiedIcon'
 import Flag01Icon from '@hugeicons/core-free-icons/Flag01Icon'
 import FlashIcon from '@hugeicons/core-free-icons/FlashIcon'
 import Folder01Icon from '@hugeicons/core-free-icons/Folder01Icon'
@@ -64,6 +67,7 @@ import FolderOpenIcon from '@hugeicons/core-free-icons/FolderOpenIcon'
 import FolderSearchIcon from '@hugeicons/core-free-icons/FolderSearchIcon'
 import GitBranchIcon from '@hugeicons/core-free-icons/GitBranchIcon'
 import GitCommitHorizontalIcon from '@hugeicons/core-free-icons/GitCommitHorizontalIcon'
+import GitCompareIcon from '@hugeicons/core-free-icons/GitCompareIcon'
 import GitForkIcon from '@hugeicons/core-free-icons/GitForkIcon'
 import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
@@ -180,6 +184,7 @@ export const Archive = /* @__PURE__ */ createIcon('Archive', Archive01Icon)
 export const ArrowDownLeft = /* @__PURE__ */ createIcon('ArrowDownLeft', ArrowDownLeft01Icon)
 export const ArrowLeft = /* @__PURE__ */ createIcon('ArrowLeft', ArrowLeft02Icon)
 export const ArrowRight = /* @__PURE__ */ createIcon('ArrowRight', ArrowRight02Icon)
+export const ArrowTurnForward = /* @__PURE__ */ createIcon('ArrowTurnForward', ArrowTurnForwardIcon)
 export const ArrowUp = /* @__PURE__ */ createIcon('ArrowUp', ArrowUp02Icon)
 export const ArrowUpRight = /* @__PURE__ */ createIcon('ArrowUpRight', ArrowUpRight01Icon)
 export const CircleArrowUp = /* @__PURE__ */ createIcon('CircleArrowUp', CircleArrowUp02Icon)
@@ -221,6 +226,7 @@ export const FolderPlus = /* @__PURE__ */ createIcon('FolderPlus', FolderAddIcon
 export const Gauge = /* @__PURE__ */ createIcon('Gauge', DashboardSpeed01Icon)
 export const GitBranch = /* @__PURE__ */ createIcon('GitBranch', GitBranchIcon)
 export const GitCommitHorizontal = /* @__PURE__ */ createIcon('GitCommitHorizontal', GitCommitHorizontalIcon)
+export const GitCompare = /* @__PURE__ */ createIcon('GitCompare', GitCompareIcon)
 export const GitFork = /* @__PURE__ */ createIcon('GitFork', GitForkIcon)
 export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
@@ -260,6 +266,12 @@ export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', Pan
 export const PanelRightOpen = /* @__PURE__ */ createIcon('PanelRightOpen', PanelRightOpenIcon)
 export const Paperclip = /* @__PURE__ */ createIcon('Paperclip', Attachment01Icon)
 export const Pause = /* @__PURE__ */ createIcon('Pause', PauseIcon)
+/** A notification inside the app window: a small toast card with two lines of text. */
+export const AppNotification = /* @__PURE__ */ createIcon('AppNotification', [
+  ['path', { d: 'M3 9C3 6.79086 4.79086 5 7 5H17C19.2091 5 21 6.79086 21 9V15C21 17.2091 19.2091 19 17 19H7C4.79086 19 3 17.2091 3 15V9Z', stroke: 'currentColor', strokeLinejoin: 'round', strokeWidth: '1.5', key: '0' }],
+  ['path', { d: 'M7.5 10H16.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: '1.5', key: '1' }],
+  ['path', { d: 'M7.5 14H13', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: '1.5', key: '2' }]
+])
 export const Pencil = /* @__PURE__ */ createIcon('Pencil', Edit02Icon)
 export const Pin = /* @__PURE__ */ createIcon('Pin', PinIcon)
 export const Play = /* @__PURE__ */ createIcon('Play', PlayIcon)
@@ -309,6 +321,7 @@ export const ChevronsUp = /* @__PURE__ */ createIcon('ChevronsUp', ArrowUpDouble
 export const CircleX = /* @__PURE__ */ createIcon('CircleX', CancelCircleIcon)
 export const FileCode = /* @__PURE__ */ createIcon('FileCode', FileScriptIcon)
 export const FilePlus = /* @__PURE__ */ createIcon('FilePlus', FileAddIcon)
+export const FileApproved = /* @__PURE__ */ createIcon('FileApproved', FileVerifiedIcon)
 export const FileJs = /* @__PURE__ */ createIcon('FileJs', JavaScriptIcon)
 export const FolderSearch = /* @__PURE__ */ createIcon('FolderSearch', FolderSearchIcon)
 export const Logout = /* @__PURE__ */ createIcon('Logout', Logout01Icon)
@@ -319,12 +332,12 @@ export const VolumeHigh = /* @__PURE__ */ createIcon('VolumeHigh', VolumeHighIco
 export const ArchiveRestore = /* @__PURE__ */ createIcon('ArchiveRestore', ArchiveRestoreIcon)
 export const Clean = /* @__PURE__ */ createIcon('Clean', CleanIcon)
 export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
+export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
 export const IconBrain = Brain
 export const IconArrowBackUp = Undo2
 export const IconArrowDown = ArrowDown
-export const IconArrowUp = ArrowUp
 export const IconCheck = Check
 export const IconChecklist = ClipboardList
 export const IconChevronDown = ChevronDown
@@ -348,10 +361,7 @@ export const IconInfoCircle = Info
 export const IconLogout = Logout
 export const IconMessageCircleQuestion = MessageQuestion
 export const IconMessagePlus = MessageSquarePlus
-export const IconPaperclip = Paperclip
 export const IconPhoto = Image
-export const IconPlayerStopFilled = Stop
-export const IconPlus = Plus
 export const IconSearch = Search
 export const IconSend = Send
 export const IconSparkles = Sparkles

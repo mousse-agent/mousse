@@ -131,6 +131,21 @@ describe('row actions', () => {
     expect(git.discard).not.toHaveBeenCalled()
   })
 
+  it('waits for a confirmation that answers later, and discards nothing until it says yes', async () => {
+    const { git } = install()
+    let answer: (yes: boolean) => void = () => undefined
+    const asked = new Promise<boolean>((resolve) => { answer = resolve })
+    const outcome = runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] }, { confirm: () => asked })
+    await Promise.resolve()
+    expect(git.discard).not.toHaveBeenCalled()
+    answer(true)
+    expect(await outcome).toEqual({ kind: 'done' })
+    expect(git.discard).toHaveBeenCalledWith(project, ['a.ts'])
+    const declined = runRowAction(PATH, project, { action: 'discard', files: [file('b.ts')] }, { confirm: async () => false })
+    expect(await declined).toEqual({ kind: 'cancelled' })
+    expect(git.discard).toHaveBeenCalledTimes(1)
+  })
+
   it("refuses stage and unstage in a thread's own worktree before asking the daemon, and still discards", async () => {
     const { git } = install()
     expect(await runRowAction(PATH, thread, { action: 'stage', files: [file('a.ts')] })).toEqual({ kind: 'failed', message: "Not available in this thread's worktree" })

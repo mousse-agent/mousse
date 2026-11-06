@@ -27,13 +27,15 @@ export interface InteractiveChatOptions {
   mode: OutputMode
   initialThreadId: string | null
   initialMessage?: string
+  /** Start a new private thread (`Thread.localOnly`) instead of reusing one. */
+  privateChat?: boolean
 }
 
 export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<void> {
   const { client, initialThreadId, initialMessage } = opts
   let threadId = initialThreadId
 
-  if (!threadId) {
+  if (!threadId && !opts.privateChat) {
     const list = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
       'threads.list'
     )
@@ -41,7 +43,8 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   }
   if (!threadId) {
     const created = await client.request<{ thread: { id: string } }>('threads.create', {
-      name: 'CLI session'
+      name: 'CLI session',
+      ...(opts.privateChat ? { localOnly: true } : {})
     })
     threadId = created.thread.id
   }

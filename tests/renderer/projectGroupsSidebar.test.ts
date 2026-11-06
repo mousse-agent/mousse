@@ -16,8 +16,6 @@ vi.mock('../../src/renderer/lib/floatingLayer', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/renderer/lib/floatingLayer')>()),
   FloatingPortal: ({ children }: { children: unknown }) => children
 }))
-// Recently deleted reads the daemon and is not what these tests are about.
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 
 const at = '2026-10-25T10:00:00.000Z'
 const B ='nod_studio'
@@ -136,7 +134,7 @@ describe('the menu of a project group', () => {
         target,
         onClose: () => undefined,
         onPin: () => undefined,
-        onSettle: () => undefined,
+        onArchive: () => undefined,
         onRegenerateTitle: () => undefined,
         onRename: () => undefined,
         onRemove: () => undefined,
@@ -147,7 +145,7 @@ describe('the menu of a project group', () => {
   it('says which computer a project of another computer is on', () => {
     const html = menu({ type: 'project', id: `${B}:b2`, name: 'Studio only', pinned: false, node: B, computerName: 'Studio' })
     expect(html).toContain('On Studio')
-    expect(html).not.toContain('Trust Git settings again')
+    expect(html).not.toContain('Git settings')
   })
 
   it('says that removing a project of this computer leaves the other computers’ projects', () => {

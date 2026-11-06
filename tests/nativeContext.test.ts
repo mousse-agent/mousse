@@ -7,6 +7,7 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import {
   appendNativeMessage,
+  clearNativeContext,
   compactMessagesAtSafeBoundary,
   compactNativeContext,
   commitNativeMessages,
@@ -19,6 +20,7 @@ import {
   userMessage
 } from '../src/mms/orchestrator/nativeContext'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from '../src/mms/orchestrator/steer'
+import { nativeAgentHistory } from '../src/mms/providers/nativeAgentHistory'
 
 const usage = {
   input: 10, output: 5, cacheRead: 2, cacheWrite: 0, totalTokens: 17,
@@ -169,6 +171,60 @@ describe('Pi-native thread context', () => {
   it('reports an unchanged durable context by identity when no safe reduction exists', () => {
     const context = createNativeContext([userMessage('only current request')])
     expect(compactNativeContext(context, 20_000)).toBe(context)
+  })
+
+  it('/clear leaves nothing provider-visible and keeps the archive and compaction generation', () => {
+    const messages: Message[] = [
+      userMessage('the secret plan is blue'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old log '.repeat(4_000) }] },
+      userMessage('recent '.repeat(400)),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
+    ]
+    const compacted = compactNativeContext(createNativeContext(messages), 500)
+    expect(nativeAgentHistory(compacted)).not.toBe('')
+    const cleared = clearNativeContext(compacted)
+
+    expect(cleared.messages).toEqual(messages)
+    expect(getActiveMessages(cleared)).toEqual([])
+    expect(cleared.clearedAtIndex).toBe(messages.length)
+    expect(cleared.compaction?.generation).toBe(compacted.compaction?.generation)
+    expect(cleared.compaction?.summary).toBe('')
+    expect(cleared.revision).toBe((compacted.revision ?? 0) + 1)
+    // The history every runtime fingerprints is empty: none resumes its old session.
+    expect(nativeAgentHistory(cleared)).toBe('')
+    expect(nativeAgentHistory(clearNativeContext(createNativeContext(messages)))).toBe('')
+  })
+
+  it('never brings cleared messages back into a later compaction', () => {
+    const before: Message[] = [
+      userMessage('the secret plan is blue'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old '.repeat(400) }] }
+    ]
+    const after: Message[] = [
+      userMessage('write the release notes'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'working '.repeat(4_000) }] },
+      userMessage('recent '.repeat(400)),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
+    ]
+    let context = clearNativeContext(createNativeContext(before))
+    for (const message of after) context = appendNativeMessage(context, message)
+    const compacted = compactNativeContext(context, 500)
+
+    expect(compacted.activeStartIndex).toBeGreaterThan(before.length)
+    expect(compacted.compaction?.summary).toContain('write the release notes')
+    expect(compacted.compaction?.summary).not.toContain('secret plan')
+  })
+
+  it('adds a /compact focus to the generated memory', () => {
+    const messages: Message[] = [
+      userMessage('ship the login fix'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old log '.repeat(4_000) }] },
+      userMessage('recent '.repeat(400)),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
+    ]
+    const compacted = compactNativeContext(createNativeContext(messages), 500, '  keep the failing test names ')
+    expect(compacted.compaction?.summary).toContain('keep the failing test names')
+    expect(compactNativeContext(createNativeContext(messages), 500).compaction?.summary).not.toContain('Focus')
   })
 
   it('preserves user intent while excluding tool output from directives', () => {

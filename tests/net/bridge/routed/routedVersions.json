@@ -305,8 +305,8 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 2,
-    "digest": "603f2c1520163ce5",
+    "version": 3,
+    "digest": "c3f9789b24c3fa13",
     "security": "1447c39a3cdfbf97"
   },
   "orchestrator.steer": {
@@ -644,6 +644,16 @@
     "digest": "e2af3a0680e25499",
     "security": "926c4af141d1208d"
   },
+  "threads.clearContext": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
+  },
+  "threads.compact": {
+    "version": 1,
+    "digest": "94dd6dadebc5f444",
+    "security": "926c4af141d1208d"
+  },
   "threads.create": {
     "version": 1,
     "digest": "8c29741dbc687abf",
@@ -684,11 +694,6 @@
     "digest": "9779ecb28c4ca43c",
     "security": "ceacd93869361a7a"
   },
-  "threads.restore": {
-    "version": 1,
-    "digest": "d536a70a70cc7c8c",
-    "security": "ceacd93869361a7a"
-  },
   "threads.search": {
     "version": 1,
     "digest": "70c38e267069982a",
@@ -712,11 +717,6 @@
   "threads.setWorktreeEnabled": {
     "version": 1,
     "digest": "d45007f32a42eb40",
-    "security": "ceacd93869361a7a"
-  },
-  "threads.trash": {
-    "version": 1,
-    "digest": "d536a70a70cc7c8c",
     "security": "ceacd93869361a7a"
   },
   "workflowRuns.answer": {

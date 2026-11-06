@@ -34,6 +34,8 @@ export interface AgentThreadIntent {
   /** The most the thread's agents may be granted whatever the profile says. */
   accessCeiling: AgentAccessLevel
   createdByThreadId: string
+  /** The creator is a private thread, so this one is private too (`Thread.localOnly`). Absent on older intents. */
+  localOnly?: true
   actor: AgentActor
   request: AgentThreadRequest
   firstMessage: { content: string; mode: 'agent' | 'plan' } | null

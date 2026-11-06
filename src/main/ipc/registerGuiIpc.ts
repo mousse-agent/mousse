@@ -66,6 +66,7 @@ import { BROWSER_SETUP_METHODS } from '../../shared/browser/setup'
 import {
   appearanceUsesAcrylic,
   normalizeAppearance,
+  threadNotificationChannels,
   type MousseSettings,
   type MousseSettingsUpdate
 } from '../../shared/settings'
@@ -88,11 +89,15 @@ import {
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
   SUBAGENT_QUESTION_BODY,
+  bodyWithProject,
   getThreadNotificationPresentation,
-  type ThreadNotificationKind
+  planThreadNotification,
+  type ThreadNotificationKind,
+  type ThreadToastPayload
 } from '../notifications/threadNotification'
 import { NotificationThreadIndex } from '../notifications/threadNotificationTarget'
 import { playThreadCompletionSound } from '../notifications/completionSound'
+import { AttentionCounts, showAttentionCount } from '../attentionBadge'
 import type {
   BrowserBounds,
   CreateScheduledJobInput,
@@ -443,6 +448,8 @@ export function registerGuiIpc(
 
   // Thread rows the main process has seen, so a notification knows whether its thread is a subagent.
   const notificationThreads = new NotificationThreadIndex()
+  // How many threads need the person in each window, for the dock or taskbar badge.
+  const attentionCounts = new AttentionCounts()
 
   const broadcast = (channel: string, data: unknown, profileId?: string): void => {
     const senderId = guiMms.getCurrentSenderId()
@@ -452,6 +459,7 @@ export function registerGuiIpc(
     // activeEventProfileId instead. Installation-wide listeners remain global.
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
+    if (channel === 'projects:updated') notificationThreads.noteProjects(targetProfileId ?? currentProfileKey(), data)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         if (targetProfileId) {
@@ -477,22 +485,35 @@ export function registerGuiIpc(
     const content = getThreadNotificationPresentation(kind, profileSettings)
     const win = targetWindow
     const isFocused = win?.isFocused() ?? false
-    if (isFocused && (activeThreadId === about.threadId || (about.viaThreadId !== undefined && activeThreadId === about.viaThreadId))) {
-      // Banner is suppressed while viewing the thread, but the completion
-      // sound is still expected — play the platform completion sound explicitly since no
-      // banner exists to carry it (the default alert beep is too harsh).
-      if (!content.silent) playThreadCompletionSound()
-      return
+    const viewingThread = activeThreadId === about.threadId || (about.viaThreadId !== undefined && activeThreadId === about.viaThreadId)
+    const plan = planThreadNotification(threadNotificationChannels(profileSettings.notifications, kind), {
+      windowFocused: isFocused,
+      viewingThread,
+      systemSupported: Notification.isSupported()
+    })
+    if (plan.toast && win && !win.isDestroyed()) {
+      const threadName = about.threadName ?? about.parentName
+      const payload: ThreadToastPayload = {
+        threadId: about.threadId,
+        kind,
+        ...(threadName ? { threadName } : {}),
+        ...(about.projectName ? { projectName: about.projectName } : {}),
+        ...(about.viaThreadId ? { subagent: true } : {})
+      }
+      win.webContents.send('notifications:threadToast', payload)
     }
-    if (!Notification.isSupported()) {
-      if (!content.silent) playThreadCompletionSound()
+    if (!plan.system) {
+      // No banner carries the sound (the thread is on screen, a toast says it, or banners are off),
+      // so play the platform sound itself; the default alert beep is too harsh.
+      if (plan.playSound) playThreadCompletionSound()
       return
     }
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
+    // The thread's name, and its project in the body: two projects can each have a "Fix tests" thread.
     const notification = new Notification({
-      title: about.parentName ?? 'Mousse',
+      title: about.threadName ?? about.parentName ?? 'Mousse',
       ...content,
-      ...(about.viaThreadId ? { body: SUBAGENT_QUESTION_BODY } : {}),
+      body: bodyWithProject(about.viaThreadId ? SUBAGENT_QUESTION_BODY : content.body, about.projectName),
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Play Mousse's softer completion chime below and avoid a double sound.
       silent: useWindowsCompletionSound ? true : content.silent
@@ -502,6 +523,8 @@ export function registerGuiIpc(
         if (win.isMinimized()) win.restore()
         win.show()
         win.focus()
+        // Open the thread the banner is about; the window selects it as if its row were clicked.
+        win.webContents.send('app:openThread', about.threadId)
       }
     })
     notification.show()
@@ -898,6 +921,7 @@ export function registerGuiIpc(
       : undefined
     routeWindowState(event, binding.profileId, target)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
+    if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
@@ -1039,12 +1063,14 @@ export function registerGuiIpc(
   ): Promise<unknown> => {
     const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
     if (!targetThreadId) return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(knownAppError({ code: 'thread_not_selected', message: 'Select a thread before sending.' }, { category: 'invalid', retryable: false })) }
+    const previousBusyThreadId = activityTrackerFor().getBusyThreadId()
+    const previousActivity = activityTrackerFor().getState(targetThreadId)
     activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
       const requestId = body.requestId ?? randomUUID()
-      const result = await guiMms.request<{ queued?: boolean; message?: string }>(
+      const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
           threadId: targetThreadId,
@@ -1058,7 +1084,12 @@ export function registerGuiIpc(
           source: 'gui'
         }
       )
-      if (result.queued) {
+      if (result.heldByPause) {
+        // The message waits behind a usage-limit pause: nothing started, so the thread shows what it showed before.
+        // Only this send's own marking is undone: another thread's turn may have started or ended meanwhile.
+        if (activityTrackerFor().getBusyThreadId() === targetThreadId) activityTrackerFor().setBusyThreadId(previousBusyThreadId)
+        setThreadActivity(targetThreadId, previousActivity ?? 'paused')
+      } else if (result.queued) {
         setThreadActivity(targetThreadId, 'processing')
       }
       return result
@@ -1265,16 +1296,6 @@ export function registerGuiIpc(
   registerHandler('operations:recover', async (_e, threadId: string) =>
     guiMms.request('operations.recover', { threadId })
   )
-  registerStorageHandler('threads:restore', async (_e, threadId: string) =>
-    guiMms.request('threads.restore', { threadId })
-  )
-  registerStorageHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
-    guiMms.request('threads.purge', { ...options, threadId })
-  )
-  registerStorageHandler('threads:inventory', async (_e, threadId?: string, options?: { includeComputers?: boolean }) =>
-    guiMms.request('threads.inventory', { threadId, ...(options?.includeComputers === true ? { includeComputers: true } : {}) })
-  )
-  registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
   registerStorageHandler('storage:reviewDismiss', async () => guiMms.request('storage.reviewDismiss', {}))
   registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
@@ -1388,6 +1409,7 @@ export function registerGuiIpc(
     const target = (channel: string, data: unknown): void => {
       if (!isCurrent()) return
       if (channel === 'threads:updated') notificationThreads.note(binding.profileId, data)
+      if (channel === 'projects:updated') notificationThreads.noteProjects(binding.profileId, data)
       event.sender.send(channel, data)
     }
     const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
@@ -1482,14 +1504,16 @@ export function registerGuiIpc(
   }
 
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
-  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string } | undefined) => ({
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
     ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
-    ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {})
+    ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {}),
+    // A private thread stays on this computer; the daemon refuses one sent to another computer.
+    ...(opts?.localOnly === true ? { localOnly: true } : {})
   })
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
       createParams(name, projectId, opts)
@@ -1500,7 +1524,7 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
         createParams(name, projectId, opts)
@@ -1539,10 +1563,11 @@ export function registerGuiIpc(
     void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', res.threads), () => undefined)
   }
 
+  // Deletes an archived thread for good. The window asked first, so unpublished work goes with it.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
-      { threadId }
+      { threadId, discard: true }
     )
     broadcast('threads:updated', res.threads)
     if (currentPresentation().getActiveThreadId() === threadId) {
@@ -1565,6 +1590,29 @@ export function registerGuiIpc(
     )
     broadcast('threads:updated', res.threads)
     return res.thread
+  })
+
+  // `/fork`: the same fork agents make with `thread_fork`, after the thread's latest finished turn.
+  registerHandler('threads:fork', async (_e, threadId: string) => {
+    const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
+      sourceThreadId: threadId,
+      atRunOrdinal: 'latest_stable',
+      // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now.
+      seedFrom: 'current_head',
+      clientRequestId: randomUUID()
+    })
+    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
+    broadcast('threads:updated', threads.threads)
+    await selectThread(forked.threadId)
+    return { threadId: forked.threadId }
+  })
+
+  registerHandler('threads:clearContext', async (_e, threadId: string) => {
+    await guiMms.request('threads.clearContext', { threadId })
+  })
+
+  registerHandler('threads:compact', async (_e, threadId: string, focus?: string) => {
+    await guiMms.request('threads.compact', { threadId, ...(focus ? { focus } : {}) })
   })
 
   registerHandler('threads:regenerateTitle', async (_e, threadId: string) => {
@@ -2618,6 +2666,40 @@ export function registerGuiIpc(
   })
   registerHandler('app:navigateMainView', (_e, view: MainView) => {
     broadcast('app:navigateMainView', view)
+  })
+  // Each window says how many of its threads need the person; the app icon shows the total.
+  // Settings' "Try it": the system notification and sound an event would use, chosen by the renderer,
+  // which shows the toast itself.
+  registerHandler('notifications:preview', (event, request: unknown) => {
+    const { kind, system, sound } = (request ?? {}) as { kind?: unknown; system?: unknown; sound?: unknown }
+    if (kind !== 'completed' && kind !== 'question' && kind !== 'idle') return
+    const showBanner = system === true && Notification.isSupported()
+    const audible = sound === true
+    if (showBanner) {
+      const content = getThreadNotificationPresentation(kind, { notifications: { threadCompletionSound: audible, allRemoteThreads: false } })
+      const useWindowsCompletionSound = process.platform === 'win32' && audible
+      const notification = new Notification({
+        title: 'Example thread',
+        ...content,
+        silent: useWindowsCompletionSound ? true : content.silent
+      })
+      const win = BrowserWindow.fromWebContents(event.sender)
+      notification.on('click', () => { if (win && !win.isDestroyed()) { win.show(); win.focus() } })
+      notification.show()
+      if (useWindowsCompletionSound) playThreadCompletionSound()
+      return
+    }
+    if (audible) playThreadCompletionSound()
+  })
+
+  registerHandler('app:attentionCount', (event, count: unknown) => {
+    const sender = event.sender
+    const value = typeof count === 'number' && Number.isFinite(count) ? count : 0
+    const profile = guiMms.getWindowBindingForSender(sender.id)?.profileId ?? currentProfileKey()
+    if (!attentionCounts.has(sender.id)) {
+      sender.once('destroyed', () => showAttentionCount(attentionCounts.drop(sender.id)))
+    }
+    showAttentionCount(attentionCounts.set(sender.id, profile, value))
   })
   registerHandler('window:focusMain', () => {
     const win = getWindow()

@@ -573,7 +573,6 @@ describe('a routed call runs as a person on another computer', () => {
     for (const method of [
       'files.writeDirect',
       'files.root',
-      'threads.purge',
       'browser.sessions.list'
     ])
       await expect(

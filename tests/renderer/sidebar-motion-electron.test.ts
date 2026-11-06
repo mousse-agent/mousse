@@ -29,7 +29,6 @@ it('animates real sidebar layout, clips behind the rail, reverses safely, and re
     expect(report.ok, JSON.stringify(report)).toBe(true)
     expect(report.errors).toEqual([])
     expect(report.initial).toMatchObject({ width: 281, children: 1, inert: false, railHit: true, navigationIconWidth: 18, rowIconWidth: 16, svgRefReady: true })
-    expect(report.selected.dot).toBe('none')
     expect(report.selected.status).not.toBe('none')
     expect(report.selected.project).not.toBe('rgba(0, 0, 0, 0)')
     expect(report.selected.thread).not.toBe('rgba(0, 0, 0, 0)')

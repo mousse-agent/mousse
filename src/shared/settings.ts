@@ -6,6 +6,7 @@ import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
 import type { ShortcutOverrides } from './commands'
+import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -49,18 +50,97 @@ export interface AppearanceSettings {
   acrylicIntensity: number
   /** Show LaTeX in chat replies and Markdown previews as formatted equations. */
   renderMath: boolean
+  /** Font for interface text. */
+  interfaceFont: FontChoice
+  /** Font for monospace text: code, diffs, the file editor and terminals. */
+  codeFont: FontChoice
   /** Tint each thread in the Threads tab with its project's color. */
   threadProjectColors: boolean
+  /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
+  animationSpeed: AnimationSpeed
+  /** What a turn that changed files shows at its end. */
+  turnChangedFiles: TurnChangedFilesMode
+}
+
+export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
+
+export const ANIMATION_SPEEDS: readonly AnimationSpeed[] = ['off', 'fast', 'normal', 'slow']
+
+/** Multiplier on every UI motion duration (`--ui-motion-scale`). */
+export const ANIMATION_SPEED_SCALE: Readonly<Record<AnimationSpeed, number>> = {
+  off: 0,
+  fast: 0.6,
+  normal: 1,
+  slow: 1.6
+}
+
+export function isAnimationSpeed(value: unknown): value is AnimationSpeed {
+  return typeof value === 'string' && (ANIMATION_SPEEDS as readonly string[]).includes(value)
+}
+
+/** One summary line (file list collapsed), the full list expanded, or nothing. */
+export type TurnChangedFilesMode = 'summary' | 'list' | 'off'
+
+export const TURN_CHANGED_FILES_MODES: readonly TurnChangedFilesMode[] = ['summary', 'list', 'off']
+
+export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode {
+  return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
+}
+
+/**
+ * A moment a thread tells the person about: its agent finished, it needs them (a question or an
+ * approval), or it stopped without finishing (interrupted, failed, or paused by a usage limit).
+ */
+export type ThreadNotificationEvent = 'completed' | 'question' | 'idle'
+
+export const THREAD_NOTIFICATION_EVENTS: readonly ThreadNotificationEvent[] = ['completed', 'question', 'idle']
+
+/** How Mousse tells the person: a toast in its window, the operating system's notification, a sound. */
+export interface NotificationChannels {
+  toast: boolean
+  system: boolean
+  sound: boolean
 }
 
 export interface NotificationSettings {
-  /** Use the operating system notification sound when a thread's agent finishes. */
+  /**
+   * The sound for every event, from before sounds were chosen per event. Still read for an event
+   * whose `sound` has not been chosen.
+   */
   threadCompletionSound: boolean
   /**
    * Notify for every thread on the user's other computers. Off: only a thread this computer started or
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /** The channels chosen for each event. A channel not chosen yet is on. */
+  events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
+}
+
+/** The channels an event uses: what the person chose, and on for anything not chosen yet. */
+export function threadNotificationChannels(
+  settings: Partial<NotificationSettings> | undefined,
+  event: ThreadNotificationEvent
+): NotificationChannels {
+  const chosen = settings?.events?.[event]
+  return {
+    toast: chosen?.toast ?? true,
+    system: chosen?.system ?? true,
+    sound: chosen?.sound ?? settings?.threadCompletionSound ?? true
+  }
+}
+
+/**
+ * A settings patch that sets only one channel of one event. The store merges it, so two quick
+ * changes never overwrite each other with a stale copy.
+ */
+export function threadNotificationChannelPatch(
+  event: ThreadNotificationEvent,
+  channel: keyof NotificationChannels,
+  on: boolean
+): MousseSettingsUpdate {
+  // DeepPartial stops at interfaces, so the nested patch is typed by hand; the store deep-merges it.
+  return { notifications: { events: { [event]: { [channel]: on } } } } as unknown as MousseSettingsUpdate
 }
 
 export interface PermissionSettings {
@@ -73,33 +153,109 @@ export function normalizePermissionSettings(raw?: Partial<PermissionSettings> | 
   return { defaultMode: raw?.defaultMode === undefined ? DEFAULT_PERMISSION_MODE : normalizePermissionMode(raw.defaultMode) }
 }
 
-export type ContextCompactionTokens = 128000 | 256000 | 384000 | 512000 | 1024000 | 'model-max'
+/** A whole number of tokens from the minimum to the maximum below, or the model's own window. */
+export type ContextCompactionTokens = number | 'model-max'
 
 export interface ContextSettings {
   compactionEnabled: boolean
   compactionTokens: ContextCompactionTokens
 }
 
-export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label: string }[] = [
-  { value: 128000, label: '128k' },
-  { value: 256000, label: '256k' },
-  { value: 384000, label: '384k' },
-  { value: 512000, label: '512k' },
-  { value: 1024000, label: '1024k' },
-  { value: 'model-max', label: 'Model Max Context' }
-]
+export const CONTEXT_COMPACTION_MIN_TOKENS = 32_000
+export const CONTEXT_COMPACTION_MAX_TOKENS = 2_000_000
+
+/** The sizes the compact-context menu offers; any other size in range can be typed. */
+export const CONTEXT_COMPACTION_PRESETS: readonly number[] = [128_000, 256_000, 512_000, 1_000_000]
+
+export function isContextCompactionSize(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= CONTEXT_COMPACTION_MIN_TOKENS && value <= CONTEXT_COMPACTION_MAX_TOKENS
+}
+
+/** A size as people write it: `300k`, `1M`, `1.5M`, or the digits when it is not a round number. */
+export function formatContextCompactionSize(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 100_000 === 0) return `${tokens / 1_000_000}M`
+  if (tokens % 1000 === 0) return `${tokens / 1000}k`
+  return tokens.toLocaleString('en-US')
+}
+
+/**
+ * A typed size: `300k`, `300000`, `300,000`, `0.3m`, `1M`, optionally followed by `tokens`.
+ * Undefined when it is not a whole number of tokens in range.
+ */
+export function parseContextCompactionSize(text: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?|\.\d+)([km])?(?:tokens?)?$/.exec(text.toLowerCase().replace(/[\s,_]/g, ''))
+  if (!match) return undefined
+  const exact = Number(match[1]) * (match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1000 : 1)
+  const tokens = Math.round(exact)
+  // Whole tokens only; the rounding just absorbs float noise such as 0.3 × 1M.
+  if (Math.abs(exact - tokens) > 1e-6) return undefined
+  return isContextCompactionSize(tokens) ? tokens : undefined
+}
+
+/** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
+export const DEFAULT_CONTEXT_COMPACTION_TOKENS: ContextCompactionTokens = 'model-max'
+
+/**
+ * Marker on the stored context section: the default above has been applied once. Every install wrote
+ * the previous default (128k) to disk, so a stored 128k without this marker is that old default.
+ */
+export const CONTEXT_COMPACTION_DEFAULT_MARKER = 'modelMaxDefault'
 
 export function normalizeContextSettings(raw?: Partial<ContextSettings> | null): ContextSettings {
+  // A size from an older build or a hand-edited file that is out of range or not whole: the default.
+  const tokens: unknown = raw?.compactionTokens
   return {
     compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
-    compactionTokens: CONTEXT_COMPACTION_OPTIONS.some(({ value }) => value === raw?.compactionTokens)
-      ? raw!.compactionTokens! : 128000
+    compactionTokens: tokens === 'model-max' || isContextCompactionSize(tokens) ? tokens : DEFAULT_CONTEXT_COMPACTION_TOKENS
   }
 }
 
 export function resolveContextCompactionTokens(selected: ContextCompactionTokens, modelMaxContext: number): number {
   const maximum = Number.isFinite(modelMaxContext) && modelMaxContext > 0 ? modelMaxContext : 128000
   return selected === 'model-max' ? maximum : Math.min(selected, maximum)
+}
+
+/** Room kept free under a model's window so the summary request itself fits. */
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
+/** Without a smaller size, compaction starts at this share of the window. */
+export const EXACT_COMPACTION_USAGE_RATIO = 0.95
+
+/**
+ * The active-context size at which a thread compacts, for a model with this window and an optional
+ * chosen size. Infinity when the window is unknown. The daemon compacts at this point, and Settings
+ * shows it.
+ */
+export function contextCompactionPoint(
+  contextWindow: number,
+  configuredThreshold?: number,
+  reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS
+): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return Infinity
+  const requestedReserve = Math.max(0, Math.min(reserveTokens, contextWindow - 1))
+  const reserve = contextWindow > requestedReserve * 2 ? requestedReserve : 0
+  const watermark = Math.floor(contextWindow * EXACT_COMPACTION_USAGE_RATIO)
+  const configured = configuredThreshold && configuredThreshold > 0
+    ? Math.min(configuredThreshold, contextWindow)
+    : watermark
+  return Math.min(watermark, configured, contextWindow - reserve)
+}
+
+/**
+ * Where a thread compacts under the Compact context setting. A size compacts at `contextCompactionPoint`
+ * of the model's window when it is known, else of the size itself; Auto (`model-max`) waits for a known
+ * window. Undefined when compaction is off or the point is not known yet. The daemon compacts here and
+ * the context popover shows it.
+ */
+export function settingCompactionPoint(
+  context: Pick<ContextSettings, 'compactionEnabled' | 'compactionTokens'>,
+  knownWindow?: number
+): number | undefined {
+  if (!context.compactionEnabled) return undefined
+  const size = typeof context.compactionTokens === 'number' ? context.compactionTokens : knownWindow
+  if (size === undefined) return undefined
+  const point = contextCompactionPoint(knownWindow ?? size, size)
+  return Number.isFinite(point) ? point : undefined
 }
 
 /**
@@ -116,7 +272,7 @@ export interface AgentAccessSettings {
   /** `manage` only: an agent may answer a pending approval on another thread. */
   answerApprovals: boolean
   /**
-   * "Allow agents to create Subagents on other Devices". Off, the default, refuses every remote subagent
+   * "Let agents start subagents on your other devices". Off, the default, refuses every remote subagent
    * whatever `computers` lists; the list is kept, so turning it back on restores the same computers.
    */
   remoteSubagents: boolean
@@ -574,7 +730,11 @@ export function getDefaultSettings(): MousseSettings {
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true,
-      threadProjectColors: true
+      interfaceFont: { ...DEFAULT_FONT_CHOICE },
+      codeFont: { ...DEFAULT_FONT_CHOICE },
+      threadProjectColors: true,
+      animationSpeed: 'normal',
+      turnChangedFiles: 'summary'
     },
     notifications: {
       threadCompletionSound: true,
@@ -691,8 +851,12 @@ export function normalizeAppearance(
       raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
     ),
     renderMath: typeof raw.renderMath === 'boolean' ? raw.renderMath : defaults.renderMath,
+    interfaceFont: normalizeFontChoice(raw.interfaceFont),
+    codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors
+      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+    animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
+    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles)
   }
 }
 

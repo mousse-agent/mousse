@@ -1,4 +1,3 @@
-import { useMemo } from 'react'
 import { findListedModel, modelChoiceOf, type ModelChoice } from '../../shared/modelChoice'
 import { parseIdSuffixes } from '../../shared/modelVariants'
 import { listingServes } from '../../shared/providerInstances'
@@ -49,16 +48,4 @@ function listedLabel(selection: ModelSelectionLike, providers: readonly LlmProvi
  */
 export function resolveModelChoice(selection: ModelSelectionLike, providers?: readonly LlmProviderOption[]): ModelChoice {
   return modelChoiceOf(selection, listedLabel(selection, providers))
-}
-
-/** `resolveModelChoice` that names the model again when snapshots arrive. */
-export function useModelChoice(selection: ModelSelectionLike, providers?: readonly LlmProviderOption[]): ModelChoice {
-  const scopes = useProviderSnapshotsStore((state) => state.scopes)
-  const { instanceId, provider, model, effort, name } = selection
-  return useMemo(
-    () => resolveModelChoice({ instanceId, provider, model, effort, name }, providers),
-    // `scopes` is read through the store inside; it is a dependency so new snapshots rename.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [instanceId, provider, model, effort, name, providers, scopes]
-  )
 }

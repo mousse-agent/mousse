@@ -25,8 +25,8 @@ export type RowRequest =
 export type RowOutcome = { kind: 'done'; notice?: string; left?: string } | { kind: 'cancelled' } | { kind: 'failed'; message: string }
 
 export interface RowActionDeps {
-  /** Asks the user; false cancels. Defaults to the window's confirm dialog. */
-  confirm?: (message: string) => boolean
+  /** Asks the user; false cancels. May answer later (a themed dialog). Defaults to the window's confirm dialog. */
+  confirm?: (message: string) => boolean | Promise<boolean>
   /** How long a discard keeps its copy, as the folder's status says (`discardKeptForMs`). */
   discardKeptForMs?: number
 }
@@ -52,7 +52,7 @@ export async function runRowAction(
   try {
     if (request.action === 'discard') {
       const confirm = deps.confirm ?? ((message: string) => window.confirm(message))
-      if (!confirm(discardPrompt(request.files, deps.discardKeptForMs))) return { kind: 'cancelled' }
+      if (!(await confirm(discardPrompt(request.files, deps.discardKeptForMs)))) return { kind: 'cancelled' }
       const kept = await discardGitPaths(path, paths(request.files), scope)
       return { kind: 'done', ...(kept?.notice ? { notice: kept.notice } : {}), ...(kept?.left ? { left: kept.left } : {}) }
     } else {

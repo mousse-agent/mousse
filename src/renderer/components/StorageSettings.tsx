@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
-import type { TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { storagePolicyHasRule, type StoragePolicy, type WorktreeFolderStatus } from '../../shared/storage'
 import { parseStoragePolicy, parseStoragePolicyReply } from '../../shared/storageReply'
-import { trashCount } from '../lib/trashInventory'
 import { setStorageReviewPending } from '../lib/storageReview'
 import { RecommendedRulesNotice, recommendedPolicy } from './storage/RecommendedRules'
 import { StorageCleanupSection } from './storage/StorageCleanupSection'
@@ -13,9 +11,6 @@ import { WorktreeFolderRow } from './storage/WorktreeFolderRow'
 import '../styles/storage.css'
 
 export function StorageSettings() {
-  const [records, setRecords] = useState<TaskLifecycleRecord[]>([])
-  const [trash, setTrash] = useState<TrashRetentionPolicy>()
-  const [trashPaused, setTrashPaused] = useState(false)
   const [policy, setPolicy] = useState<StoragePolicy>()
   const [storagePaused, setStoragePaused] = useState(false)
   const [reviewRecommended, setReviewRecommended] = useState(false)
@@ -31,13 +26,10 @@ export function StorageSettings() {
     if (inFlight.current) return inFlight.current
     // An older service without the worktree folder: the row stays as it is.
     const folder = Promise.resolve().then(() => window.mousse.storage.worktreeFolder()).then(({ status }) => { if (mounted.current) setWorktreeFolder(status) }, () => undefined)
-    const request = Promise.all([window.mousse.threads.inventory(), window.mousse.storage.policy(), folder]).then(([inventory, stored]) => {
+    const request = Promise.all([window.mousse.storage.policy(), folder]).then(([stored]) => {
       // A reply that does not look like a policy is refused before it reaches a control.
       const reply = parseStoragePolicyReply(stored)
       if (!mounted.current) return
-      setRecords(inventory.lifecycles)
-      setTrash(reply.trash)
-      setTrashPaused(reply.trashSweepStatus.suspended)
       setPolicy(reply.policy)
       setStoragePaused(reply.clockSuspended)
       setReviewRecommended(reply.reviewRecommended)
@@ -89,10 +81,6 @@ export function StorageSettings() {
       if (mounted.current) setBusy(false)
     }
   }
-  const saveTrash = (next: TrashRetentionPolicy) => void run(async () => {
-    setTrash(next)
-    await window.mousse.threads.configureTrash(next)
-  })
   // Saving also lifts a clock pause on the time-based rules, so Resume is the same call with the same values.
   const savePolicy = (next: StoragePolicy) => void run(async () => {
     setPolicy(next)
@@ -121,26 +109,23 @@ export function StorageSettings() {
 
   // Dismissing leaves every rule as it is; turning the recommended rules on is an ordinary save.
   const dismissReview = () => void run(async () => { await window.mousse.storage.reviewDismiss() })
-  const hasRule = Boolean(policy && trash && storagePolicyHasRule(policy, trash))
+  // Only the rules this page shows count: threads no longer wait in a trash, and a deleted thread's worktree always goes with it.
+  const hasRule = Boolean(policy && storagePolicyHasRule({ ...policy, worktrees: { ...policy.worktrees, removeWithDeletedThreads: false } }, { schemaVersion: 1, graceDays: 30, automaticPurge: false }))
 
+  // Space first, then the cleanup that frees it; the rules that clean up on their own follow.
   return <section className="settings-section storage-settings">
     {reviewRecommended && policy && <RecommendedRulesNotice busy={busy} onTurnOn={() => savePolicy(recommendedPolicy(policy))} onDismiss={dismissReview} />}
+    <StorageUsageSection refreshKey={usageKey} />
+    <StorageCleanupSection hasRule={hasRule} onDone={() => { setUsageKey((key) => key + 1); void reload().catch(showRefreshError) }} />
+
     <StoragePolicyRows
-      trash={trash}
       policy={policy}
-      trashPaused={Boolean(trash?.automaticPurge && trashPaused)}
       storagePaused={storagePaused}
       busy={busy}
-      trashCount={trashCount(records)}
-      onTrash={saveTrash}
       onPolicy={savePolicy}
-      onResumeTrash={() => { if (trash) saveTrash(trash) }}
       onResumeStorage={() => { if (policy) savePolicy(policy) }}
       worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} refusal={folderRefusal} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
     />
     {error && <p className="storage-error" role="alert">{error}</p>}
-
-    <StorageUsageSection refreshKey={usageKey} />
-    <StorageCleanupSection hasRule={hasRule} onDone={() => { setUsageKey((key) => key + 1); void reload().catch(showRefreshError) }} />
   </section>
 }

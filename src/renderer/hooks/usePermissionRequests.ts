@@ -5,7 +5,8 @@ import {
   permissionRequestOptions,
   withPermissionRequests,
   type LocalPermissionAnswer,
-  type PermissionRequestControls
+  type PermissionRequestControls,
+  type PermissionRequestData
 } from '../chat/components/agent-elements/tools/permission-request'
 import { questionAnswerThreadId } from '../chat/components/agent-elements/tools/quick-action-approval'
 
@@ -13,6 +14,16 @@ import { questionAnswerThreadId } from '../chat/components/agent-elements/tools/
 function answerOf(pending: PendingUserQuestions, optionId: string): LocalPermissionAnswer {
   const option = pending.questions[0]?.options.find((candidate) => candidate.id === optionId)
   return { decision: option?.decision === 'allow' ? 'allow' : 'reject', ...(option?.scope ? { scope: option.scope } : {}) }
+}
+
+/** The first waiting request this window can answer: what the composer's cue and the approval commands act on. */
+export interface CurrentPermissionRequest {
+  requestId: string
+  prompt: string
+  action: PermissionRequestData['action']
+  controls: PermissionRequestControls
+  /** Its inline row is on screen. */
+  inView: boolean
 }
 
 /**
@@ -27,15 +38,22 @@ export function usePermissionRequests(
 ): {
   controls: Readonly<Record<string, PermissionRequestControls>>
   waiting: boolean
+  current: CurrentPermissionRequest | null
   place: (messages: UIMessage[]) => UIMessage[]
 } {
   const [waiting, setWaiting] = useState<PendingUserQuestions[]>([])
   const [saved, setSaved] = useState<ThreadApprovalRequest[]>([])
   const [answered, setAnswered] = useState<Record<string, LocalPermissionAnswer>>({})
+  // Answers sent and not settled yet, by request: the row and the composer's cue share it, so a
+  // request is answered once whichever is pressed.
+  const [chosen, setChosen] = useState<Record<string, string>>({})
+  const [inView, setInView] = useState<Record<string, boolean>>({})
   const threadRef = useRef(threadId)
   threadRef.current = threadId
   const onRefusedRef = useRef(onRefused)
   onRefusedRef.current = onRefused
+  const chosenRef = useRef(chosen)
+  chosenRef.current = chosen
 
   const refresh = useCallback(() => {
     const id = threadRef.current
@@ -54,6 +72,8 @@ export function usePermissionRequests(
     setWaiting([])
     setSaved([])
     setAnswered({})
+    setChosen({})
+    setInView({})
     refresh()
     const orchestrator = window.mousse?.orchestrator
     if (!orchestrator) return
@@ -77,7 +97,14 @@ export function usePermissionRequests(
   const answer = useCallback(
     (pending: PendingUserQuestions, optionId: string) => {
       const question = pending.questions[0]
-      if (!question) return
+      if (!question || chosenRef.current[pending.requestId]) return
+      chosenRef.current = { ...chosenRef.current, [pending.requestId]: optionId }
+      setChosen(chosenRef.current)
+      const settle = () =>
+        setChosen((current) => {
+          const { [pending.requestId]: _settled, ...rest } = current
+          return rest
+        })
       const target = questionAnswerThreadId(pending, threadRef.current)
       void window.mousse.orchestrator
         .answerQuestionsDetailed(pending.requestId, { [question.id]: optionId }, target)
@@ -85,16 +112,30 @@ export function usePermissionRequests(
           // Taken, or no longer waiting (answered elsewhere, closed): either way it is not answerable here any more.
           if (outcome?.ok) setAnswered((current) => ({ ...current, [pending.requestId]: answerOf(pending, optionId) }))
           setWaiting((current) => current.filter((entry) => entry.requestId !== pending.requestId))
+          settle()
           const refusal = describe(outcome)
           if (refusal) onRefusedRef.current(refusal)
           refresh()
         })
         .catch(() => {
           // The answer did not reach the daemon: the request stays answerable.
+          settle()
         })
     },
     [describe, refresh]
   )
+
+  // One callback per request, kept while it waits, so a row's observer is not rebuilt on every change.
+  const inViewReporters = useRef(new Map<string, (visible: boolean) => void>())
+  const reportInView = useCallback((requestId: string) => {
+    let report = inViewReporters.current.get(requestId)
+    if (!report) {
+      report = (visible: boolean) =>
+        setInView((current) => (Boolean(current[requestId]) === visible ? current : { ...current, [requestId]: visible }))
+      inViewReporters.current.set(requestId, report)
+    }
+    return report
+  }, [])
 
   const controls = useMemo(() => {
     const out: Record<string, PermissionRequestControls> = {}
@@ -104,16 +145,30 @@ export function usePermissionRequests(
       out[pending.requestId] = {
         options,
         ...(pending.approval ? { approval: pending.approval } : {}),
-        onAnswer: (optionId) => answer(pending, optionId)
+        chosen: chosen[pending.requestId] ?? null,
+        onAnswer: (optionId) => answer(pending, optionId),
+        onInView: reportInView(pending.requestId)
       }
     }
     return out
-  }, [waiting, answered, answer])
+  }, [waiting, answered, chosen, answer, reportInView])
+
+  const current = useMemo((): CurrentPermissionRequest | null => {
+    const first = waiting.find((pending) => controls[pending.requestId])
+    if (!first) return null
+    return {
+      requestId: first.requestId,
+      prompt: saved.find((request) => request.requestId === first.requestId)?.prompt ?? first.questions[0]!.prompt,
+      action: saved.find((request) => request.requestId === first.requestId)?.action ?? 'tool',
+      controls: controls[first.requestId]!,
+      inView: Boolean(inView[first.requestId])
+    }
+  }, [waiting, saved, controls, inView])
 
   const place = useCallback(
     (messages: UIMessage[]) => withPermissionRequests(messages, saved, waiting, answered),
     [saved, waiting, answered]
   )
 
-  return { controls, waiting: Object.keys(controls).length > 0, place }
+  return { controls, waiting: Object.keys(controls).length > 0, current, place }
 }

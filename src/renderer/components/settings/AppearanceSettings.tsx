@@ -1,7 +1,23 @@
 import type { CSSProperties } from 'react'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } from '../../../shared/settings'
+import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import { Palette } from '../../lib/icons'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { Select, type SelectOption } from '../ui/Select'
+import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { FontPicker } from './FontPicker'
+import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
+
+const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
+  { value: 'summary', label: 'Summary line' },
+  { value: 'list', label: 'Full list' },
+  { value: 'off', label: 'Off' }
+]
+
+const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
+  off: 'Off',
+  fast: 'Fast',
+  normal: 'Normal',
+  slow: 'Slow'
+}
 
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
@@ -36,6 +52,15 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
   )
 }
 
+/**
+ * A patch that sets one font and nothing else. The daemon merges it into the current settings, so
+ * a font that finishes downloading later cannot restore other appearance values from an older
+ * render. DeepPartial does not reach into interfaces, hence the cast.
+ */
+function fontPatch(font: Pick<AppearanceValues, 'interfaceFont'> | Pick<AppearanceValues, 'codeFont'>): MousseSettingsUpdate {
+  return { appearance: font } as MousseSettingsUpdate
+}
+
 export interface AppearanceSettingsProps {
   settings: MousseSettings
   options: SettingsOptions
@@ -49,7 +74,7 @@ export interface AppearanceSettingsProps {
   onCommitAcrylicIntensity: (value: number) => void
 }
 
-/** Settings → Appearance: theme, accent, glass, math and thread colors. */
+/** Settings → Appearance: theme, accent, fonts, glass, math, thread colors and animation speed. */
 export function AppearanceSettings({
   settings,
   options,
@@ -60,14 +85,16 @@ export function AppearanceSettings({
   onCommitAcrylicIntensity
 }: AppearanceSettingsProps) {
   const appearance = settings.appearance
-  const setTheme = (theme: ThemeId) => void onUpdate({ appearance: { ...appearance, theme } })
+  const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme) void onUpdate({ appearance: { ...appearance, theme } }) }
+  const themeChosen = options.themes.some((theme) => theme.id === appearance.theme)
+  const accentChosen = options.accentColors.some((color) => color.value === appearance.accentColor)
 
   return (
     <section id="appearance" className="settings-section">
       <SettingsGroup title="Appearance" icon={Palette}>
-        <SettingsRow title="Color theme">
-          <div className="theme-carousel" role="radiogroup" aria-label="Color theme">
-            {options.themes.map((theme) => {
+        <SettingsRow title="Color theme" anchor="appearance-theme">
+          <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
+            {options.themes.map((theme, index) => {
               const selected = appearance.theme === theme.id
               return (
                 <div
@@ -75,11 +102,13 @@ export function AppearanceSettings({
                   className={`theme-card${selected ? ' selected' : ''}`}
                   onClick={() => setTheme(theme.id)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setTheme(theme.id)
+                    if (e.key !== 'Enter' && e.key !== ' ') return
+                    e.preventDefault()
+                    setTheme(theme.id)
                   }}
                   role="radio"
                   aria-checked={selected}
-                  tabIndex={0}
+                  tabIndex={radioTabIndex(selected, index, themeChosen)}
                 >
                   <ThemePreview themeId={theme.id} />
                   <span className="theme-card-label">{theme.label}</span>
@@ -90,30 +119,63 @@ export function AppearanceSettings({
         </SettingsRow>
         <SettingsRow
           title="Accent color"
+          anchor="appearance-accent"
           control={
-            <div className="accent-grid">
-              {options.accentColors.map((color) => (
-                <button
-                  key={color.id}
-                  type="button"
-                  className={`accent-swatch${appearance.accentColor === color.value ? ' selected' : ''}`}
-                  style={{ backgroundColor: color.value }}
-                  title={color.label}
-                  aria-label={color.label}
-                  aria-pressed={appearance.accentColor === color.value}
-                  onClick={() => void onUpdate({ appearance: { ...appearance, accentColor: color.value } })}
-                />
-              ))}
+            <div className="accent-grid" role="radiogroup" aria-label="Accent color" onKeyDown={onRadioGroupKeyDown}>
+              {options.accentColors.map((color, index) => {
+                const selected = appearance.accentColor === color.value
+                return (
+                  <button
+                    key={color.id}
+                    type="button"
+                    role="radio"
+                    className={`accent-swatch${selected ? ' selected' : ''}`}
+                    style={{ backgroundColor: color.value }}
+                    title={color.label}
+                    aria-label={color.label}
+                    aria-checked={selected}
+                    tabIndex={radioTabIndex(selected, index, accentChosen)}
+                    onClick={() => { if (!selected) void onUpdate({ appearance: { ...appearance, accentColor: color.value } }) }}
+                  />
+                )
+              })}
             </div>
           }
         />
         <SettingsRow
+          title="Interface font"
+          anchor="appearance-interface-font"
+          description={<span title="Menus, chat, settings and other text. A Google font downloads once when chosen and then works offline.">Menus, chat and settings.</span>}
+          control={
+            <FontPicker
+              role="interface"
+              ariaLabel="Interface font"
+              value={appearance.interfaceFont}
+              onChange={(interfaceFont) => onUpdate(fontPatch({ interfaceFont }))}
+            />
+          }
+        />
+        <SettingsRow
+          title="Code font"
+          anchor="appearance-code-font"
+          description={<span title="Code blocks in chat, diffs and review, the file editor, terminals and command output. Lists monospace fonts. A Google font downloads once when chosen and then works offline.">Code, diffs, editor and terminals.</span>}
+          control={
+            <FontPicker
+              role="code"
+              ariaLabel="Code font"
+              value={appearance.codeFont}
+              onChange={(codeFont) => onUpdate(fontPatch({ codeFont }))}
+            />
+          }
+        />
+        <SettingsRow
           title="Acrylic glass"
+          anchor="appearance-acrylic"
           description={<>
-            Translucent window material on every theme. The desktop shows blurred through it on Windows, macOS and KDE Plasma.
+            <span title="The desktop shows blurred through the window on Windows, macOS and KDE Plasma.">Translucent window</span>
             {restartRequired && (
               <>
-                {' '}
+                {' · '}
                 <button type="button" className="theme-restart-link" onClick={onRestart}>
                   Restart to apply
                 </button>
@@ -130,6 +192,7 @@ export function AppearanceSettings({
         />
         <SettingsRow
           title="Glass intensity"
+          anchor="appearance-glass-intensity"
           htmlFor="acrylic-intensity"
           description="Blur and opacity of the glass layers, from solid to glassy."
           disabled={!appearance.acrylic}
@@ -159,6 +222,7 @@ export function AppearanceSettings({
         />
         <SettingsRow
           title="Render math"
+          anchor="appearance-render-math"
           description="Show LaTeX in replies and Markdown previews as formatted equations."
           control={
             <Switch
@@ -169,7 +233,20 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
+          title="Changed files after each turn"
+          anchor="appearance-turn-changed-files"
+          control={
+            <Select
+              ariaLabel="Changed files after each turn"
+              value={appearance.turnChangedFiles}
+              onChange={(turnChangedFiles) => void onUpdate({ appearance: { ...appearance, turnChangedFiles } })}
+              options={TURN_CHANGED_FILES_OPTIONS}
+            />
+          }
+        />
+        <SettingsRow
           title="Project colors on threads"
+          anchor="appearance-project-colors"
           description="Tint threads with their project's color."
           control={
             <Switch
@@ -180,6 +257,21 @@ export function AppearanceSettings({
           }
         />
       </SettingsGroup>
+
+      <SettingsAdvanced>
+        <SettingsRow
+          title="Animation speed"
+          description={<span title="Off whenever your system is set to reduce motion.">How fast panels, menus and lists move.</span>}
+          control={
+            <Select
+              ariaLabel="Animation speed"
+              value={appearance.animationSpeed}
+              onChange={(animationSpeed) => void onUpdate({ appearance: { ...appearance, animationSpeed } })}
+              options={ANIMATION_SPEEDS.map((speed) => ({ value: speed, label: ANIMATION_SPEED_LABELS[speed] }))}
+            />
+          }
+        />
+      </SettingsAdvanced>
     </section>
   )
 }

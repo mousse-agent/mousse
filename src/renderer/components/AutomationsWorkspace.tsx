@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Clock, RefreshCw, Workflow, Zap } from '../lib/icons'
+import { Bot, Clock, Workflow, Zap } from '../lib/icons'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { createAgentDefinitionsClient } from '../services/agentDefinitionsClient'
 import { createPersonalBotsClient } from '../services/personalBotsClient'
@@ -83,6 +83,7 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
     } finally { if (ticket === generation.current) setRefreshing(false) }
   }, [clients, profileId])
   useEffect(() => { void load(); return () => { generation.current += 1 } }, [load])
+  const refreshTools = useCallback(() => { void load(true) }, [load])
   useEffect(() => registerNavigationGuard((reason) => {
     if (!workflowGuard.current) return true
     reveal()
@@ -103,6 +104,14 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
       if (focus) requestAnimationFrame(() => document.getElementById(`automations-${next}-tab`)?.focus())
     }
   }
+  // Another surface (the Agents tab of the sidebar) can open Automations at a section.
+  const sectionRequest = useAppStore((state) => state.automationsSectionRequest)
+  const handledRequest = useRef(sectionRequest)
+  useEffect(() => {
+    if (!sectionRequest || sectionRequest === handledRequest.current) return
+    handledRequest.current = sectionRequest
+    void selectTab(sectionRequest.section)
+  })
   const workflowCatalogs: WorkflowEditorCatalogs = {
     ...catalogs, subworkflows,
     builtinTools: catalogs.builtinTools.filter((tool) => workflowProjectToolIds.has(tool.id)),
@@ -122,13 +131,12 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
           <button key={id} type="button" role="tab" id={`automations-${id}-tab`} tabIndex={tab === id ? 0 : -1} aria-controls={`automations-${id}-pane`} aria-selected={tab === id} onClick={() => void selectTab(id)}><Icon size={15} /> {label}</button>
         ))}
       </nav>
-      <button type="button" className="btn btn-sm" disabled={refreshing} onClick={() => void load(true)} title="Refresh installed skills and connect configured MCP servers to discover tools"><RefreshCw size={13} /> {refreshing ? 'Refreshing…' : 'Refresh tools'}</button>
     </header>
     {error && <p className="agents-workspace__error" role="alert">{error}</p>}
     {tab === 'agents' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-agents-pane" aria-labelledby="automations-agents-tab">
-      <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} />
+      <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} onRefreshTools={refreshTools} refreshingTools={refreshing} />
     </div> : tab === 'workflows' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-workflows-pane" aria-labelledby="automations-workflows-tab">
-      <WorkflowsWorkspace profileId={profileId} client={clients.workflows} execution={clients.execution} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} />
+      <WorkflowsWorkspace profileId={profileId} client={clients.workflows} execution={clients.execution} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} onRefreshTools={refreshTools} refreshingTools={refreshing} />
     </div> : tab === 'bots' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-bots-pane" aria-labelledby="automations-bots-tab">
       <BotsWorkspace client={clients.bots} providers={catalogs.providers} skills={catalogs.skills} active={active} />
     </div> : <div className="agents-workspace__pane automations-scheduled-pane" role="tabpanel" id="automations-scheduled-pane" aria-labelledby="automations-scheduled-tab">

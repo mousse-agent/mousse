@@ -17,7 +17,7 @@
   background: var(--vscode-sideBar-background, rgba(var(--surface-strong-rgb), 0.72));
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  animation: threads-sidebar-slide-in 0.2s ease-out;
+  animation: threads-sidebar-slide-in var(--ui-dur-slow) ease-out;
 }
 
 /* Hover-to-reveal when the left sidebar is closed. No equivalent for the right side. */
@@ -42,7 +42,7 @@
   z-index: 50;
   display: flex;
   box-shadow: 12px 0 32px rgba(0, 0, 0, 0.35);
-  animation: threads-sidebar-slide-in 0.18s ease-out;
+  animation: threads-sidebar-slide-in calc(180ms * var(--ui-motion-scale)) ease-out;
 }
 
 .threads-sidebar-peek .threads-sidebar {
@@ -52,16 +52,16 @@
 }
 
 .threads-sidebar-closing {
-  animation: threads-sidebar-slide-out 0.2s ease-in forwards;
+  animation: threads-sidebar-slide-out var(--ui-dur-slow) ease-in forwards;
 }
 
 .threads-sidebar-peek-closing {
-  animation: threads-sidebar-slide-out 0.2s ease-in forwards;
+  animation: threads-sidebar-slide-out var(--ui-dur-slow) ease-in forwards;
 }
 
 .resizer-threads-closing {
   opacity: 0;
-  transition: opacity 0.2s ease-in;
+  transition: opacity var(--ui-dur-slow) ease-in;
 }
 
 @keyframes threads-sidebar-slide-out {
@@ -75,14 +75,6 @@
   }
 }
 
-.threads-sidebar-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  gap: 4px;
-  padding: 8px 12px 4px;
-  flex-shrink: 0;
-}
-
 .threads-sidebar-toolbar-button {
   display: grid;
   place-items: center;
@@ -92,18 +84,29 @@
   color: var(--text-secondary);
 }
 
-.threads-sidebar-toolbar-button:hover,
-.threads-sidebar-open-project:hover {
+.threads-sidebar-toolbar-button:hover {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
+/* Projects · Threads · Agents, three equal segments that never change width, then Add project. */
+.threads-sidebar-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin: 8px 12px 10px;
+}
+
+.threads-sidebar-add-project {
+  flex-shrink: 0;
+}
+
 .threads-sidebar-tabs {
   display: flex;
-  flex-shrink: 0;
-  width: fit-content;
+  flex: 1;
+  min-width: 0;
   gap: 2px;
-  margin: 2px 12px 10px;
   padding: 2px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.09);
   border-radius: 10px;
@@ -111,14 +114,22 @@
 }
 
 .threads-sidebar-tab {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 32px;
-  height: 32px;
-  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  gap: 5px;
+  padding: 0 4px;
   border-radius: 7px;
+  font-size: 12px;
   color: var(--text-secondary);
+}
+
+.threads-sidebar-tab-label {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .threads-sidebar-tab.active {
@@ -130,9 +141,10 @@
 .threads-sidebar-tab svg { flex-shrink: 0; }
 .threads-sidebar-section[hidden] { display: none; }
 
-.threads-sidebar-toolbar-button:focus-visible,
 .threads-sidebar-tab:focus-visible,
-.threads-sidebar-open-project:focus-visible {
+.threads-sidebar-thread:focus-visible,
+.threads-sidebar-project-toggle:focus-visible,
+.threads-sidebar-inline-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -161,11 +173,17 @@
   min-height: 0;
 }
 
+/* As tall as its rows, and no taller: the footer comes right after it. It shrinks and scrolls once the rows
+   outgrow the sidebar. The Agents tab has no footer, so there it fills the sidebar. */
 .threads-sidebar-scroll {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding-bottom: 12px;
+}
+
+.threads-sidebar-scroll[data-view='chats'] {
+  flex-grow: 1;
 }
 
 .threads-sidebar-section-settled.collapsed {
@@ -252,6 +270,7 @@
 }
 
 .threads-sidebar-project-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -285,9 +304,30 @@
 .threads-sidebar-project-row.expanded .threads-sidebar-project-toggle { color: var(--text-primary); }
 .threads-sidebar-project-row.expanded .threads-sidebar-project-icon { color: var(--accent); }
 
-.threads-sidebar-chevron {
-  flex-shrink: 0;
+/* A project row's disclosure chevron: in the tree's left gutter, so it moves nothing; shown on hover and focus,
+   turned down while the project is open. */
+.threads-sidebar-project-chevron {
+  position: absolute;
+  top: 50%;
+  left: -6px;
   color: var(--text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.threads-sidebar-project-row.expanded .threads-sidebar-project-chevron {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.threads-sidebar-project-row:hover .threads-sidebar-project-chevron,
+.threads-sidebar-project-toggle:focus-visible .threads-sidebar-project-chevron {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-project-chevron { transition: none; }
 }
 
 .threads-sidebar-project-icon,
@@ -305,31 +345,20 @@
   white-space: nowrap;
 }
 
-.threads-sidebar-thread-name-text {
-  display: inline-block;
-  min-width: 100%;
-  will-change: transform;
-}
-
-.threads-sidebar-thread:hover
-  .threads-sidebar-thread-name[data-overflow='true']
-  .threads-sidebar-thread-name-text {
-  animation: threads-sidebar-title-scroll var(--thread-title-duration, 2s) linear 0.08s 1 normal forwards;
-}
-
-@keyframes threads-sidebar-title-scroll {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(calc(-1 * var(--thread-title-overflow, 0px)));
-  }
-}
-
+/* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
+   merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
-  margin: 2px 0 8px 17px;
+  margin: 2px 0 0 17px;
   padding-left: 6px;
   border-left: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+}
+
+/* In a closing group a row's highlight (selected, hovered) fades with its text, quicker than the clip
+   shrinks, so no strip of it is left once the text is gone. */
+.app .ui-collapse[data-motion='exit'] .threads-sidebar-thread {
+  background: transparent;
+  box-shadow: none;
+  transition: background-color 70ms var(--ui-collapse-ease-close), box-shadow 70ms var(--ui-collapse-ease-close);
 }
 
 .threads-sidebar-thread {
@@ -350,6 +379,35 @@
 
 .threads-sidebar-thread-container {
   position: relative;
+  /* The width the hover actions cover at the row's end: three 23px buttons and their inset. */
+  --thread-actions-room: 76px;
+}
+
+/* A row keeps its hover actions' room at rest too, so a long title always ends in an ellipsis before them and
+   nothing moves when the pointer arrives. At rest the room holds the status, computer and worktree marks; the
+   actions take their place on hover. A card keeps its actions over the age line, clear of the title. */
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
+  position: relative;
+  padding-right: var(--thread-actions-room);
+}
+
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
+  position: absolute;
+  top: 50%;
+  right: var(--ui-row-x, 9px);
+  margin-left: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
+  opacity: 0;
+}
+
+.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  padding-left: 0;
+  background: none;
 }
 
 .threads-sidebar-thread-actions {
@@ -368,9 +426,16 @@
 }
 
 .threads-sidebar-thread-container:hover .threads-sidebar-thread-actions,
-.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions {
+.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions,
+.threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* While a menu is open, only the row it belongs to keeps its actions lit: the rows under the pointer stay quiet. */
+.threads-sidebar.menu-open .threads-sidebar-thread-actions:not(:has([aria-expanded='true'])) {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .threads-sidebar-thread-action {
@@ -397,7 +462,7 @@
 .threads-sidebar-thread-list {
   max-height: calc(var(--threads-sidebar-row-height) * 5);
   overflow: hidden;
-  transition: max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
@@ -509,6 +574,47 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
+/* A project row's state: the worst of its threads as a dot, and while it is closed how many need the person. */
+.threads-sidebar-project-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.threads-sidebar-project-status--needs-me { color: var(--status-input); }
+.threads-sidebar-project-status--working { color: var(--status-running); }
+.threads-sidebar-project-status--paused { color: var(--warning); }
+.threads-sidebar-project-status--done { color: var(--status-done); }
+
+.threads-sidebar-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.threads-sidebar-project-status--working .threads-sidebar-status-dot {
+  animation: threads-sidebar-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes threads-sidebar-dot-pulse {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-project-status--working .threads-sidebar-status-dot { animation: none; }
+}
+
+/* Threads that wait for the person, from every project, above the list. */
+.threads-sidebar-needs-me {
+  margin-bottom: 8px;
+}
+
 .threads-sidebar-card-status,
 .threads-sidebar-card-age {
   display: inline-flex;
@@ -536,9 +642,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   text-overflow: ellipsis;
 }
 
-.threads-sidebar-card-title svg {
-  margin-right: 4px;
-  vertical-align: -1px;
+/* Pinned: a glyph after the project name, so a pinned card is as tall as any other. */
+.threads-sidebar-card-pin {
+  flex-shrink: 0;
+  margin-left: -2px;
+  opacity: 0.85;
 }
 
 .threads-sidebar-thread-container:has(.threads-sidebar-card) .threads-sidebar-thread-actions {
@@ -550,11 +658,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-.threads-sidebar-thread.settled {
-  cursor: default;
-  opacity: 1;
 }
 
 .threads-sidebar-settled-count {
@@ -608,6 +711,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-worktree-icon {
+  display: inline-flex;
   flex-shrink: 0;
   color: var(--text-secondary);
   opacity: 0.85;
@@ -638,15 +742,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
-.threads-sidebar-project-new-chat {
+/* A project's "New thread" is always there, faint at rest; its "…" shows on hover or focus. */
+.threads-sidebar-project-new-chat,
+.threads-sidebar-project-more {
   flex-shrink: 0;
-  opacity: 0;
   transition: opacity 0.15s;
 }
 
-.threads-sidebar-project-row:hover .threads-sidebar-project-new-chat,
-.threads-sidebar-project-new-chat:focus-visible {
+.threads-sidebar-project-new-chat {
+  opacity: 0.55;
+}
+
+.threads-sidebar-project-more {
+  opacity: 0;
+}
+
+.threads-sidebar-project-row:hover :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
+.threads-sidebar-project-row:focus-within :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
+.threads-sidebar-project-more[aria-expanded="true"] {
   opacity: 1;
+}
+
+/* While a menu is open, project rows under the pointer go back to rest, except the one whose "…" opened it. */
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) .threads-sidebar-project-new-chat {
+  opacity: 0.55;
+}
+
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) :is(.threads-sidebar-project-more, .threads-sidebar-project-chevron) {
+  opacity: 0;
 }
 
 .threads-sidebar-empty {
@@ -656,8 +779,54 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 0.7;
 }
 
+/* No projects yet: one muted line, and the one place the words "Add project" appear. */
+.threads-sidebar-empty-projects {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  opacity: 1;
+}
+
+.threads-sidebar-inline-action {
+  padding: 2px 0;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.threads-sidebar-inline-action:hover {
+  text-decoration: underline;
+}
+
+/* A project with no threads: muted "No threads", then a small New thread button. */
 .threads-sidebar-empty-nested {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding-left: 11px;
+}
+
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) {
+  opacity: 1;
+}
+
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) > span {
+  opacity: 0.7;
+}
+
+/* Neutral, like the row's own New thread: no accent at rest or on hover. */
+.threads-sidebar-empty-new-thread {
+  flex-shrink: 0;
+}
+
+.threads-sidebar-empty-new-thread:hover {
+  background: var(--ui-hover);
+}
+
+.threads-sidebar-empty-new-thread:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: -2px;
 }
 
 .threads-sidebar-show-more {
@@ -677,22 +846,23 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 1;
 }
 
+/* The thread and project menu: the shared menu surface and rows (--ui-menu-* in polish.css), neutral hover and focus. */
 .threads-context-menu {
   position: fixed;
   z-index: var(--z-floating, 50000);
-  min-width: 160px;
-  padding: 4px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 8px;
+  min-width: 168px;
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
   background: rgba(var(--surface-strong-rgb), 0.98);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 8px 24px rgba(var(--surface-base-rgb), 0.45);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 /* What a project's menu acts on, when that is a project on another computer. */
 .threads-context-menu-label {
-  padding: 5px 10.5px 6px;
+  padding: 5px var(--ui-menu-row-x) 6px;
   font-size: 11.5px;
   color: var(--text-secondary);
 }
@@ -702,9 +872,10 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 7.5px 10.5px;
-  border-radius: 4px;
-  font-size: 13.5px;
+  min-height: 30px;
+  padding: 5px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  font-size: 13px;
   color: var(--text-primary);
   text-align: left;
   transition: background 0.15s, color 0.15s;
@@ -716,17 +887,48 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   flex-shrink: 0;
 }
 
-.threads-context-menu-item:hover {
-  background: rgba(var(--accent-rgb), 0.16);
+.threads-context-menu-item:hover,
+.threads-context-menu-item:focus-visible {
+  outline: none;
+  background: var(--ui-hover);
+}
+
+/* "Git ›": its menu opens beside the row, or on the left when the window has no room on the right. */
+.threads-context-submenu-anchor {
+  position: relative;
+}
+
+.threads-context-submenu-trigger[aria-expanded='true'] {
+  background: var(--ui-hover);
+}
+
+.threads-context-menu-item .threads-context-submenu-chevron {
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+
+.threads-context-menu.threads-context-submenu {
+  position: absolute;
+  top: calc(-1 * var(--ui-menu-pad, 4px) - 1px);
+  left: 100%;
+  white-space: nowrap;
+}
+
+.threads-context-menu.threads-context-submenu.flip {
+  right: 100%;
+  left: auto;
 }
 
 .threads-context-menu-item-danger {
-  color: #f87171;
+  color: var(--danger);
 }
 
-.threads-context-menu-item-danger:hover {
-  background: rgba(239, 68, 68, 0.14);
-  color: #fca5a5;
+.threads-context-menu-item-danger:hover,
+.threads-context-menu-item-danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .threads-sidebar-rename-input {
@@ -782,113 +984,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   }
 }
 
-/* Thread hover card (model / worktree / subagents) */
-.thread-hover-card {
-  width: min(280px, calc(100vw - 48px));
-  padding: 12px 14px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-  border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.5);
-  pointer-events: auto;
-  color: var(--text-primary);
-}
-
-.thread-hover-card-title {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
-  letter-spacing: 0.01em;
-  margin-bottom: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.thread-hover-card-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.thread-hover-card-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  min-width: 0;
-}
-
-.thread-hover-card-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.9;
-}
-
-.thread-hover-card-icon img,
-.thread-hover-card-icon svg {
-  width: 13px;
-  height: 13px;
-}
-
-.thread-hover-card-row-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.thread-hover-card-row-label {
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.3;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.thread-hover-card-row-detail {
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--text-secondary);
-  opacity: 0.85;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.threads-sidebar-selected-dot {
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.threads-sidebar-open-project {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px;
-  margin: 4px 12px;
-  border-radius: 7px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  text-align: left;
-}
-
 .threads-sidebar-recent {
   margin-top: 18px;
   padding-top: 10px;
@@ -926,169 +1021,99 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 .threads-sidebar-device-detail { font-size: 11px; }
 
-@container threads-sidebar (max-width: 220px) {
-  .threads-sidebar-tab { gap: 4px; font-size: 12px; }
-  .threads-sidebar-tab svg { width: 15px; height: 15px; }
+/* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
+   width, so switching tabs moves nothing; the other two show their icons, with their names in the tooltips.
+   A label is shown whole or not at all. */
+@container threads-sidebar (max-width: 319px) {
+  .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
+  .threads-sidebar-tab.active { flex: 0 0 auto; min-width: 88px; padding: 0 8px; }
 }
 
-/* Recently deleted: rows are lists of actions, not a selection, so hover and focus use a
-   background fill only. */
-.threads-sidebar-trash-list {
-  padding-bottom: 6px;
+/* Too narrow even for one word beside two icons: every tab is an icon. */
+@container threads-sidebar (max-width: 239px) {
+  .threads-sidebar-tab-label { display: none; }
+  .threads-sidebar-tab.active { flex: 1 1 0; min-width: 0; padding: 0 4px; }
 }
 
-.threads-sidebar-trash-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+/* Under the lists: "No project" and "Archived". The footer follows the lists, and its auto bottom margin keeps
+   the profile at the window's edge. When the lists are taller than the sidebar they scroll and the footer sits
+   at the bottom. The footer is the one scroll container for its own sections: it takes what they need up to
+   45vh, and the lists above give up the room. */
+.threads-sidebar-footer {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+  margin-bottom: auto;
 }
 
-.threads-sidebar-trash-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 4px 4px 4px 7px;
-  border-radius: 5px;
+/* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
+   that scrolls even with overlay scrollbars. */
+.threads-sidebar-scroll[data-more-below] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
 }
 
-.threads-sidebar-trash-row:hover,
-.threads-sidebar-trash-row:focus-within {
-  background: rgba(var(--accent-rgb), 0.09);
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar { width: 6px; }
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-track { background: transparent; }
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: rgba(var(--accent-rgb), 0.32);
 }
 
-.threads-sidebar-trash-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.threads-sidebar-trash-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-.threads-sidebar-trash-meta {
-  font-size: 11px;
-  line-height: 1.3;
+/* Archived: Clear all sits at the end of the heading; hover and focus use a background fill only. */
+.threads-sidebar-heading-action {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 500;
   color: var(--text-secondary);
-  overflow-wrap: anywhere;
+  transition: background 0.15s, color 0.15s;
 }
 
-.threads-sidebar-trash-error {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.3;
+.threads-sidebar-heading-action:hover,
+.threads-sidebar-heading-action:focus-visible {
+  background: rgba(var(--accent-rgb), 0.12);
   color: var(--danger);
-  overflow-wrap: anywhere;
 }
 
-.threads-sidebar-trash-actions {
-  display: inline-flex;
-  flex-shrink: 0;
-  gap: 2px;
-}
-
-.threads-sidebar-trash-actions .threads-sidebar-icon-btn:focus-visible {
+.threads-sidebar-heading-action:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
 }
 
-.threads-sidebar-trash-actions .threads-sidebar-icon-btn:disabled {
+.threads-sidebar-thread-action.danger:hover,
+.threads-sidebar-thread-action.danger:focus-visible {
+  color: var(--danger);
+}
+
+.threads-sidebar-thread-action:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.threads-sidebar-trash-actions .threads-sidebar-icon-btn.danger:hover:not(:disabled) {
-  color: var(--danger);
-}
-
-/* The permanent-deletion dialog. */
-.trash-delete {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  font-size: 13px;
-}
-
-.trash-delete > p,
-.trash-delete-warning > p {
+/* The archived-thread delete confirmation. */
+.archived-delete-body {
   margin: 0;
-  line-height: 1.5;
-}
-
-.trash-delete-headline {
   color: var(--text-primary);
-}
-
-.trash-delete-frees {
-  color: var(--text-secondary);
-}
-
-.trash-delete-warning {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-}
-
-.trash-delete-discard {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.trash-delete-discard input {
-  flex-shrink: 0;
-  margin: 3px 0 0;
-  accent-color: var(--accent);
-}
-
-.trash-delete-error {
-  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
-.trash-delete-details > summary,
-.trash-delete-files > summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.trash-delete-details ul {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.archived-delete-error {
   margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.trash-delete-details li {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.trash-delete-identity {
+  color: var(--danger);
   font-size: 12px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
-.trash-delete-kind {
-  font-size: 11px;
-  color: var(--text-secondary);
+/* The "Remove project" confirmation: one line. */
+.threads-sidebar-remove-project {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
 }
 
 /* Where a row dragged in the Threads tab will land. */

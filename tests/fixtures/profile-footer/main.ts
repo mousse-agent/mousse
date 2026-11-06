@@ -58,7 +58,7 @@ async function main() {
     const text=node=>node?.textContent?.trim()
     const box=node=>{const r=node.getBoundingClientRect();return {left:Math.round(r.left),top:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height)}}
     const identity=menu.querySelector('.profile-account-identity')
-    return { role: menu.getAttribute('role'), label: menu.getAttribute('aria-label'), box: box(menu), wide: menu.classList.contains('profile-menu-wide'),
+    return { role: menu.getAttribute('role'), label: menu.getAttribute('aria-label'), box: box(menu), trigger: box(document.querySelector('.profile-sidebar-trigger')), wide: menu.classList.contains('profile-menu-wide'),
       columns: [...menu.querySelectorAll('.profile-menu-col')].map(col=>({ label: col.getAttribute('aria-label'), box: box(col) })),
       heading: text(menu.querySelector('.profile-menu-heading')),
       profiles: [...menu.querySelectorAll('[role=menuitemradio]')].map(row=>({ name: text(row.querySelector('.profile-menu-name')), checked: row.getAttribute('aria-checked'), check: !!row.querySelector('svg'), dot: row.querySelector('.profile-dot').style.background, dotSize: box(row.querySelector('.profile-dot')).width })),
@@ -202,7 +202,7 @@ async function main() {
     await openMenu()
     evidence.signedOut = { menu: await menuInfo(), requests: await execute('footerQa.requestLog'), trigger: await execute("document.querySelector('.profile-sidebar-trigger').getAttribute('aria-label')") }
 
-    // Narrow windows stack the columns, account on top, at the single-column width.
+    // Narrow windows keep the trigger's width and stack the columns, account on top.
     await load({ scenario: 'static', account: 'in', profiles: '3' }, { width: 500, height: 800 })
     await openMenu()
     await until("!!document.querySelector('.profile-account-devices')")

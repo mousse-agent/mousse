@@ -25,6 +25,7 @@ import {
   normalizeRunSettings,
   resolveContextCompactionTokens,
   resolveModelForMode,
+  settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
@@ -165,7 +166,9 @@ import {
   type TurnState,
   type TurnStateSnapshot,
   type UserQuestion,
-  type UserQuestionAnswers
+  type UserQuestionAnswers,
+  type AnsweredQuestion,
+  DEFAULT_CHAT_MODE
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
@@ -296,21 +299,24 @@ import { userQuestionService as defaultUserQuestionService, UserQuestionService,
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
+  clearNativeContext,
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
   compactNativeContext,
   createNativeContext,
   appendNativeMessage,
-  DEFAULT_COMPACTION_RESERVE_TOKENS,
   estimateActiveContextTokens,
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
   normalizeNativeContext,
-  shouldCompactNativeContext,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
+
+/** What an agent in a private thread is told when it asks for work on another computer. */
+const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
 interface SnapshotFolder {
@@ -374,6 +380,30 @@ export function formatQuestionAnswersMessage(
       return `Q: ${question.prompt}\nA: ${rendered}`
     })
     .join('\n\n')
+}
+
+/**
+ * The answers as the transcript keeps them (`ChatMessage.questionAnswers`): option ids resolve to
+ * their labels; text that names no option is the reply typed instead.
+ */
+export function describeQuestionAnswers(
+  questions: UserQuestion[],
+  answers: UserQuestionAnswers
+): AnsweredQuestion[] {
+  return questions.map((question) => {
+    const value = answers[question.id]
+    const values = (value === undefined ? [] : Array.isArray(value) ? value : [value])
+      .map((entry) => String(entry).trim())
+      .filter((entry) => entry.length > 0)
+    const chosen: string[] = []
+    const typed: string[] = []
+    for (const entry of values) {
+      const option = question.options.find((each) => each.id === entry)
+      if (option) chosen.push(option.label.trim() || entry)
+      else typed.push(entry)
+    }
+    return { prompt: question.prompt, chosen, ...(typed.length ? { reply: typed.join('\n') } : {}) }
+  })
 }
 
 /** Render an explicit dismissal as transcript text. */
@@ -520,6 +550,11 @@ export interface OrchestratorSendOptions {
    * never read for `/skill` mentions.
    */
   agent?: AgentActor
+  /**
+   * A follow-up a parent thread on another computer sends to a subagent here: a thread paused by a usage limit
+   * refuses it (`thread_paused`), as it refuses a follow-up from a parent on the same computer.
+   */
+  refuseWhilePaused?: boolean
   /** Carried by the queue item when the send queues, so the item drains with the same model and origin. */
   queueOrigin?: QueuedMessage['origin']
   /** The scheduled occurrence this send is; the turn's end reports to the scheduler. */
@@ -737,6 +772,8 @@ interface ContinuationTurnPayload {
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
 const CONTINUATION_CALL_WAIT_MS = 10_000
+/** How long `/compact` waits for a runtime's own compaction before compacting Mousse's copy instead. */
+const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 
 function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
@@ -3521,6 +3558,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: narrowPermissionMode(profileMode, callerMode),
       accessCeiling: narrowAgentAccess(this.effectiveAccess(options.accessLevel), LAUNCHED_THREAD_ACCESS_CEILING) ?? 'lineage',
       createdByThreadId: options.actor.threadId,
+      // An agent in a private thread only ever starts private threads.
+      ...(this.isLocalOnly(options.actor.threadId) ? { localOnly: true as const } : {}),
       actor: options.actor,
       request: input,
       firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' }
@@ -3581,7 +3620,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: intent.permissionMode,
       // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
       createdByThreadId: intent.createdByThreadId,
-      accessCeiling: intent.accessCeiling
+      accessCeiling: intent.accessCeiling,
+      localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
     engine.store.appendEvent({
@@ -4201,8 +4241,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * An automatic timer or continue item that is more than a day past the reset does not continue the run
-   * (Mousse was off over it): the run stays paused with auto-resume off, still shown as paused, and a message or
-   * Resume now continues it. Only the first call writes the line. A continue item already written is removed.
+   * (Mousse was off over it): the run stays paused with auto-resume off, still shown as paused, and Resume now
+   * continues it (a message a person sends waits in the queue behind it; Cancel lets it go). Only the first call writes the line. A continue item already written is removed.
    */
   private markPauseStale(runId: string, threadId: string): void {
     const engine = this.runEngine
@@ -4894,6 +4934,13 @@ export class OrchestratorService extends EventEmitter {
     return path ? { path, parentThreadId } : null
   }
 
+  /** Whether `threadId` is a private thread or below one (`Thread.localOnly`). */
+  isLocalOnly(threadId: string): boolean {
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    return Boolean(thread && isLocalOnlyThread(thread, store!.listAllThreads()))
+  }
+
   /**
    * Engine host callback (before the delegation transaction; synchronous): the child thread gets the
    * parent's project and model selection, or the requested provider/model.
@@ -4907,6 +4954,8 @@ export class OrchestratorService extends EventEmitter {
     if (request.remote) {
       // A remote subagent's thread here is a stand-in: its agent, model and workspace are the other
       // computer's, so it gets none of its own, and nothing ever runs here (`sendOwned` refuses).
+      // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
+      if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
@@ -4943,7 +4992,9 @@ export class OrchestratorService extends EventEmitter {
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
       // delegated it, and it keeps that mode for its later turns and its own subagents.
       permissionMode: narrowPermissionMode(this.requestedPermissionMode(request.parentThreadId), this.runPermissionMode(request.parentRunId)),
-      ...(model ? { modelOverride: model } : {})
+      ...(model ? { modelOverride: model } : {}),
+      // A subagent of a private thread is private too.
+      localOnly: this.isLocalOnly(parentThread.id)
     })
     const session = this.getOrCreateSession(child.id)
     session.modelOverride = model ? structuredClone(model) : undefined
@@ -5072,7 +5123,9 @@ export class OrchestratorService extends EventEmitter {
     const accessCeiling = narrowAgentAccess(sourceCeiling ?? 'manage', creation.accessLevel === undefined ? undefined : this.effectiveAccess(creation.accessLevel)) ?? 'lineage'
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
       ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
-      accessCeiling
+      accessCeiling,
+      // A fork carries the conversation, so a private thread's fork is private too.
+      localOnly: this.isLocalOnly(sourceThread.id)
     })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
@@ -5100,6 +5153,11 @@ export class OrchestratorService extends EventEmitter {
       if (message.turnId) {
         const run = engine?.getRun(message.turnId)
         if (run && run.threadId === threadId) ordinal = run.ordinal
+      }
+      // `/clear` started the context again: what came before is not handed over either.
+      if (message.kind === 'context_cleared' && !message.hidden) {
+        items.length = 0
+        continue
       }
       if (message.hidden || message.kind || (message.role !== 'user' && message.role !== 'assistant')) continue
       const text = message.content.trim()
@@ -5541,6 +5599,8 @@ export class OrchestratorService extends EventEmitter {
   ) {
     const engine = this.requireRunEngine()
     const refuse = (code: string, message: string, extra: Record<string, unknown> = {}) => ({ started: false as const, code, message, ...extra })
+    if (this.isLocalOnly(parentThreadId))
+      return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     // A retry of an accepted call returns that task before anything else is checked.
     const requestKey = delegationRequestKey(parentThreadId, parentRunId, call.toolCallId)
     const prior = engine.store.getReceipt(requestKey)
@@ -5678,6 +5738,7 @@ export class OrchestratorService extends EventEmitter {
    * there now. The repository match is asked of each online computer that is allowed, in parallel.
    */
   private async listComputers(parentThreadId: string) {
+    if (this.isLocalOnly(parentThreadId)) return { computers: [], note: PRIVATE_THREAD_REMOTE_REFUSAL }
     if (!this.remoteSubagents || !this.remoteComputers)
       return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
     const access = this.agentAccessSettings()
@@ -5863,6 +5924,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const remote = this.remoteSubagents
     const refuse = (code: string, message: string) => ({ started: false as const, code, message, subagent: target.title, childThreadId: target.childThreadId })
+    if (this.isLocalOnly(parentThreadId)) return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     const bindings = engine.remoteSubagents.listForChildThread(target.childThreadId)
     const first = bindings.find((binding) => binding.remoteThreadId)
     const replay = engine.store.getReceipt(target.requestId)
@@ -5985,7 +6047,7 @@ export class OrchestratorService extends EventEmitter {
       return { answered: false as const, code, message: `"${target.title}" asked for an approval you cannot give. ${describeApprovalRefusal(code)}` }
     }
     // As in the GUI: the model gets the answers as the tool result; the transcript shows what was said.
-    this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers))
+    this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers), describeQuestionAnswers(pending.questions, input.answers))
     return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId }
   }
 
@@ -7893,8 +7955,11 @@ export class OrchestratorService extends EventEmitter {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
+      let driver: string | undefined
       try {
-        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
+        const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
+        caps = resolved.caps
+        driver = resolved.driver
       } catch {
         caps = undefined
       }
@@ -7922,7 +7987,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      return {
+        ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
+        // Pi compacts its own session near the window (only the on/off is passed to it); the other
+        // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
+        ...(driver === 'pi' ? { compactedByRuntime: true } : {})
+      }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
@@ -8702,8 +8772,7 @@ export class OrchestratorService extends EventEmitter {
       if (item) return { steered: false, queued: true, item }
     }
     // A paused run has no turn to join. The text is kept as a held message, as a steer that names the paused run is
-    // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays. A person who wants it to run
-    // now sends it as a message, which ends the pause.
+    // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays, as a message sent now does.
     const paused = this.runEngine?.store.getPausedRun(threadId)
     if (paused && text.trim()) {
       this.enqueueLateSteer(threadId, text, undefined, undefined, paused.runId, undefined, opts?.permissionMode, opts?.sentFrom)
@@ -8873,8 +8942,14 @@ export class OrchestratorService extends EventEmitter {
       throw new Error(`Thread deleted: ${threadId}`)
     }
 
+    // A person's new message on a thread paused by a usage limit joins the queue and the pause stays: it runs after
+    // the continue turn (at the reset or Resume now), or at once when the pause is cancelled. Agents' messages,
+    // follow-ups from a parent (on this or another computer), wakes and continue turns keep their own rules; a
+    // retry, the restart note's Continue and an approval continuation are explicit actions and still end the pause.
+    const queueBehindPause =
+      !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake' && !opts?.agent && !opts?.delegation && !opts?.bindDelivery && !opts?.refuseWhilePaused
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
-    if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
+    if (opts?.forceQueue || session.isTurnRunning() || (queueBehindPause && this.hasPausedRun(threadId))) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
       ? () => {
@@ -8897,6 +8972,7 @@ export class OrchestratorService extends EventEmitter {
     const deniesApprovals = !opts?.forceQueue && !opts?.delegation && !opts?.bindDelivery && opts?.preemptQuestions !== false
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
+    let heldByPause = false
     if (this.runEngine) {
       const text = normalizeSendRequest(input).content
       const result = await this.runEngine.dispatch({
@@ -8911,7 +8987,9 @@ export class OrchestratorService extends EventEmitter {
         ...(deniesApprovals
           ? { settleApprovals: { ...(opts?.continuationOfRunId || opts?.source === 'wake' || !text.trim() ? {} : { feedback: text }), answeredBy: opts?.actor ?? { kind: 'user' as const } } }
           : {}),
-        ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {})
+        ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
+        ...(queueBehindPause ? { queueBehindPause: true } : {}),
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -8919,6 +8997,12 @@ export class OrchestratorService extends EventEmitter {
       if (result.status !== 'accepted') throw new DomainRpcError(result.reason, `Send refused: ${result.reason}.`)
       if (result.replayed) {
         const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
+        // A replay of a message that waits behind a pause answers as the first send did: queued and held, so the
+        // window keeps it out of the transcript and the thread keeps showing as paused.
+        if (result.heldByPause && this.runEngine.getRun(result.runId)?.status === 'queued' && this.threadStore) {
+          const queueItem = readDurableQueue(this.threadStore, threadId).find((item) => item.runId === result.runId)
+          if (queueItem) return { message: '', actions: [], queued: true, queueItem, heldByPause: true, ...replayed }
+        }
         // A replay of a send whose turn is still live waits for the same result (SPEC §12.7).
         const live = this.turnResults.get(result.runId)
         const run = live ? this.runEngine.getRun(result.runId) : null
@@ -8942,6 +9026,7 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...(workflowRun ? { workflowRun } : {}), ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+      heldByPause = Boolean(result.heldByPause)
       if (opts?.sentFrom) this.recordSentFrom(threadId, run.runId, opts.sentFrom.node)
       // This message ended a usage-limit pause (it is a person's): the continue message that waited for the
       // reset is not wanted any more, and the thread no longer shows as paused.
@@ -8992,18 +9077,25 @@ export class OrchestratorService extends EventEmitter {
         return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
       })()
 
-    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser) {
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause) {
       const item = this.enqueueForThread(threadId, input, {
         source: opts?.source,
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
         origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined)
       })
+      // The pause ended between the admission and the item (Cancel, Stop): the drain that ending scheduled may have
+      // looked before the item was there, so the message is not left waiting for a drain that never comes.
+      if (heldByPause && !this.hasPausedRun(threadId)) {
+        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+        else this.scheduleQueueDrain(session)
+      }
       return {
         message: '',
         actions: [],
         queued: true,
         queueItem: item,
+        ...(heldByPause ? { heldByPause: true } : {}),
         ...run
       }
     }
@@ -9136,7 +9228,8 @@ export class OrchestratorService extends EventEmitter {
    * there mid-turn would corrupt the in-flight tool loop. Best-effort:
    * returns null when the thread is gone.
    */
-  recordQuestionResponseMessage(threadId: string, content: string): ChatMessage | null {
+  /** `questionAnswers`, for answers (not a dismissal), makes the transcript show them as a step of the agent's turn. */
+  recordQuestionResponseMessage(threadId: string, content: string, questionAnswers?: AnsweredQuestion[]): ChatMessage | null {
     const text = content.trim()
     if (!text || threadId === '__unbound__') return null
     if (this.threadStore && !this.threadStore.getThread(threadId)) return null
@@ -9148,6 +9241,7 @@ export class OrchestratorService extends EventEmitter {
         role: 'user',
         content: text,
         timestamp: new Date().toISOString(),
+        ...(questionAnswers?.length ? { questionAnswers } : {}),
         // Presentation-only echo: preserve the tracked mode so the next real
         // turn does not mistake this answer for a legacy agent turn.
         ...((() => {
@@ -10153,16 +10247,14 @@ export class OrchestratorService extends EventEmitter {
           prepareNativeContext: (provider, model) => {
             const capacity = this.nativeContext.nativeProviderModel
             const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
-            const threshold = typeof contextSettings.compactionTokens === 'number'
-              ? contextSettings.compactionTokens : knownLimit
             const previous = session.lastMeasuredContextSignature === `${provider}:${model}`
               ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
               : 0
             const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
             // When the runtime has not reported capacity yet, a numeric Mousse threshold
             // still applies; model-max waits for an actual provider window.
-            if (!contextSettings.compactionEnabled || threshold === undefined ||
-                !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
+            const compactsAt = settingCompactionPoint(contextSettings, knownLimit)
+            if (compactsAt === undefined || !Number.isFinite(activeTokens) || activeTokens < compactsAt) return null
             onCompaction('start')
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
@@ -10874,8 +10966,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Whether a drain must leave the queue alone: the thread is paused by a usage limit and the next
    * pending item (the one `claimNextNormal` would take) is not that pause's continue message. What was
-   * queued before the pause waits behind it, in its original order, and what is sent during it is
-   * either a person's message (which ends the pause) or held the same way.
+   * queued before the pause waits behind it, in its original order, and so does what is sent during it.
    */
   private pausedHoldsQueue(threadId: string, items: QueuedMessage[]): boolean {
     let paused: RunRecord | null | undefined
@@ -11548,6 +11639,76 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
     })
+  }
+
+  /**
+   * `/clear`: the thread's next turn starts a fresh provider session with no earlier context. The transcript
+   * stays, with a divider where the context starts again. Every runtime resumes its native session only while
+   * the history Mousse sends is the one it saved after the last turn; with no earlier message or summary
+   * left to send, each starts a new session instead.
+   */
+  clearConversationContext(threadId: string): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot clear the context while a turn is running.')
+    this.sessionAls.run(session, () => {
+      this.nativeContext = clearNativeContext(this.nativeContext)
+      this.clearLastTurnUsage()
+      const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_cleared', content: 'Context cleared', timestamp: new Date().toISOString() }
+      session.messages.push(marker)
+      this.emitMessageAdded(marker)
+      this.persist(true)
+    })
+  }
+
+  /**
+   * `/compact`: compacts the thread's context now. The runtime's own compaction of its native session comes
+   * first (Claude Code's `/compact`, Codex's `thread/compact/start`); Mousse compacts its own copy when the
+   * runtime has none, holds no session for this history, or fails. `focus` says what the summary keeps.
+   */
+  async compactConversationContext(threadId: string, focus?: string): Promise<'native' | 'compacted' | 'unchanged'> {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot compact the context while a turn is running.')
+    const note: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
+      content: 'Compacting context…', streaming: true, timestamp: new Date().toISOString() }
+    const finish = (content: string): void => this.sessionAls.run(session, () => {
+      note.content = content
+      note.streaming = false
+      this.emitMessageUpdated(note)
+      this.persist(true)
+    })
+    this.sessionAls.run(session, () => {
+      session.messages.push(note)
+      this.emitMessageAdded(note)
+      this.persist(true)
+    })
+    try {
+      let native = false
+      const instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
+      if (instanceId) {
+        try {
+          native = await this.harness.compactConversation({
+            threadId, instanceId, focus,
+            history: nativeAgentHistory(session.nativeContext),
+            signal: AbortSignal.timeout(NATIVE_COMPACT_TIMEOUT_MS)
+          })
+        } catch (error) {
+          console.warn('[orchestrator] native compaction failed; compacting Mousse\'s copy', { threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
+        const compacted = compactNativeContext(this.nativeContext, undefined, focus)
+        if (compacted === this.nativeContext) return 'unchanged' as const
+        this.nativeContext = compacted
+        return 'compacted' as const
+      })
+      // The measured size is the context before compaction.
+      if (outcome !== 'unchanged') this.sessionAls.run(session, () => this.clearLastTurnUsage())
+      finish(outcome === 'unchanged' ? 'Context checked — no older messages to compact' : 'Context compacted')
+      return outcome
+    } catch (error) {
+      finish('Context not compacted')
+      throw error
+    }
   }
 
   replaceConversationState(

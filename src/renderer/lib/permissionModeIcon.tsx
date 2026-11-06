@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react'
-import { Pencil, ShieldCheck, ShieldOff, Wand2 } from './icons'
+import { FileApproved, ShieldCheck, ShieldOff, Wand2 } from './icons'
 import type { PermissionMode } from '../../shared/permissionMode'
 
 type ModeIcon = typeof ShieldCheck
 
-/** One icon per permission mode, so a mode reads the same wherever it is named. A new mode adds one entry. */
+/** One icon per permission mode, so a mode reads the same wherever it is named. A new mode adds one entry.
+ * Auto-accept edits is a file with a tick, not the pencil New thread uses. */
 const PERMISSION_MODE_ICONS: Record<PermissionMode, ModeIcon> = {
   ask: ShieldCheck,
-  accept_edits: Pencil,
+  accept_edits: FileApproved,
   auto: Wand2,
   full: ShieldOff
 }

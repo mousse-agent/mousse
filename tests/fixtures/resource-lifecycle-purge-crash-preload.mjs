@@ -2,7 +2,7 @@
 // never imported by production code or an ordinary application launch.
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { resolve } from 'node:path'
+import { basename, resolve, sep } from 'node:path'
 
 const fault = () => {
   const control = process.env.RESOURCE_LIFECYCLE_PURGE_CRASH_CONTROL
@@ -24,7 +24,10 @@ fs.renameSync = function (from, to) {
 const unlink = fs.unlinkSync
 fs.unlinkSync = function (path) {
   const result = unlink(path), config = fault()
-  if (config.stage === 'partial-unlink' && config.unlinkPath && resolve(String(path)) === resolve(config.unlinkPath)) kill(config, { stage: config.stage, removedPath: String(path) })
+  // `unlinkName`: the file of that name in the trash, where a delete moved it under a folder named only then.
+  const matches = (config.unlinkPath && resolve(String(path)) === resolve(config.unlinkPath)) ||
+    (config.unlinkName && basename(String(path)) === config.unlinkName && resolve(String(path)).includes(`${sep}trash${sep}`))
+  if (config.stage === 'partial-unlink' && matches) kill(config, { stage: config.stage, removedPath: String(path) })
   return result
 }
 syncBuiltinESMExports()

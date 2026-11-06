@@ -1,6 +1,8 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
+import { workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
-import { findUnstartedThread } from '../../shared/threadTitle'
+import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
+import type { Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -13,6 +15,7 @@ export async function selectThread(threadId: string): Promise<void> {
   store.setSidebarMode('projects')
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
+  store.setUsageOpen(false)
   if (threadId === store.activeThreadId) return
   // One store update: highlight + restore cached transcript (if any) while
   // the daemon snapshot loads. Main also broadcasts thread:selected early.
@@ -20,22 +23,62 @@ export async function selectThread(threadId: string): Promise<void> {
   await window.mousse.threads.select(threadId)
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. */
+/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
-  store.setThreadsSidebarView('threads')
-  const thread = findUnstartedThread(visibleThreads(store.threads)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
+  await selectThread(thread.id)
+}
+
+/** Opens the newest empty private draft (`Thread.localOnly`), or creates one on this computer, and selects it. */
+export async function createAndSelectPrivateThread(): Promise<void> {
+  const store = useAppStore.getState()
+  const thread =
+    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    await window.mousse.threads.create(undefined, undefined, { localOnly: true })
+  store.upsertThread(thread)
+  // A reused draft may have had Private turned off in its composer; the command means private.
+  const draft = store.composerWorkspaceDrafts[thread.id]
+  if (draft && !draft.localOnly) store.setComposerWorkspaceDraft(thread.id, workspaceWithPrivate(draft, true, store.projects.filter((entry) => !entry.node)))
   await selectThread(thread.id)
 }
 
 /** Opens the newest empty draft thread of a project, or creates one there, and selects it. */
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads), projectId) ?? await window.mousse.threads.create(undefined, projectId)
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId) ?? await window.mousse.threads.create(undefined, projectId)
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)
+}
+
+/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+export async function addProjectAndStartThread(): Promise<void> {
+  const project = await window.mousse.projects.open()
+  if (!project) return
+  await createAndSelectProjectThread(project.id)
+}
+
+/** The open thread when it has a sidebar row (started); a draft has nothing to rename, pin or archive yet. */
+export function openStartedThread(): Thread | null {
+  const { activeThreadId, threads } = useAppStore.getState()
+  const thread = activeThreadId ? threads.find((candidate) => candidate.id === activeThreadId) : undefined
+  return thread && isThreadStarted(thread) ? thread : null
+}
+
+/** Pins the open thread, or unpins it when it is pinned. */
+export async function togglePinOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread) return
+  await window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+}
+
+/** Archives the open thread; it stays open. */
+export async function archiveOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread || thread.settledAt) return
+  await window.mousse.threads.settle(thread.id, true)
 }
 
 /**
@@ -45,7 +88,6 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
 export async function openThreadFromPullRequest(input: StartPullRequestThreadInput): Promise<void> {
   const store = useAppStore.getState()
   const result = await window.mousse.pullRequests.startThread(input)
-  store.setThreadsSidebarView('threads')
   // The daemon's threads:updated broadcast can arrive after the thread is selected.
   store.upsertThread(result.thread)
   store.setComposerDraft(result.thread.id, result.seed)

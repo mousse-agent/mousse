@@ -53,6 +53,7 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       return projectId !== undefined && projectIds.includes(projectId)
     },
     threadExists: (threadId) => host.threadMeta?.(threadId) !== undefined,
+    localOnly: (threadId) => host.threadMeta?.(threadId)?.localOnly === true,
     relation: (caller, threadId) => {
       if (host.threadMeta?.(threadId)?.createdByThreadId === caller.threadId) return 'launched'
       const lineage = lineageRelation(engine, caller.threadId, threadId)

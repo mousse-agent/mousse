@@ -42,8 +42,8 @@ describe('idle phone speech wait', () => {
       expect(services.getOwnedActivity()).not.toHaveProperty('rpc:speech.host.wait')
 
       // A storage lifecycle request still runs while the window's wait is open.
-      await expect(services.runOwnedRequest('threads.trash', () => 'trashed')).resolves.toBe(
-        'trashed'
+      await expect(services.runOwnedRequest('threads.delete', () => 'deleted')).resolves.toBe(
+        'deleted'
       )
 
       // Other requests stay owned work.

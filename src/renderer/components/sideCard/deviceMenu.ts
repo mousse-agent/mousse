@@ -68,7 +68,7 @@ export function thisComputerLacksGrant(localName: string): string {
 
 /** Why a computer that stopped sharing cannot be picked: its owner switch is off, or it blocked this computer. */
 export function notSharingReason(name: string): string {
-  return `${name} is not sharing its threads with this computer. Turn on "Let my other computers work on this computer's threads" on ${name}, in Settings, Devices, or unblock this computer there.`
+  return `${name} is not sharing its threads with this computer. Turn on "Let other computers work here" on ${name}, in Settings, Devices, or unblock this computer there.`
 }
 
 /** The Run on rows: this computer first, then each connected computer, with the picked one active. */
@@ -109,14 +109,9 @@ export function activeWorkspaceChoice(workspace: ComposerWorkspace): WorkspaceCh
   return workspace.projectId && workspace.worktreeEnabled ? 'worktree' : 'checkout'
 }
 
-/** The draft to store when a choice is picked; the project and the computer are kept. */
+/** The draft to store when a choice is picked; everything else it holds (project, computer, Private) is kept. */
 export function workspaceDraftForChoice(workspace: ComposerWorkspace, choice: WorkspaceChoice): ComposerWorkspace {
-  return {
-    projectId: workspace.projectId,
-    worktreeEnabled: choice === 'worktree',
-    ...(workspace.node ? { node: workspace.node } : {}),
-    ...(workspace.localProjectId ? { localProjectId: workspace.localProjectId } : {})
-  }
+  return { ...workspace, worktreeEnabled: choice === 'worktree' }
 }
 
 /** True when at least one row would change something if picked. */
@@ -141,7 +136,8 @@ export function buildDeviceMenu(input: {
   const choice = activeWorkspaceChoice(input.workspace)
   const noProject = hasProject ? undefined : 'Needs a project'
   return {
-    runOn: canPickComputer(input.devices, input.workspace.node)
+    // A private chat runs on this computer only (`Thread.localOnly`): there is nothing to pick.
+    runOn: !input.workspace.localOnly && canPickComputer(input.devices, input.workspace.node)
       ? buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node, notSharing: input.notSharing })
       : null,
     workspace: [

@@ -1,4 +1,5 @@
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
 import { join } from 'node:path'
 import { AgentDefinitionError, isAgentDefinitionError } from '../../shared/agents/errors'
 import type {
@@ -228,6 +229,12 @@ export class MmsWorkflowAgents {
   }
 
   dispose(): void { this.stopped = true }
+
+  /** The workflow's thread is private (`Thread.localOnly`), or below a private one. */
+  private originIsLocalOnly(threadId: string): boolean {
+    const thread = this.services.threads.getThread(threadId)
+    return Boolean(thread && isLocalOnlyThread(thread, this.services.threads.listAllThreads()))
+  }
 
   /** Root injects the same BrowserRuntimePort bound to OrchestratorService. */
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
@@ -600,7 +607,9 @@ export class MmsWorkflowAgents {
       `${context.profileId}/workflow/${manifest.requestId}/agent/${request.idempotencyKey}`,
       `Workflow agent ${request.idempotencyKey.slice(0, 12)}`,
       context.projectId,
-      { parentTaskId: context.threadId, runId: context.runId }
+      { parentTaskId: context.threadId, runId: context.runId },
+      // A workflow started in a private thread keeps its agents' threads private too.
+      { localOnly: this.originIsLocalOnly(context.threadId) }
     )
     this.writeInvocation({
       version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,

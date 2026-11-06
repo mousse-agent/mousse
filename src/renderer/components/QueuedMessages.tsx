@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from '../lib/icons'
+import { ArrowTurnForward, GripVertical, MoreHorizontal, Pencil, Trash2 } from '../lib/icons'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { noticeSummary } from '../chat/adapters/subagentNotice'
 import { readableError } from '../lib/errorText'
+import { useComposerDockStrip, useComposerNotice } from './ComposerNotice'
 
 /** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
@@ -137,6 +138,13 @@ export function QueuedMessages({
   const loadGeneration = useRef(0)
   const retryTimer = useRef<number | null>(null)
   const loggedLoadFailure = useRef(false)
+  // The ids of this thread's first list and every item shown since. An id not in it is a message just
+  // queued: it shows the queue for a moment even over a higher notice (a paused run). Null until the first list.
+  const knownIds = useRef<Set<string> | null>(null)
+  const receive = useCallback((next: QueuedMessage[]) => {
+    if (!knownIds.current) knownIds.current = new Set(next.map((item) => item.id))
+    setItems(next)
+  }, [])
 
   // A failed load is never shown: the last list stays, and the load keeps retrying quietly with
   // backoff until it succeeds or is superseded. Only the first failure of a streak is logged.
@@ -148,7 +156,7 @@ export function QueuedMessages({
         const list = await window.mousse.queue.list(id)
         if (!current()) return
         loggedLoadFailure.current = false
-        setItems(list)
+        receive(list)
         setError(null)
         return
       } catch (err) {
@@ -164,7 +172,7 @@ export function QueuedMessages({
         if (!current()) return
       }
     }
-  }, [])
+  }, [receive])
 
   useEffect(() => {
     if (!threadId) {
@@ -177,12 +185,13 @@ export function QueuedMessages({
     // snapshot's queue:updated so we don't race thread.snapshot with queue.list.
     setItems([])
     setMenuOpenId(null)
+    knownIds.current = null
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
       if (updatedId !== threadId) return
       settled = true
       loadGeneration.current += 1
-      setItems(next)
+      receive(next)
       setError(null)
     })
     const fallback = window.setTimeout(() => {
@@ -197,7 +206,7 @@ export function QueuedMessages({
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
       retryTimer.current = null
     }
-  }, [threadId, loadQueue])
+  }, [threadId, loadQueue, receive])
 
   useEffect(() => {
     if (!onOptimisticItemReconciled) return
@@ -348,32 +357,28 @@ export function QueuedMessages({
     )
   ]
 
-  if (!threadId || displayedItems.length === 0) {
-    return error ? (
-      <div className="queued-messages-error" role="status">
-        {error}
-        <button type="button" className="queued-messages-error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-          <X size={12} strokeWidth={2} />
-        </button>
-      </div>
-    ) : null
-  }
+  useComposerNotice(error ? { tone: 'error', title: error, onDismiss: () => setError(null) } : null)
+
+  // The queue is one entry of the dock above the composer: a higher notice (a paused run) hides it.
+  const present = Boolean(threadId) && displayedItems.length > 0
+  const { state: dock, reveal } = useComposerDockStrip(present)
+  const shownIds = displayedItems.map((item) => item.id).join('\n')
+  useEffect(() => {
+    const known = knownIds.current
+    if (!known || !shownIds) return
+    let added = false
+    for (const id of shownIds.split('\n')) {
+      if (known.has(id)) continue
+      known.add(id)
+      added = true
+    }
+    if (added) reveal()
+  }, [shownIds, reveal])
+
+  if (!present || dock === 'hidden') return null
 
   return (
-    <div className="queued-messages" aria-label="Queued messages">
-      {error && (
-        <div className="queued-messages-error" role="status">
-          {error}
-          <button
-            type="button"
-            className="queued-messages-error-dismiss"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-          >
-            <X size={12} strokeWidth={2} />
-          </button>
-        </div>
-      )}
+    <div className={`queued-messages${dock === 'leaving' ? ' is-leaving' : ''}`} aria-label="Queued messages">
       <ul id={listId} className="queued-messages-list" role="list">
         {displayedItems.map((item, index) => {
           const optimistic = item.id.startsWith('optimistic:')
@@ -426,13 +431,13 @@ export function QueuedMessages({
               <div className="queued-messages-actions">
                 <button
                   type="button"
-                  className="queued-messages-btn queued-messages-btn-steer"
+                  className="queued-messages-btn queued-messages-btn-icon queued-messages-btn-steer"
                   onClick={() => void handleSteer(item.id)}
                   disabled={busy || isSteering}
-                  title={isSteering ? 'Already steering this turn' : 'Steer active turn with this message'}
-                  aria-label="Steer with queued message"
+                  title={isSteering ? 'Steering…' : 'Send now (steer)'}
+                  aria-label={isSteering ? 'Steering…' : 'Send now (steer)'}
                 >
-                  {isSteering ? 'Steering…' : 'Steer'}
+                  <ArrowTurnForward size={14} strokeWidth={2} />
                 </button>
                 {onEditItem && !item.subagentNotice?.length && (
                   <button

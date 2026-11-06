@@ -1,7 +1,10 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import { readHomeFolderArgument } from '../shared/homeFolderArgument'
+import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
+import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
@@ -90,7 +93,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -169,6 +172,13 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
+  /** This computer's home folder, for showing paths as `~/…`. */
+  homeFolder: readHomeFolderArgument(process.argv),
+  fonts: {
+    /** A Google Fonts family's cached files; downloads them first only when `download` is true. */
+    loadGoogle: (family: string, role: FontRole, download: boolean): Promise<LoadedGoogleFont | null> =>
+      ipcRenderer.invoke('fonts:loadGoogle', family, role, download)
+  },
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
@@ -767,9 +777,9 @@ const api = {
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
     /** `opts.node` creates the chat on another of the user's computers (`projectId` is then that computer's, as this computer lists it). */
-    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }): Promise<Thread> =>
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId, opts),
-    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }): Promise<Thread> =>
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     /** A page of the messages before `before` of a long thread of another computer. */
@@ -778,16 +788,18 @@ const api = {
     /** One image of a message that arrived without its bytes. */
     messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
+    /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
-    restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
-    /** `includeComputers`: also the trash of the user's other computers (Recently deleted); without it, this computer's alone. */
-    inventory: (threadId?: string, options?: { includeComputers?: boolean }): Promise<{ lifecycles: Array<import('../shared/resourceLifecycle').TaskLifecycleRecord & { node?: string; computerName?: string }>; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; skipped?: import('../shared/types').ThreadSearchSkipped[] }> => storageInvoke('threads:inventory', threadId, options),
-    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
+    /** `/clear`: the thread's next turn starts a fresh provider session with no earlier context. */
+    clearContext: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:clearContext', threadId),
+    /** `/compact`: summarizes the thread's context now; `focus` says what the summary keeps. */
+    compact: (threadId: string, focus?: string): Promise<void> => ipcRenderer.invoke('threads:compact', threadId, focus),
+    /** `/fork`: a new thread from the thread's latest finished turn, selected. */
+    fork: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
@@ -1054,6 +1066,24 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    },
+    /** How many threads need the person in this window, shown on the dock or taskbar icon. 0 clears it. */
+    setAttentionCount: (count: number): Promise<void> =>
+      ipcRenderer.invoke('app:attentionCount', count),
+    /** A thread the person asked to open from outside the window, such as by clicking its notification. */
+    onOpenThread: (cb: (threadId: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, threadId: string) => cb(threadId)
+      ipcRenderer.on('app:openThread', handler)
+      return () => ipcRenderer.removeListener('app:openThread', handler)
+    },
+    /** Settings' "Try it": shows the system notification and plays the sound an event would use. */
+    previewNotification: (request: { kind: ThreadNotificationEvent; system: boolean; sound: boolean }): Promise<void> =>
+      ipcRenderer.invoke('notifications:preview', request),
+    /** A thread event to show as a toast: one the person is not looking at finished, needs them, or stopped. */
+    onThreadToast: (cb: (toast: ThreadToastPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, toast: ThreadToastPayload) => cb(toast)
+      ipcRenderer.on('notifications:threadToast', handler)
+      return () => ipcRenderer.removeListener('notifications:threadToast', handler)
     }
   },
   /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */
