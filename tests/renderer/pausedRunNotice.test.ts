@@ -52,10 +52,10 @@ function view(patch: Partial<PausedRunNoticeInput> = {}) {
 }
 
 describe('the paused run notice', () => {
-  it('one line: the limit, when it resumes and the time left; the limit\'s name in the tooltip; only Try now and Cancel', () => {
+  it('one line: the limit and when it resumes; the time left and the limit\'s name in the tooltip; only Try now and Cancel', () => {
     view()
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes .+ \(in 2h 15m\)$/)
-    expect(line()!.title).toBe("Claude's 5-hour limit was reached. Continues by itself at reset.")
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes \S+(\s?[AP]M)?$/)
+    expect(line()!.title).toBe("Resumes in 2h 15m. Claude's 5-hour limit was reached. Continues by itself at reset.")
     expect(notice()!.dataset.tone).toBe('warning')
     expect(names()).toEqual(['Try now', 'Cancel'])
     expect(button('Try now').className).toBe('composer-notice-btn composer-notice-btn-primary')
@@ -66,18 +66,19 @@ describe('the paused run notice', () => {
 
   it('says an estimated time is approximate', () => {
     view({ pause: pause({ estimated: true }) })
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes around .+ \(in 2h 15m\)$/)
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resumes around \S+(\s?[AP]M)?$/)
   })
 
   it('with no timer it says when the limit resets, not that it resumes', () => {
     view({ pause: pause({ autoResume: false }) })
-    expect(line()!.textContent).toMatch(/^Usage limit reached · resets .+ \(in 2h 15m\)$/)
-    expect(line()!.title).toContain("It won't continue by itself. Press Try now once it resets.")
+    expect(line()!.textContent).toMatch(/^Usage limit reached · resets \S+(\s?[AP]M)?$/)
+    expect(line()!.title).toBe("Resets in 2h 15m. Claude's 5-hour limit was reached. It won't continue by itself. Press Try now once it resets.")
   })
 
   it('past the reset time it says it is retrying, or that it should have reset', () => {
     view({ now: at(16, 10) })
     expect(line()!.textContent).toBe('Usage limit reached · retrying now')
+    expect(line()!.title).not.toMatch(/ in \d/)
     view({ pause: pause({ autoResume: false }), now: at(16, 10) })
     expect(line()!.textContent).toBe('Usage limit reached · should have reset by now')
   })
@@ -223,9 +224,9 @@ describe('the notice on a thread', () => {
     vi.useFakeTimers({ now: NOW })
     setTurn(state())
     show('t1', clientOf())
-    expect(line()!.textContent).toContain('in 2h 15m')
+    expect(line()!.title).toContain('in 2h 15m')
     act(() => { vi.advanceTimersByTime(30 * 60_000) })
-    expect(line()!.textContent).toContain('in 1h 45m')
+    expect(line()!.title).toContain('in 1h 45m')
   })
 })
 

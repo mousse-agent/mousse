@@ -211,14 +211,32 @@ describe('the dock on the composer', () => {
     return css.slice(start, css.indexOf('}', start))
   }
 
-  it('docks the notice line and the queue the same way: the composer\'s surface, flush on its top edge', () => {
-    const dock = body('.chat-input-area > :is(.composer-notice-slot, .queued-messages)')
-    expect(dock).toMatch(/margin:\s*0;/)
-    expect(dock).toMatch(/border:\s*1px solid var\(--ui-line-strong\);\s*border-bottom:\s*0;/)
-    expect(dock).toMatch(/border-radius:\s*16px 16px 0 0;/)
-    expect(dock).toMatch(/background:\s*var\(--ui-raised\);/)
-    expect(body('.app .chat-input-area:has(> .composer-notice-slot, > .queued-messages):not(:has(.composer-workspace-toolbar)) .composer'))
+  it('docks the queue on the composer: its surface, flush on its top edge', () => {
+    const queue = body('.chat-input-area > .queued-messages')
+    expect(queue).toMatch(/margin:\s*0;/)
+    expect(queue).toMatch(/border:\s*1px solid var\(--ui-line-strong\);\s*border-bottom:\s*0;/)
+    expect(queue).toMatch(/border-radius:\s*16px 16px 0 0;/)
+    expect(queue).toMatch(/background:\s*var\(--ui-raised\);/)
+    expect(body('.app .chat-input-area:has(> .queued-messages):not(:has(.composer-workspace-toolbar)) .composer'))
       .toMatch(/border-top-left-radius:\s*0;\s*border-top-right-radius:\s*0;/)
+  })
+
+  it('draws a notice as one quiet line: no border, fill, shadow or corners, muted metadata text, plain text actions', () => {
+    // Both appear and fade in the same way.
+    expect(body('.chat-input-area > :is(.composer-notice-slot, .queued-messages)')).toMatch(/animation:\s*composer-dock-in/)
+    const rules = [...css.matchAll(/([^{}]*\.composer-notice[^{}]*)\{([^}]*)\}/g)].map(([, selector, declarations]) => ({ selector: selector.trim(), declarations }))
+    expect(rules.length).toBeGreaterThan(5)
+    for (const { selector, declarations } of rules) {
+      // Buttons keep their rounded hover shape and their focus ring; nothing else draws an edge.
+      if (!/:focus-visible/.test(selector)) expect(declarations, selector).not.toMatch(/(^|;)\s*(border(?!-radius)(-[a-z]+)*|box-shadow)\s*:(?!\s*(0|none);)/)
+      // A fill only on hover and press.
+      if (!/:(hover|active)/.test(selector)) expect(declarations, selector).not.toMatch(/background(-color)?\s*:(?!\s*transparent;)/)
+    }
+    expect(css).not.toMatch(/:has\([^)]*\.composer-notice-slot[^)]*\)[^{]*\.composer\s*\{/)
+    const line = body('.composer-notice')
+    expect(line).toMatch(/color:\s*var\(--text-secondary\);/)
+    expect(line).toMatch(/font-size:\s*12\.5px;/)
+    expect(body('.composer-notice-btn-primary')).toMatch(/color:\s*color-mix\(in srgb, var\(--accent\)/)
   })
 
   it('sits in the composer stack, so the transcript keeps clear of it without an offset of its own', () => {
