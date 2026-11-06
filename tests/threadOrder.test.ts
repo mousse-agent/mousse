@@ -30,13 +30,16 @@ describe('orderedThreadIds', () => {
     expect(orderedThreadIds({ projects, threads, view: 'projects' })).toEqual(['p1-a', 'p1-b', 'p2-a', 'orphan-b', 'orphan-a'])
   })
 
-  it('lists one flat sidebar order in the threads view', () => {
+  it('lists every project in one list in the threads view, newest first by when each started', () => {
+    // `order` is per project, so it does not decide the flat list: a later send does not move a row.
     const threads = [
-      thread('c', { projectId: 'p2', order: 3 }),
-      thread('a', { order: 1 }),
-      thread('b', { projectId: 'p1', order: 2 })
+      thread('c', { projectId: 'p2', order: -40, startedAt: '2026-01-01T00:00:01.000Z' }),
+      thread('a', { order: 1, startedAt: '2026-01-03T00:00:00.000Z' }),
+      thread('b', { projectId: 'p1', order: -1, startedAt: '2026-01-02T00:00:00.000Z' })
     ]
     expect(orderedThreadIds({ projects, threads, view: 'threads' })).toEqual(['a', 'b', 'c'])
+    // The order the rows were dragged into.
+    expect(orderedThreadIds({ projects, threads, view: 'threads', arranged: ['c', 'a', 'b'] })).toEqual(['c', 'a', 'b'])
     expect(orderedThreadIds({ projects, threads, view: 'chats' })).toEqual(['a', 'b', 'c'])
   })
 
@@ -65,14 +68,14 @@ describe('orderedThreadIds', () => {
   it('steps through the threads of other computers too, by their place among this computer’s', () => {
     const remote = (id: string, over: Partial<Thread> = {}) => thread(id, { node: 'nod_other', ...over })
     const threads = [
-      thread('mine-b', { order: 2 }),
-      remote('nod_other:r1', { order: 0.5 }),
-      remote('nod_other:r2', { projectId: 'nod_other:rp', order: 0 }),
+      thread('mine-b', { order: 2, startedAt: '2026-01-01T00:00:01.000Z' }),
+      remote('nod_other:r1', { order: 0.5, startedAt: '2026-01-02T00:00:00.000Z' }),
+      remote('nod_other:r2', { projectId: 'nod_other:rp', order: 0, startedAt: '2026-01-03T00:00:00.000Z' }),
       remote('nod_other:child', {
         order: 1,
         lineage: { parentThreadId: 'nod_other:r1', rootThreadId: 'nod_other:r1', relationship: 'subagent' }
       }),
-      thread('mine-a', { order: 0 })
+      thread('mine-a', { order: 0, startedAt: '2026-01-04T00:00:00.000Z' })
     ]
     expect(orderedThreadIds({ projects, threads, view: 'threads' })).toEqual(['mine-a', 'nod_other:r2', 'nod_other:r1', 'mine-b'])
     // Under a project of the other computer, they follow that project in the projects view.

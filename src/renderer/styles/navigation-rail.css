@@ -46,10 +46,6 @@
 
 .navigation-rail-button:disabled { opacity: 0.35; cursor: not-allowed; }
 
-.navigation-rail-active-dot {
-  display: none;
-}
-
 .navigation-rail-separator {
   width: 26px;
   margin: 3px 0;

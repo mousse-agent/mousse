@@ -455,7 +455,12 @@ describe('the command table', () => {
   it('has unique ids and parseable default bindings on every platform', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     for (const command of COMMANDS) {
-      for (const platform of ['win32', 'darwin']) expect(parseBinding(defaultBindingFor(command.id, platform))).not.toBeNull()
+      for (const platform of ['win32', 'darwin']) {
+        const binding = defaultBindingFor(command.id, platform)
+        // A command declared without a key ships unbound; every other default parses.
+        if (command.defaultBinding === null) expect(binding).toBeNull()
+        else expect(parseBinding(binding!)).not.toBeNull()
+      }
     }
   })
 

@@ -11,6 +11,7 @@ import {
   parseBinding,
   reservedMatches,
   resolveBinding,
+  resolveOptionalBinding,
   scopesOverlap,
   type CommandCategory,
   type CommandDefinition,
@@ -206,7 +207,7 @@ export function shortcutGroups(query: string, overrides: ShortcutOverrides, plat
     const custom =
       !command.fixed &&
       overrides[command.id] !== undefined &&
-      (binding === null || resolveBinding(binding, platform) !== resolveBinding(defaultBindingFor(command.id, platform), platform))
+      resolveOptionalBinding(binding, platform) !== resolveOptionalBinding(defaultBindingFor(command.id, platform), platform)
     const row: ShortcutRow = { command, binding, label, custom, shadowedBy: shadows.get(command.id) ?? null }
     const rows = groups.get(command.category)
     if (rows) rows.push(row)

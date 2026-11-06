@@ -5,7 +5,9 @@ import { REVIEW_MAX_FILES, type ReviewFileEntry, type ReviewFilesResult, type Re
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
 import { ResizablePanelSidebar } from '../ResizablePanelSidebar'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select, type SelectOption } from '../ui/Select'
+import { Collapse } from '../ui/Collapse'
 import { ReviewDiffPane, WhitespaceToggle } from './ReviewDiffPane'
 import { commentCounts, commentScopeLabel, scopeKey } from './reviewComments'
 import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type WorkspaceAvailability } from './reviewData'
@@ -66,9 +68,9 @@ function TreeRows({
                 {open ? <ChevronDown size={12} strokeWidth={2} /> : <ChevronRight size={12} strokeWidth={2} />}
                 <span className="git-file-path">{node.name}</span>
               </button>
-              {open && (
+              <Collapse open={open} itemCount={node.children.length}>
                 <TreeRows nodes={node.children} depth={depth + 1} selectedPath={selectedPath} collapsed={collapsed} comments={comments} onToggle={onToggle} onSelect={onSelect} />
-              )}
+              </Collapse>
             </div>
           )
         }
@@ -327,7 +329,7 @@ export function ReviewPanel() {
             ) : currentList && !result?.unavailable && !error ? (
               <div className="git-empty git-empty-nested">No changes in {scope ? scopeLabel(scope, choices) : 'this scope'}</div>
             ) : !result && !error ? (
-              <div className="git-empty git-empty-nested">Loading…</div>
+              <div className="git-empty git-empty-nested"><DelayedLoader size="small" label="Loading changes" /></div>
             ) : null}
           </div>
         </div>

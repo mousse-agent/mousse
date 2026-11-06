@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from 'react'
 import { ChevronRight } from '../../lib/icons'
 import { useAppStore } from '../../stores/appStore'
+import { Collapse } from '../ui/Collapse'
 
 /** What every side card section receives. Add shared fields here rather than per section. */
 export interface SideCardSectionContext {
@@ -56,7 +57,7 @@ export function SideCardSection({ title, threadId, action, collapseKey = title, 
         </h3>
         {!collapsed && action}
       </div>
-      {!collapsed && <div id={bodyId} className="side-card-section-body">{children}</div>}
+      <Collapse open={!collapsed} id={bodyId} className="side-card-section-body">{children}</Collapse>
     </section>
   )
 }

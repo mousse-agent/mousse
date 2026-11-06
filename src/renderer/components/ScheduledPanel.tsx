@@ -39,6 +39,7 @@ import {
 } from './scheduled/scheduledLabels'
 import { WebhookDialog, type WebhookApi } from './scheduled/WebhookDialog'
 import { openThread } from '../lib/openThread'
+import { Collapse } from './ui/Collapse'
 import '../styles/scheduled-panel.css'
 
 function formatWhen(iso: string | null | undefined): string {
@@ -361,7 +362,7 @@ export function ScheduledPanel() {
                   </div>
                   {job.state === 'paused' && job.pausedReason ? <p className="scheduled-item-note" data-meta="paused-reason">Paused: {job.pausedReason}</p> : null}
                   {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
-                  {selected ? <RunHistory id={`${detailsId}-${job.id}`} job={job} /> : null}
+                  <Collapse open={selected}><RunHistory id={`${detailsId}-${job.id}`} job={job} /></Collapse>
                 </div>
                 <div className="scheduled-item-actions">
                   {runThreadId(job) ? (
