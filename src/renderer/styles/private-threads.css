@@ -141,7 +141,3 @@
   flex-shrink: 0;
   color: var(--ui-faint);
 }
-
-.threads-context-menu-subitem {
-  padding-left: 34px;
-}

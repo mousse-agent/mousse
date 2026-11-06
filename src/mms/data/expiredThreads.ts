@@ -21,3 +21,16 @@ export function threadFolderExpired(location: string, now = Date.now()): boolean
     return false
   }
 }
+
+/** The root thread of the subagent thread whose folder is `location` (`Thread.lineage`), read from its `meta.json`. */
+export function threadFolderRoot(location: string): string | undefined {
+  try {
+    const path = join(location, 'meta.json')
+    if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size > 1024 * 1024) return undefined
+    const meta = JSON.parse(readFileSync(path, 'utf8')) as Partial<Thread>
+    const root = meta.lineage?.rootThreadId
+    return typeof root === 'string' && root !== meta.id ? root : undefined
+  } catch {
+    return undefined
+  }
+}

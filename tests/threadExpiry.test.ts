@@ -75,7 +75,7 @@ describe('thread expiry', () => {
     expect(inventory.lifecycles.map((record) => record.taskId)).not.toContain(thread.id)
   }, 120_000)
 
-  it('deletes a subagent that was already in the trash with its expiring thread', async () => {
+  it('deletes a subagent a cut-short delete left in the trash with its expiring thread', async () => {
     const root = mms.threads.createThread('Root', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     const child = mms.threads.createThread('Helper', undefined, undefined, { started: true, ownerThreadId: root.id, lineage: { parentThreadId: root.id, rootThreadId: root.id, relationship: 'subagent' } })
     await mms.trashThread(child.id)
@@ -84,6 +84,17 @@ describe('thread expiry', () => {
     await mms.threadExpiry.pass()
     expect(mms.threads.lifecycleStore.get(root.id)?.state).toBe('purged')
     expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('purged')
+  }, 60_000)
+
+  it('finishes an expiry delete a crash cut short at the next start, instead of putting it back in Archived', async () => {
+    const thread = mms.threads.createThread('Cut short', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+    mms.threads.updateThreadMeta(thread.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
+    const deletes = (mms as unknown as { threadDeletes: { setIntent(id: string, intent: unknown): void; finishCutShort(): Promise<Array<{ taskId: string; outcome: string }>> } }).threadDeletes
+    // The state a crash leaves between the trash and the purge: the thread in the trash with its expiry intent.
+    deletes.setIntent(thread.id, { human: false, discard: false, at: new Date().toISOString(), expiry: true })
+    await mms.trashThread(thread.id)
+    expect(await deletes.finishCutShort()).toEqual([{ taskId: thread.id, outcome: 'purged' }])
+    expect(mms.threads.lifecycleStore.get(thread.id)?.state).toBe('purged')
   }, 60_000)
 
   it('gives the expiry purge authority only to a thread whose own expiry passed', async () => {
