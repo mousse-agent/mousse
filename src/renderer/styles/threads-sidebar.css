@@ -75,17 +75,38 @@
   }
 }
 
-.threads-sidebar-open-project:hover {
+.threads-sidebar-toolbar-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+}
+
+.threads-sidebar-toolbar-button:hover {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
+/* Projects · Threads · Agents, three equal segments that never change width, then Add project. */
+.threads-sidebar-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin: 8px 12px 10px;
+}
+
+.threads-sidebar-add-project {
+  flex-shrink: 0;
+}
+
 .threads-sidebar-tabs {
   display: flex;
-  flex-shrink: 0;
-  width: fit-content;
+  flex: 1;
+  min-width: 0;
   gap: 2px;
-  margin: 8px 12px 10px;
   padding: 2px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.09);
   border-radius: 10px;
@@ -93,14 +114,22 @@
 }
 
 .threads-sidebar-tab {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 32px;
-  height: 32px;
-  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  gap: 5px;
+  padding: 0 4px;
   border-radius: 7px;
+  font-size: 12px;
   color: var(--text-secondary);
+}
+
+.threads-sidebar-tab-label {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .threads-sidebar-tab.active {
@@ -113,7 +142,9 @@
 .threads-sidebar-section[hidden] { display: none; }
 
 .threads-sidebar-tab:focus-visible,
-.threads-sidebar-open-project:focus-visible {
+.threads-sidebar-thread:focus-visible,
+.threads-sidebar-project-toggle:focus-visible,
+.threads-sidebar-inline-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -142,11 +173,17 @@
   min-height: 0;
 }
 
+/* As tall as its rows, and no taller: the footer comes right after it. It shrinks and scrolls once the rows
+   outgrow the sidebar. The Agents tab has no footer, so there it fills the sidebar. */
 .threads-sidebar-scroll {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding-bottom: 12px;
+}
+
+.threads-sidebar-scroll[data-view='chats'] {
+  flex-grow: 1;
 }
 
 .threads-sidebar-section-settled.collapsed {
@@ -636,6 +673,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-worktree-icon {
+  display: inline-flex;
   flex-shrink: 0;
   color: var(--text-secondary);
   opacity: 0.85;
@@ -666,16 +704,24 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
-.threads-sidebar-project-new-chat {
+/* A project's "New thread" is always there, faint at rest; its "…" shows on hover or focus. */
+.threads-sidebar-project-new-chat,
+.threads-sidebar-project-more {
   flex-shrink: 0;
-  opacity: 0;
   transition: opacity 0.15s;
 }
 
-.threads-sidebar-project-row:hover .threads-sidebar-project-new-chat,
-.threads-sidebar-project-row:focus-within .threads-sidebar-project-new-chat,
-.threads-sidebar-project-new-chat:focus-visible,
-.threads-sidebar-project-new-chat[aria-expanded="true"] {
+.threads-sidebar-project-new-chat {
+  opacity: 0.55;
+}
+
+.threads-sidebar-project-more {
+  opacity: 0;
+}
+
+.threads-sidebar-project-row:hover :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
+.threads-sidebar-project-row:focus-within :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
+.threads-sidebar-project-more[aria-expanded="true"] {
   opacity: 1;
 }
 
@@ -684,6 +730,26 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   font-size: 12.5px;
   color: var(--text-secondary);
   opacity: 0.7;
+}
+
+/* No projects yet: one muted line, and the one place the words "Add project" appear. */
+.threads-sidebar-empty-projects {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  opacity: 1;
+}
+
+.threads-sidebar-inline-action {
+  padding: 2px 0;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.threads-sidebar-inline-action:hover {
+  text-decoration: underline;
 }
 
 .threads-sidebar-empty-nested {
@@ -817,113 +883,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   }
 }
 
-/* Thread hover card (model / worktree / subagents) */
-.thread-hover-card {
-  width: min(280px, calc(100vw - 48px));
-  padding: 12px 14px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-  border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.5);
-  pointer-events: auto;
-  color: var(--text-primary);
-}
-
-.thread-hover-card-title {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
-  letter-spacing: 0.01em;
-  margin-bottom: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.thread-hover-card-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.thread-hover-card-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  min-width: 0;
-}
-
-.thread-hover-card-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.9;
-}
-
-.thread-hover-card-icon img,
-.thread-hover-card-icon svg {
-  width: 13px;
-  height: 13px;
-}
-
-.thread-hover-card-row-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.thread-hover-card-row-label {
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.3;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.thread-hover-card-row-detail {
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--text-secondary);
-  opacity: 0.85;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.threads-sidebar-selected-dot {
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.threads-sidebar-open-project {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px;
-  margin: 4px 12px;
-  border-radius: 7px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  text-align: left;
-}
-
 .threads-sidebar-recent {
   margin-top: 18px;
   padding-top: 10px;
@@ -961,9 +920,49 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 .threads-sidebar-device-detail { font-size: 11px; }
 
-@container threads-sidebar (max-width: 220px) {
-  .threads-sidebar-tab { gap: 4px; font-size: 12px; }
-  .threads-sidebar-tab svg { width: 15px; height: 15px; }
+/* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
+   width, so switching tabs moves nothing; the other two show their icons, with their names in the tooltips.
+   A label is shown whole or not at all. */
+@container threads-sidebar (max-width: 319px) {
+  .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
+  .threads-sidebar-tab.active { flex: 0 0 auto; min-width: 88px; padding: 0 8px; }
+}
+
+/* Too narrow even for one word beside two icons: every tab is an icon. */
+@container threads-sidebar (max-width: 239px) {
+  .threads-sidebar-tab-label { display: none; }
+  .threads-sidebar-tab.active { flex: 1 1 0; min-width: 0; padding: 0 4px; }
+}
+
+/* Under the lists: "No project" and "Archived". The footer follows the lists, and its auto bottom margin keeps
+   the profile at the window's edge. When the lists are taller than the sidebar they scroll and the footer sits
+   at the bottom. The footer is the one scroll container for its own sections: it takes what they need up to
+   45vh, and the lists above give up the room. */
+.threads-sidebar-footer {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+  margin-bottom: auto;
+}
+
+/* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
+   that scrolls even with overlay scrollbars. */
+.threads-sidebar-scroll[data-more-below] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar { width: 6px; }
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-track { background: transparent; }
+.threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: rgba(var(--accent-rgb), 0.32);
+}
+
+/* Recently deleted, a sub-heading inside the open Archived disclosure. */
+.threads-sidebar-trash-nested {
+  margin-top: 4px;
 }
 
 /* Recently deleted: rows are lists of actions, not a selection, so hover and focus use a

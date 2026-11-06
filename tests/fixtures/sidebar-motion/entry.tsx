@@ -15,7 +15,7 @@ function Sidebar({ width, kind }: { width: number; kind: string }) {
   return <aside className="threads-sidebar" style={{ width }} data-kind={kind}>
     <div className="threads-sidebar-project-row expanded"><button><FolderOpen size={16} />Project</button></div>
     <button className="threads-sidebar-thread active sidebar-focus">
-      <span className="threads-sidebar-selected-dot" /><MessageSquare size={16} />Thread
+      <MessageSquare size={16} />Thread
       <span className="threads-sidebar-status-dot threads-sidebar-status-dot--question" />
     </button>
   </aside>

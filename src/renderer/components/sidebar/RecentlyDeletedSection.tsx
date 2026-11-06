@@ -16,8 +16,11 @@ export interface RecentlyDeletedActions {
   onRetry: (taskId: string) => void
 }
 
-/** Trashed threads, restorable or permanently deletable, under the Archived block. */
-export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean }) {
+/**
+ * Trashed threads, restorable or permanently deletable. `nested`: a sub-heading inside the open Archived
+ * disclosure, which mounts it, so its list is read when Archived opens.
+ */
+export function RecentlyDeletedSection({ hidden = false, nested = false }: { hidden?: boolean; nested?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   /** Set when an action started from a row's button; the row may vanish, and keyboard focus must not fall to the page. */
@@ -74,6 +77,7 @@ export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean })
       state={state}
       expanded={expanded}
       hidden={hidden}
+      nested={nested}
       rootRef={rootRef}
       actions={{
         onToggle: () => setExpanded((open) => !open),
@@ -94,10 +98,11 @@ export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean })
   </>
 }
 
-export function RecentlyDeletedView({ state, expanded, hidden, actions, now, rootRef }: {
+export function RecentlyDeletedView({ state, expanded, hidden, nested = false, actions, now, rootRef }: {
   state: TrashState
   expanded: boolean
   hidden: boolean
+  nested?: boolean
   actions: RecentlyDeletedActions
   now?: number
   rootRef?: React.Ref<HTMLDivElement>
@@ -111,7 +116,7 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
   return (
     <div
       ref={rootRef}
-      className={`threads-sidebar-section threads-sidebar-section-settled threads-sidebar-section-trash${expanded ? '' : ' collapsed'}`}
+      className={`threads-sidebar-section ${nested ? 'threads-sidebar-trash-nested' : 'threads-sidebar-section-settled'} threads-sidebar-section-trash${expanded ? '' : ' collapsed'}`}
       data-testid="sidebar-trash-section"
       hidden={hidden}
     >
@@ -125,8 +130,7 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
           aria-label={expanded ? 'Collapse recently deleted threads' : 'Expand recently deleted threads'}
         >
           <Trash2 size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
-          <span>Recently deleted</span>
-          <span className="threads-sidebar-settled-count" data-testid="sidebar-trash-count">{rows.length}</span>
+          <span>Recently deleted · <span data-testid="sidebar-trash-count">{rows.length}</span></span>
         </button>
       </div>
       <Collapse open={expanded} id={listId} className="threads-sidebar-tree threads-sidebar-trash-list" itemCount={rows.length}>
