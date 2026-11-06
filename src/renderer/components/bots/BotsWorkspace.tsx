@@ -158,7 +158,7 @@ export function BotsWorkspace({ client, providers, skills, active = true }: Bots
         <h2>Bots</h2>
         <button type="button" className="btn btn-sm" onClick={() => setEditing({ definition: newBotDefinition('New bot', providers[0]) })}>New bot</button>
       </div>
-      {bots.length === 0 && <p className="bots__muted">No bots yet. A bot works on its own inside the permissions you approve once.</p>}
+      {bots.length === 0 && <p className="bots__muted">No bots yet. Bots run tasks within their granted permissions.</p>}
       <ul>
         {bots.map((bot) => <li key={bot.id}>
           <button type="button" className="bots__row" aria-current={bot.id === selected ? 'true' : undefined} onClick={() => setSelected(bot.id)}>
