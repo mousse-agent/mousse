@@ -32,6 +32,12 @@
   font-size: 12.5px;
 }
 
+/* Nothing to say: the strip takes no room, and stays in place as a live region for when it has something. */
+.start-from-pr-status:empty {
+  min-height: 0;
+  margin: 0;
+}
+
 .start-from-pr-resolved {
   color: var(--text-primary);
 }
@@ -90,8 +96,14 @@
   cursor: pointer;
 }
 
-.start-from-pr-row:hover {
+.start-from-pr-row:hover,
+.start-from-pr-row[data-active='true'] {
   background: rgba(var(--accent-rgb), 0.08);
+}
+
+.start-from-pr-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .start-from-pr-row.selected {

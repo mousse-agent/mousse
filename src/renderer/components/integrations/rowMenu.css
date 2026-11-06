@@ -1,0 +1,37 @@
+/* The shared overflow menu (RowMenu): settings rows, integrations and the Git panel's file rows. */
+
+/* Overflow menu. The shared icon button reads as "delete" on hover; this one does not. */
+.settings-icon-btn.row-menu-btn:hover:not(:disabled) { color: var(--text-primary); }
+.settings-icon-btn.row-menu-btn[aria-expanded='true'] { color: var(--text-primary); background: var(--ui-hover); }
+
+.row-menu {
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius, 8px);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-raised-shadow, 0 8px 24px rgba(0, 0, 0, 0.28));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.row-menu-item {
+  display: block;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: calc(var(--ui-control-radius, 8px) - 2px);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row-menu-item:hover:not(:disabled),
+.row-menu-item:focus-visible { background: var(--ui-hover); outline: none; }
+.row-menu-item.danger { color: var(--danger, #e07a8a); }
+.row-menu-item:disabled { opacity: 0.45; cursor: default; }
