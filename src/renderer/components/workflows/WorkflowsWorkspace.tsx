@@ -23,6 +23,8 @@ export interface WorkflowsWorkspaceProps {
   activeRunsSlot?: ReactNode
   active?: boolean
   onRegisterLeaveGuard?: (guard: WorkflowLeaveGuard | null) => void
+  onRefreshTools?: () => void
+  refreshingTools?: boolean
 }
 
 export function WorkflowsWorkspace({
@@ -33,7 +35,9 @@ export function WorkflowsWorkspace({
   agentDefinitions,
   activeRunsSlot,
   active = true,
-  onRegisterLeaveGuard
+  onRegisterLeaveGuard,
+  onRefreshTools,
+  refreshingTools
 }: WorkflowsWorkspaceProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState<WorkflowLibraryQuery>(EMPTY_WORKFLOW_LIBRARY_QUERY)
@@ -76,6 +80,8 @@ export function WorkflowsWorkspace({
         onRun={execution ? setRunId : undefined}
         runDisabledReason={execution ? undefined : 'Execution is not connected.'}
         activeRunsSlot={activeRunsSlot}
+        onRefreshTools={onRefreshTools}
+        refreshingTools={refreshingTools}
       />
       {runId && execution ? (
         <LibraryRunDialog

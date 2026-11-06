@@ -1,0 +1,65 @@
+/* Shared by the Automations editors and libraries: the draft state, the publish issue link,
+   28px icon buttons, and the library filters. */
+
+.agents-workspace {
+  --settings-control-h: 28px;
+}
+
+.automation-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* A dot carries the state at a glance; the words carry it for everyone. */
+.automation-save-state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary, var(--text-secondary));
+  flex-shrink: 0;
+}
+
+.automation-save-state[data-state='unsaved']::before { background: var(--warning, #d4b06a); }
+.automation-save-state[data-state='unpublished']::before { background: var(--accent, #b5c9fa); }
+.automation-save-state[data-state='published']::before { background: var(--success, #7ec99a); }
+
+.automation-issue-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--warning, #d4b06a);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.automation-issue-link:hover { text-decoration-color: currentColor; }
+
+.automation-icon-toggle[aria-pressed='true'] { color: var(--text-primary); }
+
+.agent-defs .btn-danger,
+.wf-root .btn-danger { color: var(--danger, #e07a8a); }
+
+/* "Fix N issues to publish" moves focus to the first error in Validation. */
+.wf-diagnostics li:focus { outline: 1px solid var(--ui-line-strong); outline-offset: 2px; border-radius: 4px; }
+
+/* Library filters: the shared Select at the toolbar's height. */
+.automation-filter { flex: 0 1 auto; min-width: 0; }
+
+.automation-empty-line {
+  margin: 0;
+  padding: 32px 16px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}

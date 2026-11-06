@@ -1,4 +1,5 @@
 import { parseWorkflowBinding, type WorkflowBinding, type WorkflowNode } from '../../../shared/workflows'
+import { Select } from '../ui/Select'
 
 export function BindingEditor({
   id,
@@ -27,14 +28,21 @@ export function BindingEditor({
     <div className="wf-field" id={id} data-binding={id}>
       <label htmlFor={`${id}-kind`}>{label}</label>
       <div className="wf-inline">
-        <select id={`${id}-kind`} aria-label={`${label} binding kind`} disabled={readOnly} value={kind} onChange={(event) => setKind(event.target.value)}>
-          <option value="literal">Literal</option>
-          <option value="input">Input pointer</option>
-          <option value="node">Node pointer</option>
-          <option value="loop">Loop pointer</option>
-          <option value="template">Template</option>
-          <option value="secret">Secret ref</option>
-        </select>
+        <Select
+          id={`${id}-kind`}
+          ariaLabel={`${label} binding kind`}
+          disabled={readOnly}
+          value={kind}
+          onChange={setKind}
+          options={[
+            { value: 'literal', label: 'Literal' },
+            { value: 'input', label: 'Input pointer' },
+            { value: 'node', label: 'Node pointer' },
+            { value: 'loop', label: 'Loop pointer' },
+            { value: 'template', label: 'Template' },
+            { value: 'secret', label: 'Secret ref' }
+          ]}
+        />
         {kind === 'literal' ? (
           <input
             id={`${id}-literal`}
@@ -56,20 +64,15 @@ export function BindingEditor({
         ) : null}
         {kind === 'node' ? (
           <>
-            <select
+            <Select
               id={`${id}-node`}
+              ariaLabel={`${label} node`}
               disabled={readOnly}
               value={nodeIdOf(value)}
-              onChange={(event) => onChange({ ref: 'node', nodeId: event.target.value, pointer: pointerOf(value) })}
-              aria-label={`${label} node`}
-            >
-              <option value="">Select node</option>
-              {nodes.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {node.id} ({node.type})
-                </option>
-              ))}
-            </select>
+              placeholder="Select node"
+              onChange={(nodeId) => onChange({ ref: 'node', nodeId, pointer: pointerOf(value) })}
+              options={nodes.map((node) => ({ value: node.id, label: `${node.id} (${node.type})` }))}
+            />
             <input
               disabled={readOnly}
               value={pointerOf(value)}
