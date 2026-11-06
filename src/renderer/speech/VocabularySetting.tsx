@@ -66,6 +66,7 @@ export function VocabularySetting({
     <>
       <SettingsRow
         title="Vocabulary"
+        anchor="speech-vocabulary"
         description={usesVocabulary(selection) ? 'Names dictation should spell right.' : 'Names dictation should spell right. Only Parakeet models use them.'}
         control={
           <button type="button" className="settings-btn" title="Edit vocabulary" onClick={open}>
