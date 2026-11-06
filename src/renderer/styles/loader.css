@@ -1,0 +1,74 @@
+/* The shared loader (components/ui/DelayedLoader.tsx): a lit bead with a comet
+   arc orbiting it. The component mounts it only after a short delay, so quick
+   loads never flash it; here it only fades in. No text. */
+.ui-loader-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ui-loader-slot:empty {
+  display: none;
+}
+
+.ui-loader {
+  --ui-loader-size: 34px;
+  --ui-loader-stroke: 2.5px;
+  --ui-loader-core-inset: 9px;
+  position: relative;
+  flex: none;
+  width: var(--ui-loader-size);
+  height: var(--ui-loader-size);
+  animation: ui-loader-in 220ms ease-out both;
+}
+
+.ui-loader.small {
+  --ui-loader-size: 16px;
+  --ui-loader-stroke: 2px;
+  --ui-loader-core-inset: 4.5px;
+}
+
+.ui-loader-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0% 50%,
+    rgba(var(--accent-rgb), 0.12) 66%,
+    rgba(var(--accent-rgb), 0.7) 90%,
+    rgba(255, 255, 255, 0.95) 99%,
+    transparent 100%
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ui-loader-stroke)), #000 calc(100% - var(--ui-loader-stroke) + 0.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ui-loader-stroke)), #000 calc(100% - var(--ui-loader-stroke) + 0.5px));
+  /* Turned by .icon-spin, which keeps functional progress moving under reduced motion. */
+}
+
+.ui-loader-core {
+  position: absolute;
+  inset: var(--ui-loader-core-inset);
+  border-radius: 50%;
+  background-color: var(--ui-raised, var(--surface-soft));
+  background-image: var(--ui-sheen, none);
+  box-shadow: var(--ui-specular, none), 0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: ui-loader-breathe 1.15s ease-in-out infinite alternate;
+}
+
+html[data-theme='high-contrast'] .ui-loader-ring {
+  background: conic-gradient(from 0deg, transparent 0% 50%, var(--text-primary) 99%, transparent 100%);
+}
+
+@keyframes ui-loader-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes ui-loader-breathe {
+  from { transform: scale(0.82); }
+  to { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-loader-core { animation: none; }
+}

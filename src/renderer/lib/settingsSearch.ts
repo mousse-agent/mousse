@@ -53,17 +53,17 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Display name', section: 'providers', anchor: 'providers-display-name', keywords: ['rename'] },
 
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
-  { title: 'Chat titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming'] },
+  { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
   { title: 'Agent access', section: 'agents', anchor: 'agents-access', keywords: ['reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
   { title: 'Agents may answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions'] },
-  { title: 'Allow agents to create Subagents on other Devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote'] },
+  { title: 'Let agents start subagents on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'create subagents on other devices'] },
   { title: 'Give each subagent its own worktree', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch'] },
 
   { title: 'Skills', section: 'integrations', anchor: 'integrations-skills' },
   { title: 'MCP servers', section: 'integrations', anchor: 'integrations-mcp', keywords: ['tools'] },
   { title: 'Available to main agent', section: 'integrations', anchor: 'integrations-main-agent', keywords: ['skill defaults'] },
-  { title: 'Share with other agents', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp'] },
+  { title: 'Let other agents use your MCP servers', section: 'integrations', anchor: 'integrations-share', keywords: ['relay', 'mcp', 'share with other agents'] },
   { title: 'Web search', section: 'integrations', anchor: 'integrations-web-search', keywords: ['search tool'] },
 
   { title: 'Read aloud', section: 'speech', anchor: 'speech-read-aloud', keywords: ['text to speech'] },
