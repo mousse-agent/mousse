@@ -82,9 +82,11 @@ describe('edit row', () => {
     const chevron = () => toggle().querySelector('.an-edit-row-chevron')!
     // After the line totals, inside the button.
     expect(toggle().lastElementChild).toBe(chevron())
-    expect(chevron().classList).not.toContain('rotate-90')
+    // The shared Collapse chevron turns on data-open.
+    expect(chevron().classList).toContain('ui-collapse-chevron')
+    expect(chevron().getAttribute('data-open')).toBeNull()
     click(toggle())
-    expect(chevron().classList).toContain('rotate-90')
+    expect(chevron().getAttribute('data-open')).toBe('true')
   })
 
   it('a row with nothing to open has no chevron', () => {
