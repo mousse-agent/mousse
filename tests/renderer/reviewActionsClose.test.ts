@@ -112,9 +112,13 @@ describe('discarding a file from the Git panel', () => {
     }))
     const divider = host.querySelector('[aria-label="Resize Staged and Changes sections"]')
     await key(divider, 'ArrowDown')
-    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', expect.closeTo(0.55))
+    // The list hands over the key; the panel measures the sections first, then moves the pair.
+    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', 'ArrowDown')
     await key(divider, 'Home')
-    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', 0.15)
+    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', 'Home')
+    const calls = onDividerResize.mock.calls.length
+    await key(divider, 'Enter')
+    expect(onDividerResize).toHaveBeenCalledTimes(calls)
   })
 
   it('asks in the app dialog with the kept-copy line, focus off the confirming button, and Escape answers no', async () => {
