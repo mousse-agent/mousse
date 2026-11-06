@@ -104,12 +104,12 @@ export interface ContextSettings {
 }
 
 export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label: string }[] = [
+  { value: 'model-max', label: 'Auto' },
   { value: 128000, label: '128k' },
   { value: 256000, label: '256k' },
   { value: 384000, label: '384k' },
   { value: 512000, label: '512k' },
-  { value: 1024000, label: '1024k' },
-  { value: 'model-max', label: 'Model Max Context' }
+  { value: 1024000, label: '1024k' }
 ]
 
 /** Compact near the model's own window, as each provider's CLI does; a fixed size is opt-in. */
