@@ -35,15 +35,17 @@ export const BOTS_PERSONAL_EVENTS = ['bots.changed', 'bots.escalation'] as const
 /**
  * The Bot UI methods (Bot Phase 1 §5.11). No payload carries a model or an instance id, apart from
  * `BotError.action.instanceId` (a Sign in button). `bots.activate` stays internal, and
- * `bots.memory.reindex` is an engine function (`BotMemoryAdmin.reindex`) until Phase 2.
+ * `bots.memory.reindex` is an engine function (`BotMemoryAdmin.reindex`) until Phase 2. The list,
+ * pause and resume methods are `bots.personal.*`: `bots.list` and `bots.resume` already name the
+ * Space-bot methods (`BOTS_LOCAL_METHODS`), and a method has one handler.
  */
 export const BOTS_PERSONAL_V2_METHODS = [
-  'bots.list',
+  'bots.personal.list',
   'bots.create',
   'bots.get',
   'bots.update',
-  'bots.pause',
-  'bots.resume',
+  'bots.personal.pause',
+  'bots.personal.resume',
   'bots.delete',
   'bots.chat.list',
   'bots.chat.send',
@@ -70,12 +72,12 @@ export interface BotChatAttachment {
 
 /** Each v2 method's params (`profileId` aside) and result. */
 export interface BotsPersonalV2Api {
-  'bots.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
+  'bots.personal.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
   'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   'bots.update': { params: { botId: string; name?: string; look?: BotLook }; result: { bot: BotSummary } }
-  'bots.pause': { params: { botId: string }; result: { bot: BotSummary } }
-  'bots.resume': { params: { botId: string }; result: { bot: BotSummary } }
+  'bots.personal.pause': { params: { botId: string }; result: { bot: BotSummary } }
+  'bots.personal.resume': { params: { botId: string }; result: { bot: BotSummary } }
   /** Archives now; everything is purged at `purgeAt` (30 days). */
   'bots.delete': { params: { botId: string }; result: { purgeAt: string } }
   'bots.chat.list': {

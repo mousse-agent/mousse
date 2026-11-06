@@ -10,13 +10,13 @@ import type { BridgeHubLocalMethod } from './bridge/types'
 import type { BridgeActivityMethod } from './bridge/deviceActivity'
 import type { SpacesLocalMethod } from './spaces/local'
 import type { BotsLocalMethod } from './bots/space/local'
-import type { BotsPersonalMethod } from './bots/personal/methods'
+import type { BotsPersonalMethod, BotsPersonalV2Method } from './bots/personal/methods'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
-  | BotsPersonalMethod
+  | BotsPersonalMethod | BotsPersonalV2Method
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'

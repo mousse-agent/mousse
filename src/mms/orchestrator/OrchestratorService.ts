@@ -784,12 +784,14 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
 /**
- * A bot turn's preamble: the bot's role and instructions first, then Mousse's own. Bots that never
- * ask anyone run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
+ * A bot turn's preamble: the bot's role and instructions first, then its context pack (memory and
+ * history, built by Mousse and frozen for the activation, Bot Phase 1 §5.3.2), then Mousse's own.
+ * Bots that never ask anyone run their app tools with `approvals: 'never'`, so a tool that would
+ * ask is refused.
  */
-function withBotInstructions(instructions: string | undefined, preamble: string): string {
-  if (!instructions?.trim()) return preamble
-  return [`Your role and instructions:\n${instructions.trim()}`, preamble].filter(Boolean).join('\n\n')
+function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
+  const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
+  return parts.filter(Boolean).join('\n\n')
 }
 
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
@@ -3050,7 +3052,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     try {
@@ -3103,7 +3105,7 @@ export class OrchestratorService extends EventEmitter {
           modePrompt,
           appletCatalogue,
           usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
-        }))
+        }), input.botPreamble)
       })
     }
   }
@@ -4041,8 +4043,10 @@ export class OrchestratorService extends EventEmitter {
    * A bot dispatch's `turn.start` (PR 6 §4): the bot engine rebuilds the turn from `bots.db` and
    * checks that its grant still holds; only then does the turn start, bound to the compiled policy,
    * with the activation's authority, counts and spend. A refusal cancels the queued run, and
-   * nothing is sent. The activation thread is new, so the turn starts with no history; anything
-   * else fails it with `bot_state_invalid` before a request.
+   * nothing is sent. A run's thread is new, so its first turn starts with no history; a chat
+   * activation's first turn runs on the home thread right after the engine cleared its context
+   * (`history: 'cleared'`: the transcript stays, nothing of it is sent). Anything else fails it with
+   * `bot_state_invalid` before a request.
    */
   private async executeBotEffect(payload: BotTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
@@ -4071,10 +4075,12 @@ export class OrchestratorService extends EventEmitter {
       return cancel('bot_prepare_failed')
     }
     if ('refused' in prepared) return cancel(prepared.code)
-    // History 'none': a fresh activation thread has no transcript, native context or summary. A
+    // History 'none': a fresh activation thread has no transcript, native context or summary.
+    // 'cleared': the home thread's context was just cleared, so none of its transcript is sent. A
     // continuation or a consult runs on the thread's own history ('thread').
-    const fresh = session.messages.length === 0 && getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
-    if (busy() || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
+    const cleared = getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
+    const fresh = session.messages.length === 0 && cleared
+    if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
     try {
       const response = await this.runTurnOnSession(
@@ -10248,7 +10254,7 @@ export class OrchestratorService extends EventEmitter {
       const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
-        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
+        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -10342,7 +10348,8 @@ export class OrchestratorService extends EventEmitter {
         else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
         // A scheduled occurrence is never paused (its run would outlive the occurrence). It fails, and the run
         // records when the limit resets so the scheduler waits for it instead of taking slots inside the window.
-        const scheduled = opts?.schedule ? usageLimitOf(err) : undefined
+        // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
+        const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
         assistantText = `[${providerError.code}] ${providerError.message}`
       }

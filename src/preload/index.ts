@@ -118,6 +118,7 @@ import type {
   SignInResponse
 } from '../shared/harness/types'
 import type { BotEscalationSummary } from '../shared/bots/personal/escalation'
+import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -671,13 +672,26 @@ const api = {
       return () => ipcRenderer.removeListener('mcp:changed', handler)
     }
   },
-  /** Personal bots (Automations → Bots): change and escalation events; requests go through `platformRequest`. */
+  /** Personal bots (the Bots section): change, chat-row and live-chip events; requests go through `platformRequest`. */
   personalBots: {
     onChanged: (cb: (event: { botId?: string; activationId?: string }) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string }) => cb(event ?? {})
       ipcRenderer.on('bots:changed', handler)
       return () => ipcRenderer.removeListener('bots:changed', handler)
     },
+    /** A new or changed chat row (`bots.message`): chat push and notifications. */
+    onMessage: (cb: (event: BotsPersonalV2EventData['bots.message']) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.message']) => cb(event)
+      ipcRenderer.on('bots:message', handler)
+      return () => ipcRenderer.removeListener('bots:message', handler)
+    },
+    /** A working bot's live chip (`bots.activity`); a null chip clears it. */
+    onActivity: (cb: (event: BotsPersonalV2EventData['bots.activity']) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
+      ipcRenderer.on('bots:activity', handler)
+      return () => ipcRenderer.removeListener('bots:activity', handler)
+    },
+    /** The form editor's wall event; the daemon no longer sends it (asks arrive as `onMessage`). TODO(WP4): remove with `BotsWorkspace`. */
     onEscalation: (cb: (escalation: BotEscalationSummary) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, escalation: BotEscalationSummary) => cb(escalation)
       ipcRenderer.on('bots:escalation', handler)

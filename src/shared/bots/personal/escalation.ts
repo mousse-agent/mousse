@@ -73,21 +73,20 @@ export interface BotEscalationSummary {
   /** The main dispatch that hit the wall. */
   dispatchN: number
   kind: BotWallKind
-  permission: BotPermissionRequest
+  /** What is asked for: a permission, or an ask that grants nothing (`export_memory`). */
+  permission: BotAskRequest
   /** The permission in plain words ("Read files in ~/proj/site"). */
   permissionText: string
   /** Why the bot needs it (its own words for `escalate`; Mousse's for a gate or a limit). */
   reason: string
   status: BotEscalationStatus
   createdAt: string
-  expiresAt: string
+  /** Asks never expire (Bot Phase 1): null, except on an escalation an older build wrote. */
+  expiresAt: string | null
   answeredAt: string | null
   /** The amount a budget wall was answered with. */
   amount: number | null
-  /**
-   * Bot Phase 1 asks (`bots.db` v4). TODO(WP2): fill these and make `expiresAt` nullable when the
-   * v4 migration lands; asks never expire.
-   */
+  /** Bot Phase 1 asks (`bots.db` v4). */
   mode?: BotAskMode
   fingerprint?: string
   /** Plain words for the card (`askText`). */

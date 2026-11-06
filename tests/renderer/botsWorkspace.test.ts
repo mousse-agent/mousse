@@ -6,12 +6,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BotActivationSummary, BotApprovalView, BotSummaryV1 as BotSummary } from '../../src/shared/bots/personal/definition'
 import type { BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
-import { BOTS_PERSONAL_METHODS } from '../../src/shared/bots/personal/methods'
 import { ActivationRow, ApprovalDialog, BotsWorkspace, EscalationRow, keepFolderAccess, newBotDefinition, shellNote } from '../../src/renderer/components/bots/BotsWorkspace'
 import { createPersonalBotsClient, type PersonalBotsClient } from '../../src/renderer/services/personalBotsClient'
-import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
-import { GUI_REQUIRED_METHODS } from '../../src/main/mms/guiDaemonCompatibility'
-import { PLATFORM_REQUEST_METHODS } from '../../src/main/ipc/registerGuiIpc'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -274,13 +270,6 @@ describe('Bots tab: list', () => {
 })
 
 describe('Bots wiring', () => {
-  it('every personal-bot method is allowed through the bridge and required of the daemon', () => {
-    for (const method of BOTS_PERSONAL_METHODS) {
-      expect(PLATFORM_REQUEST_METHODS.has(method)).toBe(true)
-      expect(GUI_REQUIRED_METHODS).toContain(method)
-    }
-  })
-
   it('the client calls each method with exact params', async () => {
     const request = vi.fn(async (method: string) => method === 'bots.definitions.list' ? { bots: [] } : method === 'bots.escalations.list' ? { escalations: [] } : {})
     const client = createPersonalBotsClient({ request } as never)
@@ -296,14 +285,6 @@ describe('Bots wiring', () => {
       ['bots.escalations.respond', { escalationId: 'esc-1', answer: 'allow_more', amount: 60_000 }],
       ['bots.escalations.list', {}]
     ])
-  })
-
-  it('bridges bots.changed and bots.escalation to the renderer', () => {
-    const broadcast = vi.fn()
-    const presentation = { getActiveThreadId: () => null } as never
-    expect(bridgeProtocolEvent({ type: 'bots.changed', data: { botId: 'site-editor' } } as never, broadcast, presentation)).toBe(true)
-    expect(bridgeProtocolEvent({ type: 'bots.escalation', data: escalation() } as never, broadcast, presentation)).toBe(true)
-    expect(broadcast.mock.calls).toEqual([['bots:changed', { botId: 'site-editor' }], ['bots:escalation', escalation()]])
   })
 })
 

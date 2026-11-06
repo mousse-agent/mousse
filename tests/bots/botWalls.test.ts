@@ -1,13 +1,14 @@
 /**
- * PR 6 §5 and §5a, unit 6c-2: walls end the dispatch and ask the owner; answers continue it
- * behind the unknown-call gate; consults run one at a time per context thread; the startup pass
- * settles what a crash left; trashing a bot's thread ends its activation.
+ * PR 6 §5 and §5a, unit 6c-2, with Bot Phase 1 §5.4: in the chat lane (the owner is there) walls
+ * end the dispatch and ask the owner, and answers continue it behind the unknown-call gate; asks
+ * never expire; consults run one at a time per context thread; the startup pass settles what a crash
+ * left; trashing a bot's thread ends its activation; a deleted bot is archived, then purged.
  */
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
@@ -21,8 +22,9 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import { foldersOf, type BotDefinitionV1 as BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
-import { permissionText, withPermission, type BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
+import { foldersOf, type BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
+import { permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
+import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 
 let base: string
@@ -37,6 +39,8 @@ let outbox: EffectOutbox
 let bots: BotEngine
 let stopped: string[]
 let trashed: string[]
+let archived: string[]
+let cleared: string[]
 let threadStates: Map<string, 'active' | 'trashed' | 'missing'>
 let timers: Array<{ fn: () => void; ms: number; cleared: boolean }>
 let host: BotEngineHost
@@ -58,11 +62,16 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
 })
 
 const definition = (patch: Partial<BotDefinition> = {}): BotDefinition => ({
+  format: 2,
   id: 'site-editor',
   name: 'Site editor',
+  description: 'Keeps the site tidy.',
+  look: { colour: 'teal', accessory: 'cap' },
+  owner: { kind: 'person', id: 'self' },
+  placement: { kind: 'this_computer' },
   role: 'You keep the site tidy.',
-  main: { key: 'main', title: 'Main', agent: { instructions: 'Answer briefly.' }, selection: { instanceId: 'pi:openrouter', model: 'some/model' } },
-  context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, selection: { instanceId: 'pi:openrouter', model: 'some/model' }, narrow: { tools: ['read'] } }],
+  main: { key: 'main', title: 'Main', agent: { instructions: 'Answer briefly.' }, model: { mode: 'auto', depth: 'normal' } },
+  context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, model: { mode: 'auto', depth: 'normal' }, narrow: { tools: ['read'] } }],
   permissions: manifest(),
   triggers: { manual: true },
   ...patch
@@ -89,6 +98,8 @@ beforeEach(() => {
   runs = new RunEngine({ store: runStore, outbox, tools: new ToolInvocations(runStore), now, pid: 1 })
   stopped = []
   trashed = []
+  archived = []
+  cleared = []
   timers = []
   escalations = []
   threadStates = new Map()
@@ -104,6 +115,10 @@ beforeEach(() => {
       trashed.push(threadId)
       threadStates.set(threadId, 'trashed')
     },
+    archiveThread: (threadId) => { archived.push(threadId) },
+    clearContext: (threadId) => { cleared.push(threadId) },
+    // The hidden model (WP3): every activation resolves to this Pi model.
+    models: { resolve: async () => ({ selection: { instanceId: 'pi:openrouter', model: 'some/model' } }), markLimited: () => {} },
     runs: () => runs,
     harness: {
       checkPolicy: () => ({ ok: true }),
@@ -146,8 +161,17 @@ const start = (runId: string) => {
 
 const end = (runId: string, status: 'completed' | 'failed' | 'interrupted' | 'uncertain', outcome?: RunOutcome) => runs.markTerminal(runId, status, outcome)
 
-async function running(input = 'Fix the footer', id = 'c1') {
-  const activation = await bots.activate({ botId: 'site-editor', input, clientRequestId: id })
+const HOME = 'thread:bot:site-editor'
+const DAY = 24 * 60 * 60_000
+
+/**
+ * A working activation, prepared and started. Walls exist where the owner is there, so by default
+ * it is a chat activation (on the home thread); `run` makes a run on its own thread.
+ */
+async function running(input = 'Fix the footer', id = 'c1', lane: 'chat' | 'run' = 'chat') {
+  const activation = lane === 'chat'
+    ? await bots.enqueueChat('site-editor', `chat:${id}`, input)
+    : await bots.activate({ botId: 'site-editor', input, clientRequestId: id })
   const payload = payloadOf(store.dispatch(activation.id, 1)!.runId!)
   const prepared = bots.prepare(payload)
   if ('refused' in prepared) throw new Error(prepared.refused)
@@ -162,56 +186,85 @@ async function endAtWall(payload: BotTurnPayload) {
   await tick()
 }
 
+/** A gate refusal of a folder outside the grant: in the chat lane, a wall at once. */
+const gateWall = (prepared: { authority: BotAuthority }) =>
+  prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })
+
+/** `escalate` in a chat turn: recorded now; the turn finishes and then waits with its card. */
+async function askAndFinish(prepared: { authority: { escalate?: (request: { permission: unknown; reason: string }) => string } }, payload: BotTurnPayload, permission: BotPermissionRequest = { tool: 'web_fetch' }) {
+  expect(prepared.authority.escalate!({ permission, reason: 'docs' })).toBe(BOT_ASK_DEFERRED_TEXT)
+  end(payload.runId, 'completed')
+  bots.settle(payload, { text: 'I need to read the changelog.' })
+  await tick()
+}
+
+/** A wall the activation hit earlier, already answered. */
+function pastWall(activationId: string, index: number, answered = true) {
+  store.insertEscalation({ id: `esc_${index}`, botId: 'site-editor', activationId, dispatchN: 1, toolCallId: null, kind: 'gate', permission: { tool: 'write' }, reason: 'r', createdAt: 'x', expiresAt: null, mode: 'wall', fingerprint: `old-${index}`, title: null, note: null, messageId: null })
+  if (answered) store.answerEscalation(`esc_${index}`, 'denied')
+}
+
+const titleOf = (activationId: string) => bots.listEscalations(activationId)[0].title!
+
 describe('walls', () => {
-  it('a gate refusal is a wall: the owner is asked, the dispatch ends, and nothing more runs', async () => {
+  it('a gate refusal in the chat is a wall: the owner is asked, the dispatch ends, and nothing more runs', async () => {
     const { activation, prepared } = await running()
+    // The chat's first dispatch starts from a cleared home context.
+    expect(prepared.history).toBe('cleared')
+    expect(cleared).toEqual([HOME])
     const wall = prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(other, 'a.md') } })
-    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: `Read files in ${join(other, 'a.md')}` } })
+    // A file is asked for by its folder.
+    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: `read files in ${other}` } })
     expect(isBotWallAbort(prepared.authority.time.signal.reason)).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', permission: { path: join(other, 'a.md'), access: 'read' } } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { path: other, access: 'read' } } })
     expect(escalations).toHaveLength(1)
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
-    // The expiry is armed: 30 minutes.
-    expect(timers.at(-1)!.ms).toBe(30 * 60_000)
+    // Asks never expire: no expiry is armed (the only timer is the dispatch's deadline).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
   })
 
-  it('escalate asks for a structured permission; a malformed one is refused without a wall', async () => {
-    const { activation, prepared } = await running()
+  it('escalate asks for a structured permission; a malformed one is refused, and a chat turn finishes before it waits', async () => {
+    const { activation, prepared, payload } = await running()
     expect(prepared.authority.escalate!({ permission: { shell: true }, reason: 'x' })).toContain('not one a bot can ask for')
     expect(bots.getActivation(activation.id).status).toBe('running')
-    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe('Paused: waiting for the owner to allow: Use the tool `web_fetch`. End your turn now.')
-    expect(store.escalations({ activationId: activation.id })[0]).toMatchObject({ kind: 'escalate', toolCallId: 'call-1', reason: 'I need the changelog.' })
+    expect(prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'I need the changelog.', toolCallId: 'call-1' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(store.escalations({ activationId: activation.id })[0]).toMatchObject({ kind: 'escalate', mode: 'wall', toolCallId: 'call-1', reason: 'I need the changelog.', status: 'open' })
+    // The turn goes on: it is not aborted, and the activation waits only once its text is complete.
+    expect(prepared.authority.time.signal.aborted).toBe(false)
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    end(payload.runId, 'completed')
+    bots.settle(payload, { text: 'I asked to read the changelog.' })
+    await tick()
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'escalate' } })
   })
 
   it('the sixth wall of an activation ends it blocked', async () => {
     const { activation } = await running()
-    for (let index = 0; index < 5; index += 1) {
-      store.insertEscalation({ id: `esc_${index}`, activationId: activation.id, dispatchN: 1, toolCallId: null, kind: 'gate', permission: { tool: 'write' }, reason: 'r', createdAt: 'x', expiresAt: 'y' })
-      store.answerEscalation(`esc_${index}`, 'denied')
-    }
+    for (let index = 0; index < 5; index += 1) pastWall(activation.id, index)
     expect(bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })).toEqual({ kind: 'ended' })
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'asked_too_often' })
   })
 
-  it('an unanswered wall expires and ends the activation blocked; nothing is auto-approved', async () => {
+  it('an unanswered ask never expires: the chat waits, and the answer still continues it days later', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'r' })
-    await endAtWall(payload)
-    timers.at(-1)!.fn()
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'escalation_expired' })
+    await askAndFinish(prepared, payload)
+    clock += 3 * DAY
+    for (const timer of timers.filter((entry) => !entry.cleared)) timer.fn()
+    await tick()
     const [escalation] = bots.listEscalations(activation.id)
-    expect(escalation.status).toBe('expired')
-    await expect(bots.respond({ escalationId: escalation.id, answer: 'allow_once' })).rejects.toMatchObject({ code: 'escalation_answered' })
-    expect(store.dispatches(activation.id)).toHaveLength(1)
+    expect(escalation).toMatchObject({ status: 'open', expiresAt: null })
+    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
+    await bots.respond({ escalationId: escalation.id, answer: 'allow_once' })
+    expect(store.dispatches(activation.id)).toHaveLength(2)
   })
 })
 
 describe('answers and continuations', () => {
   it('"Allow this time" continues the walled run with the permission for this activation only', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })
+    gateWall(prepared)
     await endAtWall(payload)
     expect(runs.getRun(payload.runId)!.outcome).toMatchObject({ interruptedBy: 'bot_wall' })
     const [escalation] = bots.listEscalations(activation.id)
@@ -219,7 +272,7 @@ describe('answers and continuations', () => {
     expect(answered).toMatchObject({ escalation: { status: 'allowed_once' }, activation: { status: 'running' } })
     const next = store.dispatch(activation.id, 2)!
     expect(next).toMatchObject({ kind: 'continue', clientRequestId: `${activation.id}:d2` })
-    expect(next.prompt.text).toContain(`The owner allowed: Read files in ${other}`)
+    expect(next.prompt.text).toBe(`[Mousse] The owner allowed: read files in ${other}. Continue.`)
     expect(runs.getRun(next.runId!)!.outcome?.continuationOf).toBe(payload.runId)
     const again = bots.prepare(payloadOf(next.runId!))
     if ('refused' in again) throw new Error(again.refused)
@@ -231,8 +284,7 @@ describe('answers and continuations', () => {
 
   it('"Allow for this bot" publishes and approves a wider revision in one action', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
-    await endAtWall(payload)
+    await askAndFinish(prepared, payload)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_bot' })
     const grant = store.activeGrant('site-editor')!
     expect(grant.manifest.tools).toContain('web_fetch')
@@ -245,10 +297,9 @@ describe('answers and continuations', () => {
 
   it('"Deny" is recorded and the bot continues without it', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
-    await endAtWall(payload)
+    await askAndFinish(prepared, payload)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'deny' })
-    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner denied: Use the tool `web_fetch`')
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toBe(`[Mousse] The owner said not now: ${titleOf(activation.id)}. Carry on without it and say what you couldn't do. Continue.`)
     expect(store.overlays(activation.id)).toEqual([])
   })
 
@@ -257,7 +308,8 @@ describe('answers and continuations', () => {
     timers[0].fn()
     clock += 10 * 60_000
     await endAtWall(payload)
-    await expect(bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })).rejects.toMatchObject({ code: 'invalid_answer' })
+    // The card offers the higher limit (twice the work time); the owner may give a different amount.
+    expect(bots.listEscalations(activation.id)[0]).toMatchObject({ kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: 10 * 60_000 } } })
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_more', amount: 5 * 60_000 })
     const next = bots.prepare(payloadOf(store.dispatch(activation.id, 2)!.runId!))
     if ('refused' in next) throw new Error(next.refused)
@@ -266,7 +318,7 @@ describe('answers and continuations', () => {
 
   it('an answer waits for the walled run to end before anything is sent', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })
     expect(store.dispatches(activation.id)).toHaveLength(1)
     await endAtWall(payload)
@@ -281,7 +333,7 @@ describe('answers and continuations', () => {
     expect(consult).toMatchObject({ mainN: 1, clientRequestId: `${activation.id}:c${consult.n}` })
     const attempt = start(consult.runId!)
     runs.tools.start({ invocationId: 'consult-edit', runId: consult.runId!, attemptId: attempt, tool: 'edit', argsDigest: 'd', now: 'n', idempotent: false })
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     expect(await asked).toContain('Paused: waiting for the owner')
     // Ending the main dispatch stops its consult.
     await endAtWall(payload)
@@ -299,7 +351,7 @@ describe('answers and continuations', () => {
     expect(store.unknownCalls(activation.id)[0].acknowledged).toBe(false)
     await bots.continueActivation(activation.id, { acknowledge: { calls: ['consult-edit'] } })
     const next = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'continue')!
-    expect(next.prompt.text).toContain('The owner allowed: Use the tool `web_fetch`')
+    expect(next.prompt.text).toContain(`The owner allowed: read files in ${other}.`)
     expect(next.prompt.text).toContain('edit (consult run')
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
@@ -453,7 +505,7 @@ describe('startup pass', () => {
 
   it('a wall cut by a crash before the run interrupt keeps waiting and is never continued', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
     expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
@@ -492,12 +544,13 @@ describe('startup pass', () => {
     expect(activation.id).not.toBe(second.id)
   })
 
-  it('a deleted bot left half-deleted is finished: its activations end and its home thread goes to the trash', async () => {
+  it('a deleted bot left half-deleted is finished: its activations end and its threads are archived, not deleted', async () => {
     const { activation } = await running()
     store.markDeleted('site-editor')
     await crash()
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
-    expect(trashed).toEqual(['thread:bot:site-editor'])
+    expect(archived).toContain(HOME)
+    expect(trashed).toEqual([])
   })
 
   it('a trashed context thread is forgotten; the next consult starts a new generation, and the activation still waits', async () => {
@@ -505,7 +558,7 @@ describe('startup pass', () => {
     const asked = prepared.authority.consult!({ context: 'docs', question: 'one' })
     await tick()
     const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     await asked
     end(payload.runId, 'interrupted', { interruptedBy: 'bot_wall' })
     end(consult.runId!, 'cancelled')
@@ -519,18 +572,24 @@ describe('startup pass', () => {
 
 describe('trash and profile hooks', () => {
   it('trashing the activation thread while running or waiting ends it cancelled, with nothing sent later', async () => {
-    const { activation, prepared } = await running()
+    const { activation, payload: first, prepared } = await running()
     bots.beforeTrash([activation.threadId!])
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
     expect(stopped).toEqual([activation.threadId])
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: root } })).toEqual({ ok: false, wall: { kind: 'ended' } })
 
-    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    // The next chat message waits until the stopped turn has let go of the home thread.
+    const second = await bots.enqueueChat('site-editor', 'chat:c2', 'two')
+    expect(bots.getActivation(second.id).status).toBe('queued')
+    end(first.runId, 'interrupted', { interruptedBy: 'user' })
+    bots.settle(first, {})
+    await tick()
+    expect(bots.getActivation(second.id).status).toBe('running')
     const payload = payloadOf(store.dispatch(second.id, 1)!.runId!)
     const p2 = bots.prepare(payload)
     if ('refused' in p2) throw new Error(p2.refused)
-    p2.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
-    bots.afterTrash(['thread:bot:site-editor', second.threadId!])
+    gateWall(p2)
+    bots.afterTrash([HOME, second.threadId!])
     expect(bots.getActivation(second.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
     expect(bots.listEscalations(second.id)[0].status).toBe('cancelled')
     await expect(bots.respond({ escalationId: bots.listEscalations(second.id)[0].id, answer: 'allow_once' })).rejects.toMatchObject({ code: 'escalation_answered' })
@@ -613,7 +672,7 @@ describe('round 1: startup recovery', () => {
 
   it('an answer given before a crash is applied at startup, once', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })
     // The walled run never reported its end: boot ended it. Its processes were confirmed gone, so
     // only the window is charged (a supervisor's 15-second prepay; this build prepays everything).
@@ -622,7 +681,7 @@ describe('round 1: startup recovery', () => {
     store.run('UPDATE bot_counters SET active_ms = 15000 WHERE activation_id = ?', activation.id)
     await crash()
     expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
-    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: Use the tool `web_fetch`')
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain(`The owner allowed: read files in ${other}.`)
     expect(bots.getActivation(activation.id).status).toBe('running')
     await crash()
     expect(store.dispatches(activation.id)).toHaveLength(2)
@@ -630,7 +689,7 @@ describe('round 1: startup recovery', () => {
 
   it('a wait with neither an open wall nor an answer is handed to the owner', async () => {
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
+    gateWall(prepared)
     store.run("UPDATE bot_escalations SET status = 'cancelled' WHERE activation_id = ?", activation.id)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
@@ -676,7 +735,8 @@ describe('round 1: startup recovery', () => {
   })
 
   it('a context thread trashed while the daemon runs is retired at once; the next consult starts a new one', async () => {
-    const { activation, prepared } = await running()
+    // Two runs, each on its own thread (the first one's run is never ended here).
+    const { activation, prepared } = await running('Fix the footer', 'c1', 'run')
     const asked = prepared.authority.consult!({ context: 'docs', question: 'one' })
     await tick()
     const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
@@ -691,7 +751,7 @@ describe('round 1: startup recovery', () => {
     expect(bots.roleOf(consult.threadId)).toBeUndefined()
     // Trashing a context thread ends the activation that uses it (plan §4).
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'thread_trashed' })
-    const next = await running('two', 'c2')
+    const next = await running('two', 'c2', 'run')
     void next.prepared.authority.consult!({ context: 'docs', question: 'two' })
     for (let index = 0; index < 5; index += 1) await tick()
     expect(store.dispatches(next.activation.id).find((dispatch) => dispatch.kind === 'consult')!.threadId).toBe('thread:bot:site-editor:ctx:docs:2')
@@ -726,23 +786,30 @@ describe('round 1: trash and delete of a working bot', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('deleting a bot stops its runs, then trashes its home thread; a refused trash is reported and retried', async () => {
+  it('deleting a bot stops its runs and archives its threads; after 30 days the purge deletes them, and a refused delete is retried', async () => {
     const { activation, payload } = await running()
     host.stopThread = (threadId) => {
       stopped.push(threadId)
       end(payload.runId, 'interrupted', { interruptedBy: 'user' })
     }
     const statusAtTrash: string[] = []
-    host.trashThread = async () => { throw new Error('busy') }
-    await expect(bots.remove('site-editor')).rejects.toMatchObject({ code: 'bot_cleanup_failed' })
+    const { purgeAt } = await bots.remove('site-editor')
+    expect(Date.parse(purgeAt)).toBe(clock + 30 * DAY)
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
+    expect(archived).toContain(HOME)
+    expect(trashed).toEqual([])
+    // Nothing is purged before its 30 days.
+    expect(await bots.sweepDeleted()).toEqual([])
+    clock += 30 * DAY + 1
+    host.trashThread = async () => { throw new Error('busy') }
+    expect(await bots.sweepDeleted()).toEqual([])
     host.trashThread = async (threadId) => {
       statusAtTrash.push(runs.getRun(payload.runId)!.status)
       trashed.push(threadId)
       threadStates.set(threadId, 'trashed')
     }
-    await bots.finishDeletions()
-    expect(trashed).toEqual(['thread:bot:site-editor'])
+    expect(await bots.sweepDeleted()).toEqual(['site-editor'])
+    expect(trashed).toEqual([HOME])
     expect(statusAtTrash).toEqual(['interrupted'])
     await bots.finishDeletions()
     expect(trashed).toHaveLength(1)
@@ -750,22 +817,21 @@ describe('round 1: trash and delete of a working bot', () => {
 })
 
 describe('round 1: every way out of a wait starts the next activation', () => {
-  it('expiry', async () => {
-    const { prepared, payload } = await running()
-    const next = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'r' })
+  it('a stop', async () => {
+    const { activation, prepared, payload } = await running()
+    const next = await bots.enqueueChat('site-editor', 'chat:c2', 'two')
+    gateWall(prepared)
     await endAtWall(payload)
     expect(bots.getActivation(next.id).status).toBe('queued')
-    timers.at(-1)!.fn()
+    await bots.stop(activation.id)
     await tick()
     expect(bots.getActivation(next.id).status).toBe('running')
   })
 
   it('the sixth wall', async () => {
     const { activation } = await running()
-    const next = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
-    for (let index = 0; index < 5; index += 1)
-      store.insertEscalation({ id: `esc_${index}`, activationId: activation.id, dispatchN: 1, toolCallId: null, kind: 'gate', permission: { tool: 'write' }, reason: 'r', createdAt: 'x', expiresAt: 'y' })
+    const next = await bots.enqueueChat('site-editor', 'chat:c2', 'two')
+    for (let index = 0; index < 5; index += 1) pastWall(activation.id, index, false)
     bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'again' })
     await tick()
     expect(bots.getActivation(next.id).status).toBe('running')
@@ -807,8 +873,7 @@ describe('round 1: smaller fixes', () => {
     const entry = bots.get('site-editor')
     bots.save({ ...entry.draft, name: 'Site editor (renamed)' }, entry.draftHash)
     const { activation, prepared, payload } = await running()
-    prepared.authority.escalate!({ permission: { tool: 'web_fetch' }, reason: 'docs' })
-    await endAtWall(payload)
+    await askAndFinish(prepared, payload)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_bot' })
     const after = bots.get('site-editor')
     expect(after.draft.name).toBe('Site editor (renamed)')
@@ -817,15 +882,17 @@ describe('round 1: smaller fixes', () => {
     expect(after.published!.permissions.tools).toContain('web_fetch')
   })
 
-  it('approval checks every context thread\'s runtime too', () => {
-    const entry = bots.get('site-editor')
-    const saved = bots.save({ ...entry.draft, context: [{ ...entry.draft.context[0], selection: { instanceId: 'codex', model: 'gpt' } }] }, entry.draftHash)
-    bots.publish('site-editor', saved.draftHash)
-    host.harness.checkPolicy = (instanceId) => instanceId === 'codex'
-      ? { ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'Codex can\'t limit tools to this list.' } }
-      : { ok: true }
-    expect(bots.approval('site-editor').threads.map((thread) => [thread.key, thread.ok])).toEqual([['main', true], ['docs', false]])
-    expect(() => bots.approve('site-editor', bots.approval('site-editor').digest)).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
+  it('approval lists every context thread; a runtime that cannot hold a context thread refuses its consult at prepare', async () => {
+    expect(bots.approval('site-editor').threads.map((thread) => [thread.key, thread.ok])).toEqual([['main', true], ['docs', true]])
+    // The context thread's narrowed policy (no consult tool) is the one this runtime cannot hold.
+    host.harness.checkPolicy = (_instanceId, policy) => policy.tools?.allow?.includes('consult')
+      ? { ok: true }
+      : { ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'This runtime can\'t limit tools to this list.' } }
+    const { activation, prepared } = await running()
+    void prepared.authority.consult!({ context: 'docs', question: 'one' })
+    await tick()
+    const consult = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'consult')!
+    expect(bots.prepare(payloadOf(consult.runId!))).toMatchObject({ code: 'policy_unenforceable' })
   })
 
   it('a completed main run with an unknown consult call pauses instead of finishing', async () => {
@@ -861,7 +928,7 @@ describe('round 1: smaller fixes', () => {
 
 describe('round 2', () => {
   it('a time wall before the first dispatch started resends that dispatch\'s prompt after the answer', async () => {
-    const activation = await bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })
+    const activation = await bots.enqueueChat('site-editor', 'chat:c1', 'Fix the footer')
     store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 5_000, activation.id)
     const payload = payloadOf(store.dispatch(activation.id, 1)!.runId!)
     expect(bots.prepare(payload)).toMatchObject({ code: 'active_time_exhausted' })
@@ -880,15 +947,17 @@ describe('round 2', () => {
     expect(saved.draft.permissions.workspace).toEqual({ roots: [root, other].sort(), access: 'read', rootAccess: { [other]: 'write' } })
   })
 
-  it('a deleted bot\'s cleanup is done once: a home thread restored afterwards is left alone', async () => {
+  it('a deleted bot\'s purge is done once: a home thread restored afterwards is left alone', async () => {
     const { payload } = await running()
     host.stopThread = () => { end(payload.runId, 'interrupted', { interruptedBy: 'user' }) }
     await bots.remove('site-editor')
-    expect(trashed).toEqual(['thread:bot:site-editor'])
-    // The owner restores the home thread; the next start leaves it.
-    threadStates.set('thread:bot:site-editor', 'active')
-    await bots.finishDeletions()
-    expect(trashed).toEqual(['thread:bot:site-editor'])
+    clock += 31 * DAY
+    await bots.sweepDeleted()
+    expect(trashed).toEqual([HOME])
+    // The owner restores the home thread; the next sweep leaves it.
+    threadStates.set(HOME, 'active')
+    await bots.sweepDeleted(clock + DAY)
+    expect(trashed).toEqual([HOME])
   })
 })
 
@@ -933,7 +1002,7 @@ describe('round 3', () => {
     host.quiesceTimeoutMs = 100
     const scratch = store.activation(activation.id)!.scratch!
     expect(existsSync(scratch)).toBe(true)
-    await expect(bots.remove('site-editor')).rejects.toMatchObject({ code: 'bot_cleanup_failed' })
+    await bots.remove('site-editor')
     expect(existsSync(scratch)).toBe(true)
   })
 

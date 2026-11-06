@@ -201,8 +201,12 @@ export function bridgeProtocolEvent(
       broadcast('bots:changed', event.data ?? {})
       return true
     }
-    case 'bots.escalation': {
-      broadcast('bots:escalation', event.data)
+    case 'bots.message': {
+      broadcast('bots:message', event.data)
+      return true
+    }
+    case 'bots.activity': {
+      broadcast('bots:activity', event.data)
       return true
     }
     case 'activity':
