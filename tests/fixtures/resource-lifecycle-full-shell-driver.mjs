@@ -66,7 +66,7 @@ async function check() {
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
   proof.noDeleteBeforeArchive = true
   await fromMenu('Archive', true, 'Archive from the sidebar')
-  await click('Expand archived threads')
+  await evaluate(`(() => { const toggle = document.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle'); if (!toggle) throw Error('Archived heading unavailable'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click() })()`)
   await until(() => evaluate(`Boolean(${threadRow}?.classList.contains('settled'))`), Boolean, 'Archived row')
   if ((await lifecycleState()) !== 'active') throw Error('Archiving moved the thread out of place')
   proof.archivedFromSidebar = true
