@@ -571,3 +571,27 @@ describe('what the frame reader keeps of a call', () => {
     expect(patch).toEqual({ kind: 'file_change', changes: [{ path: '/w/a.ts', change: 'update', diffUnavailable: true }] })
   })
 })
+
+describe('Claude text blocks', () => {
+  const stream = (event: Record<string, unknown>, parent: string | null = null): SDKMessage =>
+    ({ type: 'stream_event', parent_tool_use_id: parent, session_id: SESSION, event }) as unknown as SDKMessage
+  const textBlock = (text: string, parent: string | null = null): SDKMessage[] => [
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, parent),
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }, parent)
+  ]
+
+  it('starts each text block as a paragraph of its own, so a note and the answer after a call never run together', () => {
+    const texts: string[] = []
+    const reader = new TurnFrames({ onText: (text) => texts.push(text) }, new ClaudeMetricsCollector())
+    for (const frame of [
+      ...textBlock('Checking the logs.'),
+      stream({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'read', name: 'Read', input: {} } }),
+      // A subagent's text is not the turn's.
+      ...textBlock('Nested text', 'read'),
+      ...textBlock('The logs are clean.')
+    ])
+      reader.observe(frame)
+    expect(reader.text).toBe('Checking the logs.\n\nThe logs are clean.')
+    expect(texts.at(-1)).toBe('Checking the logs.\n\nThe logs are clean.')
+  })
+})

@@ -196,8 +196,11 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
-        // A thought that came before this call keeps its own row, above it; the next one starts below.
-        if (event.phase === 'start' && !event.parentCallId) streams.thinking.break()
+        // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) {
+          streams.thinking.break()
+          streams.text.break()
+        }
         sink.tool(runtimeToolEvent(event))
       },
       onToolNotification: (event) => {

@@ -24,7 +24,7 @@ export class CumulativeStream {
 
   update(content: string): void {
     this.seen = content.length
-    const segment = this.offset ? content.slice(this.offset).replace(/^\s+/, '') : content
+    const segment = this.segment(content)
     if (this.offset && !segment) return
     if (!this.started) {
       this.emit('start', '')
@@ -34,18 +34,27 @@ export class CumulativeStream {
     this.emit('delta', segment)
   }
 
-  /** Closes the stream with `content` (default: the latest update). No-op if nothing started. */
-  complete(content: string = this.latest): void {
-    if (this.started) this.emit('complete', content)
+  /**
+   * Closes the stream with the runtime's cumulative `content` (default: the latest update), of
+   * which the open segment gets only what came after the last break. No-op if nothing started.
+   */
+  complete(content?: string): void {
+    if (!this.started) return
+    this.emit('complete', (content === undefined ? '' : this.segment(content)) || this.latest)
   }
 
-  /** Closes the current segment (a thought before a tool call); what streams next opens another. */
+  /** Closes the current segment (a thought or a note before a tool call); what streams next opens another. */
   break(): void {
     if (!this.started) return
-    this.complete()
+    this.emit('complete', this.latest)
     this.started = false
     this.latest = ''
     this.offset = this.seen
+  }
+
+  /** What of the runtime's cumulative text came after the last break. */
+  private segment(content: string): string {
+    return this.offset ? content.slice(this.offset).replace(/^\s+/, '') : content
   }
 }
 

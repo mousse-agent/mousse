@@ -129,6 +129,88 @@ it('persists Claude measurements, populates response metadata and counts usage a
   }
 })
 
+describe('a turn whose notes come before its tool calls', () => {
+  let home: string
+  let main: MousseMainService
+  beforeAll(async () => {
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-notes-'))
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+    await main.start()
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+  })
+  afterAll(async () => {
+    try { await main?.stop() }
+    finally {
+      vi.restoreAllMocks()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  /** The turn's rows after the user's: replies by their text, timeline rows by their kind. */
+  const rows = (threadId: string) =>
+    (main.threads.loadThreadData(threadId).messages ?? [])
+      .filter((message) => message.role !== 'user')
+      .map((message) => (message.role === 'assistant' && !message.kind ? message.content : message.kind))
+
+  it('ends on the answer, in a row of its own after the calls, with the notes in rows above them', async () => {
+    const thread = main.threads.createThread('Notes then answer')
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      input.onText('Checking the tests.')
+      input.onTool?.({ phase: 'start', callId: 'run-tests', title: 'Bash', toolName: 'Bash' })
+      input.onTool?.({ phase: 'complete', callId: 'run-tests', title: 'Bash', toolName: 'Bash' })
+      input.onText('Checking the tests.\n\nThey pass. Reading the logs next.')
+      input.onTool?.({ phase: 'start', callId: 'read-logs', title: 'Read', toolName: 'Read' })
+      input.onTool?.({ phase: 'complete', callId: 'read-logs', title: 'Read', toolName: 'Read' })
+      input.onThinking?.('The logs are clean.')
+      const text = 'Checking the tests.\n\nThey pass. Reading the logs next.\n\nEverything works: 6 files pass and the logs are clean.'
+      input.onText(text)
+      return text
+    })
+    const response = await main.orchestrator.send({ content: 'Check it', mode: 'agent' }, false, { threadId: thread.id })
+    expect(rows(thread.id)).toEqual([
+      'Checking the tests.',
+      'mcp_tool_call',
+      'They pass. Reading the logs next.',
+      'mcp_tool_call',
+      'thinking',
+      'Everything works: 6 files pass and the logs are clean.'
+    ])
+    const answer = main.threads.loadThreadData(thread.id).messages?.at(-1)
+    expect(answer?.responseMetadata).toBeDefined()
+    // The run's reply is still the turn's whole text.
+    expect(response.message).toContain('Checking the tests.')
+    expect(response.message).toContain('Everything works')
+  })
+
+  it('keeps the last note as the reply of a turn that ends on a call', async () => {
+    const thread = main.threads.createThread('Ends on a call')
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      input.onText('Saving the file.')
+      input.onTool?.({ phase: 'start', callId: 'write', title: 'Write', toolName: 'Write' })
+      input.onTool?.({ phase: 'complete', callId: 'write', title: 'Write', toolName: 'Write' })
+      return 'Saving the file.'
+    })
+    await main.orchestrator.send({ content: 'Save it', mode: 'agent' }, false, { threadId: thread.id })
+    expect(rows(thread.id)).toEqual(['Saving the file.', 'mcp_tool_call'])
+    const reply = main.threads.loadThreadData(thread.id).messages?.find((message) => message.content === 'Saving the file.')
+    expect(reply?.responseMetadata).toBeDefined()
+  })
+
+  it('marks the last note incomplete when the turn stops during a call, without repeating it', async () => {
+    const thread = main.threads.createThread('Stopped during a call')
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      input.onText('Running the build.')
+      input.onTool?.({ phase: 'start', callId: 'build', title: 'Bash', toolName: 'Bash' })
+      expect(main.orchestrator.abortActiveTurn(thread.id)).toBe(true)
+      throw new Error('aborted')
+    })
+    await main.orchestrator.send({ content: 'Build it', mode: 'agent' }, false, { threadId: thread.id })
+    const replies = (main.threads.loadThreadData(thread.id).messages ?? []).filter((message) => message.role === 'assistant' && !message.kind)
+    expect(replies).toEqual([expect.objectContaining({ content: 'Running the build.', incomplete: true })])
+  })
+})
+
 it.each([false, true])('applies Mousse context compactionEnabled=%s to Claude history', async (enabled) => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-compaction-'))
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
