@@ -88,10 +88,11 @@ import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 
+/** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
   used: 0,
-  limit: 128_000,
+  limit: 0,
   modelName: null,
   source: 'estimated',
   categories: []

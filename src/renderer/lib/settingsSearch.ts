@@ -36,7 +36,9 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
   { title: 'Start new threads in a worktree', section: 'general', anchor: 'general-worktree-default', keywords: ['branch', 'chats'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
-  { title: 'Completion sound', section: 'general', anchor: 'general-completion-sound', keywords: ['notifications', 'alert', 'notification sound'] },
+  { title: 'When a thread finishes', section: 'general', anchor: 'general-notify-finished', keywords: ['notifications', 'completion sound', 'toast', 'system notification', 'done'] },
+  { title: 'When a thread needs you', section: 'general', anchor: 'general-notify-needs-you', keywords: ['notifications', 'question', 'approval', 'toast', 'sound'] },
+  { title: 'When a thread stops', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
   { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },
   { title: 'Version and updates', section: 'general', anchor: 'general-updates', keywords: ['check for updates', 'about', 'upgrade'] },
 

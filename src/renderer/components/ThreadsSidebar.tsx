@@ -1038,9 +1038,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       if (!thread) return
       // Other panels mark elements with the thread id too: only a sidebar row on screen counts.
       const rows = document.querySelectorAll<HTMLElement>(`.threads-sidebar-thread[data-thread-id="${CSS.escape(thread.id)}"]`)
-      if (![...rows].some((row) => row.offsetParent !== null)) return
+      const visible = [...rows].filter((row) => row.offsetParent !== null)
+      if (visible.length === 0) return
+      // The thread's own row first; its copy in "Needs me" only when that is the one on screen.
+      const row = visible.find((entry) => !entry.closest('.threads-sidebar-needs-me')) ?? visible[0]
       event.preventDefault()
-      setRenaming({ type: 'thread', id: thread.id, name: thread.name })
+      startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe: Boolean(row.closest('.threads-sidebar-needs-me')), returnFocus: row.closest('button') ?? row })
     }
     window.addEventListener('mousse:rename-thread', onRename)
     return () => window.removeEventListener('mousse:rename-thread', onRename)
@@ -1090,7 +1093,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Cards in the Threads tab can be dragged into an order of their own (archived and Needs me rows cannot).
     const feed = layout === 'card' && !isArchived && !inNeedsMe
     const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt), ...(feed ? { feed } : {}) }
-    const dropLine = feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
+    const dropLine = !inNeedsMe && feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
     // The lower half of a row drops after it, so a row can also go last.
     const dropsAfter = (event: React.DragEvent) => {
       const rect = event.currentTarget.getBoundingClientRect()
@@ -1667,7 +1670,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
         {sidebarView === 'threads' && renderNeedsMe()}
         <div
-          className="threads-sidebar-tree threads-sidebar-thread-feed"
+          className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
           // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
           onDragOver={(event) => {
             if (!draggedItem.current?.feed) return

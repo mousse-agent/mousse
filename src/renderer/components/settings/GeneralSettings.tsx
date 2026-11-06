@@ -4,12 +4,13 @@ import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
-import { Bell, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
+import { NotificationSettingsGroup } from './NotificationSettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -42,32 +43,7 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
 
       <RunSettingsGroup runs={settings.runs} onUpdate={onUpdate} />
 
-      <SettingsGroup title="Notifications" icon={Bell}>
-        <SettingsRow
-          title="Completion sound"
-          anchor="general-completion-sound"
-          description="Play a sound when an agent finishes or needs you."
-          control={
-            <Switch
-              label="Completion sound"
-              checked={settings.notifications.threadCompletionSound}
-              onChange={(threadCompletionSound) => void onUpdate({ notifications: { ...settings.notifications, threadCompletionSound } })}
-            />
-          }
-        />
-        <SettingsRow
-          title="All threads on my other computers"
-          anchor="general-remote-notifications"
-          description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Notify when any thread on another computer needs you or finishes.</span>}
-          control={
-            <Switch
-              label="Notify for all threads on my other computers"
-              checked={settings.notifications.allRemoteThreads === true}
-              onChange={(allRemoteThreads) => void onUpdate({ notifications: { ...settings.notifications, allRemoteThreads } })}
-            />
-          }
-        />
-      </SettingsGroup>
+      <NotificationSettingsGroup notifications={settings.notifications} onUpdate={onUpdate} />
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />
