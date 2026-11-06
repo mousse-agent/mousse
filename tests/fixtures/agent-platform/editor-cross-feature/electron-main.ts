@@ -79,7 +79,7 @@ async function run(): Promise<void> {
       await waitFor('Boolean(document.querySelector("[role=option]"))', 'model menu')
       await js(`document.querySelector('[role=option]')?.click()`)
       await click('[aria-label="Next orb palette"]')
-      await waitFor('Boolean(document.querySelector(".monaco-editor textarea"))', 'prompt Monaco')
+      await waitFor('Boolean(document.querySelector(".monaco-editor textarea"))', 'prompt Monaco', 400)
       const prompt = '# Exact renderer prompt\n\nPreserve  two spaces.'
       await js(`document.querySelector('.monaco-editor').scrollIntoView({block:'center'})`); await delay(75)
       const editorPoint = await js<{ x: number; y: number }>(`(() => { const r=document.querySelector('.monaco-editor').getBoundingClientRect();
