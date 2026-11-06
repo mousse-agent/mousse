@@ -48,7 +48,9 @@ import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
 import { usePermissionRequests } from '../hooks/usePermissionRequests'
-import { permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
+import { isWaitingPermissionRequest, permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
+import { usePendingRequestFocus } from '../stores/chatNavigationStore'
+import { ApprovalNotice, DENY_AND_SEND_LABEL } from './ApprovalNotice'
 import {
   findQuickActionCardForApproval,
   questionAnswerThreadId,
@@ -339,6 +341,14 @@ export function OrchestratorChat() {
   const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
   // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
   const shownMessages = useMemo(() => placePermissionRequests(uiMessages), [uiMessages, placePermissionRequests])
+  const approvalRequest = permissionRequests.current
+  const approvalRowId = approvalRequest ? `permission:${approvalRequest.requestId}` : null
+  const approvalPlaced = approvalRowId !== null && shownMessages.some((message) => message.id === approvalRowId)
+  // `focusPendingRequest` from the sidebar: once this thread is open, show its waiting request in the transcript.
+  usePendingRequestFocus(
+    activeThreadId,
+    approvalPlaced ? approvalRowId : (shownMessages.find(isWaitingPermissionRequest)?.id ?? null)
+  )
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
@@ -1281,6 +1291,21 @@ export function OrchestratorChat() {
     ? remotePermissionCeiling(activeThread?.lineage ? permissionCeiling : undefined, remoteMode.limit, remoteComputer?.name ?? UNKNOWN_COMPUTER_NAME)
     : { ceiling: activeThread?.lineage ? permissionCeiling : undefined }
 
+  // Sending while an approval waits denies it (with the message as the reason); the composer says so.
+  const approvalWaiting = permissionRequests.waiting || Boolean(pendingQuestions?.approval)
+  const composerHasContent = input.trim().length > 0 || attachedFiles.length > 0
+
+  const retryConnection = () => {
+    setConnectionFailed(false)
+    setLoading(true)
+    void window.mousse.orchestrator
+      .retryConnection(activeThreadId ?? undefined)
+      .then((started) => {
+        if (!started) setLoading(false)
+        else void refreshTurnActive()
+      })
+  }
+
   const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
 
   return (
@@ -1315,21 +1340,15 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} />
-        <ServiceLostNotice
-          lost={connectionFailed}
-          onReconnect={() => {
-            setConnectionFailed(false)
-            setLoading(true)
-            void window.mousse.orchestrator
-              .retryConnection(activeThreadId ?? undefined)
-              .then((started) => {
-                if (!started) setLoading(false)
-                else void refreshTurnActive()
-              })
-          }}
-          onDismiss={() => setConnectionFailed(false)}
-        />
+        <ServiceLostNotice lost={connectionFailed} onReconnect={retryConnection} onDismiss={() => setConnectionFailed(false)} />
         <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
+        <ApprovalNotice
+          request={approvalRequest}
+          composerHasText={composerHasContent}
+          placed={approvalPlaced}
+          isShown={() => !inputAreaRef.current?.closest('[inert]')}
+          serviceLost={connectionFailed}
+        />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
           aria-hidden={!showQuestions || undefined}
@@ -1456,10 +1475,10 @@ export function OrchestratorChat() {
               stoppable={turnActive || loading || turnStoppable}
               placeholder={!workspaceReady ? ''
                 : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
-                  : permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
+                  : approvalWaiting ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
               sendLabel={questionsTakeMessage
                 ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
-                : undefined}
+                : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
