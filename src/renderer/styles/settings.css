@@ -78,7 +78,10 @@
        ring shows only for keyboard focus. Hints and stars stay faint.
    ========================================================================== */
 
-.settings-page {
+/* The tokens below also serve pages outside Settings that use its primitives
+   (.settings-scope, e.g. Subscription usage). */
+.settings-page,
+.settings-scope {
   --space-4: 4px;
   --space-8: 8px;
   --space-12: 12px;
@@ -104,7 +107,9 @@
   --settings-fs-subtitle: 13px;
   --settings-fs-row: 13.5px;
   --settings-fs-small: 12.5px;
+}
 
+.settings-page {
   position: fixed;
   inset: 0;
   z-index: 1100;
@@ -119,29 +124,30 @@
    few percent off the page and an edge drawn only by light, a faint top glint
    and a fainter bottom lip. Light themes darken instead and drop the glint;
    high contrast swaps both for a plain hairline. */
-.settings-page {
+.settings-page,
+.settings-scope {
   --settings-surface: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
   --settings-surface-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
 }
 
-html[data-theme='blacksphere-plus'] .settings-page {
+html[data-theme='blacksphere-plus'] :is(.settings-page, .settings-scope) {
   --settings-surface: color-mix(in srgb, var(--text-primary) 5%, transparent);
   --settings-surface-edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 -1px 0 rgba(0, 0, 0, 0.5);
 }
 
-html[data-theme='light'] .settings-page {
+html[data-theme='light'] :is(.settings-page, .settings-scope) {
   --settings-surface: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
   --settings-surface-edge: inset 0 -1px 0 rgba(20, 16, 30, 0.05);
 }
 
 @media (prefers-color-scheme: light) {
-  html[data-theme='system'] .settings-page {
+  html[data-theme='system'] :is(.settings-page, .settings-scope) {
     --settings-surface: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
     --settings-surface-edge: inset 0 -1px 0 rgba(20, 16, 30, 0.05);
   }
 }
 
-html[data-theme='high-contrast'] .settings-page {
+html[data-theme='high-contrast'] :is(.settings-page, .settings-scope) {
   --settings-surface: transparent;
   --settings-surface-edge: inset 0 0 0 1px var(--ui-line-strong);
 }
@@ -291,7 +297,7 @@ html[data-theme='high-contrast'] .settings-nav-item-icon {
 
 /* The open section's hue (data-page-hue, set even while search results replace the nav),
    reused by its section-heading icons. */
-.settings-page { --settings-page-hue: var(--text-secondary); }
+:is(.settings-page, .settings-scope) { --settings-page-hue: var(--text-secondary); }
 .settings-page[data-page-hue='1'] { --settings-page-hue: var(--hue-1); }
 .settings-page[data-page-hue='2'] { --settings-page-hue: var(--hue-2); }
 .settings-page[data-page-hue='3'] { --settings-page-hue: var(--hue-3); }
@@ -300,7 +306,7 @@ html[data-theme='high-contrast'] .settings-nav-item-icon {
 .settings-page[data-page-hue='6'] { --settings-page-hue: var(--hue-6); }
 
 /* A row's primary action icon takes the page hue; neutral pages use the accent. */
-.settings-page { --settings-action-hue: var(--accent); }
+:is(.settings-page, .settings-scope) { --settings-action-hue: var(--accent); }
 .settings-page:is([data-page-hue='1'], [data-page-hue='2'], [data-page-hue='5']) {
   --settings-action-hue: var(--settings-page-hue);
 }
@@ -775,64 +781,7 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   box-shadow: none;
 }
 
-/* Agent access: the project checklist and the capped-thread list. A checked row is a background
-   fill only (no edge bar); the check mark is the second cue. */
-.agent-access-projects {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 240px;
-  overflow-y: auto;
-  margin-top: calc(-1 * var(--space-4));
-}
-
-.agent-access-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  width: 100%;
-  min-height: var(--settings-control-h);
-  padding: 0 var(--space-8);
-  border-radius: var(--ui-control-radius);
-  font-size: var(--settings-fs-small);
-  color: var(--text-primary);
-  text-align: left;
-  transition: background-color 0.15s;
-}
-
-.agent-access-row:hover {
-  background: var(--ui-hover);
-}
-
-.agent-access-row.on {
-  background: var(--ui-selected);
-}
-
-.agent-access-row[aria-disabled='true'] {
-  cursor: default;
-}
-
-.agent-access-row:focus-visible {
-  outline: 1px solid var(--settings-focus);
-  outline-offset: 0;
-}
-
-.agent-access-check {
-  display: inline-flex;
-  flex: 0 0 14px;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-}
-
-.agent-access-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+/* Agent access: the capped-thread list. */
 .agent-access-caps {
   display: flex;
   flex-direction: column;
@@ -856,27 +805,36 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-primary);
 }
 
-/* Pills that switch independent options in one row (agent exposure). */
-.settings-chip {
-  display: inline-flex;
-  align-items: center;
-  height: var(--settings-control-h);
-  padding: 0 var(--space-12);
-  border: 1px solid var(--ui-line);
-  border-radius: var(--ui-control-radius);
-  font-size: var(--settings-fs-small);
+/* MoreDetails: a quiet text toggle after a description, and the rules it folds away. */
+.settings-more-btn {
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--text-secondary);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
-.settings-chip:hover {
+.settings-more-btn:hover {
   color: var(--text-primary);
 }
 
-.settings-chip.on {
-  color: var(--text-primary);
-  border-color: var(--ui-line-strong);
-  background: var(--ui-raised);
-  box-shadow: var(--ui-specular);
+.settings-more-btn:focus-visible {
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.settings-more-body {
+  display: block;
+  margin-top: var(--space-4);
+}
+
+.settings-more-body[hidden] {
+  display: none;
 }
 
 .settings-muted {
@@ -1272,61 +1230,6 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   .toggle-switch::after {
     transition: none;
   }
-}
-
-/* A lit bead with a comet arc orbiting it. It fades in late so quick loads
-   never flash it. */
-.settings-loader {
-  position: relative;
-  width: 34px;
-  height: 34px;
-  animation: settings-loader-in calc(220ms * var(--ui-motion-scale)) ease-out 160ms both;
-}
-
-.settings-loader-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: conic-gradient(
-    from 0deg,
-    transparent 0% 50%,
-    rgba(var(--accent-rgb), 0.12) 66%,
-    rgba(var(--accent-rgb), 0.7) 90%,
-    rgba(255, 255, 255, 0.95) 99%,
-    transparent 100%
-  );
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
-  animation: settings-loader-spin 1.15s cubic-bezier(0.55, 0.15, 0.45, 0.85) infinite;
-}
-
-.settings-loader-core {
-  position: absolute;
-  inset: 9px;
-  border-radius: 50%;
-  background-color: var(--ui-raised, var(--surface-soft));
-  background-image: var(--ui-sheen, none);
-  box-shadow: var(--ui-specular, none), 0 2px 8px rgba(0, 0, 0, 0.3);
-  animation: settings-loader-breathe 1.15s ease-in-out infinite alternate;
-}
-
-@keyframes settings-loader-in {
-  from { opacity: 0; transform: scale(0.85); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-@keyframes settings-loader-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes settings-loader-breathe {
-  from { transform: scale(0.82); }
-  to { transform: scale(1); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .settings-loader-ring { animation-duration: 3s; }
-  .settings-loader-core { animation: none; }
 }
 
 .settings-status {
