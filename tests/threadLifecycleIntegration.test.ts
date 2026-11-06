@@ -91,13 +91,13 @@ describe('managed thread lifecycle integration', () => {
     try {
       const parent = f.services.threads.createThread('Parent')
       const child = f.services.threads.ensureExecutionThread('independent-trash-child', 'Child', undefined, { parentTaskId: parent.id })
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, child.id) })
+      await f.services.trashThread(child.id)
       const childLocation = f.services.threads.lifecycleStore.require(child.id).location
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, parent.id) })
-      await f.rpc.request('threads.restore', { threadId: parent.id })
+      await f.services.trashThread(parent.id)
+      await f.services.restoreThread(parent.id)
       expect(f.services.threads.lifecycleStore.require(child.id)).toMatchObject({ state: 'trashed', location: childLocation })
       expect(f.services.threads.getThread(child.id)).toBeUndefined()
-      await f.rpc.request('threads.restore', { threadId: child.id })
+      await f.services.restoreThread(child.id)
       expect(f.services.threads.getThread(child.id)?.id).toBe(child.id)
     } finally { await f.close() }
   })

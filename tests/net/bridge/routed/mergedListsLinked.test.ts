@@ -274,7 +274,7 @@ describe('another computer’s lists over a real link', () => {
     expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()
     // Archived: deleting for good is done on the computer that runs it, never from another one.
     await expect(t.dispatch('threads.delete', { threadId })).rejects.toThrow('Delete the thread on the computer that runs it.')
-    // The trash is a step of that delete: it is not offered to another computer at all.
+    // The trash and restore steps of a delete are not methods anyone can call, here or there.
     await expect(t.dispatch('threads.trash', { threadId })).rejects.toThrow()
     await expect(t.dispatch('threads.restore', { threadId })).rejects.toThrow()
     expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()

@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import type { LifecyclePurgePreview, TaskLifecycleRecord } from '../src/shared/resourceLifecycle'
+import type { TaskLifecycleRecord } from '../src/shared/resourceLifecycle'
 import { awaitQualification, startQualificationDaemon } from './fixtures/resource-lifecycle-qualification'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -22,27 +22,26 @@ it('recovers actual built-daemon SIGKILL after purge intent and mid-file removal
       writeFileSync(join(original.location, 'payload-a.bin'), Buffer.alloc(4096, 23))
       writeFileSync(join(original.location, 'payload-b.bin'), Buffer.alloc(8192, 57))
       await daemon!.rpc.request('threads.settle', { threadId: thread.id, settled: true })
-      await daemon!.rpc.request('threads.trash', { threadId: thread.id })
-      const trashed = JSON.parse(readFileSync(recordPath, 'utf8')) as TaskLifecycleRecord
-      const { preview } = await daemon!.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
-      expect(preview.blockers).toEqual([])
-      writeFileSync(control, JSON.stringify({ stage, recordPath, marker, unlinkPath: join(trashed.location, 'payload-b.bin') }))
+      // The thread's folder in the trash, where the delete moves it before the purge.
+      const trashed = { location: join(f.home, 'profiles', daemon!.profileId, 'trash', 'threads') }
+      writeFileSync(control, JSON.stringify({ stage, recordPath, marker, unlinkName: 'payload-b.bin' }))
       const killed = daemon!.child
-      await daemon!.rpc.request('threads.purge', { threadId: thread.id, operationId: `actual-kill-${stage}`, expectedGeneration: preview.generation, previewDigest: preview.digest }).catch(() => undefined)
+      await daemon!.rpc.request('threads.delete', { threadId: thread.id }).catch(() => undefined)
       await awaitQualification(() => killed.exitCode !== null || killed.signalCode !== null, Boolean)
       expect(JSON.parse(readFileSync(marker, 'utf8'))).toMatchObject({ stage, pid: killed.pid })
       const interrupted = JSON.parse(readFileSync(recordPath, 'utf8')) as TaskLifecycleRecord
       expect(interrupted.state).toBe('purge-started')
       expect(interrupted.purge?.completedAt).toBeUndefined()
-      if (stage === 'partial-unlink') expect(existsSync(join(trashed.location, 'payload-b.bin'))).toBe(false)
-      else expect(existsSync(join(trashed.location, 'payload-b.bin'))).toBe(true)
+      expect(interrupted.location.startsWith(trashed.location)).toBe(true)
+      if (stage === 'partial-unlink') expect(existsSync(join(interrupted.location, 'payload-b.bin'))).toBe(false)
+      else expect(existsSync(join(interrupted.location, 'payload-b.bin'))).toBe(true)
       await daemon!.close(); daemon = undefined
       writeFileSync(control, '{}')
       await launch()
       const recovered = await awaitQualification(() => JSON.parse(readFileSync(recordPath, 'utf8')) as TaskLifecycleRecord, (record) => record.state === 'purged')
       expect(recovered.purge?.completedAt).toBeTruthy()
       expect(existsSync(recovered.location)).toBe(false)
-      await expect(daemon!.rpc.request('threads.restore', { threadId: thread.id })).rejects.toThrow(/purged|tombstone|restore/i)
+      await expect(daemon!.rpc.request('threads.delete', { threadId: thread.id })).rejects.toThrow(/not found/i)
       expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
       expect(f.read(f.repo)).toBe('base\n')
     }

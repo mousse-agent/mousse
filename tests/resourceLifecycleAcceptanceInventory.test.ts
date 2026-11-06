@@ -33,8 +33,8 @@ describe('public inventory and request identity', () => {
       expect(inventory.blockers.length > 0 || inventory.sources.some((source) => source.status === 'unknown') || legacy?.materialization === 'unknown'
         || legacy?.ownership === 'unknown' || legacy?.ownership === 'source-associated',
         'a parsed legacy path alone is not physical ownership proof').toBe(true)
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) }).catch(() => undefined)
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow()
+      await f.services.trashThread(thread.id).catch(() => undefined)
+      await expect(f.services.lifecycle.purge({ taskId: thread.id })).rejects.toThrow()
       expect(readFileSync(join(foreign, 'sole-copy.txt'), 'utf8')).toBe('not a verified Mousse checkout')
     } finally { await f.close() }
   })
@@ -49,32 +49,33 @@ describe('public inventory and request identity', () => {
       const { inventory } = await f.rpc.request<{ inventory: ResourceInventorySnapshot }>('threads.inventory', { threadId: thread.id })
       expect(inventory.resources.some((resource) => resource.kind === 'artifact' && resource.identity === artifact.id)).toBe(true)
       expect(inventory.sources.some((source) => source.path.includes('artifact-index'))).toBe(true)
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow()
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
+      await expect(f.services.lifecycle.purge({ taskId: thread.id })).rejects.toThrow()
+      await f.services.restoreThread(thread.id)
       const restored = await f.services.platform.browserArtifacts.read(scope, artifact.id, 1024)
       expect(Buffer.from(restored.bytes)).toEqual(Buffer.from(bytes))
     } finally { await f.close() }
   })
 
-  it('carries expectedGeneration and operationId through the protocol: an exact replay returns the first receipt, a stale generation is refused', async () => {
+  it('carries expectedGeneration and operationId through the trash: an exact replay returns the first receipt, a stale generation is refused', async () => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'generation contract' })
       const before = await f.rpc.request<{ lifecycle: TaskLifecycleRecord; inventory: ResourceInventorySnapshot }>('threads.inventory', { threadId: thread.id })
       const path = f.services.threads.getThreadDir(thread.id)
       const operationId = randomUUID()
-      const request = { threadId: archived(f.services.threads, thread.id), operationId, expectedGeneration: before.lifecycle.generation }
-      const first = await f.rpc.request<{ lifecycle: TaskLifecycleRecord; operationResult: LifecycleOperationResult }>('threads.trash', request)
-      expect(first.operationResult).toMatchObject({ operationId, kind: 'trash', state: 'trashed' })
+      const generation = before.lifecycle.generation
+      await f.services.trashThread(thread.id, operationId, generation)
+      const first = f.services.lifecycle.getOperationResult(thread.id, operationId) as LifecycleOperationResult
+      expect(first).toMatchObject({ operationId, kind: 'trash', state: 'trashed' })
       // A replay returns its original immutable receipt and never appends a second operation.
-      const duplicate = await f.rpc.request<{ operationResult: LifecycleOperationResult }>('threads.trash', request)
-      expect(duplicate.operationResult).toEqual(first.operationResult)
+      await f.services.trashThread(thread.id, operationId, generation)
+      expect(f.services.lifecycle.getOperationResult(thread.id, operationId)).toEqual(first)
       const trashed = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: thread.id })
       expect(trashed.lifecycle.operations.filter((operation) => operation.id === operationId)).toHaveLength(1)
       // A request built from the old generation is refused; the rule and the replay-after-restore
       // behaviour are decided in ResourceLifecycleCoordinator (resourceLifecycleCoordinator.test.ts).
-      await expect(f.rpc.request('threads.restore', { ...request, operationId: randomUUID() })).rejects.toThrow(/stale|generation/i)
+      await expect(f.services.restoreThread(thread.id, randomUUID(), generation)).rejects.toThrow(/stale|generation/i)
       expect(existsSync(join(path, 'meta.json'))).toBe(false)
     } finally { await f.close() }
   })
@@ -118,7 +119,7 @@ describe('public inventory and request identity', () => {
       expect(child.status).toBe('running')
       expect(resolve(child.worktreePath)).not.toBe(resolve(repo))
       expect(readFileSync(join(child.worktreePath, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')
-      await expect(f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/active|busy|drain|agent|blocked/i)
+      await expect(f.services.trashThread(thread.id)).rejects.toThrow(/active|busy|drain|agent|blocked/i)
       writeFileSync(join(child.worktreePath, 'PRIMARY.txt'), 'retained isolated result\n')
       git(child.worktreePath, 'add', 'PRIMARY.txt'); git(child.worktreePath, 'commit', '-qm', 'deterministic child result')
       // Stop without merge cancels the legacy child and keeps its worktree and branch.
@@ -181,13 +182,13 @@ describe('public inventory and request identity', () => {
       const parentWorkspace = new ThreadWorkspaceManager(f.services.threads.getThreadDir(thread.id)).load()!
       // A settled child's own Trash state must survive its parent's lifecycle.
       const separatelyTrashed = generated[0]
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, separatelyTrashed.id) })
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
+      await f.services.trashThread(separatelyTrashed.id)
+      await f.services.trashThread(thread.id)
       for (const invocation of generated) {
         await expect(f.rpc.request('threads.rename', { threadId: invocation.id, name: 'late child write' })).rejects.toThrow()
         await expect(f.rpc.request('orchestrator.send', { threadId: invocation.id, content: 'must not resume while owner is trashed' })).rejects.toThrow()
       }
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow()
+      await expect(f.services.lifecycle.purge({ taskId: thread.id })).rejects.toThrow()
       // Trash may add reconstruction pins and retire a proven clean checkout;
       // every pre-existing reference and the dirty child's sole copy survive.
       for (const row of refs.split(/\r?\n/)) {
@@ -202,7 +203,7 @@ describe('public inventory and request identity', () => {
       expect(existsSync(manifest.trashPath!)).toBe(true)
       expect(manifest.resultSha).toBe(parentWorkspace.headSha)
       expect(readFileSync(join(child.worktreePath, 'SOLE-COPY.bin'))).toEqual(Buffer.from([0, 255, 17]))
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.restoreThread(thread.id)
       expect(existsSync(parentWorkspace.worktreePath)).toBe(false)
       await f.rpc.request('workspace.restore', { threadId: thread.id })
       expect(readFileSync(join(parentWorkspace.worktreePath, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')
@@ -210,7 +211,7 @@ describe('public inventory and request identity', () => {
       const retainedChild = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: separatelyTrashed.id })
       expect(retainedChild.lifecycle.state).toBe('trashed')
       await expect(f.rpc.request('threads.get', { threadId: separatelyTrashed.id })).rejects.toThrow()
-      await f.rpc.request('threads.restore', { threadId: separatelyTrashed.id })
+      await f.services.restoreThread(separatelyTrashed.id)
       expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId: separatelyTrashed.id })).thread.id).toBe(separatelyTrashed.id)
       expect(git(repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
       expect(git(repo, 'status', '--porcelain')).toBe('')

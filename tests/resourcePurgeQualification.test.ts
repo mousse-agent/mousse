@@ -28,11 +28,11 @@ it('preserves a shared artifact across its first owner purge and reclaims its by
       const artifactPath = join(artifactRoot, ref.id)
       expect(readFileSync(join(artifactPath, 'blob'))).toEqual(Buffer.from(bytes))
       for (const [index, thread] of owners.entries()) {
-        await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-        const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+        await f.services.trashThread(thread.id)
+        const preview = await f.services.lifecycle.cleanup.preview(thread.id)
         expect(preview.blockers).toEqual([])
         if (index === 0) expect(preview.retained.some((resource) => resource.identity === artifactPath)).toBe(true)
-        await f.rpc.request('threads.purge', { threadId: thread.id, operationId: `artifact-purge-${cycle}-${index}`, expectedGeneration: preview.generation, previewDigest: preview.digest })
+        await f.services.lifecycle.purge({ taskId: thread.id, operationId: `artifact-purge-${cycle}-${index}`, expectedGeneration: preview.generation, previewDigest: preview.digest })
         if (index === 0) expect(readFileSync(join(artifactPath, 'blob'))).toEqual(Buffer.from(bytes))
         else expect(existsSync(artifactPath)).toBe(false)
       }
@@ -117,18 +117,18 @@ it('rejects a reviewed purge preview after retained source bytes change and pres
   const f = await lifecycleHarness()
   try {
     const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'stale review proof' })
-    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-    const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+    await f.services.trashThread(thread.id)
+    const preview = await f.services.lifecycle.cleanup.preview(thread.id)
     expect(preview.blockers).toEqual([])
     const before = f.services.threads.lifecycleStore.require(thread.id)
     const path = join(before.location, 'after-review.bin'), bytes = Buffer.from([0, 255, 7, 91])
     writeFileSync(path, bytes)
-    await expect(f.rpc.request('threads.purge', { threadId: thread.id, operationId: 'stale-preview', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow(/preview.*changed|fresh.*inventory/i)
+    await expect(f.services.lifecycle.purge({ taskId: thread.id, operationId: 'stale-preview', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow(/preview.*changed|fresh.*inventory/i)
     expect(readFileSync(path)).toEqual(bytes)
     const after = f.services.threads.lifecycleStore.require(thread.id)
     expect(after.state).toBe('trashed')
     expect(after.purge).toBeUndefined()
-    await f.rpc.request('threads.restore', { threadId: thread.id })
+    await f.services.restoreThread(thread.id)
     expect(readFileSync(join(f.services.threads.getThreadDir(thread.id), 'after-review.bin'))).toEqual(bytes)
   } finally { await f.close() }
 })
@@ -143,12 +143,12 @@ it.each(['oversized', 'null', 'missing-owner'] as const)('blocks cleanup when a 
     const profileHome = join(f.home, 'profiles', f.alice.id)
     const index = join(profileHome, 'browser', 'artifact-index', `${ref.id}.json`)
     const original = readFileSync(index, 'utf8')
-    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, other.id) })
+    await f.services.trashThread(other.id)
     // Unreadable or malformed association authority cannot become no owner.
     if (corruption === 'oversized') writeFileSync(index, original + ' '.repeat(33 * 1024 * 1024))
     else if (corruption === 'null') writeFileSync(index, 'null')
     else { const value = JSON.parse(original); delete value.scope.threadId; writeFileSync(index, JSON.stringify(value)) }
-    const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: other.id, preview: true })
+    const preview = await f.services.lifecycle.cleanup.preview(other.id)
     expect(preview.blockers.length, 'Unreadable peer authority must fail closed before shared blob deletion').toBeGreaterThan(0)
     expect(readFileSync(join(profileHome, 'artifacts', ref.id, 'blob'))).toEqual(Buffer.from([17, 23, 41]))
   } finally { await f.close() }

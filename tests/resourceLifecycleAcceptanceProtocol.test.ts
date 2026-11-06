@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
-import type { LifecyclePurgePreview, TrashRetentionPolicy } from '../src/shared/resourceLifecycle'
 import { STORAGE_POLICY_DEFAULTS, summarizeCleanupReport, type StorageCleanupReport, type StoragePolicy, type StorageUsageSnapshot } from '../src/shared/storage'
 import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
@@ -14,76 +13,33 @@ import { piAdapter } from './run/phase6Fixture'
 import { archived } from './support/archived'
 
 describe('lifecycle public protocol acceptance', () => {
-  it('threads.trash preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
-    const method = 'threads.trash'
+  it('the trash preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'recoverable task' })
       const path = f.services.threads.getThreadDir(thread.id)
       const bytes = Buffer.from([0, 255, 17, 36, 10, 128])
       writeFileSync(join(path, 'sole-copy-unknown.bin'), bytes)
-      await f.rpc.request(method, { threadId: archived(f.services.threads, thread.id) })
+      await f.services.trashThread(thread.id)
       expect(existsSync(path)).toBe(false)
       await expect(f.rpc.request('threads.get', { threadId: thread.id })).rejects.toThrow()
       const trashed = f.services.threads.lifecycleStore.require(thread.id)
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow(/operationId/i)
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id, operationId: 'unreviewed-purge' })).rejects.toThrow(/preview|review/i)
+      await expect(f.services.lifecycle.purge({ taskId: thread.id } as never)).rejects.toThrow(/operation identity/i)
+      await expect(f.services.lifecycle.purge({ taskId: thread.id, operationId: 'unreviewed-purge' })).rejects.toThrow(/preview|review/i)
       const after = f.services.threads.lifecycleStore.require(thread.id)
       expect(after.state).toBe('trashed')
       expect(after.generation).toBe(trashed.generation)
       expect(after.purge).toBeUndefined()
       expect(readFileSync(join(after.location, 'sole-copy-unknown.bin'))).toEqual(bytes)
-      const restored = await f.rpc.request<{ thread: Thread }>('threads.restore', { threadId: thread.id })
-      expect(restored.thread.id).toBe(thread.id)
+      expect((await f.services.restoreThread(thread.id)).state).toBe('active')
+      expect(f.services.threads.getThread(thread.id)?.id).toBe(thread.id)
       expect(readFileSync(join(path, 'sole-copy-unknown.bin'))).toEqual(bytes)
       expect(f.services.threadRuntimes.get(thread.id)?.activity ?? 'idle').toBe('idle')
       expect(f.services.threads.loadThreadData(thread.id).messages).toEqual([])
     } finally { await f.close() }
   })
 
-  it('threads.purge honours a sole-copy discard only from a gui client; a cli client is refused', async () => {
-    const f = await lifecycleHarness()
-    try {
-      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
-      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
-      const { thread } = await gui.request<{ thread: Thread }>('threads.create', { name: 'sole copy scratch' })
-      const path = f.services.threads.getThreadDir(thread.id)
-      mkdirSync(join(path, 'terminal-workspace'), { recursive: true })
-      writeFileSync(join(path, 'terminal-workspace', 'sole-copy.txt'), 'retained output')
-      writeFileSync(join(path, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: thread.id, workspaceRelativePath: 'terminal-workspace' }))
-      await gui.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      const { preview } = await cli.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
-      expect(preview.items.some((item) => item.discardRequired)).toBe(true)
-      const request = { threadId: thread.id, operationId: 'human-gate', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true }
-      await expect(cli.request('threads.purge', request)).rejects.toMatchObject({ code: 'resource_purge_discard_required', errorInfo: { category: 'denied' } })
-      const kept = f.services.threads.lifecycleStore.require(thread.id)
-      expect(kept.state).toBe('trashed')
-      expect(readFileSync(join(kept.location, 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
-      await gui.request('threads.purge', request)
-      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
-      expect(existsSync(kept.location)).toBe(false)
-    } finally { await f.close() }
-  })
-
-  it('threads.configureTrash saves a validated policy for a gui client and refuses a cli client', async () => {
-    const f = await lifecycleHarness()
-    try {
-      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
-      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
-      const saved = await gui.request<{ policy: TrashRetentionPolicy }>('threads.configureTrash', { graceDays: 7, automaticPurge: true })
-      expect(saved.policy).toEqual({ schemaVersion: 1, graceDays: 7, automaticPurge: true })
-      // The refusal reaches the client as a generic handler error; what matters is that the policy stays as the human set it.
-      await expect(cli.request('threads.configureTrash', { graceDays: 1, automaticPurge: false })).rejects.toMatchObject({ code: 'handler_error' })
-      // Which policies are valid is decided in ResourcePurgeService.configure (resourceTrashPolicy.test.ts).
-      await expect(gui.request('threads.configureTrash', { graceDays: 7 })).rejects.toThrow()
-      await expect(gui.request('threads.configureTrash', { graceDays: 0, automaticPurge: true })).rejects.toThrow()
-      const inventory = await cli.request<{ trashPolicy: TrashRetentionPolicy }>('threads.inventory', {})
-      expect(inventory.trashPolicy).toEqual({ schemaVersion: 1, graceDays: 7, automaticPurge: true })
-    } finally { await f.close() }
-  })
-
-  it('threads.trash cannot move data while a physical writer is admitted', async () => {
-    const method = 'threads.trash'
+  it('the trash cannot move data while a physical writer is admitted', async () => {
     const f = await lifecycleHarness()
     let lease: ReturnType<typeof tryAcquireExecutionLease> = null
     try {
@@ -91,26 +47,25 @@ describe('lifecycle public protocol acceptance', () => {
       const path = f.services.threads.getThreadDir(thread.id)
       lease = tryAcquireExecutionLease(path, { source: 'resource-lifecycle-acceptance' })
       expect(lease).not.toBeNull()
-      await expect(f.rpc.request(method, { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/active|busy|drain|lease|blocked/i)
+      await expect(f.services.trashThread(thread.id)).rejects.toThrow(/active|busy|drain|lease|blocked/i)
       expect(existsSync(join(path, 'meta.json'))).toBe(true)
       releaseExecutionLeaseHandle(lease!); lease = null
     } finally { if (lease) releaseExecutionLeaseHandle(lease); await f.close() }
   })
 
-  it('keeps another profile unable to trash, restore or purge the owner task', async () => {
+  it('keeps another profile unable to delete the owner task', async () => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'Alice bytes' })
       const path = f.services.threads.getThreadDir(thread.id)
       writeFileSync(join(path, 'owner.txt'), 'Alice sole copy')
       const bob = await f.connect(f.bob.id)
-      for (const method of ['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge']) {
-        await bob.request(method, { threadId: thread.id }).catch(() => undefined)
-        expect(readFileSync(join(path, 'owner.txt'), 'utf8')).toBe('Alice sole copy')
-      }
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await expect(bob.request('threads.restore', { threadId: thread.id })).rejects.toThrow()
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      archived(f.services.threads, thread.id)
+      await expect(bob.request('threads.delete', { threadId: thread.id })).rejects.toThrow()
+      expect(readFileSync(join(path, 'owner.txt'), 'utf8')).toBe('Alice sole copy')
+      await f.services.trashThread(thread.id)
+      await expect(f.bobServices.restoreThread(thread.id)).rejects.toThrow()
+      await f.services.restoreThread(thread.id)
       expect(readFileSync(join(path, 'owner.txt'), 'utf8')).toBe('Alice sole copy')
       expect(f.bobServices.threads.listAllThreads()).toEqual([])
     } finally { await f.close() }
@@ -129,8 +84,8 @@ describe('lifecycle public protocol acceptance', () => {
       })
       runId = run.runId
       await vi.waitFor(async () => expect((await f.rpc.request<WorkflowRunView>('workflowRuns.get', { profileId: f.alice.id, runId })).state).toBe('waiting-approval'))
-      for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(f.rpc.request(method, { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/active|busy|drain|workflow|blocked/i)
+      for (const attempt of [() => f.rpc.request('threads.delete', { threadId: archived(f.services.threads, thread.id) }), () => f.services.trashThread(thread.id)]) {
+        await expect(attempt()).rejects.toThrow(/active|busy|drain|workflow|blocked/i)
         expect(existsSync(join(path, 'meta.json'))).toBe(true)
       }
     } finally {
@@ -156,14 +111,14 @@ describe('lifecycle public protocol acceptance', () => {
       })] }))
       pending = f.rpc.request('orchestrator.send', { threadId: thread.id, content: 'wait in provider seam' })
       await started
-      for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(peer.request(method, { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/active|busy|drain|running|blocked/i)
+      for (const attempt of [() => peer.request('threads.delete', { threadId: archived(f.services.threads, thread.id) }), () => f.services.trashThread(thread.id)]) {
+        await expect(attempt()).rejects.toThrow(/active|busy|drain|running|blocked/i)
       }
       release()
       await pending
       expect(f.services.threads.loadThreadData(thread.id).messages.some((message) => message.content === 'durable result after refused deletion')).toBe(true)
-      await peer.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await peer.request('threads.restore', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
+      await f.services.restoreThread(thread.id)
       expect(f.services.threads.loadThreadData(thread.id).messages.some((message) => message.content === 'durable result after refused deletion')).toBe(true)
       await peer.request('orchestrator.send', { threadId: thread.id, content: 'a genuinely new episode after restore' })
       const afterRestore = f.services.threads.loadThreadData(thread.id).messages
@@ -185,17 +140,17 @@ describe('lifecycle public protocol acceptance', () => {
       const created = await f.rpc.request<{ ptyId: string }>('pty.create', { threadId: thread.id, agentId: 'resource-lifecycle-shell', cwd: f.root })
       ptyId = created.ptyId
       expect(f.services.ptyManager.isAlive(ptyId)).toBe(true)
-      for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(f.rpc.request(method, { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/active|busy|drain|PTY|blocked/i)
+      for (const attempt of [() => f.rpc.request('threads.delete', { threadId: archived(f.services.threads, thread.id) }), () => f.services.trashThread(thread.id)]) {
+        await expect(attempt()).rejects.toThrow(/active|busy|drain|PTY|blocked/i)
         expect(existsSync(join(path, 'meta.json'))).toBe(true)
         expect(f.services.ptyManager.isAlive(ptyId)).toBe(true)
       }
       await f.rpc.request('pty.kill', { ptyId })
       await vi.waitFor(() => expect(f.services.ptyManager.isAlive(ptyId!)).toBe(false))
       ptyId = undefined
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
+      await f.services.trashThread(thread.id)
       expect(existsSync(path)).toBe(false)
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.restoreThread(thread.id)
       const live = await f.rpc.request<{ ptys: unknown[] }>('pty.list', { threadId: thread.id })
       expect(live.ptys).toEqual([])
     } finally {
@@ -250,8 +205,8 @@ describe('lifecycle public protocol acceptance', () => {
       const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'plan me' })
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      await f.services.trashThread(thread.id)
+      await f.services.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 1, automaticPurge: true }, true)
       f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
       const { plan } = await cli.request<{ plan: Array<{ rule: string; threadId?: string; action: string }> }>('storage.cleanup.plan', {})
       expect(plan).toEqual([expect.objectContaining({ rule: 'trash', threadId: thread.id, action: 'remove' })])
@@ -266,12 +221,12 @@ describe('lifecycle public protocol acceptance', () => {
       const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
       const { thread: listed } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'listed' })
       const { thread: later } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'later' })
-      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      await f.services.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 1, automaticPurge: true }, true)
       const overdue = (id: string) => f.services.threads.lifecycleStore.update(id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, listed.id) }); overdue(listed.id)
+      await f.services.trashThread(listed.id); overdue(listed.id)
       const { token } = await gui.request<{ token: { keys: string[]; policyDigest: string } }>('storage.cleanup.plan', {})
       expect(token.keys).toEqual(['trash:' + listed.id])
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, later.id) }); overdue(later.id)
+      await f.services.trashThread(later.id); overdue(later.id)
       for (const bad of [{ ...token, keys: 'all' }, { ...token, keys: [''] }, { ...token, expiresAt: 'soon' }, { ...token, policyDigest: undefined }, 'everything']) {
         await expect(gui.request('storage.cleanup.run', { token: bad })).rejects.toThrow()
       }
@@ -328,8 +283,8 @@ describe('lifecycle public protocol acceptance', () => {
       const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'to be purged' })
       writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(128 * 1024, 1))
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await gui.request('threads.configureTrash', { graceDays: 1, automaticPurge: true })
+      await f.services.trashThread(thread.id)
+      await f.services.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 1, automaticPurge: true }, true)
       f.services.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 3 * 86_400_000).toISOString() })
       const unattributed = (usage: StorageUsageSnapshot): number => usage.entries.find((entry) => entry.kind === 'threads' && !entry.threadId)?.bytes ?? 0
       const before = await cli.request<StorageUsageSnapshot>('storage.usage', { refresh: true })
@@ -362,8 +317,8 @@ describe('lifecycle public protocol acceptance', () => {
       const slow = cli.request('storage.usage', { refresh: true })
       await inFlight
       const began = Date.now()
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
+      await f.services.restoreThread(thread.id)
       // Without the exemption each of these waits two seconds for the scan and then fails with "profile requests are still active".
       expect(Date.now() - began).toBeLessThan(1500)
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
@@ -379,15 +334,15 @@ describe('lifecycle public protocol acceptance', () => {
       const pause = vi.spyOn(f.services.storageUsage, 'pause')
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'moved and removed' })
       writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(32 * 1024, 1))
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
+      await f.services.trashThread(thread.id)
       const afterTrash = pause.mock.calls.length
       expect(afterTrash).toBeGreaterThanOrEqual(1)
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.restoreThread(thread.id)
       expect(pause.mock.calls.length).toBeGreaterThan(afterTrash)
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      const { preview } = await gui.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+      await f.services.trashThread(thread.id)
+      const preview = await f.services.lifecycle.cleanup.preview(thread.id)
       const beforePurge = pause.mock.calls.length
-      await gui.request('threads.purge', { threadId: thread.id, operationId: 'remove-it', expectedGeneration: preview.generation, previewDigest: preview.digest })
+      await f.services.lifecycle.purge({ taskId: thread.id, operationId: 'remove-it', expectedGeneration: preview.generation, previewDigest: preview.digest })
       expect(pause.mock.calls.length).toBeGreaterThan(beforePurge)
       expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
       // Every pause was released: a scan still runs.
@@ -410,19 +365,20 @@ describe('lifecycle public protocol acceptance', () => {
       }
       // A scan walks the folders while each thread is moved; a walker's open handles make Windows refuse such a rename.
       const scanning = cli.request('storage.usage', { refresh: true })
-      for (const thread of created) await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
+      for (const thread of created) await f.services.trashThread(thread.id)
       await scanning
       for (const thread of created) expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
     } finally { await f.close() }
   })
 
-  it('a purge preview carries a reclaim estimate beside a preview whose digest is unchanged', async () => {
+  it('a reclaim estimate is read beside a purge preview whose digest it leaves unchanged', async () => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'preview with reclaim' })
       writeFileSync(join(f.services.threads.getThreadDir(thread.id), 'payload.bin'), Buffer.alloc(64 * 1024, 1))
-      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-      const response = await f.rpc.request<{ preview: LifecyclePurgePreview; reclaim: { bytes: number; estimated: boolean; partial: boolean } }>('threads.purge', { threadId: thread.id, preview: true })
+      await f.services.trashThread(thread.id)
+      const preview = await f.services.lifecycle.cleanup.preview(thread.id)
+      const response = { preview, reclaim: await f.services.lifecycle.cleanup.reclaimEstimate(preview) }
       expect(response.reclaim.bytes).toBeGreaterThanOrEqual(64 * 1024); expect(response.reclaim.partial).toBe(false)
       expect(response.preview).not.toHaveProperty('reclaim')
       expect((await f.services.lifecycle.cleanup.preview(thread.id)).digest).toBe(response.preview.digest)

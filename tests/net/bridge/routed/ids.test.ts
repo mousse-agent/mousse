@@ -191,7 +191,7 @@ describe('the walker', () => {
     // every other row is called, with values that satisfy its checks, and what comes back is read.
     const skipped = new Set([
       'orchestrator.send', 'orchestrator.steer', 'orchestrator.abort', 'orchestrator.retry', 'queue.enqueue',
-      'threads.regenerateTitle', 'threads.delete', 'threads.trash', 'projects.remove', 'projects.open',
+      'threads.regenerateTitle', 'threads.delete', 'projects.remove', 'projects.open',
       'pullRequests.startThread', 'publish.start', 'git.init', 'git.push', 'git.pull', 'git.fetch', 'git.checkout',
       'git.commit', 'git.discard', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.suggestCommitMessage',
       'actions.undoLatest', 'actions.redo', 'actions.revertCode', 'workspace.restore',

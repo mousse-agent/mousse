@@ -153,9 +153,9 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
   it('a manual run over the protocol empties overdue trash: its own request does not make the profile look busy', async () => {
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Overdue in the trash', project.id)
-    await gui.request('threads.trash', { threadId: archived(mms.threads, thread.id) })
+    await mms.trashThread(thread.id)
     mms.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 40 * DAY).toISOString() })
-    await gui.request('threads.configureTrash', { graceDays: 30, automaticPurge: true })
+    await mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 30, automaticPurge: true }, true)
     mms.storageCleanup.setClockForTests(Date.now) // the trash guard refuses a clock a day ahead of its last sweep
     try {
       const report = (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
@@ -163,7 +163,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
       expect(mms.threads.lifecycleStore.require(thread.id).state).toBe('purged')
     } finally {
       mms.storageCleanup.setClockForTests(() => Date.now() + 40 * DAY)
-      await gui.request('threads.configureTrash', { graceDays: 30, automaticPurge: false })
+      await mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 30, automaticPurge: false }, true)
     }
   }, 60_000)
 

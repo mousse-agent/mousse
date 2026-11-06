@@ -55,8 +55,8 @@ it('reports malformed legacy trash through the public inventory and refuses muta
     const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'unrelated preserved active task' })
     const path = f.services.threads.getThreadDir(thread.id)
     const meta = readFileSync(join(path, 'meta.json'))
-    for (const method of ['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge']) {
-      await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow()
+    for (const attempt of [() => f.rpc.request('threads.delete', { threadId: thread.id }), () => f.services.trashThread(thread.id), () => f.services.restoreThread(thread.id)]) {
+      await expect(attempt()).rejects.toThrow()
     }
     expect(readFileSync(index, 'utf8')).toBe(bytes)
     expect(readFileSync(join(path, 'meta.json'))).toEqual(meta)

@@ -28,7 +28,7 @@ it('a filesystem rename failure preserves exact unconsumed input and original ta
     const queue = readFileSync(join(path, 'queue.json'))
     const meta = readFileSync(join(path, 'meta.json'))
     fault.from = path; fault.attempts = 0
-    await expect(f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })).rejects.toMatchObject({ code: 'handler_error', details: { supportId: expect.any(String) } })
+    await expect(f.services.trashThread(thread.id)).rejects.toThrow(/rename denied/)
     expect(fault.attempts, 'the actual directory rename boundary must have been attempted').toBeGreaterThan(0)
     expect(existsSync(path)).toBe(true)
     expect(readFileSync(join(path, 'queue.json'))).toEqual(queue)
@@ -36,8 +36,8 @@ it('a filesystem rename failure preserves exact unconsumed input and original ta
     fault.from = ''
     // Legacy clients omit operationId. Retrying the same requested transition
     // must resume the durable failed move without requiring a daemon restart.
-    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
-    await f.rpc.request('threads.restore', { threadId: thread.id })
+    await f.services.trashThread(thread.id)
+    await f.services.restoreThread(thread.id)
     expect(f.services.threads.loadMessageQueue(thread.id)).toEqual([])
     const audit = JSON.parse(readFileSync(join(path, 'lifecycle-cancelled-queue.json'), 'utf8')) as Array<{ queue: unknown }>
     expect(audit.some((entry) => JSON.stringify(entry.queue) === JSON.stringify(JSON.parse(queue.toString())))).toBe(true)

@@ -798,11 +798,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
   },
   {
-    methods: ['threads.purge', 'threads.trash', 'threads.restore'],
-    reason:
-      'They are steps of a permanent delete, which stays on the computer that runs the thread; another computer can archive it.'
-  },
-  {
     methods: ['threads.focus'],
     reason:
       'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'
@@ -810,10 +805,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['threads.reorder', 'projects.reorder'],
     reason: 'Sidebar order is an overlay each computer keeps for itself.'
-  },
-  {
-    methods: ['threads.configureTrash'],
-    reason: 'The trash policy is a setting of the computer it is set on.'
   },
   {
     methods: ['projects.identity', 'projects.trustGitSettings'],
