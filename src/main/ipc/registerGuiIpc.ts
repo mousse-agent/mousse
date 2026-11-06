@@ -1035,6 +1035,7 @@ export function registerGuiIpc(
         broadcast('orchestrator:questionsPending', {
           requestId: q.requestId,
           questions: q.questions,
+          threadId: activeId,
           ...(q.approval ? { approval: q.approval } : {})
         })
       }
@@ -1496,6 +1497,8 @@ export function registerGuiIpc(
       broadcast('orchestrator:questionsPending', {
         requestId: q.requestId,
         questions: q.questions,
+        // The window shows the question only while it shows this thread.
+        threadId,
         ...(q.approval ? { approval: q.approval } : {})
       })
     }
