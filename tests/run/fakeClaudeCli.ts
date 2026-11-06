@@ -135,7 +135,10 @@ export class FakeClaudeProcess {
     return String(this.inputs[index]?.uuid)
   }
 
-  emit(...frames: Frame[]): void {
+  emit(...emitted: Frame[]): void {
+    // Like the real process: a session resumed into a fork writes its frames under the fork's id.
+    const branch = this.options.forkSession && this.options.sessionId
+    const frames = branch ? emitted.map((frame) => (frame.session_id === SESSION ? { ...frame, session_id: branch } : frame)) : emitted
     for (const frame of frames) {
       if (this.ended) return
       this.trackTasks(frame)
