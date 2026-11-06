@@ -2,8 +2,12 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const navigation = vi.hoisted(() => ({ openSettingsSection: vi.fn() }))
+vi.mock('../../src/renderer/lib/settingsNavigation', () => ({ openSettingsSection: navigation.openSettingsSection }))
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
 import { contextUsageKnown, contextUsageLevel, contextUsageSummary } from '../../src/renderer/components/ContextUsagePopover'
+import type { ContextSettings } from '../../src/shared/settings'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import { computeContextUsage } from '../../src/mms/orchestrator/contextUsage'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../src/shared/types'
@@ -46,7 +50,7 @@ function usage(used: number, limit = 200_000, extra: Partial<ContextUsageSnapsho
   }
 }
 
-function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; reports?: 'reported' | 'none' } = {}) {
+function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; reports?: 'reported' | 'none'; compaction?: ContextSettings } = {}) {
   const onContextOpenChange = vi.fn()
   const props: ComposerFooterProps = {
     providers: [provider(options.reports)],
@@ -57,6 +61,7 @@ function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; r
     onModelSelect: vi.fn(),
     onOpenSettings: vi.fn(),
     contextUsage,
+    ...(options.compaction ? { contextCompactionSetting: options.compaction } : {}),
     contextOpen: options.open ?? false,
     onContextOpenChange,
     onAttachClick: vi.fn()
@@ -116,7 +121,7 @@ describe('context ring', () => {
     expect(dialog?.getAttribute('aria-label')).toBe('Context usage: 62% · 124K of 200K tokens')
     const summary = dialog?.querySelector('.context-usage-summary')
     expect(summary?.textContent).toBe('62% · 124K of 200K')
-    expect(summary?.nextElementSibling?.classList.contains('context-usage-bar')).toBe(true)
+    expect(summary?.nextElementSibling?.querySelector('.context-usage-bar')).not.toBeNull()
     expect(dialog?.textContent).toContain('Prompt cache')
   })
 
@@ -124,6 +129,68 @@ describe('context ring', () => {
     const { onContextOpenChange } = render(usage(0), { open: true })
     expect(onContextOpenChange).toHaveBeenCalledWith(false)
     expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+})
+
+describe('compaction in the popover', () => {
+  const at = (compactionTokens: number | 'model-max'): ContextSettings => ({ compactionEnabled: true, compactionTokens })
+  const barMark = () => document.querySelector<HTMLElement>('.context-usage-bar-compaction')
+  const compactionLine = () => document.querySelector('.context-usage-compaction-text')?.textContent
+
+  it('leaves the ring as it is', () => {
+    render(usage(124_000, 1_000_000), { compaction: at(300_000) })
+    expect(ring()?.title).toBe('12% · 124K of 1M')
+    expect(ring()?.querySelectorAll('svg > *')).toHaveLength(2)
+  })
+
+  it('marks the same point on the popover bar', () => {
+    render(usage(124_000, 1_000_000), { compaction: at(300_000), open: true })
+    expect(barMark()?.style.left).toBe('30%')
+
+    render(usage(124_000, 1_000_000), { compaction: { compactionEnabled: false, compactionTokens: 300_000 }, open: true })
+    expect(barMark()).toBeNull()
+
+    render(usage(124_000, 1_000_000, { compactedByRuntime: true }), { compaction: at(300_000), open: true })
+    expect(barMark()).toBeNull()
+
+    render(usage(124_000, 1_000_000), { open: true })
+    expect(barMark()).toBeNull()
+  })
+
+  it('caps a size beyond the window as the daemon does', () => {
+    render(usage(124_000, 200_000), { compaction: at(300_000), open: true })
+    expect(barMark()?.style.left).toBe('91.808%')
+    expect(compactionLine()).toBe('Compacts at 184K')
+  })
+
+  it('says where the context compacts in the popover', () => {
+    render(usage(124_000, 1_000_000), { compaction: at(300_000), open: true })
+    expect(compactionLine()).toBe('Compacts at 300K')
+
+    render(usage(124_000, 1_000_000), { compaction: at('model-max'), open: true })
+    expect(compactionLine()).toBe('Compacts at 950K')
+
+    render(usage(124_000, 1_000_000, { compactedByRuntime: true }), { compaction: at(300_000), open: true })
+    expect(compactionLine()).toBe('Compacts near the limit')
+
+    render(usage(124_000, 1_000_000), { compaction: { compactionEnabled: false, compactionTokens: 'model-max' }, open: true })
+    expect(compactionLine()).toBe('Compaction off')
+  })
+
+  it('has no compaction line before the setting is read', () => {
+    render(usage(124_000, 1_000_000), { open: true })
+    expect(document.querySelector('.context-usage-compaction')).toBeNull()
+  })
+
+  it('opens Settings at the Compact context row from Change', () => {
+    navigation.openSettingsSection.mockClear()
+    const { onContextOpenChange } = render(usage(124_000, 1_000_000), { compaction: at(300_000), open: true })
+    const change = document.querySelector<HTMLButtonElement>('.context-usage-compaction-change')
+    expect(change?.textContent).toBe('Change')
+    expect(change?.classList.contains('btn-ghost')).toBe(true)
+    act(() => change?.click())
+    expect(onContextOpenChange).toHaveBeenCalledWith(false)
+    expect(navigation.openSettingsSection).toHaveBeenCalledWith('context')
   })
 })
 
