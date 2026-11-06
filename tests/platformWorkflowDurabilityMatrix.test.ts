@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -135,6 +135,80 @@ describe('workflow durability matrix', () => {
           : kind === 'parallel' ? 2 : kind === 'try' ? 2 : kind === 'repeat' ? 2 : 1
       expect(calls).toBe(expectedDispatches)
     }
+  })
+
+  it.each([true, false])('a waiting batch member does not hide a failed sibling (approval first: %s)', async (approvalFirst) => {
+    const profileRoot = root('mousse-matrix-batch-fail-')
+    const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
+    const fanOut = [{ from: 'start', port: 'next', to: 'review' }, { from: 'start', port: 'next', to: 'work' }]
+    const bundle: any = {
+      ...manifest('plain'),
+      outputSchema: {},
+      permissions: { capabilities: ['model.invoke', 'human.approval'] },
+      limits: { maxConcurrency: 2, maxTokens: 1 },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'review', type: 'approval', version: 1, config: { action: 'review', proposal: 'review' } },
+        { id: 'work', type: 'agent', version: 1, effect: 'external', config: { agent: { kind: 'main' }, instructions: 'work' } },
+        { id: 'end', type: 'end', version: 1, config: {} }
+      ],
+      edges: [
+        ...(approvalFirst ? fanOut : [...fanOut].reverse()),
+        { from: 'review', port: 'approved', to: 'end' },
+        { from: 'review', port: 'denied', to: 'end' },
+        { from: 'work', port: 'success', to: 'end' }
+      ]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: bundle, assets: [] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    let calls = 0
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { calls += 1; return { output: { ok: true }, tokens: 2 } } } }
+    })
+    const result = await run.start({ profileId: 'matrix', threadId: 'batch-fail', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(result.manifest.state).toBe('failed')
+    expect(result.manifest.terminalError).toMatch(/token limit/i)
+    expect(calls).toBe(1)
+    const checkpoint = JSON.parse(readFileSync(join(profileRoot, 'workflow-runs', result.manifest.runId, 'checkpoint.json'), 'utf8'))
+    expect(checkpoint.instances.work.status).toBe('failed')
+  })
+
+  it('restores a failed durable result left running by an earlier checkpoint without dispatching again', async () => {
+    const value = await setup('plain')
+    const draft = value.registry.get(value.definitionId)!
+    ;(draft.bundle.manifest as any).limits = { maxTokens: 1 }
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    value.revisionId = published.head?.revisionId
+    let calls = 0
+    const make = () => new WorkflowRunService({
+      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { calls += 1; return { output: { ok: true }, tokens: 2 } } } }
+    })
+    const first = await start(make(), value)
+    expect(first.manifest.state).toBe('failed')
+    expect(calls).toBe(1)
+    const runDir = join(value.profileRoot, 'workflow-runs', first.manifest.runId)
+    // An earlier checkpoint recorded the durable failure but never applied it to the instance.
+    const checkpoint = JSON.parse(readFileSync(join(runDir, 'checkpoint.json'), 'utf8'))
+    expect(checkpoint.intents.agent.completed).toBe(true)
+    expect(checkpoint.results.agent.outcome).toBe('failed')
+    checkpoint.instances.agent.status = 'running'
+    delete checkpoint.instances.agent.error
+    writeFileSync(join(runDir, 'checkpoint.json'), JSON.stringify(checkpoint))
+    const runManifest = JSON.parse(readFileSync(join(runDir, 'manifest.json'), 'utf8'))
+    runManifest.state = 'interrupted'
+    delete runManifest.terminalError
+    writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(runManifest))
+
+    const recovered = await make().resume(first.manifest.runId, { profileId: 'matrix' })
+    expect(recovered.manifest.state).toBe('failed')
+    expect(recovered.manifest.terminalError).toMatch(/token limit/i)
+    expect(calls).toBe(1)
+    const after = JSON.parse(readFileSync(join(runDir, 'checkpoint.json'), 'utf8'))
+    expect(after.instances.agent.status).toBe('failed')
+    expect(after.intents?.agent).toBeUndefined()
   })
 
   it('settles a failing parallel branch under collect-results and all-success policies', async () => {

@@ -35,6 +35,10 @@ export class CloudflaredTransport implements Transport {
   private directory?: string
   private listener?: Listener
   private listenTask?: Promise<Listener>
+  /** Bumped by every close: a listener start from before it gives up and keeps nothing it made. */
+  private epoch = 0
+  /** Ends the wait for the tunnel to register when the listener is closed meanwhile. */
+  private abortStart?: () => void
   private owner?: (stream: Duplex, info: InboundInfo) => void
   private endpoint?: string
   private registered = false
@@ -114,31 +118,50 @@ export class CloudflaredTransport implements Transport {
     }
     if (this.statusValue.state !== 'ready') throw new NetError('route_unreachable')
     this.owner = accept
-    this.listenTask = this.startListener(accept)
+    const task = (this.listenTask = this.startListener(accept))
     try {
-      return await this.listenTask
+      return await task
     } catch (error) {
-      await this.closeListener()
+      // A teardown that came meanwhile has closed it already.
+      if (this.listenTask === task) await this.closeListener()
       throw error
     }
   }
   private async startListener(
     accept: (stream: Duplex, info: InboundInfo) => void
   ): Promise<Listener> {
-    this.listener = await this.direct.listen((raw, info) =>
-      accept(raw, { ...info, transport: this.id })
-    )
-    const origin = new URL(this.direct.status().routes[0].address)
-    origin.protocol = 'http:'
-    origin.pathname = '/'
-    await mkdir(this.profileDir, { recursive: true, mode: 0o700 })
-    this.directory = await mkdtemp(join(this.profileDir, 'net-cloudflared-'))
-    const configPath = join(this.directory, 'config.yml')
-    const config =
-      this.settings.mode === 'quick'
-        ? '{}\n'
-        : `tunnel: ${JSON.stringify(this.settings.tunnelId)}\ncredentials-file: ${JSON.stringify(this.settings.credentialsFile)}\ningress:\n  - hostname: ${JSON.stringify(this.settings.hostname)}\n    service: ${JSON.stringify(origin.origin)}\n  - service: http_status:404\n`
-    await writeFile(configPath, config, { mode: 0o600, flag: 'wx' })
+    const epoch = this.epoch
+    const current = () => {
+      if (this.epoch !== epoch) throw new NetError('cancelled')
+    }
+    // What is made here is the listener's only once the child starts; until then a close cannot reach it.
+    let listener: Listener | undefined, directory: string | undefined, configPath: string, origin: URL
+    try {
+      listener = await this.direct.listen((raw, info) =>
+        accept(raw, { ...info, transport: this.id })
+      )
+      current()
+      await mkdir(this.profileDir, { recursive: true, mode: 0o700 })
+      current()
+      directory = await mkdtemp(join(this.profileDir, 'net-cloudflared-'))
+      current()
+      configPath = join(directory, 'config.yml')
+      origin = new URL(this.direct.status().routes[0].address)
+      origin.protocol = 'http:'
+      origin.pathname = '/'
+      const config =
+        this.settings.mode === 'quick'
+          ? '{}\n'
+          : `tunnel: ${JSON.stringify(this.settings.tunnelId)}\ncredentials-file: ${JSON.stringify(this.settings.credentialsFile)}\ningress:\n  - hostname: ${JSON.stringify(this.settings.hostname)}\n    service: ${JSON.stringify(origin.origin)}\n  - service: http_status:404\n`
+      await writeFile(configPath, config, { mode: 0o600, flag: 'wx' })
+      current()
+    } catch (error) {
+      await listener?.close()
+      if (directory) await rm(directory, { recursive: true, force: true })
+      throw this.epoch !== epoch ? new NetError('cancelled') : error
+    }
+    this.listener = listener
+    this.directory = directory
     const common = [
       'tunnel',
       '--config',
@@ -163,11 +186,13 @@ export class CloudflaredTransport implements Transport {
       cwd: this.directory,
       clock: this.clock,
       state: (state) => {
+        if (this.epoch !== epoch) return
         this.registered = false
         if (this.settings.mode === 'quick') this.endpoint = undefined
         this.changed(state)
       },
       line: (line) => {
+        if (this.epoch !== epoch) return
         if (this.settings.mode === 'quick') {
           const found = /https:\/\/([a-z0-9-]+\.trycloudflare\.com)(?=[\s/|]|$)/.exec(line)
           if (found) this.endpoint = `wss://${found[1]}/mousse-net`
@@ -176,6 +201,7 @@ export class CloudflaredTransport implements Transport {
         if (this.endpoint && this.registered) this.changed('ready')
       }
     })
+    let abort: (() => void) | undefined
     await new Promise<void>((resolve, reject) => {
       const timer = this.clock.setTimeout(() => {
         off()
@@ -192,7 +218,14 @@ export class CloudflaredTransport implements Transport {
           reject(new NetError('route_unreachable', 'Cloudflare Tunnel stopped.'))
         }
       })
+      abort = this.abortStart = () => {
+        timer.cancel()
+        off()
+        reject(new NetError('cancelled'))
+      }
       this.child!.start()
+    }).finally(() => {
+      if (this.abortStart === abort) this.abortStart = undefined
     })
     return { close: () => this.closeListener() }
   }
@@ -215,16 +248,21 @@ export class CloudflaredTransport implements Transport {
     return this.direct.dial({ ...route, transport: 'direct' }, signal)
   }
   private async closeListener(): Promise<void> {
-    await this.child?.stop()
+    this.epoch++
+    this.abortStart?.()
+    const child = this.child,
+      listener = this.listener,
+      directory = this.directory
     this.child = undefined
-    await this.listener?.close()
     this.listener = undefined
-    if (this.directory) await rm(this.directory, { recursive: true, force: true })
     this.directory = undefined
     this.endpoint = undefined
     this.registered = false
     this.listenTask = undefined
     this.owner = undefined
+    await child?.stop()
+    await listener?.close()
+    if (directory) await rm(directory, { recursive: true, force: true })
     if (this.statusValue.state !== 'disabled') this.changed('ready')
   }
   async teardown(): Promise<void> {

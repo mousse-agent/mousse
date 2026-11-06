@@ -219,7 +219,7 @@ describe('buildPaletteGroups', () => {
 
   it('limits the list to commands behind a > prefix', () => {
     const groups = build('>new')
-    expect(labels(groups)).toEqual(['Commands: New thread'])
+    expect(labels(groups)).toEqual(['Commands: New thread, New private thread'])
     expect(build('>').map((group) => group.label)).toEqual(['Commands'])
     expect(build('  > stop').flatMap((group) => group.items.map((item) => item.title))).toEqual(['Stop run'])
   })

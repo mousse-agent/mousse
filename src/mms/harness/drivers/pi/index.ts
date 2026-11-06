@@ -141,6 +141,8 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     mcpTurnBinding: 'per_call',
     // Pi's agent reaches the user's MCP servers through Mousse's MCP server.
     userMcp: 'proxy',
+    // Pi compacts its own session near the window; Mousse passes it only the on/off (`compaction`).
+    compactsNearWindow: true,
     // Pi's documented switch: off drops its install and update reports and the attribution headers
     // it adds for some providers (OpenRouter, NVIDIA, Cloudflare). Its install ping runs only in
     // interactive mode, which Mousse never starts.
