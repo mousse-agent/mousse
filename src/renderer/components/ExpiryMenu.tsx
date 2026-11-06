@@ -150,10 +150,13 @@ export function ExpiryMenu({ trigger, triggerTitle, triggerClassName, selectedMs
                   onChange={(event) => setAmount(event.target.value)}
                   onKeyDown={(event) => { if (event.key === 'Escape') closeMenu() }}
                 />
-                <select aria-label="Unit" value={unit} onChange={(event) => setUnit(event.target.value as 'hours' | 'days')}>
-                  <option value="hours">hours</option>
-                  <option value="days">days</option>
-                </select>
+                <span className="expiry-menu-units" role="group" aria-label="Unit">
+                  {(['hours', 'days'] as const).map((choice) => (
+                    <button key={choice} type="button" aria-pressed={unit === choice} className={unit === choice ? 'active' : undefined} onClick={() => setUnit(choice)}>
+                      {choice}
+                    </button>
+                  ))}
+                </span>
                 <button type="submit" disabled={customMs === undefined}>Set</button>
               </form>
             ) : (
@@ -169,10 +172,18 @@ export function ExpiryMenu({ trigger, triggerTitle, triggerClassName, selectedMs
               </button>
             )}
             <div className="composer-workspace-menu-separator" role="separator" />
-            <label className="expiry-menu-stop">
-              <input type="checkbox" checked={stop} onChange={(event) => setStop(event.target.checked)} />
-              <span>Stop a running turn when it expires</span>
-            </label>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              tabIndex={-1}
+              aria-checked={stop}
+              className="composer-workspace-menu-item"
+              title="Without it, a turn still running at expiry is waited for"
+              onClick={() => setStop((on) => !on)}
+            >
+              <span>Stop a running turn</span>
+              {stop && <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" />}
+            </button>
           </div>
         </FloatingPortal>
       )}

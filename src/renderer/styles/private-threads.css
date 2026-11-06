@@ -115,8 +115,16 @@
   width: 56px;
 }
 
+.expiry-menu-units {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.expiry-menu-units button.active {
+  background: var(--ui-hover);
+}
+
 .expiry-menu-custom input,
-.expiry-menu-custom select,
 .expiry-menu-custom button {
   padding: 2px 6px;
   border: 1px solid var(--border);
@@ -124,16 +132,6 @@
   background: var(--ui-raised, transparent);
   color: var(--text-primary);
   font: inherit;
-}
-
-.expiry-menu-stop {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--ui-faint);
-  cursor: pointer;
 }
 
 .thread-expiry-icon {

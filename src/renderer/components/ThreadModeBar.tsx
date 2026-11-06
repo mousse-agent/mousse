@@ -30,7 +30,7 @@ export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editab
         <span className="thread-mode-bar-part">
           <Lock size={12} strokeWidth={2} aria-hidden="true" />
           <span className="thread-mode-bar-text">
-            Private thread <span className="thread-mode-bar-detail">· stays on this computer, hidden from your other devices</span>
+            Private <span className="thread-mode-bar-detail">· stays on this computer</span>
           </span>
         </span>
       )}
