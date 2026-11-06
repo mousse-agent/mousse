@@ -311,7 +311,10 @@ export class RemoteSubagents {
         threadId: remoteThreadId,
         content: record.prompt,
         mode: record.chatMode,
-        clientRequestId: `remote-subagent:${record.delegationId}`
+        clientRequestId: `remote-subagent:${record.delegationId}`,
+        // A follow-up on a thread that may be paused by a usage limit refuses, as a follow-up on one computer does.
+        // A thread made for this task has never run, so the first task sends nothing extra to an older computer.
+        ...(record.remoteThreadId ? { refuseWhilePaused: true } : {})
       }, `remote-subagent:${record.delegationId}:send`)
       const runId = isRecord(sent) && typeof sent.runId === 'string' ? sent.runId : undefined
       if (!runId) {

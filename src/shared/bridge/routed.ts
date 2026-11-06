@@ -276,9 +276,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
       'clientRequestId',
       'continuationOfRunId',
       'acknowledgeUncertain',
-      ROUTED_STAGED_KEY
+      ROUTED_STAGED_KEY,
+      'refuseWhilePaused'
     ],
-    { required: ['content'], ...staging(['content', 'images']) }
+    // Version 3: `refuseWhilePaused`, a parent's follow-up to a subagent, which a thread paused by a usage limit refuses.
+    { required: ['content'], ...staging(['content', 'images']), version: 3, since: { [ROUTED_STAGED_KEY]: 2, refuseWhilePaused: 3 } }
   ),
   'orchestrator.steer': chat(
     'thread',
@@ -293,6 +295,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
+  'threads.clearContext': chat('thread', ['threadId']),
+  'threads.compact': chat('thread', ['threadId', 'focus']),
   'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers'], {
     required: ['requestId', 'answers'],
     owned: { requestId: 'question' }

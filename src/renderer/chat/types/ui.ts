@@ -43,7 +43,7 @@ export function chatStatusFromPhase(phase: TurnPhase): ChatStatus {
   if (phase === 'streaming') return 'streaming'
   if (phase === 'tool_running') return 'tool_running'
   if (phase === 'awaiting_input') return 'awaiting_input'
-  // 'paused' is a run waiting for a usage limit: the composer takes a new message, which ends the pause.
+  // 'paused' is a run waiting for a usage limit: the composer takes a new message, which joins the thread's queue.
   return 'ready'
 }
 
@@ -65,7 +65,7 @@ export function toUIMessage(msg: ChatMessage): MousseUIMessage {
   } else if (msg.kind === 'plan_card' && msg.planCard) {
     parts.push({ type: 'data-plan-card', data: msg.planCard } as DataPart)
     if (msg.content.trim()) parts.push({ type: 'text', text: msg.content })
-  } else if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction') {
+  } else if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
     parts.push({ type: `data-${msg.kind}` as string, data: msg.content } as DataPart)
   } else if (msg.role === 'assistant' && msg.streaming) {
     parts.push({ type: 'text', text: msg.content, state: 'streaming' })
