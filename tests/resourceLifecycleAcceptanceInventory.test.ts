@@ -10,8 +10,6 @@ import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
-import { archived } from './support/archived'
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -80,7 +78,7 @@ describe('public inventory and request identity', () => {
     } finally { await f.close() }
   })
 
-  it('retains dirty isolated child bytes and refs while clean task checkout retirement remains reconstructable', async () => {
+  it('retains dirty isolated child bytes, refs and the clean task checkout through trash and restore', async () => {
     const f = await lifecycleHarness()
     let workflowRunId: string | undefined
     try {
@@ -189,25 +187,18 @@ describe('public inventory and request identity', () => {
         await expect(f.rpc.request('orchestrator.send', { threadId: invocation.id, content: 'must not resume while owner is trashed' })).rejects.toThrow()
       }
       await expect(f.services.lifecycle.purge({ taskId: thread.id })).rejects.toThrow()
-      // Trash may add reconstruction pins and retire a proven clean checkout;
-      // every pre-existing reference and the dirty child's sole copy survive.
+      // Every pre-existing reference and the dirty child's sole copy survive. The trash is a step of a delete and does
+      // not retire the clean task checkout either: it stays where it is until the delete's purge removes it.
       for (const row of refs.split(/\r?\n/)) {
         const [sha, ref] = row.split(' ')
         expect(git(repo, 'rev-parse', '--verify', ref)).toBe(sha)
       }
-      expect(existsSync(parentWorkspace.worktreePath)).toBe(false)
-      const retirement = new WorktreeRetirementService(f.services.threads.lifecycleStore)
-      const manifest = retirement.load(retirement.pathFor(thread.id, parentWorkspace.worktreePath))
-      // The folder waits in the trash, still a registered checkout, until nothing in it has changed for an hour.
-      expect(manifest.state).toBe('trashed')
-      expect(existsSync(manifest.trashPath!)).toBe(true)
-      expect(manifest.resultSha).toBe(parentWorkspace.headSha)
+      expect(existsSync(parentWorkspace.worktreePath)).toBe(true)
+      expect(git(parentWorkspace.worktreePath, 'rev-parse', 'HEAD')).toBe(parentWorkspace.headSha)
       expect(readFileSync(join(child.worktreePath, 'SOLE-COPY.bin'))).toEqual(Buffer.from([0, 255, 17]))
       await f.services.restoreThread(thread.id)
-      expect(existsSync(parentWorkspace.worktreePath)).toBe(false)
-      await f.rpc.request('workspace.restore', { threadId: thread.id })
       expect(readFileSync(join(parentWorkspace.worktreePath, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')
-      expect(git(parentWorkspace.worktreePath, 'rev-parse', 'HEAD')).toBe(manifest.resultSha)
+      expect(git(parentWorkspace.worktreePath, 'rev-parse', 'HEAD')).toBe(parentWorkspace.headSha)
       const retainedChild = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: separatelyTrashed.id })
       expect(retainedChild.lifecycle.state).toBe('trashed')
       await expect(f.rpc.request('threads.get', { threadId: separatelyTrashed.id })).rejects.toThrow()
