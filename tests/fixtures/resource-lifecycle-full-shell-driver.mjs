@@ -60,9 +60,10 @@ async function check() {
   await click('Back')
   await click('Threads')
   await until(() => evaluate(`Boolean(${threadRow})`), Boolean, 'Sidebar thread row')
-  // A thread that is not archived offers no Delete.
+  // A thread that is not archived offers no Delete. "Delete after ›" sets when the thread expires; it deletes nothing now.
   await evaluate(`${threadRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
-  if (await evaluate(`[...document.querySelectorAll('.threads-context-menu button')].some((b) => /^Delete/.test(b.textContent.trim()))`)) throw Error('A thread that is not archived offers Delete')
+  await until(() => evaluate(`document.querySelectorAll('.threads-context-menu button').length`), (count) => count > 0, 'Thread context menu')
+  if (await evaluate(`[...document.querySelectorAll('.threads-context-menu button')].some((b) => /^Delete(…|\\.\\.\\.)?$/.test(b.textContent.trim()))`)) throw Error('A thread that is not archived offers Delete')
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
   proof.noDeleteBeforeArchive = true
   await fromMenu('Archive', true, 'Archive from the sidebar')

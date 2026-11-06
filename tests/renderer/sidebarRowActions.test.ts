@@ -179,7 +179,7 @@ describe('the row menu', () => {
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
     // A thread in use is archived first: no Delete.
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename'])
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Delete after'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -194,7 +194,7 @@ describe('the row menu', () => {
     key(document.activeElement!, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(menuItem('Regenerate title'))
     key(document.activeElement!, { key: 'End' })
-    expect(document.activeElement).toBe(menuItem('Rename'))
+    expect(document.activeElement).toBe(menuItem('Delete after'))
     key(document.activeElement!, { key: 'Home' })
     expect(document.activeElement).toBe(menuItem('Pin'))
     key(document.activeElement!, { key: 'Escape' })
@@ -228,7 +228,7 @@ describe('archive and delete', () => {
     show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="More actions for Old work"]')!)
-    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete…'])
+    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete after', 'Delete…'])
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')

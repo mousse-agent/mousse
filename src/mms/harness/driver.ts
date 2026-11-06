@@ -423,6 +423,11 @@ export interface HarnessDriver {
    */
   readonly mirrorsVendorFile?: boolean
   /**
+   * The runtime compacts its own session near the model's window and takes only Mousse's compaction
+   * on/off, not the Compact context size. Absent: a thread on it compacts at the Compact context size.
+   */
+  readonly compactsNearWindow?: boolean
+  /**
    * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
    * for the processes that take launch arguments. Set last, over the entry's own launch settings, on
    * every process Mousse starts for an entry whose telemetry is `off` (Settings → Providers). Absent:
