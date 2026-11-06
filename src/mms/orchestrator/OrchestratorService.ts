@@ -11250,6 +11250,8 @@ export class OrchestratorService extends EventEmitter {
       : this.boundSession
     this.assertNotBotThread(session.threadId)
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
+    // An expired thread is being deleted: Retry starts nothing in it.
+    if (session.threadId && this.isExpired(session.threadId)) return false
     const request = session.failedConnectionRequest
     // A request sent under a device's limit is retried under it, whoever presses Retry.
     const limit = session.failedConnectionLimit ?? undefined
@@ -11942,6 +11944,7 @@ export class OrchestratorService extends EventEmitter {
       // A bot's thread is never written into from outside: only the bot's own dispatches run there (PR 6 §6).
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
+      if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being deleted.' }
       // A turn sent from outside this computer: agents in it reach no other thread through the profile's
       // setting, now or in any later turn, and what they delegate inherits the limit (SPEC §15.1).
       try {

@@ -6,7 +6,8 @@ import type { Thread } from '../../shared/types'
  *
  * - The time is absolute, so a pass at start deletes what expired while the daemon was not running.
  * - A thread with a run in progress waits for the run to end, unless it was set to stop it
- *   (`expiryStopsRun`). Questions waiting for an answer and open terminals are not a run: they end at expiry.
+ *   (`expiryStopsRun`). Questions and approvals waiting for an answer and open terminals are not a run: they end
+ *   at expiry, so a run that waits on one ends too.
  * - Deleting can be refused for a while (other work running in the profile); the thread is tried again
  *   when a run ends and every minute, and in the meantime no turn starts in it (the orchestrator refuses).
  * - A delete that a crash cut short (trashed but not yet purged) is finished by the next pass.
@@ -161,6 +162,9 @@ export class ThreadExpiryService {
 
   private async expire(threadId: string, thread: Thread | undefined): Promise<void> {
     try {
+      // Questions, approvals and terminals end at expiry, before anything waits: a run that waits for an answer
+      // would otherwise keep the thread forever. Refused, that run ends, and the thread goes with it.
+      if (thread) await this.deps.quiesce(threadId)
       // A listed thread may still be running; one in the trash has nothing running.
       if (thread && this.deps.runInProgress(threadId)) {
         if (!thread.expiryStopsRun) {
@@ -168,8 +172,8 @@ export class ThreadExpiryService {
           return
         }
         await this.deps.stop(threadId)
+        await this.deps.quiesce(threadId)
       }
-      if (thread) await this.deps.quiesce(threadId)
       await this.deps.deleteForGood(threadId)
       this.waiting.delete(threadId)
       this.reported.delete(threadId)

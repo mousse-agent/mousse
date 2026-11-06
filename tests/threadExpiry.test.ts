@@ -75,6 +75,17 @@ describe('thread expiry', () => {
     expect(inventory.lifecycles.map((record) => record.taskId)).not.toContain(thread.id)
   }, 120_000)
 
+  it('deletes a subagent that was already in the trash with its expiring thread', async () => {
+    const root = mms.threads.createThread('Root', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
+    const child = mms.threads.createThread('Helper', undefined, undefined, { started: true, ownerThreadId: root.id, lineage: { parentThreadId: root.id, rootThreadId: root.id, relationship: 'subagent' } })
+    await mms.trashThread(child.id)
+    expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('trashed')
+    mms.threads.updateThreadMeta(root.id, { expiresAt: new Date(Date.now() - 1000).toISOString() })
+    await mms.threadExpiry.pass()
+    expect(mms.threads.lifecycleStore.get(root.id)?.state).toBe('purged')
+    expect(mms.threads.lifecycleStore.get(child.id)?.state).toBe('purged')
+  }, 60_000)
+
   it('gives the expiry purge authority only to a thread whose own expiry passed', async () => {
     const thread = mms.threads.createThread('Kept', undefined, undefined, { started: true, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     await mms.trashThread(thread.id)

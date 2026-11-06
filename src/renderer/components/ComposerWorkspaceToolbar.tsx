@@ -7,7 +7,7 @@ import type { Project } from '../../shared/types'
 import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import type { Device } from '../lib/netDevices'
-import type { ComposerWorkspace } from '../lib/newThread'
+import { workspaceWithProject, type ComposerWorkspace } from '../lib/newThread'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
 import '../styles/composer-workspace.css'
@@ -132,12 +132,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
                 data-project-id={entry.id}
                 title={'path' in entry ? entry.path : undefined}
                 onClick={() => {
-                  onChange({
-                    projectId: entry.id || undefined,
-                    worktreeEnabled: Boolean(entry.id && workspace.worktreeEnabled),
-                    ...(workspace.node ? { node: workspace.node } : {}),
-                    ...(workspace.localOnly ? { localOnly: true } : {})
-                  })
+                  onChange(workspaceWithProject(workspace, entry.id || undefined))
                   closeMenu()
                 }}
               >

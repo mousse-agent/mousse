@@ -299,9 +299,10 @@ export class ResourcePurgeService {
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
     })
   }
+  /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
-    for (let added = true; added;) { added = false; for (const item of records) if (item.parentTaskId && ids.has(item.parentTaskId) && !ids.has(item.taskId) && item.state !== 'trashed') { ids.add(item.taskId); added = true } }
+    for (let added = true; added;) { added = false; for (const item of records) if (item.parentTaskId && ids.has(item.parentTaskId) && !ids.has(item.taskId) && item.state !== 'trashed' && item.state !== 'purged') { ids.add(item.taskId); added = true } }
     return records.filter((record) => ids.has(record.taskId))
   }
   /** Fresh source-derived claims from every installed profile; no cached preview authorizes deletion. */
@@ -642,6 +643,8 @@ export class ResourcePurgeService {
         if (taskId !== input.taskId) this.store.update(taskId, (current) => { current.state = 'purged'; current.generation++ })
       }
       for (const child of this.store.list().filter((child) => child.parentTaskId && record.purge!.ownedTaskIds.includes(child.parentTaskId) && !record.purge!.ownedTaskIds.includes(child.taskId))) {
+        // One already deleted for good on its own holds nothing left to keep.
+        if (child.state === 'purged') continue
         if (child.state !== 'trashed') throw new Error('Independent descendant is not safely retained in trash')
         this.store.update(child.taskId, (current) => { current.formerParentTaskId = current.parentTaskId; delete current.parentTaskId; current.generation++ })
       }

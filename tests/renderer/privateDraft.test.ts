@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { composerWorkspaceFor, workspaceWithExpiry, workspaceWithPrivate } from '../../src/renderer/lib/newThread'
+import { composerWorkspaceFor, workspaceWithExpiry, workspaceWithPrivate, workspaceWithProject } from '../../src/renderer/lib/newThread'
 import type { NodeId } from '../../src/shared/net'
 
 describe('Private in the new chat draft (issue #672)', () => {
@@ -33,5 +33,13 @@ describe('expiry in the new chat draft (issue #672)', () => {
     expect(on.expiryMs).toBe(3_600_000)
     expect(workspaceWithPrivate(on, false, [{ id: 'here' }]).expiryMs).toBe(3_600_000)
     expect(workspaceWithExpiry(on, null, false)).toEqual({ projectId: 'here', worktreeEnabled: false, localOnly: true })
+  })
+})
+
+describe('picking a project in the new chat toolbar (issue #672)', () => {
+  it('keeps Private and the expiry, and the worktree choice only with a project', () => {
+    const draft = { projectId: 'a', worktreeEnabled: true, localOnly: true, expiryMs: 3_600_000, expiryStopsRun: true }
+    expect(workspaceWithProject(draft, 'b')).toEqual({ ...draft, projectId: 'b' })
+    expect(workspaceWithProject(draft, undefined)).toEqual({ ...draft, projectId: undefined, worktreeEnabled: false })
   })
 })

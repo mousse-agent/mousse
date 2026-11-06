@@ -136,6 +136,15 @@ function withExpiryOf(workspace: ComposerWorkspace): Pick<ComposerWorkspace, 'ex
   }
 }
 
+/**
+ * The draft after picking a project in the toolbar: the worktree choice only counts with a project, and the
+ * computer, Private and the expiry stay. A project of this computer replaces the one remembered for another.
+ */
+export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined): ComposerWorkspace {
+  const { localProjectId: _remembered, ...rest } = workspace
+  return { ...rest, projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+}
+
 /** The draft with an expiry picked by hand (`ms` from creation, or null for never). */
 export function workspaceWithExpiry(workspace: ComposerWorkspace, ms: number | null, stopsRun: boolean): ComposerWorkspace {
   const { expiryMs: _ms, expiryStopsRun: _stop, expiryFromPrivateDefault: _default, ...rest } = workspace

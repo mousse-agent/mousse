@@ -258,7 +258,7 @@ function ThreadCardBody({
   onCancelRename,
   onStartRename
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
   projectName?: string
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
@@ -859,7 +859,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const { target } = contextMenu
     closeContextMenu()
     try {
-      await window.mousse.threads.setExpiry(target.id, ms === null ? null : expiresAtAfter(ms))
+      await window.mousse.threads.setExpiry(target.id, ms === null ? null : expiresAtAfter(ms), target.expiryStopsRun === true)
     } catch (error) {
       console.error('Setting when the thread is deleted failed', error)
     }
@@ -1128,7 +1128,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const menuTarget: ThreadsContextMenuTarget = {
       type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
       ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {}),
-      ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
+      ...(thread.expiresAt ? { expiresAt: thread.expiresAt, ...(thread.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}),
       canExpire: !thread.node && !thread.lineage
     }
     const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`

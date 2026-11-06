@@ -52,6 +52,14 @@ describe('thread expiry', () => {
     await h.service.stop()
   })
 
+  it('sleeps at most an hour, so a changed clock is noticed', async () => {
+    const h = harness([thread('later', { expiresAt: at(3 * 24 * 3_600_000) })])
+    h.service.start()
+    await h.service.pass()
+    expect(h.timers.at(-1)!.ms).toBe(3_600_000)
+    await h.service.stop()
+  })
+
   it('leaves a subagent to its root thread', async () => {
     const h = harness([thread('child', { expiresAt: at(-1), lineage: { parentThreadId: 'root', rootThreadId: 'root', relationship: 'subagent' } })])
     h.service.start()
@@ -66,6 +74,8 @@ describe('thread expiry', () => {
     await h.service.pass()
     expect(h.deleted).toEqual([])
     expect(h.deps.stop).not.toHaveBeenCalled()
+    // A question or approval the run waits on ends at once, so the run can end.
+    expect(h.deps.quiesce).toHaveBeenCalledWith('busy')
     // It is tried again within a minute, and at once when the run ends.
     expect(h.timers.at(-1)!.ms).toBe(60_000)
     h.endRun('busy')

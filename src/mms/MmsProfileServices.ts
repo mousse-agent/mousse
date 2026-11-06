@@ -816,13 +816,15 @@ export class MmsProfileServices {
       configurationChanged: () => {
         this.config.reloadFromDisk()
       },
-      expired: (record) => threadFolderExpired(record.location)
+      expired: (record) => this.lifecycleRecordExpired(record)
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
     this.threadExpiry = new ThreadExpiryService({
       listThreads: () => this.threads.listAllThreads(),
+      // The ledger says an expiry purge began even once the thread's folder (with its expiry) is gone.
       unfinished: (now) => this.threads.lifecycleStore.list()
-        .filter((record) => !record.parentTaskId && (record.state === 'trashed' || record.state === 'purge-started') && threadFolderExpired(record.location, now))
+        .filter((record) => !record.parentTaskId && (record.state === 'trashed' || record.state === 'purge-started') &&
+          (record.purge?.expired === true || threadFolderExpired(record.location, now)))
         .map((record) => record.taskId),
       runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
       stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
@@ -979,8 +981,8 @@ export class MmsProfileServices {
       if (!ids.has(record.taskId)) return false
       let child = record
       while (child.taskId !== taskId) {
-        // Independently trashed children retain their own fence and restore choice.
-        if (child.state === 'trashed') return false
+        // Independently trashed children retain their own fence and restore choice; one deleted for good holds nothing.
+        if (child.state === 'trashed' || child.state === 'purged') return false
         if (child.state !== 'active')
           throw new Error(
             'Owned child lifecycle operation requires recovery before moving its parent'
@@ -1010,8 +1012,18 @@ export class MmsProfileServices {
    * (`ResourcePurgeService.purge`). Resumes a delete a crash or a refusal left in the trash or half purged.
    */
   private async deleteExpiredThread(taskId: string): Promise<void> {
+    // Subagents a person already put in the trash are not moved with the thread, and a purge of the thread would
+    // leave them there on their own: they go first.
+    for (const child of this.trashedDescendants(taskId)) await this.purgeForExpiry(child.taskId)
     let record = this.threads.lifecycleStore.get(taskId)
     if (!record || record.state === 'active') record = await this.trashThread(taskId)
+    await this.purgeForExpiry(taskId)
+    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
+  /** The purge of a trashed (or half purged) thread with the expiry's authority. */
+  private async purgeForExpiry(taskId: string): Promise<void> {
+    let record = this.threads.lifecycleStore.require(taskId)
     if (record.state === 'trashed') {
       const preview = await this.lifecycle.cleanup.preview(taskId)
       record = await this.lifecycle.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, authorization: 'expiry' })
@@ -1019,7 +1031,38 @@ export class MmsProfileServices {
       record = await this.lifecycle.purge({ taskId, operationId: record.purge.operationId, authorization: 'expiry' })
     }
     if (record.state !== 'purged') throw new Error(record.blockedReason ?? `The delete stopped with the thread ${record.state}`)
-    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
+  /**
+   * Threads below `taskId` (by lifecycle ownership) that were put in the trash on their own, each with the threads it
+   * owns (a purge of it takes those along). Searched through threads that are still active only.
+   */
+  private trashedDescendants(taskId: string): TaskLifecycleRecord[] {
+    const records = this.threads.lifecycleStore.list()
+    const found: TaskLifecycleRecord[] = []
+    for (let parents = new Set([taskId]); parents.size;) {
+      const next = new Set<string>()
+      for (const record of records) {
+        if (!record.parentTaskId || !parents.has(record.parentTaskId)) continue
+        if (record.state === 'trashed' || record.state === 'purge-started') found.push(record)
+        else if (record.state === 'active') next.add(record.taskId)
+      }
+      parents = next
+    }
+    return found
+  }
+
+  /**
+   * The expiry that lets a purge stand in for a person's Discard has passed for this thread: its own, or for a
+   * subagent its owner's (a subagent has no expiry of its own; see `Thread.expiresAt`).
+   */
+  private lifecycleRecordExpired(record: TaskLifecycleRecord): boolean {
+    const seen = new Set<string>()
+    for (let current: TaskLifecycleRecord | undefined = record; current && !seen.has(current.taskId); current = current.parentTaskId ? this.threads.lifecycleStore.get(current.parentTaskId) : undefined) {
+      seen.add(current.taskId)
+      if (threadFolderExpired(current.location)) return true
+    }
+    return false
   }
 
   async trashThread(
