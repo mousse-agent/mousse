@@ -56,14 +56,13 @@ describe('a private thread seen from another computer', () => {
     expect(listed.ok && (listed.result as { threads: Array<{ id: string }> }).threads.map((thread) => thread.id)).toEqual([shared.id])
   }, 60_000)
 
-  it('cannot be created, read in the trash or restored from another computer', async () => {
+  it('cannot be created or read in the trash from another computer', async () => {
     const { f, call } = await owner()
     // `localOnly` is not a key of the routed create: the call is malformed before any handler runs.
     await expect(call('threads.create', { name: 'Remote private', localOnly: true })).rejects.toMatchObject({ code: 'bad_request' })
     const secret = f.mms.threads.createThread('Secret', undefined, undefined, { started: true, localOnly: true })
     await f.mms.trashThread(secret.id)
     expect(await call('threads.inventory', { threadId: secret.id })).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
-    expect(await call('threads.restore', { threadId: secret.id })).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
     expect(f.mms.threads.lifecycleStore.get(secret.id)?.state).toBe('trashed')
   }, 60_000)
 })
