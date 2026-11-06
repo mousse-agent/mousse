@@ -87,14 +87,60 @@ export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode 
   return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
 }
 
+/**
+ * A moment a thread tells the person about: its agent finished, it needs them (a question or an
+ * approval), or it stopped without finishing (interrupted, failed, or paused by a usage limit).
+ */
+export type ThreadNotificationEvent = 'completed' | 'question' | 'idle'
+
+export const THREAD_NOTIFICATION_EVENTS: readonly ThreadNotificationEvent[] = ['completed', 'question', 'idle']
+
+/** How Mousse tells the person: a toast in its window, the operating system's notification, a sound. */
+export interface NotificationChannels {
+  toast: boolean
+  system: boolean
+  sound: boolean
+}
+
 export interface NotificationSettings {
-  /** Use the operating system notification sound when a thread's agent finishes. */
+  /**
+   * The sound for every event, from before sounds were chosen per event. Still read for an event
+   * whose `sound` has not been chosen.
+   */
   threadCompletionSound: boolean
   /**
    * Notify for every thread on the user's other computers. Off: only a thread this computer started or
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /** The channels chosen for each event. A channel not chosen yet is on. */
+  events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
+}
+
+/** The channels an event uses: what the person chose, and on for anything not chosen yet. */
+export function threadNotificationChannels(
+  settings: Partial<NotificationSettings> | undefined,
+  event: ThreadNotificationEvent
+): NotificationChannels {
+  const chosen = settings?.events?.[event]
+  return {
+    toast: chosen?.toast ?? true,
+    system: chosen?.system ?? true,
+    sound: chosen?.sound ?? settings?.threadCompletionSound ?? true
+  }
+}
+
+/**
+ * A settings patch that sets only one channel of one event. The store merges it, so two quick
+ * changes never overwrite each other with a stale copy.
+ */
+export function threadNotificationChannelPatch(
+  event: ThreadNotificationEvent,
+  channel: keyof NotificationChannels,
+  on: boolean
+): MousseSettingsUpdate {
+  // DeepPartial stops at interfaces, so the nested patch is typed by hand; the store deep-merges it.
+  return { notifications: { events: { [event]: { [channel]: on } } } } as unknown as MousseSettingsUpdate
 }
 
 export interface PermissionSettings {

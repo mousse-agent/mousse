@@ -265,6 +265,12 @@ export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', Pan
 export const PanelRightOpen = /* @__PURE__ */ createIcon('PanelRightOpen', PanelRightOpenIcon)
 export const Paperclip = /* @__PURE__ */ createIcon('Paperclip', Attachment01Icon)
 export const Pause = /* @__PURE__ */ createIcon('Pause', PauseIcon)
+/** A notification inside the app window: a small toast card with two lines of text. */
+export const AppNotification = /* @__PURE__ */ createIcon('AppNotification', [
+  ['path', { d: 'M3 9C3 6.79086 4.79086 5 7 5H17C19.2091 5 21 6.79086 21 9V15C21 17.2091 19.2091 19 17 19H7C4.79086 19 3 17.2091 3 15V9Z', stroke: 'currentColor', strokeLinejoin: 'round', strokeWidth: '1.5', key: '0' }],
+  ['path', { d: 'M7.5 10H16.5', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: '1.5', key: '1' }],
+  ['path', { d: 'M7.5 14H13', stroke: 'currentColor', strokeLinecap: 'round', strokeWidth: '1.5', key: '2' }]
+])
 export const Pencil = /* @__PURE__ */ createIcon('Pencil', Edit02Icon)
 export const Pin = /* @__PURE__ */ createIcon('Pin', PinIcon)
 export const Play = /* @__PURE__ */ createIcon('Play', PlayIcon)
