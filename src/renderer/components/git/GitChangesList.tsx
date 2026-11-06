@@ -6,10 +6,12 @@ import {
   rowActionLabel,
   rowActions,
   sectionAction,
+  sectionStyle,
   type ChangeSectionId,
   type GitSectionId,
   type RowAction,
   type SectionAction,
+  type SectionSizes,
   type SelectedFile
 } from './gitPanelLogic'
 
@@ -55,7 +57,8 @@ interface ChangeSectionProps {
   busy: boolean
   onRowAction: (action: RowAction, file: GitFileChange) => void
   onSectionAction: (action: SectionAction, files: GitFileChange[]) => void
-  flex: number
+  /** The weight a dragged divider gave this section; none until then, so it fits its rows. */
+  flex: number | undefined
   sectionRef?: (el: HTMLDivElement | null) => void
 }
 
@@ -63,7 +66,7 @@ interface ChangeSectionProps {
 export function ChangeSection({ id, items, selected, onSelect, scope, busy, onRowAction, onSectionAction, flex, sectionRef }: ChangeSectionProps) {
   const sectionButton = sectionAction(id, scope)
   return (
-    <div className="git-section" data-section={id} style={{ flex: `${flex} 1 0` }} ref={sectionRef}>
+    <div className="git-section" data-section={id} style={sectionStyle(id, items.length, flex)} ref={sectionRef}>
       <div className="git-section-header">
         <div className="git-section-title">{SECTION_TITLES[id]}</div>
         {sectionButton && (
@@ -126,7 +129,7 @@ interface GitChangesListProps {
   busy: boolean
   onRowAction: (action: RowAction, file: GitFileChange) => void
   onSectionAction: (action: SectionAction, files: GitFileChange[]) => void
-  flex: Record<GitSectionId, number>
+  flex: SectionSizes
   bindSectionRef?: (id: GitSectionId) => (el: HTMLDivElement | null) => void
   onDividerMouseDown?: (upper: GitSectionId, lower: GitSectionId) => void
 }

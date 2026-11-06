@@ -2,6 +2,7 @@ import type { CommandId } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import type { BrowserTabState, ProjectTerminalTab } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import type { TerminalLocation } from './folderLabel'
 
 export interface SurfaceChoice {
   id: MainView
@@ -25,6 +26,12 @@ export interface SurfaceTabItem {
   label: string
   resourceId?: string
   closable: boolean
+  /** A browser tab kept in every thread rather than owned by one. */
+  everyThread?: boolean
+  /** Where the tab works, in short words beside the label: a terminal's folder. */
+  detail?: string
+  /** The tab's tooltip: the label and the full folder (and computer) it works in. */
+  title?: string
 }
 
 /** A terminal title the app gave it, rather than a quick action's name. Older builds stored "Terminal N". */
@@ -35,6 +42,8 @@ export function surfaceTabItems(input: {
   terminals: ProjectTerminalTab[]
   browsers: BrowserTabState[]
   documents: Array<{ id: string; title: string }>
+  /** Each terminal's folder, by tab id (see `terminalLocations`). */
+  terminalLocations?: Record<string, TerminalLocation>
 }): SurfaceTabItem[] {
   const items: SurfaceTabItem[] = []
   for (const kind of input.opened) {
@@ -45,12 +54,14 @@ export function surfaceTabItems(input: {
         const named = tab.title && !DEFAULT_TERMINAL_TITLE.test(tab.title)
         const label = named ? tab.title : plain === 0 ? 'Terminal' : `Terminal ${plain + 1}`
         if (!named) plain += 1
+        const location = input.terminalLocations?.[tab.id]
         items.push({
           key: `terminal:${tab.id}`,
           view: 'terminal',
           label,
           resourceId: tab.id,
-          closable: true
+          closable: true,
+          ...(location ? { detail: location.label, title: `${label} · ${location.title}` } : {})
         })
       })
     } else if (kind === 'browser') {
@@ -61,7 +72,8 @@ export function surfaceTabItems(input: {
           view: 'browser',
           label: named ? tab.title : input.browsers.length > 1 ? `Browser ${index + 1}` : 'Browser',
           resourceId: tab.id,
-          closable: true
+          closable: true,
+          ...(tab.ownerThreadId === null ? { everyThread: true } : {})
         })
       })
     } else if (kind === 'files') {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
+import { Cloud, Download, Folder, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { gitScopeFor } from '../lib/activeProject'
@@ -10,31 +10,34 @@ import { GitChangesList, type SelectedFile } from './git/GitChangesList'
 import { runRowAction, runSync, type RowRequest, type SyncRequest } from './git/gitPanelActions'
 import {
   IDLE_SYNC_ACTIVITY,
+  resizeSectionPair,
+  sectionStyle,
   selectionAfterAction,
   type GitSectionId,
   type RowAction,
   type SectionAction,
+  type SectionSizes,
   type SyncActivity
 } from './git/gitPanelLogic'
 import { GitOperationStatus } from './git/GitOperationStatus'
 import { GitSyncBar } from './git/GitSyncBar'
+import { DelayedLoader } from './ui/DelayedLoader'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
+import { folderName } from '../lib/folderLabel'
 
-const MIN_SECTION_RATIO = 0.15
-const MAX_SECTION_RATIO = 0.85
-
-function CommitsSection({
+export function CommitsSection({
   commits,
   flex,
   sectionRef
 }: {
   commits: GitCommit[]
-  flex: number
+  /** The weight a dragged divider gave the list; none until then, so it takes the rest of the panel. */
+  flex: number | undefined
   sectionRef?: (el: HTMLDivElement | null) => void
 }) {
   return (
-    <div className="git-section" style={{ flex: `${flex} 1 0` }} ref={sectionRef}>
+    <div className="git-section" data-section="commits" style={sectionStyle('commits', commits.length, flex)} ref={sectionRef}>
       <div className="git-section-title">Commits</div>
       <div className="git-section-list">
         {commits.length === 0 ? (
@@ -114,13 +117,8 @@ export function GitPanel() {
   const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>('private')
   const [cloneRepository, setCloneRepository] = useState('')
   const [cloneDestination, setCloneDestination] = useState('')
-  const [sectionFlex, setSectionFlex] = useState<Record<GitSectionId, number>>({
-    staged: 1,
-    changes: 1,
-    untracked: 1,
-    conflicts: 1,
-    commits: 1
-  })
+  // Empty until a divider is dragged: every section fits its content.
+  const [sectionFlex, setSectionFlex] = useState<SectionSizes>({})
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
   const draggingDivider = useRef<{ upper: GitSectionId; lower: GitSectionId } | null>(null)
 
@@ -132,6 +130,8 @@ export function GitPanel() {
     setRowError('')
     setRowNotice('')
     setRowLeft('')
+    // Heights dragged for one folder's lists say nothing about another's.
+    setSectionFlex({})
   }, [folderId])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
@@ -257,6 +257,15 @@ export function GitPanel() {
   }, [cloneDestination, cloneRepository, refreshGitHubStatus])
 
   const onDividerMouseDown = useCallback((upper: GitSectionId, lower: GitSectionId) => {
+    // The first drag takes each shown section's current height as its weight, so nothing jumps
+    // when the sections stop fitting their content.
+    setSectionFlex((prev) => {
+      const next: SectionSizes = { ...prev }
+      for (const [id, el] of Object.entries(sectionElsRef.current) as [GitSectionId, HTMLDivElement | null][]) {
+        if (el && next[id] === undefined) next[id] = el.getBoundingClientRect().height
+      }
+      return next
+    })
     draggingDivider.current = { upper, lower }
     document.body.style.cursor = 'row-resize'
     document.body.style.userSelect = 'none'
@@ -275,17 +284,8 @@ export function GitPanel() {
       const totalHeight = upperRect.height + lowerRect.height
       if (totalHeight <= 0) return
 
-      const rawRatio = (event.clientY - upperRect.top) / totalHeight
-      const ratio = Math.min(MAX_SECTION_RATIO, Math.max(MIN_SECTION_RATIO, rawRatio))
-
-      setSectionFlex((prev) => {
-        const pairTotal = prev[drag.upper] + prev[drag.lower]
-        return {
-          ...prev,
-          [drag.upper]: pairTotal * ratio,
-          [drag.lower]: pairTotal * (1 - ratio)
-        }
-      })
+      const ratio = (event.clientY - upperRect.top) / totalHeight
+      setSectionFlex((prev) => resizeSectionPair(prev, drag.upper, drag.lower, ratio))
     }
 
     const onMouseUp = () => {
@@ -309,7 +309,7 @@ export function GitPanel() {
 
   const renderSidebarBody = () => {
     if (!folderId) return <div className="git-empty">No project open</div>
-    if (loading) return <div className="git-empty">Loading…</div>
+    if (loading) return <div className="git-empty"><DelayedLoader label="Loading Git status" /></div>
     if (!status?.isRepo) return (
       <div className="github-setup">
         <div className="github-setup-heading"><Cloud size={16} /> Not a Git repository</div>
@@ -362,13 +362,24 @@ export function GitPanel() {
     )
   }
 
+  const branchName = status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')
+  // The folder the branch is in stays named beside it, so two folders on the same branch are told apart.
+  const folder = folderName(projectPath)
+  const where = [branchName, projectPath, workspaceThreadId ? "Thread's worktree" : null].filter(Boolean).join(' · ')
+
   return (
     <div className="git-panel">
       <ResizablePanelSidebar className="git-sidebar" defaultWidth={300}>
         <div className="panel-toolbar">
-          <div className="git-toolbar-info">
-            <GitBranch size={14} />
-            <span>{status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')}</span>
+          <div className="git-toolbar-info" title={where}>
+            <GitBranch size={14} aria-hidden="true" />
+            <span className="git-toolbar-branch">{branchName}</span>
+            {folder && (
+              <span className="git-toolbar-folder">
+                <Folder size={12} strokeWidth={2} aria-hidden="true" />
+                <span className="git-toolbar-folder-name">{folder}</span>
+              </span>
+            )}
           </div>
           <button
             type="button"

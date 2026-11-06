@@ -587,8 +587,21 @@ html.platform-darwin .titlebar-left {
   text-overflow: ellipsis;
 }
 
+/* A terminal's folder: quieter than its name, and the first to give way. */
+.main-view-tab-detail {
+  min-width: 0;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 2;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 @container main-area (max-width: 520px) {
-  .main-view-tab-label {
+  .main-view-tab-label,
+  .main-view-tab-detail {
     display: none;
   }
 
@@ -3537,16 +3550,17 @@ html[data-theme='high-contrast'] {
   position: relative;
 }
 
+/* One muted line and Restart shell, centred over the closed terminal. */
 .terminal-exited-overlay {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
   background: rgba(var(--surface-base-rgb), 0.85);
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
   z-index: 2;
 }
 
@@ -3558,6 +3572,11 @@ html[data-theme='high-contrast'] {
   padding: 6px 12px;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+}
+
+.terminal-remote-holder-error {
+  margin-left: auto;
+  color: var(--danger);
 }
 
 .browser-panel,
@@ -3784,7 +3803,7 @@ html[data-theme='high-contrast'] {
 .browser-menu > button:hover, .browser-menu-actions > button:hover { background: rgba(var(--accent-rgb), 0.15); }
 .browser-menu-label { display: inline-flex; align-items: center; gap: 8px; }
 .browser-menu-label svg,
-.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 16px; height: 16px; flex-shrink: 0; }
+.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 14px; height: 14px; flex-shrink: 0; }
 .browser-menu-zoom > span:first-child { margin-right: auto; }
 .browser-menu-zoom > button { display: inline-flex; padding: 4px; border-radius: 4px; }
 .browser-menu-zoom > button:hover { background: rgba(var(--accent-rgb), 0.16); }
@@ -3803,14 +3822,44 @@ html[data-theme='high-contrast'] {
   font-size: 11px;
 }
 
-.browser-device-toolbar select {
+.browser-device-toolbar .ui-select {
   min-width: 130px;
-  padding: 4px 7px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  border-radius: 5px;
-  color: var(--text-primary);
-  background: rgba(var(--surface-elevated-rgb), 0.8);
 }
+
+/* Agent access in the toolbar: who may drive the browser, and who drives this tab now. */
+.browser-access {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 4px 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.browser-access-icon { flex-shrink: 0; }
+.browser-access-off .browser-access-icon,
+.browser-access-off .browser-access-label { opacity: 0.6; }
+.browser-access-agent .browser-access-icon { color: var(--accent); }
+.browser-access-human .browser-access-icon { color: var(--text-primary); }
+
+/* The last browser action's result or error, directly under the toolbar. */
+.browser-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 6px 2px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(var(--surface-strong-rgb), 0.55);
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.08);
+}
+
+.browser-notice > svg { flex-shrink: 0; }
+.browser-notice-done > svg { color: var(--success); }
+.browser-notice-error > svg { color: var(--danger); }
+.browser-notice-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .browser-url-form {
   flex: 1;
@@ -3872,21 +3921,34 @@ html[data-theme='high-contrast'] {
 .browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
+/* The app-owned start page follows the app theme; visited sites keep the white default. */
+.browser-viewport-blank {
+  background: var(--bg-primary);
+}
+
 .browser-blank {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   z-index: 1;
   pointer-events: none;
+  color: var(--text-secondary);
 }
 
 .browser-blank-logo {
-  width: 96px;
-  height: 96px;
+  width: 72px;
+  height: 72px;
   color: var(--accent);
   opacity: 0.7;
+}
+
+.browser-blank-copy {
+  margin: 0;
+  font-size: 12px;
 }
 
 .browser-blank-logo svg {
@@ -3924,6 +3986,10 @@ html[data-theme='high-contrast'] {
   .browser-toolbar {
     padding: 6px;
     gap: 2px;
+  }
+
+  .browser-access-label {
+    display: none;
   }
 }
 
@@ -4039,26 +4105,36 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-row {
+/* A row is the entry button plus its "…" button; hover and selection fill the whole row. */
+.file-tree-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 4px 8px 4px 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: left;
   border-radius: 4px;
+  color: var(--text-secondary);
 }
 
-.file-tree-row:hover {
+.file-tree-item:hover,
+.file-tree-item.menu-open {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
-.file-tree-row.selected {
+.file-tree-item.selected {
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--text-primary);
+}
+
+.file-tree-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 8px 4px 0;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  border-radius: 4px;
 }
 
 .file-tree-chevron,
@@ -4078,11 +4154,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-loading {
-  padding: 4px 16px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 
 .git-panel {
   flex-direction: row;
@@ -4107,12 +4178,44 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
+.git-toolbar-info > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-branch,
+.git-toolbar-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder gives way before the branch when the toolbar is narrow. */
+.git-toolbar-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-shrink: 3;
+  margin-left: 4px;
+  color: var(--text-secondary);
+}
+
+.git-toolbar-folder > svg {
+  flex-shrink: 0;
+}
+
+/* Sections size from these (see sectionStyle in gitPanelLogic.ts). If every section is at its
+   floor and the panel is shorter still, the whole list scrolls rather than hiding one. */
 .git-changes {
+  --git-section-head: 24px;
+  --git-row: 28px;
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 
@@ -5253,64 +5356,42 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .document-panel-empty {
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
 }
 
-.document-tabs {
+/* Tabs come from the shared strip (styles/tab-bar.css); Copy Markdown sits at its end. */
+.document-toolbar {
   display: flex;
-  gap: 4px;
-  padding: 8px 8px 0;
-  overflow-x: auto;
   flex-shrink: 0;
-}
-
-.document-tab {
-  display: inline-flex;
   align-items: center;
-  gap: 2px;
-  border-radius: 8px 8px 0 0;
-  background: rgba(var(--surface-soft-rgb), 0.55);
-  max-width: 220px;
-}
-
-.document-tab.active {
-  background: rgba(var(--surface-muted-rgb), 0.85);
-}
-
-.document-tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 8px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
   min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.document-tab.active .document-tab-label {
-  color: var(--text-primary);
+.document-toolbar .ui-tabs {
+  flex: 1;
+  border-bottom: 0;
 }
 
-.document-tab-label span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.document-tab-icon {
+  flex: none;
+  opacity: 0.75;
 }
 
-.document-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
+.document-copy {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
   margin-right: 4px;
-  border-radius: 6px;
+  border-radius: var(--ui-control-radius, 6px);
   color: var(--text-secondary);
 }
 
-.document-tab-close:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+.document-copy:hover:not(:disabled) {
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
@@ -6071,10 +6152,6 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   resize: vertical;
   min-height: 80px;
 }
-.browser-access-toggle { width: 28px; height: 16px; border-radius: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; }
-.browser-access-toggle::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-secondary); transition: transform var(--ui-dur); }
-.browser-access-toggle.enabled { background: rgba(var(--accent-rgb), .35); }
-.browser-access-toggle.enabled::after { transform: translateX(12px); background: var(--accent); }
 
 
 /* Rail destinations share the window chrome and navigation. */
