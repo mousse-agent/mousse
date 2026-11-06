@@ -27,6 +27,7 @@ describe('the application menu template', () => {
     const thread = submenu(template, 'Thread')
     expect(thread.map((item) => [item.id, item.label, item.accelerator])).toEqual([
       ['thread.new', 'New thread', 'CommandOrControl+N'],
+      ['thread.newPrivate', 'New private thread', 'CommandOrControl+Shift+N'],
       ['thread.next', 'Next thread', 'Ctrl+Tab'],
       ['thread.previous', 'Previous thread', 'Ctrl+Shift+Tab'],
       ['threads.search', 'Search threads', 'CommandOrControl+Shift+O'],

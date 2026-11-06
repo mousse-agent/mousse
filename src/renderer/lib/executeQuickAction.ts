@@ -24,6 +24,15 @@ function requireActiveProfile(profileId: string): ReturnType<typeof useAppStore.
 }
 
 /**
+ * Sets the composer's busy state from what a send in `threadId` did, while that thread is still the one
+ * shown: the busy state belongs to the shown thread, and another thread's send must not change it.
+ */
+function settleLoading(profileId: string, threadId: string | null, active: boolean): void {
+  const store = requireActiveProfile(profileId)
+  if (store.activeThreadId === threadId) store.setLoading(active)
+}
+
+/**
  * On a new chat, applies the workspace picked in the composer or the side card
  * (project, new worktree) before the first send, like the composer does.
  * Returns the thread to send to, or null if the user moved away meanwhile.
@@ -97,17 +106,17 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
     requireActiveProfile(profileId)
     if (result.queued) {
       const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
-      requireActiveProfile(profileId).setLoading(stillActive)
+      settleLoading(profileId, activeThreadId, stillActive)
       return
     }
     const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
-    requireActiveProfile(profileId).setLoading(stillActive)
+    settleLoading(profileId, activeThreadId, stillActive)
   } catch {
     requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
       .isTurnActive(activeThreadId)
       .catch(() => true)
-    requireActiveProfile(profileId).setLoading(stillActive)
+    settleLoading(profileId, activeThreadId, stillActive)
     throw new Error('Failed to send message.')
   }
 }
@@ -134,13 +143,13 @@ export async function executeSendInNewChat(action: QuickAction, profileId: strin
     const stillActive = await window.mousse.orchestrator
       .isTurnActive(thread.id)
       .catch(() => true)
-    requireActiveProfile(profileId).setLoading(stillActive)
+    settleLoading(profileId, thread.id, stillActive)
   } catch {
-    requireActiveProfile(profileId)
+    const shownThread = requireActiveProfile(profileId).activeThreadId
     const stillActive = await window.mousse.orchestrator
-      .isTurnActive(requireActiveProfile(profileId).activeThreadId ?? undefined)
+      .isTurnActive(shownThread ?? undefined)
       .catch(() => false)
-    requireActiveProfile(profileId).setLoading(stillActive)
+    settleLoading(profileId, shownThread, stillActive)
     throw new Error('Failed to create chat / send message.')
   }
 }

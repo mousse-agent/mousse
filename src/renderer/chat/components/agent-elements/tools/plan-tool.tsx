@@ -70,9 +70,18 @@ function defaultPreview(plan: Plan, markdown: string): void {
 /**
  * Approve the plan and start implementation: send the approved plan back
  * through the orchestrator as a build request. The chat mode stays as it is.
+ * Rejects when the request was not taken, so the plan stays to approve again.
  */
 async function defaultApprove(plan: Plan, markdown: string): Promise<void> {
   const store = useAppStore.getState();
+  const { profileId, activeThreadId } = store;
+  // The composer's busy state belongs to the shown thread: a late answer for another one leaves it alone.
+  const setLoadingWhileShown = (loading: boolean) => {
+    const current = useAppStore.getState();
+    if (current.profileId === profileId && current.activeThreadId === activeThreadId) {
+      current.setLoading(loading);
+    }
+  };
   const trimmed = (markdown ?? "").trim();
   const content = trimmed
     ? `The implementation plan is approved. Implement it now, following the plan:\n\n${markdown}`
@@ -80,18 +89,19 @@ async function defaultApprove(plan: Plan, markdown: string): Promise<void> {
   const request = { content, mode: "build" as const };
   store.setLoading(true);
   try {
-    const activeThreadId = store.activeThreadId;
     const result = activeThreadId
       ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
       : await window.mousse.orchestrator.send(request);
-    void result;
-    const stillActive = await window.mousse.orchestrator.isTurnActive(
-      activeThreadId ?? undefined,
-    );
-    store.setLoading(stillActive);
-  } catch {
-    store.setLoading(false);
+    // Refused before it was taken: nothing runs, as when the request fails.
+    if (result.error && result.requestAcknowledged === false) throw result.error;
+  } catch (error) {
+    setLoadingWhileShown(false);
+    throw error;
   }
+  const stillActive = await window.mousse.orchestrator
+    .isTurnActive(activeThreadId ?? undefined)
+    .catch(() => false);
+  setLoadingWhileShown(stillActive);
 }
 
 function planFileName(plan: Plan): string {
@@ -147,6 +157,8 @@ export const PlanTool = memo(function PlanTool({
         await defaultApprove(plan, markdown);
       }
       setIsApproved(true);
+    } catch {
+      // Not sent: the plan stays awaiting approval, with Approve to try again.
     } finally {
       setIsSending(false);
     }

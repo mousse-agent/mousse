@@ -78,6 +78,8 @@ export class ScheduledWebhookServer {
   private port: number | null = null
   private closing = false
   private stopping: Promise<void> | null = null
+  /** Bumped by every start and stop, so a bind that finishes after a later stop or start closes its own listener. */
+  private generation = 0
   private readonly inFlight = new Set<Promise<void>>()
 
   constructor(
@@ -94,6 +96,7 @@ export class ScheduledWebhookServer {
   async start(port: number): Promise<void> {
     if (this.server && this.port !== null && !this.closing && (port === 0 || this.port === port)) return
     if (this.server || this.stopping) await this.stop()
+    const generation = ++this.generation
     this.closing = false
     const server = createServer((req, res) => {
       const work = this.handle(req, res).catch(() => this.send(res, 500, { error: 'internal' }))
@@ -118,6 +121,11 @@ export class ScheduledWebhookServer {
       throw error
     }
     server.on('error', () => undefined)
+    if (generation !== this.generation || this.closing) {
+      // A stop (or a newer start) came while this one was binding: this listener is not wanted.
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      return
+    }
     const address = server.address()
     this.server = server
     this.port = typeof address === 'object' && address ? address.port : port
@@ -126,6 +134,7 @@ export class ScheduledWebhookServer {
   /** Stops accepting requests at once, then waits for the ones in flight. Calling it again joins the first stop. */
   stop(): Promise<void> {
     this.closing = true
+    this.generation += 1
     if (!this.stopping) {
       this.stopping = this.closeServer().finally(() => {
         this.stopping = null

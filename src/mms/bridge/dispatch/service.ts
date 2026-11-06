@@ -418,23 +418,30 @@ export class DispatchService {
 
   /** Startup reconciliation never invokes the model or republishes a result. */
   async recover(): Promise<void> {
-    const rows = this.options.db.database
-      .prepare("SELECT record FROM net_dispatches WHERE phase!='complete' ORDER BY id LIMIT 100")
-      .all()
-    for (const row of rows) {
-      const record = JSON.parse(String(row.record)) as DispatchRecord
-      if (this.active.has(record.execution)) continue
-      if (record.state === 'accepted') {
-        record.state = 'failed'
-        record.error = 'cancelled'
-        this.save(record)
-        await this.cleanup(record)
-      } else if (record.state === 'running') {
-        record.state = 'uncertain'
-        record.error = 'outcome_uncertain'
-        this.save(record)
-      } else if (record.state === 'completed' || record.state === 'failed')
-        await this.cleanup(record)
+    // Uncertain dispatches stay as they are for the owner, so they are not read; the rest is read a page at a time,
+    // past every row already seen, so rows whose cleanup keeps failing cannot hide the ones after them.
+    const page = this.options.db.database.prepare(
+      "SELECT id, record FROM net_dispatches WHERE phase!='complete' AND state!='uncertain' AND id>? ORDER BY id LIMIT 100"
+    )
+    for (let after = ''; ; ) {
+      const rows = page.all(after)
+      for (const row of rows) {
+        const record = JSON.parse(String(row.record)) as DispatchRecord
+        if (this.active.has(record.execution)) continue
+        if (record.state === 'accepted') {
+          record.state = 'failed'
+          record.error = 'cancelled'
+          this.save(record)
+          await this.cleanup(record)
+        } else if (record.state === 'running') {
+          record.state = 'uncertain'
+          record.error = 'outcome_uncertain'
+          this.save(record)
+        } else if (record.state === 'completed' || record.state === 'failed')
+          await this.cleanup(record)
+      }
+      if (rows.length < 100) return
+      after = String(rows[rows.length - 1]!.id)
     }
   }
   async drainCleanup(): Promise<void> {

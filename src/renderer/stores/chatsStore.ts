@@ -12,6 +12,8 @@ interface ChatsState {
   conversation: ChatConversation | null
   activeChatId: string | null
   error: string | null
+  /** What set `error`: a background refresh clears only its own, never an action's. */
+  errorSource: 'refresh' | 'action' | null
   loading: boolean
   newChatOpen: boolean
   newChatKind: 'direct' | 'group'
@@ -46,8 +48,10 @@ function retainLoadedPages(current: ChatConversation | null, fresh: ChatConversa
     nextAfter: held.cursor.seq < next.head.seq ? held.cursor : undefined } }
 }
 const errorText = (error: unknown) => error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error)
+/** The error of something the person did, which a later background refresh leaves on screen. */
+export const actionError = (error: unknown, prefix = '') => ({ error: `${prefix}${errorText(error)}`, errorSource: 'action' as const })
 export const useChatsStore = create<ChatsState>((set, get) => ({
-  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, error: null,
+  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, errorSource: null,
   loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
@@ -55,7 +59,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     pendingSends.clear()
     pendingPublications.clear()
     refreshOperation = undefined
-    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, loading: false,
+    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, errorSource: null, loading: false,
       newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
   },
   async refresh() {
@@ -65,7 +69,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       try {
         const snapshot = await window.mousse.platformRequest.request<ChatsSnapshot>('chats.snapshot', {})
         if (owner !== epoch) return
-        set({ snapshot, error: null })
+        set({ snapshot, ...(get().errorSource === 'refresh' ? { error: null, errorSource: null } : {}) })
         const chatId = get().activeChatId
         if (chatId) {
           const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
@@ -74,7 +78,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       } catch (error) {
         if (owner === epoch) {
           const denied = ['forbidden', 'not_member', 'revoked', 'bad_delegation', 'keystore_locked', 'not_enrolled', 'profile_mismatch', 'chat_not_found', 'cancelled', 'disabled'].includes(String((error as { code?: unknown })?.code ?? ''))
-          set({ error: errorText(error), ...(denied && get().conversation?.network ? { conversation: null } : {}) })
+          set({ error: errorText(error), errorSource: 'refresh', ...(denied && get().conversation?.network ? { conversation: null } : {}) })
         }
       }
     })()
@@ -86,16 +90,16 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     const owner = epoch
     useAppStore.getState().setThreadsSidebarView('chats')
     useAppStore.getState().setSidebarMode('chats')
-    set({ activeChatId: chatId, conversation: null, error: null, loading: true })
+    set({ activeChatId: chatId, conversation: null, error: null, errorSource: null, loading: true })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
       if (owner === epoch && get().activeChatId === chatId) set({ conversation, loading: false })
-    } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ error: errorText(error), loading: false }) }
+    } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ ...actionError(error), loading: false }) }
   },
   async create(input) {
     if (!await confirmNavigation()) return
-    const owner = epoch
-    set({ loading: true, error: null })
+    const owner = epoch, from = get().activeChatId
+    set({ loading: true, error: null, errorSource: null })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.create', input)
       if (owner !== epoch) return
@@ -103,13 +107,13 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       useAppStore.getState().setThreadsSidebarView('chats')
       useAppStore.getState().setSidebarMode('chats')
       await get().refresh()
-    } catch (error) { if (owner === epoch) set({ loading: false, error: errorText(error) }) }
+    } catch (error) { if (owner === epoch && get().activeChatId === from) set({ loading: false, ...actionError(error) }) }
   },
   async send(text, mentions) {
     const chatId = get().activeChatId
     if (!chatId) return
     const owner = epoch
-    set({ loading: true, error: null })
+    set({ loading: true, error: null, errorSource: null })
     try {
       const pending = pendingSends.get(chatId)
       const selection = mentions ? [...mentions].sort() : undefined
@@ -121,7 +125,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       get().setDraft(chatId, '')
       if (get().activeChatId === chatId) set({ conversation, loading: false })
       await get().refresh()
-    } catch (error) { if (owner === epoch) set({ loading: false, error: errorText(error) }) }
+    } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ loading: false, ...actionError(error) }) }
   },
   async publish() {
     const conversation = get().conversation
@@ -129,20 +133,20 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     const owner = epoch, chatId = conversation.id
     const publicationId = pendingPublications.get(chatId) ?? crypto.randomUUID()
     pendingPublications.set(chatId, publicationId)
-    set({ loading: true, error: null })
+    set({ loading: true, error: null, errorSource: null })
     try {
       await window.mousse.platformRequest.request<ChatNetworkBinding>('chats.publish', { chatId, publicationId })
       if (owner !== epoch) return
       pendingPublications.delete(chatId)
       await get().refresh()
       if (owner === epoch) set({ loading: false })
-    } catch (error) { if (owner === epoch) set({ loading: false, error: `Publication needs checking: ${errorText(error)}` }) }
+    } catch (error) { if (owner === epoch) set({ loading: false, ...actionError(error, 'Publication needs checking: ') }) }
   },
   async loadMore() {
     const conversation = get().conversation, network = conversation?.network
     if (!conversation || !network?.nextAfter || get().loading) return
     const owner = epoch, chatId = conversation.id, binding = network.binding.publicationId
-    set({ loading: true, error: null })
+    set({ loading: true, error: null, errorSource: null })
     try {
       const page = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId, after: network.nextAfter, limit: 128 })
       const current = get().conversation
@@ -152,7 +156,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       const records = [...network.records, ...page.network.records]
       if (records.length > 2048) throw new Error('This view has reached 2,048 records. Refresh to start a new page.')
       set({ conversation: { ...page, network: { ...page.network, records } }, loading: false })
-    } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ loading: false, error: errorText(error) }) }
+    } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ loading: false, ...actionError(error) }) }
   },
   async cancel() {
     const conversation = get().conversation
@@ -161,7 +165,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     try {
       const next = await window.mousse.platformRequest.request<ChatConversation>('chats.cancel', { chatId: conversation.id, runId: conversation.run.id })
       if (owner === epoch && get().activeChatId === conversation.id) set({ conversation: next })
-    } catch (error) { if (owner === epoch) set({ error: errorText(error) }) }
+    } catch (error) { if (owner === epoch && get().activeChatId === conversation.id) set(actionError(error)) }
   },
   setDraft(chatId, draft) { set((state) => ({ drafts: { ...state.drafts, [chatId]: draft } })) }
 }))

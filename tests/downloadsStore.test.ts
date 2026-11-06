@@ -181,3 +181,37 @@ describe('downloads store lingering', () => {
     expect(ids()).toEqual(['update:failed'])
   })
 })
+
+describe('downloads store subscription', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  it('does not bring back a finished download when the first model list arrives late', async () => {
+    vi.resetModules()
+    const store = await import('../src/renderer/stores/downloadsStore')
+    let listeners: Array<(status: ReturnType<typeof downloading> | { modelId: string; state: { status: 'downloaded' } }) => void> = []
+    let replyList!: (list: unknown[]) => void
+    const dictation = {
+      localModels: () => new Promise<unknown[]>((resolve) => (replyList = resolve)),
+      downloadLocalModel: vi.fn(),
+      cancelLocalModelDownload: vi.fn(),
+      onLocalModelStatus: (listener: (typeof listeners)[number]) => {
+        listeners.push(listener)
+        return () => { listeners = listeners.filter((entry) => entry !== listener) }
+      }
+    }
+    vi.stubGlobal('window', { mousse: { dictation } })
+    store.subscribeToDownloads()
+    expect(replyList).toBeTypeOf('function')
+    for (const listener of listeners) listener(downloading('moonshine-base', 5, 10))
+    for (const listener of listeners) listener({ modelId: 'moonshine-base', state: { status: 'downloaded' } })
+    // The list was read before the download finished.
+    replyList([downloading('moonshine-base', 3, 10)])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const entries = store.useDownloadsStore.getState().entries.map((entry) => `${entry.id}:${entry.phase}`)
+    expect(entries).toEqual(['dictation-model:moonshine-base:done'])
+    store.resetDownloadsStore()
+  })
+})
