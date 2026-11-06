@@ -710,6 +710,8 @@ export interface ChatMessage {
     | 'warning'
     /** Presentation-only marker emitted when retained model context is compacted. */
     | 'context_compaction'
+    /** Presentation-only divider where `/clear` started the model context again. */
+    | 'context_cleared'
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
@@ -813,6 +815,8 @@ export interface OrchestratorResponse {
    */
   queued?: boolean
   queueItem?: QueuedMessage
+  /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
+  heldByPause?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
@@ -1291,6 +1295,11 @@ export interface NativeLlmContext {
   /** Steer queue IDs whose content has been checkpointed into native history. */
   acceptedSteerItemIds?: string[]
   compaction?: NativeCompactionCheckpoint
+  /**
+   * Where the last `/clear` started the context again: the messages before it are kept for the record
+   * and Undo, and compaction never reads them back.
+   */
+  clearedAtIndex?: number
   /** Actual model capacity reported by a native provider, retained across compaction. */
   nativeProviderModel?: {
     /** `llmProvider` of the runtime that reported this capacity. */

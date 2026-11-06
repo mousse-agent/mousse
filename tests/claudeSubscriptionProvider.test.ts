@@ -268,6 +268,41 @@ describe('Claude Subscription native provider', () => {
     }
     expect(JSON.stringify(settings())).not.toContain('secret')
   })
+  it('/compact resumes the saved session with the focus and keeps it resumable', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const boundary = { type: 'system', subtype: 'compact_boundary', session_id: 'vendor-session', compact_metadata: { trigger: 'manual', pre_tokens: 1000 } }
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery(input.prompt === '/compact keep the test names' ? [boundary, result] : [result])
+    })
+    const signal = new AbortController().signal
+    await service.chat(chatInput(home))
+    service.commitConversation('thread', 'history')
+    // Another history (an undo since) or another instance: nothing native to compact.
+    expect(await service.compactConversation('thread', 'other history', undefined, undefined, signal)).toBe(false)
+    expect(await service.compactConversation('thread', 'history', 'claude-work', undefined, signal)).toBe(false)
+    expect(inputs).toHaveLength(1)
+
+    expect(await service.compactConversation('thread', 'history', undefined, 'keep the test names', signal)).toBe(true)
+    expect(inputs[1].options.resume).toBe('vendor-session')
+    expect(inputs[1].options.model).toBe('sonnet')
+    const denied = await inputs[1].options.canUseTool!('Bash', {}, { signal, suggestions: [], toolUseID: 'x' } as never)
+    expect(denied.behavior).toBe('deny')
+    // The session keeps its fingerprint: the next turn resumes the compacted session.
+    await service.chat({ ...chatInput(home), history: 'history' })
+    expect(inputs[2].options.resume).toBe('vendor-session')
+  })
+  it('/compact reports nothing compacted when Claude Code made no compact boundary', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([result])
+    })
+    await service.chat(chatInput(home))
+    service.commitConversation('thread', 'history')
+    expect(await service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)).toBe(false)
+    expect(inputs[1].prompt).toBe('/compact')
+  })
   it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const { service, home, settings } = fixture((input) => {

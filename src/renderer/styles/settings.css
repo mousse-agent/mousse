@@ -610,6 +610,29 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
   min-width: 0;
 }
 
+/* Compact context: the field, then one muted line under it (where the default model compacts, or
+   why the typed size was not saved). The line sits close to its field (4). */
+.settings-compaction {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.settings-compaction-note {
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.settings-compaction-note.invalid {
+  color: var(--danger);
+}
+
 /* Controls: one height, one radius, one text size. Buttons beside a group
    heading (.settings-group-action) match the row controls. */
 .settings-group-rows .settings-select,

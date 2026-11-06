@@ -47,6 +47,52 @@
   opacity: 0.55;
 }
 
+/* Editable select (components/ui/ComboBox.tsx): the same field, but it takes typing. */
+.ui-combobox {
+  padding-right: 2px;
+  cursor: text;
+}
+
+.ui-combobox:focus-within:not(.open) {
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-combobox.invalid {
+  border-color: var(--danger);
+}
+
+.ui-combobox.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.ui-combobox-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+
+.ui-combobox-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
+.ui-select-chevron-hit {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 100%;
+  cursor: pointer;
+}
+
 .ui-select-value {
   flex: 1;
   min-width: 0;

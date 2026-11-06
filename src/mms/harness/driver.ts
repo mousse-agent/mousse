@@ -189,6 +189,17 @@ export interface OneShotSpec {
 /** What a one-shot writes on the title model: a chat title, a pull request draft or a commit message. */
 export type OneShotTask = 'title' | 'pull_request' | 'commit_message'
 
+/** What `/compact` asks a runtime: the thread, the history its native session must hold, and an optional focus. */
+export interface NativeCompactRequest {
+  threadId: string
+  /** The thread's canonical history (`nativeAgentHistory`), as the last turn committed it. */
+  history: string
+  instanceId: string
+  /** What the summary should keep, in the user's words. */
+  focus?: string
+  signal: AbortSignal
+}
+
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
@@ -304,6 +315,11 @@ export interface DriverRuntime {
   validateOverride?(path: string): void
   /** Forget the native session of a thread so its next turn hands history over instead. */
   forgetConversation?(threadId: string): void
+  /**
+   * `/compact`: the runtime's own compaction of the thread's native session, outside a turn. False when no
+   * native session holds `history` or the runtime compacted nothing; Mousse then compacts its own copy.
+   */
+  compactConversation?(request: NativeCompactRequest): Promise<boolean>
   /**
    * Kills the processes serving `ref` (the whole tree). The gateway calls it when a native cancel
    * misses its deadline (`supervise.interruptWithDeadline`); the live turn then ends as interrupted.

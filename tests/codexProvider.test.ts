@@ -341,7 +341,7 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown' } = {}) {
     let threads = 0
     const server = scriptedServer((message) => {
       const method = message.method!
@@ -353,6 +353,13 @@ describe('CodexProviderService options (managed Codex)', () => {
         const threadId = (message.params as { threadId: string }).threadId
         if (turn) setImmediate(() => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-1', error: null, ...turn } } }) + '\n'))
         return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+      }
+      if (method === 'thread/compact/start') {
+        const turn = options.compact ? options.compact() : { status: 'completed' as const }
+        if (turn === 'unknown') return { error: { code: -32601, message: 'unknown method' } }
+        const threadId = (message.params as { threadId: string }).threadId
+        setImmediate(() => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-c', error: null, ...turn } } }) + '\n'))
+        return { result: {} }
       }
       if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
       return { result: {} }
@@ -411,6 +418,53 @@ describe('CodexProviderService options (managed Codex)', () => {
     // A level saved for another model runs at this model's default: no effort is sent.
     await chat(service, { model: 'gpt-x:max', history: 'h' })
     expect(server.requests('turn/start').map((message) => (message.params as { effort?: string }).effort)).toEqual(['ultra', undefined])
+  })
+
+  describe('/compact', () => {
+    const compact = (service: CodexProviderService, history: string) =>
+      service.compactConversation('t', history, undefined, new AbortController().signal)
+
+    it('compacts the saved Codex thread, which the next turn resumes', async () => {
+      const server = turnServer()
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      expect(await compact(service, 'h')).toBe(true)
+      expect(server.requests('thread/compact/start').map((message) => message.params)).toEqual([{ threadId: 'thr-1' }])
+      await chat(service, { history: 'h' })
+      expect(server.requests('thread/start')).toHaveLength(1)
+    })
+
+    it('resumes a thread that is not loaded, compacts it and lets it go', async () => {
+      const server = turnServer()
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      await service.stopAll('test')
+      expect(await compact(service, 'h')).toBe(true)
+      const threadCalls = ['thread/start', 'thread/resume', 'thread/compact/start', 'thread/unsubscribe']
+      expect(server.methods().filter((method) => threadCalls.includes(method ?? ''))).toEqual(threadCalls)
+    })
+
+    it('leaves it to Mousse when no saved thread holds the history or Codex has no compaction', async () => {
+      const server = turnServer({ compact: () => 'unknown' })
+      const service = create(server)
+      expect(await compact(service, 'h')).toBe(false)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      expect(await compact(service, 'other')).toBe(false)
+      expect(server.requests('thread/compact/start')).toHaveLength(0)
+      expect(await compact(service, 'h')).toBe(false)
+      expect(server.requests('thread/compact/start')).toHaveLength(1)
+    })
+
+    it('fails when Codex reports the compaction failed', async () => {
+      const server = turnServer({ compact: () => ({ status: 'failed', error: { message: 'context too small' } }) })
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      await expect(compact(service, 'h')).rejects.toThrow('context too small')
+    })
   })
 
   it('managed pins its own provider on start, fork and resume, and never reads the account from Codex', async () => {

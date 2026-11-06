@@ -1,24 +1,51 @@
 import type { ChatReference } from './chatReferences'
 
+/** Whether a command takes text after its name: never, if given, or always. */
+export type ComposerCommandArgument = 'none' | 'optional' | 'required'
+
 export interface ComposerCommandDef {
   name: string
+  /** The one-line hint the `/` picker shows. */
   description: string
   category: string
+  argument: ComposerCommandArgument
   aliases?: string[]
   argsHint?: string
+  /** Only the desktop composer runs it; other devices are not offered it. */
+  desktopOnly?: boolean
 }
 
 /**
  * The slash commands the chat composer suggests. The composer handles each itself before a
- * message is sent (`OrchestratorChat`); `composer.options` offers the same list to other devices.
+ * message is sent (`renderer/lib/slashCommands.ts`); `composer.options` offers the ones other
+ * devices can run.
  */
 export const COMPOSER_COMMANDS: ComposerCommandDef[] = [
-  { name: 'new', description: 'Start a new thread', category: 'Session', argsHint: '[title]' },
-  { name: 'usage', description: 'Open subscription usage', category: 'Info' },
-  { name: 'stop', description: 'Stop the running turn', category: 'Session' },
-  { name: 'steer', description: 'Inject guidance mid-turn (after the next tool call)', category: 'Session', argsHint: '<prompt>' },
-  { name: 'skills', description: 'Pick a skill to use as the chat mode', category: 'Session', argsHint: '[filter]' }
+  { name: 'new', description: 'Start a new thread', category: 'Session', argument: 'optional', argsHint: '[title]' },
+  { name: 'clear', description: 'Start a fresh session in this thread', category: 'Session', argument: 'none', desktopOnly: true },
+  { name: 'compact', description: 'Summarize the context now', category: 'Session', argument: 'optional', argsHint: '[focus]', desktopOnly: true },
+  { name: 'fork', description: 'Fork this thread into a new one', category: 'Session', argument: 'none', desktopOnly: true },
+  { name: 'rename', description: 'Rename this thread', category: 'Session', argument: 'optional', argsHint: '<title>', desktopOnly: true },
+  { name: 'usage', description: 'Open subscription usage', category: 'Info', argument: 'none' },
+  { name: 'stop', description: 'Stop the running turn', category: 'Session', argument: 'optional' },
+  { name: 'steer', description: 'Inject guidance mid-turn (after the next tool call)', category: 'Session', argument: 'required', argsHint: '<prompt>' },
+  { name: 'skills', description: 'Pick a skill to use as the chat mode', category: 'Session', argument: 'optional', argsHint: '[filter]' }
 ]
+
+/** A composer value that names a known command: `/name` and the text after it, trimmed. */
+export interface ParsedComposerCommand {
+  command: ComposerCommandDef
+  argument: string
+}
+
+/** The known command a composer value starts with, or null for ordinary text. Names match in any case. */
+export function parseComposerCommand(text: string): ParsedComposerCommand | null {
+  const match = /^\/([a-z][\w-]*)(?:\s+([\s\S]*))?$/i.exec(text.trim())
+  if (!match) return null
+  const name = match[1].toLowerCase()
+  const command = COMPOSER_COMMANDS.find((entry) => entry.name === name || entry.aliases?.includes(name))
+  return command ? { command, argument: (match[2] ?? '').trim() } : null
+}
 
 function matchesCommandQuery(command: ComposerCommandDef, query: string): boolean {
   const names = [command.name, ...(command.aliases ?? [])]
