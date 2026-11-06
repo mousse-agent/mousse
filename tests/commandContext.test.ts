@@ -47,7 +47,7 @@ describe('commandContextFromDom overlay', () => {
 
   it('is the top of the stack', () => {
     expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['model-picker'] }).overlay).toBe('model-picker')
-    expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['thread-search', 'palette'] }).overlay).toBe('palette')
+    expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['model-picker', 'palette'] }).overlay).toBe('palette')
   })
 
   it('lets an open dialog win over a picker beneath it', () => {

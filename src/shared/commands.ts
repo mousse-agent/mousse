@@ -45,7 +45,7 @@ export type CommandId =
 export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workflow-editor'
 
 /** The kind of overlay that is topmost. While one is open it owns the keyboard. */
-export type OverlayScope = 'modal' | 'palette' | 'thread-search' | 'model-picker'
+export type OverlayScope = 'modal' | 'palette' | 'model-picker'
 
 export type CommandCategory = 'Thread' | 'View' | 'Go' | 'Surfaces' | 'Model picker' | 'Workflow editor' | 'Editor'
 

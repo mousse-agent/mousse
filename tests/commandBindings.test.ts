@@ -281,9 +281,6 @@ describe('resolveCommand', () => {
     expect(resolve('Ctrl+Shift+Backspace', palette)).toBe('run.stop')
     expect(resolve('Ctrl+N', palette)).toBeNull()
 
-    const search = context({ overlay: 'thread-search' })
-    expect(resolve('Ctrl+K', search)).toBeNull()
-    expect(resolve('Ctrl+Shift+Backspace', search)).toBe('run.stop')
   })
 
   it('applies each command\'s own condition', () => {
@@ -497,7 +494,7 @@ describe('the command table', () => {
       expect(resolve(spec, context({ inFilesPanel: false }))).toBeNull()
       expect(resolve(spec, context())).toBeNull()
       expect(resolve(spec, context({ inFilesPanel: true, inTerminal: true }))).toBeNull()
-      for (const overlay of ['palette', 'thread-search', 'modal', 'model-picker'] as const) {
+      for (const overlay of ['palette', 'modal', 'model-picker'] as const) {
         expect(resolve(spec, context({ inFilesPanel: true, overlay }))).toBeNull()
       }
     }
@@ -527,7 +524,7 @@ describe('the command table', () => {
     expect(resolve('Ctrl+F', context({ inTextInput: true }))).toBe('chat.findInThread')
     expect(resolve('Ctrl+F', context({ inTerminal: true }))).toBeNull()
     expect(resolve('Ctrl+F', context({ threadOpen: false }))).toBeNull()
-    for (const overlay of ['palette', 'thread-search', 'modal', 'model-picker'] as const) {
+    for (const overlay of ['palette', 'modal', 'model-picker'] as const) {
       expect(resolve('Ctrl+F', context({ overlay }))).toBeNull()
     }
     expect(resolveCommand(press('Meta+F'), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('chat.findInThread')

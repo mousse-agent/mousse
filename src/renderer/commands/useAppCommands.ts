@@ -3,7 +3,7 @@ import { openSurface } from '../lib/surfaces'
 import { createAndSelectThread, selectAdjacentThread } from '../lib/threadActions'
 import { useAppStore } from '../stores/appStore'
 import { useCommand } from './commandRegistry'
-import { togglePalette } from './paletteActions'
+import { openPalette, togglePalette } from './paletteActions'
 
 /**
  * Registers the commands that act on app-wide state. Commands that belong to one component
@@ -15,7 +15,7 @@ export function useAppCommands(): void {
   useCommand('thread.new', () => void createAndSelectThread())
   useCommand('thread.next', () => void selectAdjacentThread(1))
   useCommand('thread.previous', () => void selectAdjacentThread(-1))
-  useCommand('threads.search', () => useAppStore.getState().setThreadSearchOpen(true))
+  useCommand('threads.search', () => openPalette('messages'))
   useCommand('sideCard.toggle', () => {
     const state = useAppStore.getState()
     const { visible, mode } = deriveSideCardState(state)
