@@ -175,17 +175,18 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           onClose={() => setRemoteDialog(false)}
         />
       )}
-      <button
+      {/* A worktree is of a project: with no project picked there is nothing to toggle. */}
+      {workspace.projectId ? <button
         type="button"
         className={`composer-icon-btn composer-workspace-worktree${worktreeEnabled ? ' active' : ''}`}
-        title={!workspace.projectId ? 'Select a project to start in a worktree' : `Worktree: ${worktreeEnabled ? 'On' : 'Off'}`}
+        title={`Worktree: ${worktreeEnabled ? 'On' : 'Off'}`}
         aria-label="Start in a worktree"
         aria-pressed={worktreeEnabled}
-        disabled={disabled || opening || !workspace.projectId}
+        disabled={disabled || opening}
         onClick={() => onChange({ ...workspace, worktreeEnabled: !worktreeEnabled })}
       >
         <GitBranch size={16} strokeWidth={1.8} aria-hidden="true" />
-      </button>
+      </button> : null}
     </div>
   )
 }

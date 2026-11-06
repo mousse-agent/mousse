@@ -71,7 +71,7 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
-import { composerAutoModel, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
+import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
@@ -222,6 +222,8 @@ export function OrchestratorChat() {
   )
   const remoteNodeRef = useRef(remoteNode)
   remoteNodeRef.current = remoteNode
+  const providersRef = useRef(providers)
+  providersRef.current = providers
   // `@` mentions search the thread's own checkout, or the project picked for a blank composer. The
   // project of a draft for another computer is named by its qualified id, which the daemon routes.
   const mentionProjectId = workspace.projectId
@@ -243,10 +245,11 @@ export function OrchestratorChat() {
     const provider = providers.find((entry) => entry.id === pickerId)
     return provider ? { ...(provider.instanceId ? { instanceId: provider.instanceId } : {}), llmProvider: provider.llmProvider } : { llmProvider: pickerId }
   }
-  const [selectedLlmProvider, setSelectedLlmProvider] = useState('')
-  const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>(undefined)
+  // A thread with a model shows it from the first paint, before settings are read.
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState(() => activeThreadModelOverride?.llmProvider ?? '')
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>(() => activeThreadModelOverride?.instanceId)
   const selectedProviderId = pickerIdFor({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider }, providers)
-  const [selectedModelId, setSelectedModelId] = useState('')
+  const [selectedModelId, setSelectedModelId] = useState(() => activeThreadModelOverride ? pickerModelId(activeThreadModelOverride) : '')
   // The profile's default model, once settings are read; undefined until then.
   const [profileDefault, setProfileDefault] = useState<PickerSelection | undefined>(undefined)
   // With no thread model and no default the picker offers, the composer starts on the first ready
@@ -557,7 +560,8 @@ export function OrchestratorChat() {
         ? current
         : compaction
     )
-    const selectedModel = activeThreadModelOverride ?? settings.provider
+    // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
+    const selectedModel = composerSelection({ threadModel: activeThreadModelOverride, profileDefault: settings.provider, providers: providersRef.current })
     setProfileDefault((current) =>
       current?.llmProvider === settings.provider.llmProvider &&
       current.instanceId === settings.provider.instanceId &&
@@ -566,7 +570,7 @@ export function OrchestratorChat() {
         : { ...settings.provider }
     )
     // The picker shows the other computer's model while a chat that runs there is open.
-    if (!remoteNodeRef.current) {
+    if (!remoteNodeRef.current && selectedModel) {
       setSelectedLlmProvider(selectedModel.llmProvider)
       setSelectedInstanceId(selectedModel.instanceId)
       setSelectedModelId(pickerModelId(selectedModel))
@@ -593,8 +597,6 @@ export function OrchestratorChat() {
   const remoteDefaultKey = remoteDefault ? JSON.stringify(remoteDefault) : ''
   const remoteDefaultRef = useRef(remoteDefault)
   remoteDefaultRef.current = remoteDefault
-  const providersRef = useRef(providers)
-  providersRef.current = providers
   const shownSelectionRef = useRef('')
   shownSelectionRef.current = selectionKey({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider, pickerId: selectedModelId })
   const remoteAppliedRef = useRef<{ context: string; shown: string } | undefined>(undefined)

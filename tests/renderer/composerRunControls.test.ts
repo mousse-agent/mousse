@@ -2,8 +2,10 @@
 import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
+import * as icons from '../../src/renderer/lib/icons'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { LlmModelOption } from '../../src/shared/settings'
@@ -63,7 +65,8 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
 const modelButton = () => host.querySelector<HTMLButtonElement>('.composer-model-btn')!
 /** The reasoning column beside the model list (not its hidden sizing copy). */
 const column = () => document.querySelector<HTMLElement>('.model-picker-run-settings')
-const columnModel = () => column()!.querySelector('.model-picker-run-model')!.textContent
+/** The model whose levels the column shows, as its menu is named for screen readers. */
+const columnModel = () => column()!.getAttribute('aria-label')!.replace(/^Reasoning for /, '')
 const levelItems = () => [...column()!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
 const levels = () => levelItems().map((item) => item.textContent)
 const level = (name: string) => levelItems().find((item) => item.textContent!.startsWith(name))!
@@ -74,10 +77,15 @@ const speeds = () => [...document.querySelectorAll<HTMLElement>('.model-picker-f
 const permissionButton = () => host.querySelector<HTMLButtonElement>('.composer-permission-chip')!
 const permissionMenu = () => document.querySelector<HTMLElement>('.composer-permission-menu')
 const openPermissions = () => act(() => permissionButton().click())
-const modes = () => [...permissionMenu()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission')]
-const lineItems = () => [...permissionMenu()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission-line-item')]
-/** The one line shown: the chosen mode's, or the hovered or focused one's. */
-const line = () => lineItems().filter((item) => !item.classList.contains('is-hidden')).map((item) => item.textContent).join('|')
+const modes = () => [...permissionMenu()!.querySelectorAll<HTMLElement>('.composer-permission-mode')]
+const modeName = (mode: Element) => mode.querySelector('.composer-permission-mode-name')!.textContent
+const modeLine = (mode: Element) => mode.querySelector('.composer-permission-mode-desc')!.textContent
+const modeNames = () => modes().map(modeName)
+/** Makes `host` the composer box, 640px wide, as the footer sits in it in the app. */
+const asComposer = () => {
+  host.className = 'composer'
+  host.getBoundingClientRect = () => ({ x: 0, y: 500, top: 500, left: 0, right: 640, bottom: 600, width: 640, height: 100, toJSON: () => ({}) })
+}
 const row = (name: string) => [...document.querySelectorAll<HTMLElement>('.model-picker-row')].find((entry) => entry.querySelector('.model-picker-row-title')!.textContent === name)!
 const search = () => document.querySelector<HTMLInputElement>('.model-picker-search input')!
 const key = (target: Element, name: string, init: KeyboardEventInit = {}) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...init })) })
@@ -120,7 +128,8 @@ describe('composer model picker', () => {
     expect([...document.querySelectorAll('.model-picker-row-title')].map((title) => title.textContent)).toEqual(['Opus 5.5', 'Sonnet 5', 'Plain 1'])
     // The selected model carries a check, the others an empty slot.
     expect([...document.querySelectorAll('.model-picker-row-check')].map((check) => Boolean(check.querySelector('svg')))).toEqual([true, false, false])
-    expect(column()!.querySelector('.model-picker-run-title')!.textContent).toBe('Reasoning')
+    // The header says only "Reasoning": the checked row already names the model.
+    expect(column()!.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
     expect(columnModel()).toBe('Opus 5.5')
     expect(levels()).toEqual(['Low', 'MediumDefault', 'High', 'Extra high', 'Max', 'Ultracode'])
     expect(checkedLevel()).toBe('High')
@@ -246,21 +255,25 @@ describe('composer model picker', () => {
     expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 High')
   })
 
-  it('keeps the picker one fixed box whatever is inside it', () => {
+  it('fits the picker to its rows, above the composer and no wider than it', () => {
+    // The picker anchors to the composer box, not to the model button.
+    asComposer()
+    // Opened from the button, as in the app: the composer is there before the picker measures it.
+    render({ open: false })
     render()
     const panel = () => document.querySelector('.model-picker-panel')!
     expect(panel().classList.contains('is-fixed')).toBe(true)
+    expect(document.querySelector<HTMLElement>('.model-picker-shell')!.style.getPropertyValue('--floating-anchor-width')).toBe('640px')
     // A search with no results keeps the column (its header alone) in place.
     type('nothing like this')
     expect(document.querySelectorAll('.model-picker-row')).toHaveLength(0)
-    expect(panel().classList.contains('is-fixed')).toBe(true)
     expect(document.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
-    // The box's size comes from the stylesheet alone: a fixed width and height, the list and column scrolling inside.
+    // The stylesheet caps the width at the composer's and the height at eight rows; below that the box takes its content's height.
     const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
     const rule = css.slice(css.indexOf('.model-picker-panel.is-fixed {'), css.indexOf('}', css.indexOf('.model-picker-panel.is-fixed {')))
-    expect(rule).toMatch(/\n  width: min\(720px, calc\(100vw - 48px\)\);/)
-    expect(rule).toMatch(/\n  height: min\(440px, calc\(100vh - 16px\)\);/)
-    expect(rule).not.toMatch(/fit-content|max-content|min-content|auto/)
+    expect(rule).toMatch(/\n  width: min\(720px, var\(--floating-anchor-width, 720px\), calc\(100vw - 48px\)\);/)
+    expect(rule).toMatch(/\n  max-height: min\(440px, calc\(100vh - 16px\)\);/)
+    expect(rule).not.toMatch(/\n  height:/)
   })
 
   it('keeps a long model name to one line, with the full name in the tooltip', () => {
@@ -296,7 +309,7 @@ describe('composer model picker', () => {
     expect(document.querySelector('.model-picker-run')).toBeNull()
     expect(speeds()).toHaveLength(0)
     expect(footer()).toBeNull()
-    expect(document.querySelector('.composer-model-picker-shell .composer-run-menu-permission, .model-picker-shell .composer-run-menu-permission')).toBeNull()
+    expect(document.querySelector('.composer-model-picker-shell .composer-permission-mode, .model-picker-shell .composer-permission-mode')).toBeNull()
   })
 
   it('moves through models, into their levels and on to the footer with the keyboard', () => {
@@ -332,6 +345,21 @@ describe('composer model picker', () => {
     expect(document.activeElement!.textContent).toBe('Standard')
   })
 
+  it('draws Auto-accept edits as a file with a tick, in the chip and the menu, not the pencil', () => {
+    render({ mode: 'accept_edits', open: false })
+    const paths = (svg: Element | null) => [...(svg?.querySelectorAll('path') ?? [])].map((path) => path.getAttribute('d')).join('|')
+    const markup = (Icon: typeof icons.Pencil) => {
+      const box = document.createElement('div')
+      box.innerHTML = renderToStaticMarkup(createElement(Icon))
+      return paths(box.querySelector('svg'))
+    }
+    expect(paths(permissionButton().querySelector('svg'))).toBe(markup(icons.FileApproved))
+    expect(markup(icons.FileApproved)).not.toBe(markup(icons.Pencil))
+    openPermissions()
+    const row = modes().find((mode) => modeName(mode) === 'Auto-accept edits')!
+    expect(paths(row.querySelector('svg.composer-permission-mode-icon'))).toBe(markup(icons.FileApproved))
+  })
+
   it('shows the mode as a chip left of the model button, opens the modes in one click, and closes on Escape back to the chip', () => {
     const { onModelMenuOpenChange } = render({ mode: 'ask', open: false })
     const controls = [...host.querySelectorAll<HTMLButtonElement>('.composer-footer-left button')]
@@ -343,12 +371,16 @@ describe('composer model picker', () => {
     openPermissions()
     expect(permissionButton().getAttribute('aria-expanded')).toBe('true')
     expect(permissionMenu()!.getAttribute('role')).toBe('menu')
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
-    // Tab cycles through the modes without leaving the menu.
+    expect(modeName(document.activeElement!)).toBe('Ask before acting')
+    // Tab cycles through the modes without leaving the menu; Up and Down move between the rows.
     key(document.activeElement!, 'Tab', { shiftKey: true })
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Full access')
+    expect(modeName(document.activeElement!)).toBe('Full access')
     key(document.activeElement!, 'Tab')
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
+    expect(modeName(document.activeElement!)).toBe('Ask before acting')
+    key(document.activeElement!, 'ArrowDown')
+    expect(modeName(document.activeElement!)).toBe('Auto-accept edits')
+    key(document.activeElement!, 'ArrowUp')
+    expect(modeName(document.activeElement!)).toBe('Ask before acting')
     key(document.activeElement!, 'Escape')
     expect(permissionMenu()).toBeNull()
     expect(document.activeElement).toBe(permissionButton())
@@ -370,7 +402,7 @@ describe('composer model picker', () => {
     spy.mockRestore()
     expect(permissionMenu()).not.toBeNull()
     expect(visibleAtFocus).toEqual([true])
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
+    expect(modeName(document.activeElement!)).toBe('Ask before acting')
     // Escape still closes when focus stayed on the chip.
     act(() => permissionButton().focus())
     key(permissionButton(), 'Escape')
@@ -389,18 +421,26 @@ describe('composer model picker', () => {
     expect(permissionButton().getAttribute('title')).toBe('Permissions: Auto-accept edits. This computer allows up to Auto-accept edits.')
   })
 
-  it('offers permission modes as a row of named icon buttons, highlighted without a check', () => {
+  it('lists every mode as a row with its icon, name and what it does, the chosen one checked', () => {
     const { onPermission, onModelSelect } = render({ mode: 'ask', open: false })
     openPermissions()
-    expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
+    // Every mode is named and described without hovering.
+    expect(modeNames()).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
+    expect(modes().map(modeLine)).toEqual([
+      'Asks before every command and file edit.',
+      'Edits go ahead; commands ask first.',
+      'Edits go ahead; Claude Code runs the commands it judges safe.',
+      'Runs everything without asking.'
+    ])
+    expect(modes().every((mode) => mode.querySelector('svg.composer-permission-mode-icon'))).toBe(true)
+    expect(modes()[1]!.getAttribute('aria-label')).toBe('Auto-accept edits. Edits go ahead; commands ask first.')
     const selected = modes().filter((mode) => mode.getAttribute('aria-checked') === 'true')
-    expect(selected.map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting'])
+    expect(selected.map(modeName)).toEqual(['Ask before acting'])
     expect(selected[0]!.classList.contains('selected')).toBe(true)
-    expect(permissionMenu()!.querySelector('.composer-mode-menu-check, svg.lucide-check')).toBeNull()
-    // The chosen mode is named and described; hovering another previews it.
-    expect(line()).toBe('Ask before actingAsks before every command and file edit.')
-    act(() => { modes()[3]!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
-    expect(line()).toBe('Full accessRuns everything without asking.')
+    expect(modes().map((mode) => Boolean(mode.querySelector('.composer-permission-mode-check svg')))).toEqual([true, false, false, false])
+    // Only Full access carries the warning tint.
+    expect(modes().map((mode) => mode.classList.contains('is-full'))).toEqual([false, false, false, true])
+    expect(permissionMenu()!.querySelector('.composer-mode-menu-heading')).toBeNull()
     act(() => modes()[3]!.click())
     expect(onPermission).toHaveBeenCalledWith('full')
     // The permission belongs to the thread: the model stays as it is.
@@ -408,38 +448,31 @@ describe('composer model picker', () => {
     expect(permissionMenu()).toBeNull()
   })
 
-  it('draws every mode line in one place and shows only the active one, so the menu never resizes on hover', () => {
-    render({ mode: 'ask', open: false })
+  it('opens the permission menu above the composer, not over the draft', () => {
+    asComposer()
+    render({ open: false })
     openPermissions()
-    // All four lines are rendered (the menu takes the size of the longest); one is visible and read out.
-    expect(lineItems().map((item) => item.querySelector('.composer-run-menu-permission-name')!.textContent)).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
-    const shown = () => lineItems().filter((item) => !item.classList.contains('is-hidden') && item.getAttribute('aria-hidden') !== 'true')
-    expect(shown().map((item) => item.textContent)).toEqual(['Ask before actingAsks before every command and file edit.'])
-    expect(lineItems().filter((item) => item.getAttribute('aria-hidden') === 'true')).toHaveLength(3)
-    act(() => { modes()[2]!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
-    expect(shown().map((item) => item.textContent)).toEqual(['AutoEdits go ahead; Claude Code runs the commands it judges safe.'])
-    expect(lineItems()).toHaveLength(4)
+    expect(permissionMenu()!.style.getPropertyValue('--floating-anchor-width')).toBe('640px')
   })
 
   it('hides Auto on an agent without an auto mode and shows a thread set to Auto as Auto-accept edits', () => {
     const { onPermission } = render({ mode: 'auto', auto: false, agent: 'Grok', open: false })
     expect(permissionButton().getAttribute('aria-label')).toBe('Permissions: Auto-accept edits')
     openPermissions()
-    expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Full access'])
-    expect(modes().find((mode) => mode.getAttribute('aria-checked') === 'true')!.getAttribute('aria-label')).toBe('Auto-accept edits')
+    expect(modeNames()).toEqual(['Ask before acting', 'Auto-accept edits', 'Full access'])
+    expect(modeName(modes().find((mode) => mode.getAttribute('aria-checked') === 'true')!)).toBe('Auto-accept edits')
     expect(document.body.textContent).not.toContain('no auto mode')
     act(() => modes()[1]!.click())
     expect(onPermission).not.toHaveBeenCalled()
   })
 
-  it('keeps a mode above the limit in the row, dimmed, and says why on hover', () => {
+  it('keeps a mode above the limit in the list, dimmed, and says why on its row', () => {
     const { onPermission } = render({ mode: 'accept_edits', ceiling: 'accept_edits', open: false })
     openPermissions()
     const full = modes()[3]!
     expect(full.getAttribute('aria-disabled')).toBe('true')
-    expect(full.getAttribute('title')).toBe('Full access: This computer allows up to Auto-accept edits.')
-    act(() => { full.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
-    expect(line()).toBe('Full accessThis computer allows up to Auto-accept edits.')
+    expect(full.classList.contains('is-disabled')).toBe(true)
+    expect(modeLine(full)).toBe('This computer allows up to Auto-accept edits.')
     act(() => full.click())
     expect(onPermission).not.toHaveBeenCalled()
   })

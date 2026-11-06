@@ -11,6 +11,7 @@ import {
 import {
   beginProfileSwitch,
   composerAutoModel,
+  composerSelection,
   fallbackModel,
   instanceBadges,
   pickerIdFor,
@@ -133,6 +134,22 @@ describe('composer picker from snapshots', () => {
       // A provider set up later gives a profile still without a default a model.
       expect(composerAutoModel({ ...base, providers: [] })).toBeUndefined()
       expect(composerAutoModel({ ...base, providers: pickerProviders([codex()], []) })?.model).toBe('gpt-5')
+    })
+
+    it('shows the thread model, else the one it starts on, else the default, and never nothing in place of a model', () => {
+      const providers = pickerProviders([claude(), codex()], [])
+      const none = { llmProvider: '', model: '' }
+      const thread = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5', effort: 'high' }
+      // A thread with a model shows it, whatever the default and even before the providers load.
+      expect(composerSelection({ threadModel: thread, profileDefault: none, providers: [] })).toBe(thread)
+      // No thread model: the model the composer starts on by itself, else the default.
+      expect(composerSelection({ threadModel: undefined, profileDefault: none, providers })?.model).toBe('claude-opus-4')
+      const chosen = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5-mini' }
+      expect(composerSelection({ threadModel: undefined, profileDefault: chosen, providers })).toBe(chosen)
+      // A default the providers have not listed yet still names a model.
+      expect(composerSelection({ threadModel: undefined, profileDefault: chosen, providers: [] })).toBe(chosen)
+      // Nothing to show yet: undefined, so the composer keeps the model it shows.
+      expect(composerSelection({ threadModel: undefined, profileDefault: none, providers: [] })).toBeUndefined()
     })
   })
 
