@@ -1923,10 +1923,10 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
  */
 /** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
 function ContextClearedDivider({ text }: { text: string }) {
-  return <div role="separator" aria-label={text} className="flex w-full items-center gap-3 py-2 text-[11px] text-muted-foreground">
-    <span aria-hidden="true" className="h-px flex-1 bg-border" />
+  return <div role="separator" aria-label={text} className="context-cleared">
+    <span aria-hidden="true" className="context-cleared-rule" />
     <span>{text}</span>
-    <span aria-hidden="true" className="h-px flex-1 bg-border" />
+    <span aria-hidden="true" className="context-cleared-rule" />
   </div>;
 }
 

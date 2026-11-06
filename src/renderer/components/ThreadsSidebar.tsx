@@ -876,8 +876,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       const threadId = (event as CustomEvent<{ threadId?: string }>).detail?.threadId
       const thread = threadId ? threads.find((entry) => entry.id === threadId) : undefined
       if (!thread) return
-      const row = document.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(thread.id)}"]`)
-      if (!row || row.offsetParent === null) return
+      // Other panels mark elements with the thread id too: only a sidebar row on screen counts.
+      const rows = document.querySelectorAll<HTMLElement>(`.threads-sidebar-thread[data-thread-id="${CSS.escape(thread.id)}"]`)
+      if (![...rows].some((row) => row.offsetParent !== null)) return
       event.preventDefault()
       setRenaming({ type: 'thread', id: thread.id, name: thread.name })
     }
