@@ -15,7 +15,7 @@ import { getDefaultSettings, type SettingsOptions } from '../../src/shared/setti
 const PAGES: SettingsSearchPage[] = [
   { id: 'general', label: 'General', keywords: ['notification'] },
   { id: 'appearance', label: 'Appearance', keywords: ['theme'] },
-  { id: 'account', label: 'Account', keywords: ['mousse id'] },
+  { id: 'activity', label: 'Activity', keywords: ['heatmap'] },
   { id: 'providers', label: 'Providers', keywords: ['api key', 'subscription'] },
   { id: 'agents', label: 'Agents', keywords: ['context'] },
   { id: 'integrations', label: 'Skills & MCP', keywords: ['skills', 'mcp'] },
