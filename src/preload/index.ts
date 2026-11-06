@@ -777,9 +777,9 @@ const api = {
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
     /** `opts.node` creates the chat on another of the user's computers (`projectId` is then that computer's, as this computer lists it). */
-    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }): Promise<Thread> =>
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId, opts),
-    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean }): Promise<Thread> =>
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     /** A page of the messages before `before` of a long thread of another computer. */
@@ -812,6 +812,9 @@ const api = {
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
+    /** When the thread deletes itself for good (`Thread.expiresAt`); null keeps it. */
+    setExpiry: (threadId: string, expiresAt: string | null, stopsRun?: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
     search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>

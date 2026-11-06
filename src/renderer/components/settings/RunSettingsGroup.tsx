@@ -1,4 +1,5 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
+import { EXPIRY_PRESETS } from '../../../shared/threadExpiry'
 import { Pause } from '../../lib/icons'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -58,6 +59,25 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
             options={[
               { value: OFF, label: 'Off' },
               ...capChoices(cap).map((choice) => ({ value: String(choice), label: capLabel(choice) }))
+            ]}
+          />
+        }
+      />
+      <SettingsRow
+        title="Delete private threads after"
+        anchor="general-private-expiry"
+        description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread, its subagents, worktree and checkpoints are deleted for good. Commits and pushed code are kept.">New private threads delete themselves after this time.</span>}
+        control={
+          <Select
+            ariaLabel="Delete private threads after"
+            value={runs.privateThreadExpiry}
+            onChange={(next) => {
+              if (next === runs.privateThreadExpiry) return
+              void onUpdate({ runs: { ...runs, privateThreadExpiry: next as MousseSettings['runs']['privateThreadExpiry'] } })
+            }}
+            options={[
+              { value: 'never', label: 'Never' },
+              ...EXPIRY_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))
             ]}
           />
         }

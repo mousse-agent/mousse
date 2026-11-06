@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { expiryPresetMs } from '../../shared/threadExpiry'
 import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
@@ -81,7 +82,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceWithPrivate } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -177,6 +178,8 @@ export function OrchestratorChat() {
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
   const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
+  const privateThreadExpiry = useAppStore((s) => s.privateThreadExpiry)
+  const privateDefaultMs = privateThreadExpiry === 'never' ? undefined : expiryPresetMs(privateThreadExpiry)
   const workspace = composerWorkspaceFor(workspaceDraft, activeThread, worktreeByDefault)
   const localName = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
   const { devices: runOnDevices, notSharing, refresh: refreshRunOnDevices } = useRunOnDevices()
@@ -1452,7 +1455,8 @@ export function OrchestratorChat() {
                 }}
                 onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
                 onPrivateChange={(localOnly) =>
-                  setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node)))}
+                  setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node), privateDefaultMs))}
+                onExpiryChange={(ms, stopsRun) => setComposerWorkspaceDraft(activeThreadId, workspaceWithExpiry(workspace, ms, stopsRun))}
                 onOpenProject={openProjectForDraft}
                 onError={setSendError}
               />

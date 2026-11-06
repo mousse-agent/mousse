@@ -15,8 +15,10 @@ import {
   MessageSquarePlus,
   PinOffRegular,
   PinRegular,
-  ShieldCheck
+  ShieldCheck,
+  Clock
 } from '../lib/icons'
+import { EXPIRY_PRESETS } from '../../shared/threadExpiry'
 import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
 
 export interface ThreadsContextMenuTarget {
@@ -33,6 +35,12 @@ export interface ThreadsContextMenuTarget {
   alsoOn?: readonly string[]
   /** A project's folder, on the computer that holds it. */
   path?: string
+  /** Threads only: when it deletes itself (`Thread.expiresAt`). */
+  expiresAt?: string
+  /** Threads only: its expiry can be set here (a thread of this computer that is not a subagent). */
+  canExpire?: boolean
+  /** Threads only: at expiry a running turn is stopped (`Thread.expiryStopsRun`); kept when the time changes. */
+  expiryStopsRun?: boolean
 }
 
 /** An app the project's folder opens in: its menu label ("Open in Cursor", "Show in Finder") and how to open it. */
@@ -64,15 +72,17 @@ interface ThreadsContextMenuProps {
   reveal?: ProjectOpener
   /** Projects only: copy the folder's path. */
   onCopyPath?: () => void
+  /** Threads only: delete the thread `ms` from now, or null to keep it. */
+  onSetExpiry?: (ms: number | null) => void
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
 
 /**
- * "Git ›": rarely needed project actions, one level down. Opens on hover, click, Enter, Space or the right arrow
- * (focusing its first item); the left arrow or Escape closes it and returns to "Git".
+ * "Git ›", "Delete after ›": rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
+ * arrow (focusing its first item); the left arrow or Escape closes it and returns to its item.
  */
-function GitSubmenu({ children }: { children: ReactNode }) {
+function Submenu({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [focusFirst, setFocusFirst] = useState(false)
   const [flip, setFlip] = useState(false)
@@ -117,8 +127,8 @@ function GitSubmenu({ children }: { children: ReactNode }) {
           } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') setOpen(false)
         }}
       >
-        <GitBranch />
-        <span>Git</span>
+        {icon}
+        <span>{label}</span>
         <ChevronRight className="threads-context-submenu-chevron" aria-hidden="true" />
       </button>
       {open && (
@@ -126,7 +136,7 @@ function GitSubmenu({ children }: { children: ReactNode }) {
           ref={submenuRef}
           className={`threads-context-menu threads-context-submenu${flip ? ' flip' : ''}`}
           role="menu"
-          aria-label="Git"
+          aria-label={label}
           data-submenu=""
           onKeyDown={(event) => {
             event.stopPropagation()
@@ -160,7 +170,8 @@ export function ThreadsContextMenu({
   onNewThreadFromPullRequest,
   openInEditor,
   reveal,
-  onCopyPath
+  onCopyPath,
+  onSetExpiry
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
@@ -288,8 +299,22 @@ export function ThreadsContextMenu({
           <EditRegular />
           <span>Rename</span>
         </button>
+        {target.type === 'thread' && target.canExpire && onSetExpiry && (
+          <Submenu icon={<Clock />} label="Delete after">
+            {EXPIRY_PRESETS.map((preset) => (
+              <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
+                <span>After {preset.label}</span>
+              </button>
+            ))}
+            {target.expiresAt && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(null)}>
+                <span>Keep it</span>
+              </button>
+            )}
+          </Submenu>
+        )}
         {target.type === 'project' && onTrustGitSettings && !target.node && (
-          <GitSubmenu>
+          <Submenu icon={<GitBranch />} label="Git">
             <button
               type="button"
               className="threads-context-menu-item"
@@ -300,7 +325,7 @@ export function ThreadsContextMenu({
               <ShieldCheck />
               <span>Trust this repository's Git settings</span>
             </button>
-          </GitSubmenu>
+          </Submenu>
         )}
         {target.type === 'project' && <Separator />}
         {target.type === 'project' && (

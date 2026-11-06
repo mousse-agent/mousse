@@ -28,6 +28,8 @@ export interface ResourceLifecycleHooks {
    * handles that make Windows refuse a rename) until the returned function is called.
    */
   quiesceDisk?(): Promise<() => void>
+  /** The trashed thread's own expiry has passed (`Thread.expiresAt`); see `ResourcePurgeService.purge`. */
+  expired?(record: TaskLifecycleRecord): boolean
   /** Fault injection / observability after durable boundaries, never used to authorize a move. */
   onPhase?(record: TaskLifecycleRecord, phase: LifecycleOperationPhase): Promise<void> | void
   /**
@@ -46,7 +48,7 @@ const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.loc
 export class ResourceLifecycleCoordinator {
   readonly cleanup: ResourcePurgeService
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
-    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk, expired: (record) => hooks.expired?.(record) === true })
   }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }

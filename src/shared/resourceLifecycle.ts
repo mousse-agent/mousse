@@ -168,6 +168,8 @@ export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   completedAt?: string
   error?: string
   discardAuthorized: boolean
+  /** The thread's expiry deleted it (`Thread.expiresAt`), not a person: it is never listed in Recently deleted. */
+  expired?: true
 }
 export interface TrashRetentionPolicy { schemaVersion: 1; graceDays: number; automaticPurge: boolean }
 export interface LifecycleAdmission {

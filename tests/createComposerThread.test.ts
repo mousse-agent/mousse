@@ -235,3 +235,16 @@ describe('a private new chat (issue #672)', () => {
     expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: false })
   })
 })
+
+describe('a new chat that deletes itself (issue #672)', () => {
+  it('creates it with an expiry counted from now, and gives a reused draft the same', async () => {
+    const create = vi.fn(async () => ({ id: 'timed' }) as Thread)
+    const setExpiry = vi.fn(async () => ({ id: 'draft' }) as Thread)
+    const now = () => Date.parse('2026-11-06T12:00:00.000Z')
+    const deps = { setWorktreeEnabled: vi.fn(), update: vi.fn(), stillVisible: () => true, activate: vi.fn(), select: vi.fn(async () => {}), create, setExpiry, now }
+    await prepareComposerThread({ ...deps, workspace: { worktreeEnabled: false, expiryMs: 3_600_000, expiryStopsRun: true } })
+    expect(create).toHaveBeenCalledWith(undefined, { worktreeEnabled: false, expiresAt: '2026-11-06T13:00:00.000Z', expiryStopsRun: true })
+    await prepareComposerThread({ ...deps, thread: { id: 'draft', worktreeEnabled: false } as Thread, workspace: { worktreeEnabled: false, expiryMs: 3_600_000 } })
+    expect(setExpiry).toHaveBeenCalledWith('draft', '2026-11-06T13:00:00.000Z', false)
+  })
+})

@@ -18,7 +18,16 @@ import type { ResourcePurgeService } from './ResourcePurgeService'
 export const ARCHIVE_BEFORE_DELETE = 'Archive the thread before deleting it.'
 
 /** What a delete was asked to do, kept while it runs so a delete cut short finishes the same way. */
-export interface DeleteIntent { human: boolean; discard: boolean; at: string }
+export interface DeleteIntent {
+  human: boolean
+  discard: boolean
+  at: string
+  /**
+   * The thread's expiry asked for it (`Thread.expiresAt`): it goes without being archived, and its purge has the
+   * expiry's authority (`ResourcePurgeService.purge`), which holds only while that expiry has passed.
+   */
+  expiry?: true
+}
 
 export interface ThreadDeleteDeps {
   store: ResourceLifecycleStore
@@ -42,6 +51,8 @@ export interface DeleteOptions {
    * and one that holds unpublished work stays in Archived instead of failing.
    */
   internal?: boolean
+  /** The thread's expiry passed (`DeleteIntent.expiry`); the daemon's own expiry pass is the only caller. */
+  expiry?: boolean
 }
 
 interface ThreadMeta { id: string; settledAt?: string; lineage?: Thread['lineage'] }
@@ -131,7 +142,10 @@ export class ThreadDeleter {
       }
     }
     visit(threadId)
-    return order.filter((id) => !this.ownedWithin(id, family))
+    // One already in the trash (a delete of it cut short) does not move with its owner, and the owner's purge leaves it
+    // behind, so it is deleted on its own as well.
+    const trashed = (id: string): boolean => ['trashed', 'purge-started'].includes(this.deps.store.get(id)?.state ?? '')
+    return order.filter((id) => !this.ownedWithin(id, family) || trashed(id))
   }
 
   /**
@@ -144,9 +158,10 @@ export class ThreadDeleter {
     const listed = this.deps.getThread(threadId)
     const continuing = !listed && (record?.state === 'trashed' || record?.state === 'purge-started')
     if (!listed && !continuing) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-    if (listed && options.internal && !listed.settledAt) this.deps.archive(threadId)
-    if (listed && !this.isArchived(this.deps.getThread(threadId) ?? listed)) throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
-    const intent: DeleteIntent = { human: options.human, discard: options.human && options.discard, at: new Date().toISOString() }
+    if (listed && options.internal && !options.expiry && !listed.settledAt) this.deps.archive(threadId)
+    // An expired thread is deleted where it is: it is never archived on its way out.
+    if (listed && !options.expiry && !this.isArchived(this.deps.getThread(threadId) ?? listed)) throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
+    const intent: DeleteIntent = { human: options.human, discard: options.human && options.discard, at: new Date().toISOString(), ...(options.expiry ? { expiry: true as const } : {}) }
     const members = [threadId, ...this.subagentsOf(threadId)]
     const trashedHere: string[] = []
     // Check everything first: the thread, then its subagent threads. Nothing is purged until all of them may go.
@@ -184,7 +199,7 @@ export class ThreadDeleter {
   private async check(taskId: string, intent: DeleteIntent): Promise<Awaited<ReturnType<ThreadDeleteDeps['purge']['preview']>>> {
     const preview = await this.deps.purge.preview(taskId)
     if (preview.blockers.length) throw new DomainRpcError('thread_delete_blocked', `The thread could not be deleted: ${preview.blockers.join('; ')}`, { threadId: taskId })
-    if (preview.items.some((item) => item.discardRequired) && !(intent.human && intent.discard))
+    if (preview.items.some((item) => item.discardRequired) && !(intent.human && intent.discard) && !intent.expiry)
       throw new DomainRpcError('thread_has_unpublished_work', 'The thread has unpublished work. Delete it from the Mousse app.', { threadId: taskId })
     return preview
   }
@@ -194,10 +209,10 @@ export class ThreadDeleter {
     const record = this.deps.store.get(taskId)
     if (!record || record.state === 'purged') { this.setIntent(taskId, undefined); return }
     if (record.state === 'purge-started' && record.purge) {
-      await this.deps.purge.purge({ taskId, operationId: record.purge.operationId })
+      await this.deps.purge.purge({ taskId, operationId: record.purge.operationId, ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
     } else {
       const preview = await this.check(taskId, intent)
-      await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human })
+      await this.deps.purge.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: intent.discard, human: intent.human, ...(intent.expiry ? { authorization: 'expiry' as const } : {}) })
     }
     this.setIntent(taskId, undefined)
   }

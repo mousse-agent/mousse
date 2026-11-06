@@ -64,6 +64,7 @@ export interface TrashSweepOutcome {
 
 const purgeErrors = createErrorProvider({
   resource_purge_discard_required: { category: 'denied', retryable: false, message: 'Sole-copy discard requires an exact human-reviewed preview.' },
+  resource_purge_not_expired: { category: 'denied', retryable: false, message: 'Only a thread whose expiry has passed can be deleted for its expiry.' },
   resource_purge_repository_unavailable: { category: 'unavailable', retryable: false, message: 'Repository is unavailable; purge remains pending. Reconnect the repository and retry.' },
   resource_purge_preview_stale: { category: 'conflict', retryable: false, message: 'Purge preview changed; review a fresh inventory.' },
   resource_policy_invalid: { category: 'invalid', retryable: false, message: 'Invalid trash retention policy. Grace days must be an integer from 1 to 3650.' },
@@ -146,7 +147,7 @@ export class ResourcePurgeService {
   private timer?: ReturnType<typeof setInterval>
   private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void> }) { this.retirement = new WorktreeRetirementService(store) }
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void>; /** The trashed thread's own expiry has passed (`Thread.expiresAt`): the authority an expiry purge needs. */ expired?(record: TaskLifecycleRecord): boolean }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
     const path = join(this.store.root, 'trash-policy.json')
@@ -298,9 +299,10 @@ export class ResourcePurgeService {
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
     })
   }
+  /** `taskId` and the threads it owns; one trashed on its own keeps its own choice, and one deleted for good is gone. */
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
-    for (let added = true; added;) { added = false; for (const item of records) if (item.parentTaskId && ids.has(item.parentTaskId) && !ids.has(item.taskId) && item.state !== 'trashed') { ids.add(item.taskId); added = true } }
+    for (let added = true; added;) { added = false; for (const item of records) if (item.parentTaskId && ids.has(item.parentTaskId) && !ids.has(item.taskId) && item.state !== 'trashed' && item.state !== 'purged') { ids.add(item.taskId); added = true } }
     return records.filter((record) => ids.has(record.taskId))
   }
   /** Fresh source-derived claims from every installed profile; no cached preview authorizes deletion. */
@@ -579,12 +581,18 @@ export class ResourcePurgeService {
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
 
-  async purge(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
+  /**
+   * `authorization: 'expiry'` is the daemon deleting a thread whose expiry passed (`Thread.expiresAt`): the person
+   * agreed to lose its unpublished files when they set it, so it stands in for a person's Discard, and only while the
+   * trashed thread's own expiry has passed. The thread's branches (`refs/heads/`) are kept, so committed work stays.
+   * A protocol call can never pass it (`threads.purge` builds its input itself).
+   */
+  async purge(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry' }): Promise<TaskLifecycleRecord> {
     if (!input || typeof input !== 'object' || typeof input.operationId !== 'string' || !input.operationId || input.operationId.length > 256 || /[\x00-\x1f]/.test(input.operationId) || typeof input.taskId !== 'string') throw new Error('Purge requires a valid task and operation identity')
     const release = await this.hooks.quiesceDisk?.()
     try { return await this.withOwnership(input.taskId, () => this.purgeOwned(input)) } finally { release?.() }
   }
-  private async purgeOwned(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
+  private async purgeOwned(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean; authorization?: 'expiry' }): Promise<TaskLifecycleRecord> {
     const key = `${this.store.root}/${input.taskId}`
     if (active.has(key)) throw new Error('Purge already running')
     active.add(key)
@@ -597,12 +605,20 @@ export class ResourcePurgeService {
         const preview = await this.previewOwned(input.taskId)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
         if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw purgeErrors.create('resource_purge_preview_stale')
-        if (preview.items.some((item) => item.discardRequired) && !(input.human && input.discard)) throw purgeErrors.create('resource_purge_discard_required')
+        const expiry = input.authorization === 'expiry'
+        if (expiry && this.hooks.expired?.(record) !== true) throw purgeErrors.create('resource_purge_not_expired')
+        const discardAuthorized = Boolean(input.human && input.discard) || expiry
+        if (preview.items.some((item) => item.discardRequired) && !discardAuthorized) throw purgeErrors.create('resource_purge_discard_required')
+        // An expiry keeps the thread's branches: code committed from it stays in the repository. They stay in the
+        // ledger as retained, so its digest still matches the reviewed preview.
+        const items = expiry
+          ? preview.items.map((item) => (item.kind === 'ref' && item.identity.startsWith('refs/heads/') ? { ...item, status: 'retained' as const } : item))
+          : preview.items
         this.store.enableCleanupWriter()
         record = this.store.update(input.taskId, (current) => {
           if (current.state !== 'trashed' || current.generation !== preview.generation) throw new Error('Task changed before purge boundary')
           current.state = 'purge-started'; current.generation++
-          current.purge = { ...preview, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized: Boolean(input.human && input.discard) }
+          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, ...(expiry ? { expired: true } : {}) }
         })
         await this.hooks.onBoundary?.(record)
       }
@@ -627,6 +643,8 @@ export class ResourcePurgeService {
         if (taskId !== input.taskId) this.store.update(taskId, (current) => { current.state = 'purged'; current.generation++ })
       }
       for (const child of this.store.list().filter((child) => child.parentTaskId && record.purge!.ownedTaskIds.includes(child.parentTaskId) && !record.purge!.ownedTaskIds.includes(child.taskId))) {
+        // One already deleted for good on its own holds nothing left to keep.
+        if (child.state === 'purged') continue
         if (child.state !== 'trashed') throw new Error('Independent descendant is not safely retained in trash')
         this.store.update(child.taskId, (current) => { current.formerParentTaskId = current.parentTaskId; delete current.parentTaskId; current.generation++ })
       }

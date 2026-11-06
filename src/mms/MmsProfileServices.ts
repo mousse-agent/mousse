@@ -84,6 +84,9 @@ import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingSer
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
+import { ThreadExpiryService } from './lifecycle/ThreadExpiryService'
+import { threadFolderExpired, threadFolderRoot } from './data/expiredThreads'
+import { isThreadExpired } from '../shared/threadExpiry'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
@@ -178,6 +181,8 @@ export class MmsProfileServices {
   readonly storageCleanup: StorageCleanupService
   /** Disk usage for Settings > Storage, measured in the background and cached. */
   readonly storageUsage: StorageUsageService
+  /** Deletes threads whose expiry passed (`Thread.expiresAt`). */
+  readonly threadExpiry: ThreadExpiryService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly agents: AgentRegistry
@@ -811,9 +816,36 @@ export class MmsProfileServices {
       },
       configurationChanged: () => {
         this.config.reloadFromDisk()
-      }
+      },
+      expired: (record) => this.lifecycleRecordExpired(record)
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    this.threadExpiry = new ThreadExpiryService({
+      listThreads: () => this.threads.listAllThreads(),
+      // The ledger says an expiry purge began even once the thread's folder (with its expiry) is gone.
+      unfinished: (now) => this.threads.lifecycleStore.list()
+        .filter((record) => !record.parentTaskId && (record.state === 'trashed' || record.state === 'purge-started') &&
+          (record.purge?.expired === true || threadFolderExpired(record.location, now)))
+        .map((record) => record.taskId),
+      runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
+      stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
+      quiesce: (threadId) => {
+        // A question waiting for an answer and an open terminal are not a run: they end at expiry.
+        for (const task of this.lifecycleOwnedTasks(threadId)) {
+          this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
+          this.ptyManager.killByThreadId(task.taskId)
+        }
+      },
+      deleteForGood: (threadId) => this.deleteExpiredThread(threadId),
+      onRunEnd: (listener) => {
+        const handler = (event: ThreadEvent): void => {
+          if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) listener(event.threadId)
+        }
+        this.orchestrator.on('run-event', handler)
+        return () => { this.orchestrator.off('run-event', handler) }
+      },
+      log: (message, details) => console.warn(message, details)
+    })
     this.pullRequestWatch = new PullRequestWatchService({
       threads: this.threads,
       codeHost: this.gitService.codeHost,
@@ -950,8 +982,8 @@ export class MmsProfileServices {
       if (!ids.has(record.taskId)) return false
       let child = record
       while (child.taskId !== taskId) {
-        // Independently trashed children retain their own fence and restore choice.
-        if (child.state === 'trashed') return false
+        // Independently trashed children retain their own fence and restore choice; one deleted for good holds nothing.
+        if (child.state === 'trashed' || child.state === 'purged') return false
         if (child.state !== 'active')
           throw new Error(
             'Owned child lifecycle operation requires recovery before moving its parent'
@@ -974,6 +1006,39 @@ export class MmsProfileServices {
     return pending?.kind === kind && !['completed', 'rejected'].includes(pending.phase)
       ? pending.id
       : randomUUID()
+  }
+
+  /**
+   * Deletes a thread whose expiry passed, for good, with its subagent threads (`ThreadDeleter`, with the expiry's
+   * intent: no archive first, and the purge has the expiry's authority). A delete a crash or a refusal cut short is
+   * finished the same way, also by the next start.
+   */
+  private async deleteExpiredThread(taskId: string): Promise<void> {
+    const record = await this.deleteThreadForGood(taskId, { human: false, discard: false, expiry: true })
+    if (record.state !== 'purged') throw new Error(record.blockedReason ?? `The delete stopped with the thread ${record.state}`)
+    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
+  /**
+   * The expiry that lets a purge stand in for a person's Discard has passed for this thread: its own, or for a
+   * subagent its owner's (a subagent has no expiry of its own; see `Thread.expiresAt`).
+   */
+  private lifecycleRecordExpired(record: TaskLifecycleRecord): boolean {
+    const seen = new Set<string>()
+    const expired = (current: TaskLifecycleRecord | undefined): boolean => {
+      if (!current || seen.has(current.taskId)) return false
+      seen.add(current.taskId)
+      if (threadFolderExpired(current.location)) return true
+      // A subagent thread that is not owned by its root follows the root's expiry all the same.
+      const root = threadFolderRoot(current.location)
+      if (root) {
+        const listed = this.threads.getThread(root)
+        if (listed) return isThreadExpired(listed)
+        if (expired(this.threads.lifecycleStore.get(root))) return true
+      }
+      return expired(current.parentTaskId ? this.threads.lifecycleStore.get(current.parentTaskId) : undefined)
+    }
+    return expired(record)
   }
 
   async trashThread(
@@ -1110,6 +1175,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.threadExpiry.stop()
     void this.pullRequestWatch.stop()
     void this.storageCleanup.stop()
     void this.storageUsage.stop()
@@ -1329,6 +1395,9 @@ export class MmsProfileServices {
 
   async start(): Promise<void> {
     await this.requests.run('profile-start', () => this.startOwned())
+    // Threads that expired, also while the daemon was not running, are deleted once the start's own request
+    // ended (a delete waits for the profile to be idle). Until then no turn starts in them: the orchestrator refuses.
+    this.threadExpiry.start()
     // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
     void this.personalBots?.finishDeletions().catch(() => {})
   }

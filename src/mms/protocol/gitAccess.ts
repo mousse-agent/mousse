@@ -47,6 +47,7 @@ export const GIT_ACCESS = {
   'threads.setModel': 'none',
   'threads.setWorktreeEnabled': 'owned',
   'threads.setPermissionMode': 'none',
+  'threads.setExpiry': 'none',
   'threads.approvalRules': 'none',
   'threads.clearApprovalRules': 'none',
   'threads.approvalRequests': 'none',
