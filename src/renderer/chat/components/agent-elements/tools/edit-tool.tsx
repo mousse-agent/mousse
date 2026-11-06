@@ -3,7 +3,7 @@ import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
-import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
+import { IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { CODE_FONT_VAR } from "../../../../lib/typography";
@@ -15,6 +15,7 @@ import {
   mapToolStateToStepState,
 } from "../utils/tool-adapters";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
+import { openFileInPanel } from "../../../../utils/chatLinks";
 
 export type EditToolDiffCardProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -140,13 +141,18 @@ export function EditToolDiffCard({
   const isPending = state === "animating";
   const sections = React.useMemo(() => changeSections(output?.changes), [output]);
   const isInterrupted = output?.interrupted === true;
+  // The one file the card is about, which its name opens; a card about several files names each in its body.
+  const filePath = sections
+    ? sections.length === 1
+      ? sections[0].path
+      : undefined
+    : step.filePath || extractFilePathArg(input) || undefined;
   const fileName =
     sections && sections.length > 1
       ? `${sections.length} files`
       : sections?.[0]?.label ||
-        step.filePath?.split("/").pop() ||
+        (filePath ? baseName(filePath) : "") ||
         step.toolDetail ||
-        extractFilePathArg(input)?.split("/").pop() ||
         "";
   const hasFileName = Boolean(fileName);
   const isWrite = step.toolName === "Write";
@@ -252,6 +258,22 @@ export function EditToolDiffCard({
   const hasBody = sections
     ? sections.some((section) => section.patch || section.oldFile || section.note || section.error)
     : Boolean(diffFiles);
+  const canToggle = hasBody && isCollapsible;
+
+  // Above the header's expand control, so a click on the name opens the file instead of the diff.
+  const nameControl = filePath ? (
+    <button
+      type="button"
+      onClick={() => openFileInPanel({ path: filePath })}
+      title={filePath}
+      aria-label={`Open ${fileName}`}
+      className="pointer-events-auto relative hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color rounded-sm"
+    >
+      {fileName}
+    </button>
+  ) : (
+    fileName
+  );
 
   // Theme-compliant diff surface: point the library at the app theme tokens
   // instead of hardcoded black so bg, gutters and separators follow the
@@ -296,22 +318,7 @@ export function EditToolDiffCard({
 
   return (
     <div className="an-edit-tool-card rounded-an-tool-border-radius border border-an-tool-border-color bg-an-tool-background overflow-hidden">
-      <button
-        type="button"
-        onClick={
-          hasBody && isCollapsible
-            ? () => setIsExpanded((prev) => !prev)
-            : undefined
-        }
-        aria-expanded={hasBody && isCollapsible ? isExpanded : undefined}
-        aria-label={
-          hasBody && isCollapsible
-            ? isExpanded
-              ? `Collapse diff for ${fileName || "file"}`
-              : `Expand diff for ${fileName || "file"}`
-            : undefined
-        }
-        disabled={!hasBody || !isCollapsible}
+      <div
         className={
           // Header keeps the theme tool background so it stays distinct from
           // the diff body below it.
@@ -319,14 +326,23 @@ export function EditToolDiffCard({
           // keep contrast, but the diff body below always renders at full
           // opacity — dimming the code to 0.55 washes it out next to
           // full-opacity surfaces like the Git tab Monaco diff.
-          "an-tool-chrome flex items-center justify-between px-2.5 py-0 h-7 w-full text-left bg-an-tool-background " +
+          "an-tool-chrome relative flex items-center justify-between px-2.5 py-0 h-7 w-full text-left bg-an-tool-background " +
           (isExpanded || !isCollapsible
-            ? "border-b border-an-tool-border-color "
-            : "") +
-          (hasBody && isCollapsible ? "cursor-pointer" : "")
+            ? "border-b border-an-tool-border-color"
+            : "")
         }
       >
-        <span className="flex items-center gap-1.5 min-w-0 flex-1">
+        {/* The one expand control covers the header; the file name sits above it and opens the file. */}
+        {canToggle && (
+          <button
+            type="button"
+            onClick={() => setIsExpanded((prev) => !prev)}
+            aria-expanded={isExpanded}
+            aria-label={`${isExpanded ? "Collapse" : "Expand"} diff for ${fileName || "file"}`}
+            className="absolute inset-0 w-full cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-an-border-color"
+          />
+        )}
+        <span className="pointer-events-none flex items-center gap-1.5 min-w-0 flex-1">
           {hasFileName && (
             <FileExtIcon filename={fileName} className="w-[18px] h-[18px] shrink-0" />
           )}
@@ -340,20 +356,20 @@ export function EditToolDiffCard({
             </TextShimmer>
           ) : isInterrupted ? (
             <span className="text-xs text-an-tool-color-muted truncate">
-              {isWrite ? "Create" : "Edit"} interrupted: {fileName}
+              {isWrite ? "Create" : "Edit"} interrupted: {nameControl}
             </span>
           ) : isError ? (
             <span className="text-xs text-red-400 truncate">
-              Failed to {isWrite ? "create" : "edit"} {fileName}
+              Failed to {isWrite ? "create" : "edit"} {nameControl}
             </span>
           ) : (
             <span className="text-xs text-an-tool-color-muted truncate">
-              {isWrite ? "Created" : "Edited"} {fileName}
+              {isWrite ? "Created" : "Edited"} {nameControl}
             </span>
           )}
         </span>
         {diffStats && !isPending && (
-          <span className="text-[11px] font-sans text-an-tool-color-muted inline-flex gap-2">
+          <span className="pointer-events-none text-[11px] font-sans text-an-tool-color-muted inline-flex gap-2">
             {diffStats.split(" ").map((token) => (
               <span
                 key={token}
@@ -370,36 +386,33 @@ export function EditToolDiffCard({
             ))}
           </span>
         )}
-        {hasBody && isCollapsible && (
+        {canToggle && (
           <IconChevronRight
-            className="ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted ml-1"
+            className="pointer-events-none ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted ml-1"
             data-open={isExpanded || undefined}
           />
         )}
-      </button>
+      </div>
       <Collapse
         open={hasBody && (!isCollapsible || isExpanded)}
         animate={isCollapsible}
         className={`${diffClassName} text-[12px]`}
         style={diffCssVars}
       >
-          <div
-            className={isCollapsible ? "group/edit-diff relative" : "relative"}
-          >
-            <div
-              className={
-                isCollapsible && !isExpanded
-                  ? "max-h-[260px] overflow-hidden"
-                  : undefined
-              }
-            >
               {sections
                 ? sections.map((section, index) => (
                     <div key={`${section.path}:${index}`}>
                       {sections.length > 1 && (
                         <div className="flex items-center gap-1.5 px-2.5 h-6 text-[11px] text-an-tool-color-muted border-b border-an-tool-border-color">
                           <FileExtIcon filename={section.label} className="w-4 h-4 shrink-0" />
-                          <span className="truncate">{section.path}</span>
+                          <button
+                            type="button"
+                            onClick={() => openFileInPanel({ path: section.path })}
+                            aria-label={`Open ${section.path}`}
+                            className="truncate text-left hover:underline hover:text-an-tool-color focus-visible:outline focus-visible:outline-1 focus-visible:outline-an-border-color rounded-sm"
+                          >
+                            {section.path}
+                          </button>
                         </div>
                       )}
                       {section.error && (
@@ -461,30 +474,6 @@ export function EditToolDiffCard({
                       }}
                     />
                   )}
-            </div>
-            {isCollapsible && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setIsExpanded((prev) => !prev)}
-                  aria-label={isExpanded ? "Hide" : "Show more"}
-                  className={
-                    "group absolute inset-x-0 bottom-0 h-16 flex items-end justify-center pb-2 text-muted-foreground " +
-                    (isExpanded
-                      ? "bg-transparent"
-                      : "bg-linear-to-b from-transparent to-background")
-                  }
-                >
-                  <IconChevronDown
-                    className={
-                      "w-4 h-4 transition-opacity duration-150 opacity-0 group-hover:opacity-100 " +
-                      (isExpanded ? "rotate-180" : "rotate-0")
-                    }
-                  />
-                </button>
-              </>
-            )}
-          </div>
       </Collapse>
       {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
     </div>

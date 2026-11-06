@@ -49,7 +49,7 @@ export function resolveQuestionAnswers(
 }
 
 /** The composer's hint while an approval request waits: a message is also an answer. */
-export const APPROVAL_COMPOSER_PLACEHOLDER = 'Answer the approval, or send a message to deny it and redirect the agent'
+export const APPROVAL_COMPOSER_PLACEHOLDER = 'Type to deny and redirect'
 
 /** The composer's hint while the agent's questions are open above it. */
 export const QUESTION_COMPOSER_PLACEHOLDER = 'Or reply in your own words'
