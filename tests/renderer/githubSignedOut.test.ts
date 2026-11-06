@@ -123,3 +123,33 @@ describe('starting from a pull request while GitHub CLI is signed out', () => {
     expect(document.body.querySelector('.start-from-pr-input')?.getAttribute('placeholder')).toContain('search below')
   })
 })
+
+describe('starting from a pull request that another thread took meanwhile', () => {
+  it('reads the pull request again and offers to start another thread, without starting one', async () => {
+    const { openThreadFromPullRequest } = await import('../../src/renderer/lib/threadActions')
+    const start = vi.mocked(openThreadFromPullRequest)
+    start.mockRejectedValueOnce({ code: 'pull_request_thread_exists', message: 'Another thread already works on this pull request.' })
+    const pullRequest = { number: 42, title: 'Retry uploads', url: 'https://github.com/acme/app/pull/42', state: 'open', isDraft: false, author: 'ada', headRefName: 'retry', isCrossRepository: false }
+    const resolve = vi.fn()
+      .mockResolvedValueOnce({ pullRequest, threads: [], enablesWorktreeConfig: false })
+      .mockResolvedValue({ pullRequest, threads: [{ id: 't9', name: 'Review retry uploads' }], enablesWorktreeConfig: false })
+    vi.stubGlobal('mousse', { pullRequests: { list: vi.fn(async () => []), resolve } })
+    await render(createElement(StartFromPullRequestDialog, { projectId: 'p1', projectName: 'app', onClose: () => undefined }))
+    const input = document.body.querySelector<HTMLInputElement>('.start-from-pr-input')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '42')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const wait = (ms: number) => act(async () => { await new Promise((done) => setTimeout(done, ms)) })
+    await wait(350)
+    expect(resolve).toHaveBeenCalledTimes(1)
+    await click(button('Start thread'))
+    await settle()
+    await wait(350)
+    expect(resolve).toHaveBeenCalledTimes(2)
+    const primary = document.body.querySelector<HTMLButtonElement>('.btn-primary')!
+    expect(primary.textContent).toBe('Start another thread')
+    expect(primary.disabled).toBe(false)
+    expect(start).toHaveBeenCalledTimes(1)
+  })
+})

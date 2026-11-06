@@ -243,6 +243,12 @@ export function ToastHost() {
   const [heights, setHeights] = useState<Record<number, number>>({})
   const [ghosts, setGhosts] = useState<Ghost[]>([])
   const expanded = (hovered || focusWithin) && toasts.length > 0
+  // An empty stack unmounts without a pointer leave or a blur: the next toast starts closed and counting down.
+  useEffect(() => {
+    if (toasts.length > 0) return
+    setHovered(false)
+    setFocusWithin(false)
+  }, [toasts.length])
   const now = useNow(toasts.length > 0)
   const paused = expanded || !windowFocused
 

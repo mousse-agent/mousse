@@ -85,3 +85,34 @@ describe('the toast stack', () => {
     expect(toastAge(0, 2 * 3_600_000)).toBe('2h')
   })
 })
+
+describe('the toast stack after it empties', () => {
+  const section = () => document.querySelector<HTMLElement>('.ui-toaster')
+
+  it('a toast that comes after Clear all under the pointer closes by itself and the stack is not open', () => {
+    vi.useFakeTimers()
+    act(() => { showToast({ message: 'One' }); showToast({ message: 'Two' }) })
+    act(() => { section()!.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, relatedTarget: document.body })) })
+    act(() => { document.querySelector<HTMLButtonElement>('[data-action="clear-all"]')!.click() })
+    // The leaving toasts fade out, then the stack is gone without the pointer ever leaving it.
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(section()).toBeNull()
+    act(() => { showToast({ message: 'Later', durationMs: 1_000 }) })
+    expect(section()!.classList.contains('is-expanded')).toBe(false)
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(toasts()).toHaveLength(0)
+  })
+
+  it('the same after the last toast was closed from the keyboard', () => {
+    vi.useFakeTimers()
+    act(() => { showToast({ message: 'One' }) })
+    act(() => { document.querySelector<HTMLButtonElement>('.ui-toast button')!.focus() })
+    act(() => { dismissToast() })
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(section()).toBeNull()
+    act(() => { showToast({ message: 'Later', durationMs: 1_000 }) })
+    expect(section()!.classList.contains('is-expanded')).toBe(false)
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(toasts()).toHaveLength(0)
+  })
+})
