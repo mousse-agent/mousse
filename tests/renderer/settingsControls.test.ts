@@ -193,13 +193,13 @@ describe('Settings > Agents > Compact context', () => {
     expect(trigger().textContent).toContain('Off')
     pick('At 512k tokens')
     expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 512000 })
-    pick('At model maximum')
+    pick('Auto')
     expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max' })
   })
 
   it('choosing what is already saved writes nothing', () => {
     const { updates } = show()
-    pick('At model maximum')
+    pick('Auto')
     expect(updates).not.toHaveBeenCalled()
   })
 })

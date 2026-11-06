@@ -11,7 +11,7 @@ import type { AgentEditorCatalogs } from './client'
 import { AGENT_RUNTIME_LABELS } from './client'
 import { JsonValueEditor } from './JsonValueEditor'
 import { runsOnLabel } from './editorIssues'
-import { CheckRow, Field, SettingGroup } from './fields'
+import { CheckRow, Field, FieldSelect, SettingGroup } from './fields'
 
 export interface AgentSettingsFormProps {
   definitionId: string
@@ -290,52 +290,40 @@ export function AgentSettingsForm({
           </Field>
         </div>
         <Field id="output-verbosity" label="Length">
-          <select
-            id="output-verbosity-input"
+          <FieldSelect
+            field="output-verbosity"
             value={settings.output.verbosity}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'output', { ...settings.output, verbosity: event.target.value as AgentDefinitionSettings['output']['verbosity'] })
-              )
-            }
-          >
-            <option value="concise">Concise</option>
-            <option value="normal">Normal</option>
-            <option value="verbose">Detailed</option>
-          </select>
+            onChange={(verbosity) => onSettingsChange(patch(settings, 'output', { ...settings.output, verbosity }))}
+            options={[
+              { value: 'concise', label: 'Concise' },
+              { value: 'normal', label: 'Normal' },
+              { value: 'verbose', label: 'Detailed' }
+            ]}
+          />
         </Field>
         <Field id="output-citations" label="Citations">
-          <select
-            id="output-citations-input"
+          <FieldSelect
+            field="output-citations"
             value={settings.output.citationPreference}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'output', {
-                  ...settings.output,
-                  citationPreference: event.target.value as AgentDefinitionSettings['output']['citationPreference']
-                })
-              )
-            }
-          >
-            <option value="none">None</option>
-            <option value="inline">Inline</option>
-            <option value="footnotes">Footnotes</option>
-          </select>
+            onChange={(citationPreference) => onSettingsChange(patch(settings, 'output', { ...settings.output, citationPreference }))}
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'inline', label: 'Inline' },
+              { value: 'footnotes', label: 'Footnotes' }
+            ]}
+          />
         </Field>
         <Field id="output-format" label="Output format">
-          <select
-            id="output-format-input"
+          <FieldSelect
+            field="output-format"
             value={settings.output.format}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'output', { ...settings.output, format: event.target.value as AgentDefinitionSettings['output']['format'] })
-              )
-            }
-          >
-            <option value="markdown">Markdown</option>
-            <option value="json">JSON</option>
-            <option value="schema">JSON matching a schema</option>
-          </select>
+            onChange={(format) => onSettingsChange(patch(settings, 'output', { ...settings.output, format }))}
+            options={[
+              { value: 'markdown', label: 'Markdown' },
+              { value: 'json', label: 'JSON' },
+              { value: 'schema', label: 'JSON matching a schema' }
+            ]}
+          />
         </Field>
         {settings.output.format === 'schema' ? (
           <JsonValueEditor
@@ -383,22 +371,16 @@ export function AgentSettingsForm({
           />
         </Field>
         <Field id="attachments" label="Attachments">
-          <select
-            id="attachments-input"
+          <FieldSelect
+            field="attachments"
             value={settings.context.attachmentPolicy}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'context', {
-                  ...settings.context,
-                  attachmentPolicy: event.target.value as AgentDefinitionSettings['context']['attachmentPolicy']
-                })
-              )
-            }
-          >
-            <option value="none">None</option>
-            <option value="explicit">Only files I list</option>
-            <option value="thread">Thread attachments</option>
-          </select>
+            onChange={(attachmentPolicy) => onSettingsChange(patch(settings, 'context', { ...settings.context, attachmentPolicy }))}
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'explicit', label: 'Only files I list' },
+              { value: 'thread', label: 'Thread attachments' }
+            ]}
+          />
         </Field>
         <Field id="max-context" label="Token budget (optional)">
           <input
@@ -420,19 +402,16 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/memory" title="Memory" lead="Default is this thread only. Profile memory never leaks to another profile.">
         <Field id="memory-scope" label="Remember">
-          <select
-            id="memory-scope-input"
+          <FieldSelect
+            field="memory-scope"
             value={settings.memory.scope}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'memory', { ...settings.memory, scope: event.target.value as AgentDefinitionSettings['memory']['scope'] })
-              )
-            }
-          >
-            <option value="off">Off</option>
-            <option value="thread">This thread</option>
-            <option value="profile_agent">This agent in this profile</option>
-          </select>
+            onChange={(scope) => onSettingsChange(patch(settings, 'memory', { ...settings.memory, scope }))}
+            options={[
+              { value: 'off', label: 'Off' },
+              { value: 'thread', label: 'This thread' },
+              { value: 'profile_agent', label: 'This agent in this profile' }
+            ]}
+          />
         </Field>
         <Field id="memory-retention" label="Keep for (days)">
           <input
@@ -454,18 +433,15 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/skills" title="Skills" lead="Inherit profile skills or pick a specific set. A missing skill keeps the draft but blocks publish/run.">
         <Field id="skills-mode" label="Selection">
-          <select
-            id="skills-mode-input"
+          <FieldSelect
+            field="skills-mode"
             value={settings.skills.mode}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'skills', { ...settings.skills, mode: event.target.value as AgentDefinitionSettings['skills']['mode'] })
-              )
-            }
-          >
-            <option value="inherit">Inherit profile skills</option>
-            <option value="explicit">Only skills I enable</option>
-          </select>
+            onChange={(mode) => onSettingsChange(patch(settings, 'skills', { ...settings.skills, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile skills' },
+              { value: 'explicit', label: 'Only skills I enable' }
+            ]}
+          />
         </Field>
         {catalogs.skills.map((skill) => {
           const selection = settings.skills.selections.find((item) => item.skillId === skill.id)
@@ -492,16 +468,15 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/mcp" title="MCP tools" lead="Turning on a server is not permission for future tools. Name the tools this agent may use.">
         <Field id="mcp-mode" label="Selection">
-          <select
-            id="mcp-mode-input"
+          <FieldSelect
+            field="mcp-mode"
             value={settings.mcp.mode}
-            onChange={(event) =>
-              onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, mode: event.target.value as AgentDefinitionSettings['mcp']['mode'] }))
-            }
-          >
-            <option value="inherit">Inherit profile tools</option>
-            <option value="explicit">Only tools I enable</option>
-          </select>
+            onChange={(mode) => onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile tools' },
+              { value: 'explicit', label: 'Only tools I enable' }
+            ]}
+          />
         </Field>
         {catalogs.mcpServers.map((server) => {
           const current = settings.mcp.servers.find((item) => item.serverId === server.serverId)
@@ -552,18 +527,15 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/tools" title="Built-in tools">
         <Field id="tools-mode" label="Selection">
-          <select
-            id="tools-mode-input"
+          <FieldSelect
+            field="tools-mode"
             value={settings.tools.mode}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'tools', { ...settings.tools, mode: event.target.value as AgentDefinitionSettings['tools']['mode'] })
-              )
-            }
-          >
-            <option value="inherit">Inherit profile tools</option>
-            <option value="explicit">Only tools I enable</option>
-          </select>
+            onChange={(mode) => onSettingsChange(patch(settings, 'tools', { ...settings.tools, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile tools' },
+              { value: 'explicit', label: 'Only tools I enable' }
+            ]}
+          />
         </Field>
         {catalogs.builtinTools.map((tool) => (
           <CheckRow
@@ -584,38 +556,28 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/browser" title="Browser" lead="Off for a new generic agent. Turn this on only when the agent should use a browser.">
         <Field id="browser-mode" label="Mode">
-          <select
-            id="browser-mode-input"
+          <FieldSelect
+            field="browser-mode"
             value={settings.browser.mode}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'browser', { ...settings.browser, mode: event.target.value as AgentDefinitionSettings['browser']['mode'] })
-              )
-            }
-          >
-            <option value="disabled">Disabled</option>
-            <option value="structured">Structured</option>
-            <option value="hybrid">Hybrid</option>
-            <option value="native">Native adapter</option>
-          </select>
+            onChange={(mode) => onSettingsChange(patch(settings, 'browser', { ...settings.browser, mode }))}
+            options={[
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'structured', label: 'Structured' },
+              { value: 'hybrid', label: 'Hybrid' },
+              { value: 'native', label: 'Native adapter' }
+            ]}
+          />
         </Field>
         <Field id="browser-workspace" label="Browser workspace">
-          <select
-            id="browser-workspace-input"
+          <FieldSelect
+            field="browser-workspace"
             value={settings.browser.workspaceId ?? ''}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'browser', { ...settings.browser, workspaceId: event.target.value || undefined })
-              )
-            }
-          >
-            <option value="">None</option>
-            {catalogs.browserWorkspaces.map((workspace) => (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.name}
-              </option>
-            ))}
-          </select>
+            onChange={(workspaceId) => onSettingsChange(patch(settings, 'browser', { ...settings.browser, workspaceId: workspaceId || undefined }))}
+            options={[
+              { value: '', label: 'None' },
+              ...catalogs.browserWorkspaces.map((workspace) => ({ value: workspace.id, label: workspace.name }))
+            ]}
+          />
         </Field>
         <Field id="browser-domains" label="Allowed domains" hint="Not enforced yet, so leave it empty (no restriction).">
           <textarea
@@ -633,22 +595,16 @@ export function AgentSettingsForm({
           />
         </Field>
         <Field id="browser-trace" label="Keep traces">
-          <select
-            id="browser-trace-input"
+          <FieldSelect
+            field="browser-trace"
             value={settings.browser.traceRetention}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'browser', {
-                  ...settings.browser,
-                  traceRetention: event.target.value as AgentDefinitionSettings['browser']['traceRetention']
-                })
-              )
-            }
-          >
-            <option value="none">None</option>
-            <option value="run">This run</option>
-            <option value="profile">This profile</option>
-          </select>
+            onChange={(traceRetention) => onSettingsChange(patch(settings, 'browser', { ...settings.browser, traceRetention }))}
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'run', label: 'This run' },
+              { value: 'profile', label: 'This profile' }
+            ]}
+          />
         </Field>
       </SettingGroup>
 
@@ -698,22 +654,16 @@ export function AgentSettingsForm({
 
       <SettingGroup pointer="/settings/workspace" title="Workspace">
         <Field id="workspace-mode" label="Files this agent may change">
-          <select
-            id="workspace-mode-input"
+          <FieldSelect
+            field="workspace-mode"
             value={settings.workspace.mode}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'workspace', {
-                  ...settings.workspace,
-                  mode: event.target.value as AgentDefinitionSettings['workspace']['mode']
-                })
-              )
-            }
-          >
-            <option value="read_only">Read only</option>
-            <option value="thread_worktree">Current thread worktree</option>
-            <option value="dedicated_child_worktree">Dedicated child worktree</option>
-          </select>
+            onChange={(mode) => onSettingsChange(patch(settings, 'workspace', { ...settings.workspace, mode }))}
+            options={[
+              { value: 'read_only', label: 'Read only' },
+              { value: 'thread_worktree', label: 'Current thread worktree' },
+              { value: 'dedicated_child_worktree', label: 'Dedicated child worktree' }
+            ]}
+          />
         </Field>
         <Field id="permitted-roots" label="Allowed roots" hint="One path per line.">
           <textarea
@@ -755,21 +705,15 @@ export function AgentSettingsForm({
           />
         </Field>
         <Field id="script-mode" label="Where they run">
-          <select
-            id="script-mode-input"
+          <FieldSelect
+            field="script-mode"
             value={settings.script.executionMode}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'script', {
-                  ...settings.script,
-                  executionMode: event.target.value as AgentDefinitionSettings['script']['executionMode']
-                })
-              )
-            }
-          >
-            <option value="sandboxed" disabled>Sandboxed (unavailable)</option>
-            <option value="workspace">Workspace</option>
-          </select>
+            onChange={(executionMode) => onSettingsChange(patch(settings, 'script', { ...settings.script, executionMode }))}
+            options={[
+              { value: 'sandboxed', label: 'Sandboxed (unavailable)', disabled: true },
+              { value: 'workspace', label: 'Workspace' }
+            ]}
+          />
         </Field>
         <CheckRow
           id="script-network"
@@ -798,41 +742,29 @@ export function AgentSettingsForm({
           Can ask questions
         </CheckRow>
         <Field id="approval-policy" label="Approvals">
-          <select
-            id="approval-policy-input"
+          <FieldSelect
+            field="approval-policy"
             value={settings.approval.policy}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'approval', {
-                  ...settings.approval,
-                  policy: event.target.value as AgentDefinitionSettings['approval']['policy']
-                })
-              )
-            }
-          >
-            <option value="inherit">Use profile policy</option>
-            <option value="always">Always ask</option>
-            <option value="unattended_deny">Unattended: deny extra authority</option>
-            <option value="unattended_allow_readonly">Unattended: allow read-only work</option>
-          </select>
+            onChange={(policy) => onSettingsChange(patch(settings, 'approval', { ...settings.approval, policy }))}
+            options={[
+              { value: 'inherit', label: 'Use profile policy' },
+              { value: 'always', label: 'Always ask' },
+              { value: 'unattended_deny', label: 'Unattended: deny extra authority' },
+              { value: 'unattended_allow_readonly', label: 'Unattended: allow read-only work' }
+            ]}
+          />
         </Field>
         <Field id="unattended" label="If nobody is there">
-          <select
-            id="unattended-input"
+          <FieldSelect
+            field="unattended"
             value={settings.approval.unattendedBehavior}
-            onChange={(event) =>
-              onSettingsChange(
-                patch(settings, 'approval', {
-                  ...settings.approval,
-                  unattendedBehavior: event.target.value as AgentDefinitionSettings['approval']['unattendedBehavior']
-                })
-              )
-            }
-          >
-            <option value="pause">Pause</option>
-            <option value="skip">Skip</option>
-            <option value="fail">Fail</option>
-          </select>
+            onChange={(unattendedBehavior) => onSettingsChange(patch(settings, 'approval', { ...settings.approval, unattendedBehavior }))}
+            options={[
+              { value: 'pause', label: 'Pause' },
+              { value: 'skip', label: 'Skip' },
+              { value: 'fail', label: 'Fail' }
+            ]}
+          />
         </Field>
       </SettingGroup>
 

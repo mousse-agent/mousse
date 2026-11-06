@@ -142,7 +142,7 @@ export function AgentsSettings({
                 { value: COMPACTION_OFF, label: 'Off' },
                 ...CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => ({
                   value: String(value),
-                  label: value === 'model-max' ? 'At model maximum' : `At ${label} tokens`
+                  label: value === 'model-max' ? label : `At ${label} tokens`
                 }))
               ]}
             />
