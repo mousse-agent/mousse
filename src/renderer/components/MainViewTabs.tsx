@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
+import { BrowserTab, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
@@ -147,7 +147,7 @@ export function MainViewTabs() {
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
       {items.map((item) => {
-        const Icon = TAB_ICONS[item.view]
+        const Icon = item.everyThread ? BrowserTab : TAB_ICONS[item.view]
         const selected = active(item)
         const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
@@ -157,7 +157,7 @@ export function MainViewTabs() {
               className="main-view-tab-select"
               aria-current={selected ? 'page' : undefined}
               aria-label={item.detail ? name : undefined}
-              title={item.title}
+              title={item.title ?? (item.everyThread ? 'Kept in every thread' : undefined)}
               onClick={() => void select(item)}
             >
               <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />

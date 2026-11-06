@@ -26,6 +26,8 @@ export interface SurfaceTabItem {
   label: string
   resourceId?: string
   closable: boolean
+  /** A browser tab kept in every thread rather than owned by one. */
+  everyThread?: boolean
   /** Where the tab works, in short words beside the label: a terminal's folder. */
   detail?: string
   /** The tab's tooltip: the label and the full folder (and computer) it works in. */
@@ -63,7 +65,8 @@ export function surfaceTabItems(input: {
           view: 'browser',
           label: named ? tab.title : input.browsers.length > 1 ? `Browser ${index + 1}` : 'Browser',
           resourceId: tab.id,
-          closable: true
+          closable: true,
+          ...(tab.ownerThreadId === null ? { everyThread: true } : {})
         })
       })
     } else if (kind === 'files') {
