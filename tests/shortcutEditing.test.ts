@@ -197,7 +197,8 @@ describe('the list', () => {
 
   it('narrows by every word of the query across title, terms, category and shortcut', () => {
     const ids = (query: string) => shortcutGroups(query, {}, WIN).flatMap((group) => group.rows.map((row) => row.command.id))
-    expect(ids('new thread')).toEqual(['thread.new'])
+    expect(ids('new thread')).toEqual(['thread.new', 'thread.newPrivate'])
+    expect(ids('private')).toEqual(['thread.newPrivate'])
     expect(ids('interrupt')).toEqual(['run.stop'])
     expect(ids('model picker')).toEqual(['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5'])
     expect(ids('ctrl+tab')).toContain('thread.next')
