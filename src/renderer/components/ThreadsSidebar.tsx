@@ -3,7 +3,8 @@ import { flushSync } from 'react-dom'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
@@ -256,7 +257,7 @@ function ThreadCardBody({
   onCancelRename,
   onStartRename
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly'>
   projectName?: string
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
@@ -334,6 +335,7 @@ function ThreadCardBody({
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
+            {thread.localOnly && <Lock size={11} strokeWidth={2} className="thread-private-icon" aria-label="Private" />}
             {thread.name}
           </span>
         )}
@@ -1245,6 +1247,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />
 
+        )}
+
+        {thread.localOnly && (
+          <span className="thread-private-icon" title="Private: stays on this computer">
+            <Lock size={12} strokeWidth={2} aria-label="Private" />
+          </span>
         )}
 
         {isRenaming ? (

@@ -1,5 +1,5 @@
 import type { Project, Thread, ThreadActivitySnapshot } from '../../shared/types'
-import { visibleThreads } from '../../shared/threadLineage'
+import { isLocalOnlyThread, visibleThreads } from '../../shared/threadLineage'
 import type { RemoteListsPort } from './remoteListsPort'
 import type { ProtocolClientType, ProtocolEvent } from './types'
 
@@ -16,6 +16,24 @@ export function connectionSeesSubagents(connection: { readonly clientType?: Prot
 }
 
 /**
+ * Whether the caller is on this computer: the desktop app or the CLI. Every other caller (another of the
+ * user's computers through Bridge, a linked phone, which has no connection at all) is never shown a private
+ * thread (`Thread.localOnly`).
+ */
+export function connectionIsLocal(connection: { readonly clientType?: ProtocolClientType } | undefined): boolean {
+  return connection?.clientType === 'gui' || connection?.clientType === 'cli'
+}
+
+/** `threads` without the private ones unless the caller is on this computer. */
+export function withoutLocalOnlyFor<T extends Pick<Thread, 'localOnly' | 'lineage'>>(
+  connection: { readonly clientType?: ProtocolClientType } | undefined,
+  threads: readonly T[],
+  inventory: readonly Pick<Thread, 'id' | 'localOnly'>[] = threads as unknown as readonly Pick<Thread, 'id' | 'localOnly'>[]
+): T[] {
+  return connectionIsLocal(connection) ? [...threads] : threads.filter((thread) => !isLocalOnlyThread(thread, inventory))
+}
+
+/**
  * `threads` as `connection` should see them. `inventory` is the complete list parents are looked up
  * in; give it whenever `threads` is a slice (one project), so a slice never makes a parent look
  * missing and a subagent look orphaned. Filtering happens here, before any limit a caller applies.
@@ -25,7 +43,8 @@ export function visibleThreadsFor(
   threads: readonly Thread[],
   inventory: readonly Thread[] = threads
 ): Thread[] {
-  return connectionSeesSubagents(connection) ? [...threads] : visibleThreads(threads, inventory)
+  const shared = withoutLocalOnlyFor(connection, threads, inventory)
+  return connectionSeesSubagents(connection) ? shared : visibleThreads(shared, inventory)
 }
 
 /** What a handler knows of its caller: who it is, and the merged lists of the profile it runs in. */

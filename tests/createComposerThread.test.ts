@@ -211,3 +211,27 @@ describe('blank composer thread on another computer', () => {
     expect(deps.select).not.toHaveBeenCalled()
   })
 })
+
+describe('a private new chat (issue #672)', () => {
+  const base = (thread?: Thread) => ({
+    thread,
+    setWorktreeEnabled: vi.fn(),
+    update: vi.fn(),
+    stillVisible: () => true,
+    activate: vi.fn(),
+    select: vi.fn(async () => {})
+  })
+
+  it('creates the thread private, on this computer, and never reuses an empty draft of the other mode', async () => {
+    const create = vi.fn(async () => ({ id: 'private-1', localOnly: true }) as Thread)
+    const shared = { id: 'draft', projectId: 'p1', worktreeEnabled: false } as Thread
+    await prepareComposerThread({ ...base(shared), create, workspace: { projectId: 'p1', worktreeEnabled: false, localOnly: true } })
+    expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: false, localOnly: true })
+
+    create.mockClear()
+    const privateDraft = { id: 'draft-2', projectId: 'p1', worktreeEnabled: false, localOnly: true } as Thread
+    expect(await prepareComposerThread({ ...base(privateDraft), create, workspace: { projectId: 'p1', worktreeEnabled: false, localOnly: true } })).toBe('draft-2')
+    await prepareComposerThread({ ...base(privateDraft), create, workspace: { projectId: 'p1', worktreeEnabled: false } })
+    expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: false })
+  })
+})

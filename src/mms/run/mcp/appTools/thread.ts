@@ -1,5 +1,5 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { visibleThreads } from '../../../../shared/threadLineage'
+import { isLocalOnlyThread, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
@@ -524,7 +524,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           throw new McpToolError('mousse_scope_denied', 'includeSubagents needs the "manage" agent access level.')
         const all = host.listThreads()
         const projectIds = allowedProjectIds()
+        // Private threads are listed only to an agent in a private thread.
+        const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
         const candidates = (args.includeSubagents === true ? all : visibleThreads(all)).filter((thread) => {
+          if (!callerPrivate && isLocalOnlyThread(thread, all)) return false
           const launched = thread.createdByThreadId === ctx.caller.threadId
           if (!launched && !inProjects(projectIds, thread.projectId)) return false
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
@@ -588,8 +591,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         // Message matches (and so their existence) are transcript content: a manager's.
         // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
         // or reads any transcript; transcripts are scanned for the most recent threads only.
+        const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
         const results = host.searchThreads(args.query, limit, {
-          allow: (found) => inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId,
+          allow: (found) => (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId),
           titlesOnly: !manage,
           maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
         })

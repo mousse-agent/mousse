@@ -1070,6 +1070,12 @@ export interface Thread {
   /** Set on a remote subagent: the computer and thread that run it. No turn runs on this computer. */
   runsOn?: ThreadRunsOn
   /**
+   * Set on a private thread: it stays on this computer. It is never listed, searched, opened or run from
+   * another of the user's computers or a phone, and everything it starts (subagents, threads its agents
+   * create, workflow agents) is private too. Fixed when the thread is created; absent means shared.
+   */
+  localOnly?: true
+  /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
    * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own

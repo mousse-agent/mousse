@@ -1,7 +1,7 @@
 import type { ChatSummary } from '../../../shared/chats'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
-import { rollUpActivities, visibleThreads } from '../../../shared/threadLineage'
+import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../shared/threadLineage'
 import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
 
@@ -216,7 +216,9 @@ export class MmsListsSource {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
-    const inventory = s.threads.listAllThreads()
+    // Private threads (`Thread.localOnly`) and everything below them never reach another device's lists.
+    const all = s.threads.listAllThreads()
+    const inventory = all.filter((thread) => !isLocalOnlyThread(thread, all))
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.

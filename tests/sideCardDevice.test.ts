@@ -384,3 +384,13 @@ describe('device menu stylesheet', () => {
     expect(css.slice(start, css.indexOf('}', start))).toMatch(/transition:\s*none/)
   })
 })
+
+describe('a private draft in the side card (issue #672)', () => {
+  it('keeps Private when a checkout choice is picked, and offers no other computer', () => {
+    const workspace = { projectId: 'p1', worktreeEnabled: false, localOnly: true }
+    expect(workspaceDraftForChoice(workspace, 'worktree')).toEqual({ projectId: 'p1', worktreeEnabled: true, localOnly: true })
+    const devices = [device({ node: 'big' as Device['node'], name: 'Studio', kind: 'computer' })]
+    expect(buildDeviceMenu({ localName: 'Mac', devices, workspace: { ...workspace, localOnly: false } }).runOn).not.toBeNull()
+    expect(buildDeviceMenu({ localName: 'Mac', devices, workspace }).runOn).toBeNull()
+  })
+})

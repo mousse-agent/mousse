@@ -5,6 +5,7 @@ import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
   addProjectAndStartThread,
   archiveOpenThread,
+  createAndSelectPrivateThread,
   createAndSelectThread,
   openStartedThread,
   selectAdjacentThread,
@@ -27,6 +28,7 @@ export function useAppCommands(): void {
   // The settings page makes the rest of the app inert; a palette opened over it could not be used.
   useCommand('palette.open', togglePalette, () => !useAppStore.getState().settingsOpen)
   useCommand('thread.new', () => void createAndSelectThread())
+  useCommand('thread.newPrivate', () => void createAndSelectPrivateThread())
   useCommand('thread.next', () => void selectAdjacentThread(1))
   useCommand('thread.previous', () => void selectAdjacentThread(-1))
   useCommand('threads.search', () => openPalette('messages'))

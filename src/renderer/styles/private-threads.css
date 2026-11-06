@@ -1,0 +1,44 @@
+/* Private threads (`Thread.localOnly`): a tint on the composer, a bar above the transcript and a lock on the row. */
+:root {
+  --private-tint: var(--hue-5, #7fa4f8);
+}
+
+.app .chat-input-area .composer.composer-private {
+  border-color: color-mix(in srgb, var(--private-tint) 45%, var(--ui-line-strong));
+  background: color-mix(in srgb, var(--private-tint) 7%, var(--ui-raised));
+}
+
+.app .chat-input-area .composer.composer-private:focus-within {
+  border-color: color-mix(in srgb, var(--private-tint) 70%, var(--ui-line-strong));
+}
+
+.composer-workspace-private.active {
+  color: var(--private-tint);
+}
+
+.thread-mode-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px calc(clamp(12px, 1.5vw, 18px) + var(--side-card-reserved, 0px)) 0 clamp(12px, 1.5vw, 18px);
+  font-size: 12px;
+  color: var(--private-tint);
+}
+
+.thread-mode-bar-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-mode-bar-detail {
+  color: var(--ui-faint);
+}
+
+.thread-private-icon {
+  flex-shrink: 0;
+  color: var(--private-tint);
+}
