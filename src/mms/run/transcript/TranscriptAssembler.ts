@@ -119,13 +119,33 @@ function settleInterrupted(item: AgentActivityItem, by: ActivityInterruptedBy, s
 }
 
 /**
+ * What of a turn's whole reply `text` the rows in `shown` (their text, in order) do not hold yet:
+ * the text after the last of them, without leading whitespace. All of `text` when one of them is
+ * not in it, in that order.
+ */
+export function unshownReplyText(text: string, shown: readonly string[]): string {
+  let rest = text
+  for (const content of shown) {
+    const part = content.trim()
+    if (!part) continue
+    const at = rest.indexOf(part)
+    if (at === -1) return text
+    rest = rest.slice(at + part.length)
+  }
+  return shown.length ? rest.replace(/^\s+/, '') : text
+}
+
+/**
  * Turns streamed text, thinking and tool events into `ChatMessage` mutations (SPEC §13.4 shared
- * builders): one assistant reply, one thinking message at a time, and one timeline message per
- * tool call, with the turn phase following the stream.
+ * builders): one assistant reply row per stretch of text (a tool call ends one in `replace` mode),
+ * one thinking message at a time, and one timeline message per tool call, with the turn phase
+ * following the stream.
  */
 export class TranscriptAssembler {
   /** The `blockedOnWait` last published with `tool_running`. */
   private blockedOnWait = false
+  /** Reply rows a `complete` text event closed this turn, oldest first. Cleared on `reset()`. */
+  private readonly closedReplyIds: string[] = []
   private readonly callToMessage: Map<string, string>
   private readonly streams = new Map<string, ItemStream>()
 
@@ -144,6 +164,7 @@ export class TranscriptAssembler {
   reset(): void {
     this.closeOpenTools('stop')
     this.callToMessage.clear()
+    this.closedReplyIds.length = 0
     this.state.activeToolCallMessageIds.clear()
     this.blockedOnWait = false
     this.state.activeThinkingMessageId = null
@@ -178,6 +199,15 @@ export class TranscriptAssembler {
     this.state.lastCompletedAssistantMessageId = messageId
     this.state.lastCompletedAssistantContent = event.content
     this.state.activeAssistantMessageId = null
+    if (this.closedReplyIds.at(-1) !== messageId) this.closedReplyIds.push(messageId)
+  }
+
+  /** The reply rows a `complete` closed this turn, oldest first (a row since removed is left out). */
+  closedReplies(): ChatMessage[] {
+    return this.closedReplyIds.flatMap((id) => {
+      const message = this.hooks.getMessage(id)
+      return message ? [message] : []
+    })
   }
 
   thinking(event: StreamingLlmThinkingEvent): void {

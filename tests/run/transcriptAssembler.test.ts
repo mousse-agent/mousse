@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   TranscriptAssembler,
+  unshownReplyText,
   type TranscriptHooks,
   type TranscriptStreamState,
   type TranscriptTextMode
 } from '../../src/mms/run/transcript/TranscriptAssembler'
+import { CumulativeStream } from '../../src/mms/run/transcript/promptRuntime'
 import { ACTIVITY_CHECKPOINT_MS, type AgentActivityItem } from '../../src/shared/agentActivity'
 import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import type { ChatMessage, TurnPhase } from '../../src/shared/types'
@@ -81,6 +83,31 @@ describe('TranscriptAssembler', () => {
     // Deltas without an open reply are ignored.
     assembler.text({ phase: 'delta', content: 'stray', contentIndex: 0 })
     expect(messages).toHaveLength(1)
+  })
+
+  it('gives each stretch of text between tool calls a reply row of its own, and lists the closed ones', () => {
+    const { messages, assembler } = harness()
+    const stream = new CumulativeStream((phase, content) => assembler.text({ phase, content, contentIndex: 0 }))
+    stream.update('Checking the tests.')
+    stream.break()
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'bash', title: 'Bash', summary: 'Bash', details: [] })
+    // A repeated start of the same call, with nothing streamed since, opens no empty row.
+    stream.break()
+    stream.update('Checking the tests.\n\nAll pass.')
+    stream.complete('Checking the tests.\n\nAll pass.')
+    expect(messages.map((message) => message.kind ?? message.content)).toEqual(['Checking the tests.', 'mcp_tool_call', 'All pass.'])
+    expect(assembler.closedReplies().map((reply) => reply.content)).toEqual(['Checking the tests.', 'All pass.'])
+    assembler.reset()
+    expect(assembler.closedReplies()).toEqual([])
+  })
+
+  it('finds what of the whole reply the closed rows do not show yet', () => {
+    const whole = 'Checking the tests.\n\nAll pass.\n\nDone: everything works.'
+    expect(unshownReplyText(whole, ['Checking the tests.', 'All pass.'])).toBe('Done: everything works.')
+    expect(unshownReplyText(whole, [])).toBe(whole)
+    expect(unshownReplyText(whole, [...['Checking the tests.', 'All pass.'], 'Done: everything works.'])).toBe('')
+    // A row the reply does not hold, in that order, leaves the whole reply.
+    expect(unshownReplyText(whole, ['All pass.', 'Checking the tests.'])).toBe(whole)
   })
 
   it('appends deltas to completed segments in append mode and keeps the reply open', () => {

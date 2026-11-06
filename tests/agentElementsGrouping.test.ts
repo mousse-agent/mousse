@@ -10,6 +10,7 @@ import {
   activityGroupLabel,
   analyzeAssistantMessage,
   partitionTurnSegments,
+  settleFinishedTurn,
 } from '../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
 
 const tool = (type: string, toolCallId: string, extra: Record<string, unknown> = {}) => ({
@@ -229,5 +230,42 @@ describe('partitionTurnSegments', () => {
 describe('applet activity segmentation', () => {
   it('keeps an applet alongside tools on its own visible message surface', () => {
     expect(analyzeAssistantMessage([{ type: 'tool-Bash', toolCallId: 't', state: 'output-available' }, { type: 'data-applet', data: { appletId: 'a' } }], false).toolsOnly).toBe(false)
+  })
+})
+
+describe('settleFinishedTurn', () => {
+  const said = (id: string, text: string, role = 'assistant') => ({ id, role, parts: [{ type: 'text', text }] })
+  const step = (id: string, type = 'tool-Bash') => ({ id, role: 'assistant', parts: [tool(type, id)] })
+  const settle = (messages: Array<{ id: string; role?: string; parts: unknown[] }>) => {
+    const settled = settleFinishedTurn(messages, messages.map((message) => analyzeAssistantMessage(message.parts, false)))
+    return {
+      order: settled.order.map((index) => messages[index]!.id),
+      grouped: settled.order.filter((index) => settled.analyses[index]!.toolsOnly).map((index) => messages[index]!.id),
+      notes: settled.analyses.flatMap((analysis) => analysis.toolItems.filter((item) => item.part.type === 'tool-Note').map((item) => item.part.input)),
+    }
+  }
+
+  it('puts the answer last and folds the notes before it into the activity', () => {
+    const turn = settle([said('n1', 'Checking.'), step('c1'), said('n2', ' Reading the log. '), step('c2'), said('a1', 'Done.'), step('t1', 'tool-Thinking')])
+    expect(turn.order).toEqual(['n1', 'c1', 'n2', 'c2', 't1', 'a1'])
+    expect(turn.grouped).toEqual(['n1', 'c1', 'n2', 'c2', 't1'])
+    expect(turn.notes).toEqual([{ text: 'Checking.' }, { text: 'Reading the log.' }])
+  })
+
+  it('keeps a turn without reply text, and what is not activity, where it was', () => {
+    expect(settle([step('c1'), step('c2')]).order).toEqual(['c1', 'c2'])
+    const errored = settle([step('c1'), said('a1', 'Done.'), { id: 'e1', role: 'assistant', parts: [{ type: 'error', message: 'Lost' }] }, step('c2')])
+    expect(errored.order).toEqual(['c1', 'c2', 'a1', 'e1'])
+  })
+
+  it('never takes a steer for the answer or a note', () => {
+    const turn = settle([said('a1', 'Started.'), step('c1'), said('s1', 'Also check the docs', 'user')])
+    expect(turn.order).toEqual(['c1', 'a1', 's1'])
+    expect(turn.notes).toEqual([])
+  })
+
+  it('moves the one reply row of an older turn below the work that came after it', () => {
+    // Turns saved before notes had rows of their own keep all their text in the first reply row.
+    expect(settle([step('t1', 'tool-Thinking'), said('a1', 'Checking.All done.'), step('c1'), step('t2', 'tool-Thinking')]).order).toEqual(['t1', 'c1', 't2', 'a1'])
   })
 })

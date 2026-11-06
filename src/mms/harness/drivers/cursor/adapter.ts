@@ -89,6 +89,11 @@ export class CursorAdapter implements ProviderAdapter {
         if (event.phase === 'start') toolCalls.set(event.callId, 'running')
         else toolCalls.set(event.callId, event.status === 'unfinished' ? 'unfinished' : 'completed')
         progress()
+        // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start') {
+          streams.thinking.break()
+          streams.text.break()
+        }
         sink.tool(runtimeToolEvent(event))
       },
       // The ref names the agent once there is one, so stop and terminate find its run.

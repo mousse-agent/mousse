@@ -351,7 +351,7 @@ class PiTurn {
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   /** The current assistant message's text blocks by `contentIndex`. */
   text = new Map<number, string>()
-  /** The turn's reply as one cumulative stream, closed with the joined text when the turn ends. */
+  /** The turn's reply as one cumulative stream, broken at each tool call and closed with the joined text when the turn ends. */
   readonly reply: CumulativeStream
   thinking = ''
   settled!: () => void
@@ -1905,6 +1905,8 @@ export class PiRpcEngine implements ProviderAdapter {
         const mousse = !Object.hasOwn(BUILTIN_CLASSES, name)
         turn.openTools.set(String(event.toolCallId), { name, mousse })
         turn.progress()
+        // A note that came before this call keeps its own row, above it; the next one starts below.
+        turn.reply.break()
         sink.tool({
           kind: mousse ? 'mcp_tool_call' : 'build_tool_call',
           phase: 'start',
@@ -2007,7 +2009,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const { sink } = turn
     turn.progress()
     switch (update.type) {
-      // One reply bubble per turn, as the legacy loop shows it: every step's text, joined.
+      // The reply is every step's text, joined; a tool call closes its row (see `tool_execution_start`).
       case 'text_start':
         turn.text.set(update.contentIndex, '')
         return turn.reply.update(turn.replyText())

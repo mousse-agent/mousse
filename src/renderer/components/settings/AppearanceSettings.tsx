@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'react'
 import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
-import { Palette } from '../../lib/icons'
 import { Select, type SelectOption } from '../ui/Select'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
@@ -91,7 +90,7 @@ export function AppearanceSettings({
 
   return (
     <section id="appearance" className="settings-section">
-      <SettingsGroup title="Appearance" icon={Palette}>
+      <SettingsGroup>
         <SettingsRow title="Color theme" anchor="appearance-theme">
           <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
             {options.themes.map((theme, index) => {
