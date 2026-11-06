@@ -119,7 +119,8 @@ async function main() {
     held.afterBelow = await sentinelTop()
     held.belowScrollTopDelta = (await scrollTop()) - beforeBelow
     // Take the filler back out (shrinking above the reader is held just the same): later steps read plain rows.
-    for (const row of [hold.row - 1, hold.row, hold.row + 1]) await execute(`qa.growRow(${row}, 0)`)
+    // A row the window has since unmounted took its filler with it.
+    for (const row of [hold.row - 1, hold.row, hold.row + 1]) await execute(`qa.isMounted(${row}) && qa.growRow(${row}, 0)`)
     await execute('qa.frames(4)')
 
     // Scrolling by hand through rows whose estimates are far off: up, then down.
