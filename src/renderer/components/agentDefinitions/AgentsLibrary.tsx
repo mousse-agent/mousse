@@ -2,6 +2,7 @@ import { Plus, Star, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { RefreshToolsButton } from '../automations/LibraryParts'
 import { Select } from '../ui/Select'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { SearchInput } from '../ui/SearchInput'
 import { AgentCard } from './AgentCard'
 import {
@@ -246,8 +247,8 @@ export function AgentsLibrary({
         </div>
       ) : null}
       {loading ? (
-        <div className="agent-defs--loading" role="status">
-          Loading agents…
+        <div className="agent-defs--loading">
+          <DelayedLoader label="Loading agents" />
         </div>
       ) : error ? (
         <div className="agent-defs--error" role="alert">
