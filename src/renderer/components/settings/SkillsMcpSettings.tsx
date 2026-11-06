@@ -128,7 +128,7 @@ function WebSearchKeys() {
   }
 
   return (
-    <SettingsGroup title="Web search" icon={Globe} description="Optional API keys for the web_search tool, kept in the secure credential store.">
+    <SettingsGroup anchor="integrations-web-search" title="Web search" icon={Globe} description="Optional API keys for the web_search tool, kept in the secure credential store.">
       {WEB_SERVICES.map(({ id, label }) => {
         const editing = !configured[id] || replacing === id
         const inputId = `web-search-key-${id}`
@@ -170,7 +170,7 @@ function WebSearchKeys() {
 function MainAgentAvailability({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const { skills, mcp } = settings.integrations
   return (
-    <SettingsGroup title="Available to main agent">
+    <SettingsGroup anchor="integrations-main-agent" title="Available to main agent">
       <SettingsRow
         title="Skills"
         htmlFor="main-agent-skills"
@@ -230,6 +230,7 @@ export function RelayAvailability({ settings, onUpdate }: { settings: MousseSett
   const disabled = mcp.enabled === false
   return (
     <SettingsGroup
+      anchor="integrations-share"
       title="Share with other agents"
       description="Claude Code, Codex and other agents reach the MCP servers that are on through Mousse, as the mousse-relay server. Claude Code also keeps the servers Mousse adds to it directly, so their tools can appear twice."
       className="skills-mcp-compact"
