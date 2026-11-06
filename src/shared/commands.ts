@@ -19,6 +19,8 @@ export type CommandId =
   | 'project.open'
   | 'chat.findInThread'
   | 'run.stop'
+  | 'approval.allow'
+  | 'approval.deny'
   | 'sideCard.toggle'
   | 'sidebar.toggle'
   | 'mainArea.toggle'
@@ -52,7 +54,7 @@ export type CommandId =
 export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workflow-editor'
 
 /** The kind of overlay that is topmost. While one is open it owns the keyboard. */
-export type OverlayScope = 'modal' | 'palette' | 'thread-search' | 'model-picker'
+export type OverlayScope = 'modal' | 'palette' | 'model-picker'
 
 export type CommandCategory = 'Thread' | 'View' | 'Go' | 'Surfaces' | 'Model picker' | 'Workflow editor' | 'Editor'
 
@@ -78,6 +80,8 @@ export interface CommandContext {
    * the browser surface leave it absent or true.
    */
   fromKey?: boolean
+  /** Whether the key press came from the thread's composer. Absent where no one has built it. */
+  inComposer?: boolean
 }
 
 export interface CommandDefinition {
@@ -86,7 +90,7 @@ export interface CommandDefinition {
   category: CommandCategory
   /** Extra words the palette matches besides the title. */
   searchTerms?: string[]
-  /** Null: no key until the user records one. */
+  /** `null`: no key until the user sets one: a palette-only command, or one a slip of the hand must not run. */
   defaultBinding: string | { mac: string; other: string } | null
   scope: CommandScope
   /** Whether the command may run while a text field has focus. */
@@ -108,6 +112,8 @@ const MOD = 'CommandOrControl'
 const surfaceAvailable = (ctx: CommandContext): boolean => ctx.fromKey === false || (ctx.mainAreaOpen && ctx.projectsMode)
 const threadIsOpen = (ctx: CommandContext): boolean => ctx.threadOpen
 const inFilesPanel = (ctx: CommandContext): boolean => ctx.inFilesPanel === true
+/** A thread is open and the key, if any, was not typed into another text field (a commit box, a search field). */
+const approvalTarget = (ctx: CommandContext): boolean => ctx.threadOpen && (!ctx.inTextInput || ctx.inComposer === true)
 
 function surfaceCommand(id: CommandId, title: string, letter: string): CommandDefinition {
   return {
@@ -265,6 +271,33 @@ export const COMMANDS: readonly CommandDefinition[] = [
     terminal: 'allow',
     guest: 'allow',
     when: (ctx) => ctx.runActive
+  },
+  {
+    // Answers the open thread's waiting permission request. Its handler is enabled only while one
+    // waits and, from the composer, only while the composer is empty (with text, the key sends).
+    id: 'approval.allow',
+    title: 'Approve request',
+    category: 'Thread',
+    searchTerms: ['approval', 'permission', 'allow', 'accept'],
+    defaultBinding: `${MOD}+Enter`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: approvalTarget
+  },
+  {
+    // No default key, so a slip cannot deny.
+    id: 'approval.deny',
+    title: 'Deny request',
+    category: 'Thread',
+    searchTerms: ['approval', 'permission', 'reject', 'refuse'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny',
+    when: approvalTarget
   },
   {
     id: 'sideCard.toggle',
@@ -644,6 +677,12 @@ export function resolveOptionalBinding(binding: string | null, platform: string)
   return binding === null ? null : resolveBinding(binding, platform)
 }
 
+/** Whether two bindings (null = unbound) are the same key on a platform. */
+export function sameBinding(a: string | null, b: string | null, platform: string): boolean {
+  if (a === null || b === null) return a === b
+  return resolveBinding(a, platform) === resolveBinding(b, platform)
+}
+
 /** The binding a command has under these overrides: the override (`null` = unbound) or the default. */
 export function bindingFor(id: CommandId, overrides: ShortcutOverrides, platform: string): string | null {
   const override = overrides[id]
@@ -970,7 +1009,7 @@ export function normalizeShortcuts(raw: unknown, platform: string): ShortcutOver
     const parsed = parseBinding(value)
     if (!parsed) continue
     if (reservedMatches(value, platform, id).some((entry) => entry.hard)) continue
-    if (resolveBinding(value, platform) === resolveOptionalBinding(defaultBindingFor(id, platform), platform)) continue
+    if (sameBinding(value, defaultBindingFor(id, platform), platform)) continue
     result[id] = serializeBinding(parsed)
   }
   return result
