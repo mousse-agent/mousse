@@ -573,8 +573,21 @@ html.platform-darwin .titlebar-left {
   text-overflow: ellipsis;
 }
 
+/* A terminal's folder: quieter than its name, and the first to give way. */
+.main-view-tab-detail {
+  min-width: 0;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 2;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 @container main-area (max-width: 520px) {
-  .main-view-tab-label {
+  .main-view-tab-label,
+  .main-view-tab-detail {
     display: none;
   }
 
@@ -3762,7 +3775,7 @@ html[data-theme='high-contrast'] {
 .browser-menu > button:hover, .browser-menu-actions > button:hover { background: rgba(var(--accent-rgb), 0.15); }
 .browser-menu-label { display: inline-flex; align-items: center; gap: 8px; }
 .browser-menu-label svg,
-.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 16px; height: 16px; flex-shrink: 0; }
+.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 14px; height: 14px; flex-shrink: 0; }
 .browser-menu-zoom > span:first-child { margin-right: auto; }
 .browser-menu-zoom > button { display: inline-flex; padding: 4px; border-radius: 4px; }
 .browser-menu-zoom > button:hover { background: rgba(var(--accent-rgb), 0.16); }
@@ -3781,14 +3794,44 @@ html[data-theme='high-contrast'] {
   font-size: 11px;
 }
 
-.browser-device-toolbar select {
+.browser-device-toolbar .ui-select {
   min-width: 130px;
-  padding: 4px 7px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  border-radius: 5px;
-  color: var(--text-primary);
-  background: rgba(var(--surface-elevated-rgb), 0.8);
 }
+
+/* Agent access in the toolbar: who may drive the browser, and who drives this tab now. */
+.browser-access {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 4px 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.browser-access-icon { flex-shrink: 0; }
+.browser-access-off .browser-access-icon,
+.browser-access-off .browser-access-label { opacity: 0.6; }
+.browser-access-agent .browser-access-icon { color: var(--accent); }
+.browser-access-human .browser-access-icon { color: var(--text-primary); }
+
+/* The last browser action's result or error, directly under the toolbar. */
+.browser-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 6px 2px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(var(--surface-strong-rgb), 0.55);
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.08);
+}
+
+.browser-notice > svg { flex-shrink: 0; }
+.browser-notice-done > svg { color: var(--success); }
+.browser-notice-error > svg { color: var(--danger); }
+.browser-notice-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .browser-url-form {
   flex: 1;
@@ -3850,21 +3893,34 @@ html[data-theme='high-contrast'] {
 .browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
+/* The app-owned start page follows the app theme; visited sites keep the white default. */
+.browser-viewport-blank {
+  background: var(--bg-primary);
+}
+
 .browser-blank {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   z-index: 1;
   pointer-events: none;
+  color: var(--text-secondary);
 }
 
 .browser-blank-logo {
-  width: 96px;
-  height: 96px;
+  width: 72px;
+  height: 72px;
   color: var(--accent);
   opacity: 0.7;
+}
+
+.browser-blank-copy {
+  margin: 0;
+  font-size: 12px;
 }
 
 .browser-blank-logo svg {
@@ -3902,6 +3958,10 @@ html[data-theme='high-contrast'] {
   .browser-toolbar {
     padding: 6px;
     gap: 2px;
+  }
+
+  .browser-access-label {
+    display: none;
   }
 }
 
@@ -4090,12 +4150,75 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
+.git-toolbar-info > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-branch,
+.git-toolbar-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder gives way before the branch when the toolbar is narrow. */
+.git-toolbar-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-shrink: 3;
+  margin-left: 4px;
+  color: var(--text-secondary);
+}
+
+.git-toolbar-folder > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-computer {
+  flex: none;
+  min-width: 0;
+}
+
+/* The diff header: the open file, then the whitespace switch and Push, Commit and Create PR. */
+.git-diff-toolbar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.git-diff-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-diff-message {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.git-diff-message.git-diff-error {
+  color: var(--danger);
+}
+
+/* Sections size from these (see sectionStyle in gitPanelLogic.ts). If every section is at its
+   floor and the panel is shorter still, the whole list scrolls rather than hiding one. */
 .git-changes {
+  --git-section-head: 24px;
+  --git-row: 28px;
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 
@@ -4144,6 +4267,12 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .git-section-divider:hover,
 .git-section-divider:active {
   background: rgba(var(--accent-rgb), 0.35);
+}
+
+.git-section-divider:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .git-section-header {
@@ -4213,7 +4342,8 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-file-row:hover .git-row-actions,
-.git-file-row:focus-within .git-row-actions {
+.git-file-row:focus-within .git-row-actions,
+.git-file-row:has(.row-menu-btn[aria-expanded='true']) .git-row-actions {
   display: flex;
 }
 
@@ -4232,7 +4362,37 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   color: var(--text-primary);
 }
 
-.git-row-action[data-action='discard']:hover:not(:disabled) {
+.git-row-action.row-menu-btn[aria-expanded='true'] {
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--text-primary);
+}
+
+.git-row-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* The question before a discard: what goes, then which files and how long a copy is kept. */
+.git-discard-dialog .modal {
+  width: min(440px, calc(100vw - 32px));
+}
+
+.git-discard-lead {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-detail {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-dialog .btn-danger {
   color: var(--danger);
 }
 
@@ -6032,10 +6192,6 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   resize: vertical;
   min-height: 80px;
 }
-.browser-access-toggle { width: 28px; height: 16px; border-radius: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; }
-.browser-access-toggle::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-secondary); transition: transform var(--ui-dur); }
-.browser-access-toggle.enabled { background: rgba(var(--accent-rgb), .35); }
-.browser-access-toggle.enabled::after { transform: translateX(12px); background: var(--accent); }
 
 
 /* Rail destinations share the window chrome and navigation. */
