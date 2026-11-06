@@ -167,9 +167,10 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(result.afterSweeps.first && result.afterSweeps.last).toBe(true)
 
     // Opening a group of tool calls that is above the reading line, in the turn being read, moves the content down and the
-    // scroll position with it; opening one below it moves nothing; closing the first again puts it back.
+    // scroll position with it; opening one below it, in the next turn, moves nothing; closing the first again puts it back.
     const cards = result.toolCards
-    expect(cards.groups).toBe(2)
+    expect(cards.groups).toBe(1)
+    expect(cards.nextGroups).toBe(1)
     expect(cards.firstGroupTop).toBeLessThan(0)
     expect(cards.secondGroupTop).toBeGreaterThan(800)
     expect(within(cards.start, 100)).toBe(true)

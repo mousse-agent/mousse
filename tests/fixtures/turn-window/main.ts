@@ -150,16 +150,16 @@ async function main() {
     // A group opens and closes with a short height animation (ui/Collapse); the reading line is read once it has ended,
     // so a slow frame in the middle of the motion does not decide the result.
     const groupSettled = async () => {
-      await waitFrames(`!document.querySelector(${JSON.stringify('[data-turn-key="u-400"] .ui-collapse[data-motion]')})`, 120)
+      await waitFrames(`!document.querySelector(${JSON.stringify(':is([data-turn-key="u-400"], [data-turn-key="u-401"]) .ui-collapse[data-motion]')})`, 120)
       await execute('qa.frames(3)')
     }
     await execute('qa.goToRow(400, 0)')
     await execute('qa.frames(4)')
     await execute("qa.placeSentinel('anchor-paragraph-3', 100)")
     await execute('qa.frames(5)')
-    const toolCards = { groups: await execute<number>('qa.groupCount(400)') } as Record<string, number | null>
+    const toolCards = { groups: await execute<number>('qa.groupCount(400)'), nextGroups: await execute<number>('qa.groupCount(401)') } as Record<string, number | null>
     toolCards.firstGroupTop = await execute<number | null>("qa.groupTop(400, 'first')")
-    toolCards.secondGroupTop = await execute<number | null>("qa.groupTop(400, 'second')")
+    toolCards.secondGroupTop = await execute<number | null>("qa.groupTop(401, 'first')")
     toolCards.start = await sentinelOf('anchor-paragraph-3')
     toolCards.startScrollTop = await scrollTop()
     toolCards.rowHeight = await execute<number>('qa.rowHeight(400)')
@@ -168,9 +168,9 @@ async function main() {
     toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-3')
     toolCards.openGrowth = (await execute<number>('qa.rowHeight(400)')) - (toolCards.rowHeight as number)
     toolCards.openScrolled = (await scrollTop()) - (toolCards.startScrollTop as number)
-    // The second group is below the reading line: nothing moves.
+    // The next turn's group is below the reading line: nothing moves.
     const beforeSecond = await scrollTop()
-    await execute("qa.toggleGroup(400, 'second')")
+    await execute("qa.toggleGroup(401, 'first')")
     await groupSettled()
     toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-3')
     toolCards.secondScrollTopDelta = (await scrollTop()) - beforeSecond
