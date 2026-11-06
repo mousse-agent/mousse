@@ -640,7 +640,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
               <Globe size={14} className="browser-url-icon" />
-              <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
+              <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" aria-label="Address" spellCheck={false} />
             </form>
             <button
               type="button"

@@ -30,6 +30,7 @@ import {
 import { pullRequestCheckRows } from './sideCard/gitSectionLogic'
 import { Collapse } from './ui/Collapse'
 import './pullRequestPanel.css'
+import { DelayedLoader } from './ui/DelayedLoader'
 
 export interface PanelActions {
   now: number
@@ -431,7 +432,7 @@ export function PullRequestPanelView({
           <PullRequestPanelDetail detail={state.detail} actions={actions} />
         </>
       ) : state.kind === 'loading' ? (
-        <Notice role="status">Loading the pull request…</Notice>
+        <div className="pr-panel-notice"><DelayedLoader label="Loading the pull request" /></div>
       ) : state.kind === 'no-branch' ? (
         <Notice role="status">Open a project on a Git branch to see its pull request.</Notice>
       ) : state.kind === 'none' ? (
