@@ -171,6 +171,13 @@ describe('Bots tab: list', () => {
     expect(document.body.textContent).toContain('Waiting for you')
     expect(document.querySelectorAll('.bots__escalation')).toHaveLength(1)
   })
+
+  it('with no bots says what a bot does without promising later actions are approved', async () => {
+    const client = { list: vi.fn(async () => []), escalations: vi.fn(async () => []) } as unknown as PersonalBotsClient
+    await act(async () => root.render(createElement(BotsWorkspace, { client, providers: [], skills: [] })))
+    expect(document.querySelector('.bots__list .bots__muted')?.textContent).toBe('No bots yet. Bots run tasks within their granted permissions.')
+    expect(document.body.textContent).not.toContain('approve once')
+  })
 })
 
 describe('Bots wiring', () => {
