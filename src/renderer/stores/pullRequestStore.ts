@@ -15,6 +15,7 @@ import type {
 } from '../../shared/pullRequests'
 import type { GitPullRequestLookup } from '../../shared/types'
 import { errorText, ipcErrorLine } from '../lib/errorText'
+import { failureReason } from '../lib/githubSignIn'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
 
@@ -39,6 +40,8 @@ export interface PullRequestEntry {
 export interface PullRequestDetailEntry {
   detail: PullRequestDetail | null
   error: string | null
+  /** Why the last read failed, when the daemon said (`unauthenticated`, `not-found`, …). */
+  errorReason?: string | null
   fetchedAt: number
 }
 
@@ -210,7 +213,7 @@ async function fetchDetailInto(
     // The host's own message is shown; what is on screen stays, and the age advances so a broken read is not retried at once.
     const previous = useGitPullRequestStore.getState().details[key]?.detail ?? null
     const message = ipcErrorLine(error).replace(/^[A-Za-z]*Error:\s*/, '')
-    setDetailEntry(key, { detail: previous, error: message || 'Could not read the pull request.', fetchedAt: Date.now() })
+    setDetailEntry(key, { detail: previous, error: message || 'Could not read the pull request.', errorReason: failureReason(error), fetchedAt: Date.now() })
   }
 }
 

@@ -1,13 +1,18 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { WORKTREE_CONFIG_NOTICE, type PullRequestListItem, type ResolvedPullRequestSummary } from '../../shared/pullRequests'
+import { useProjectComputerName } from '../hooks/useProjectComputerName'
 import { openThreadFromPullRequest, selectThread } from '../lib/threadActions'
 import { Spinner } from './ui/Spinner'
 import { Modal } from './ui/Modal'
 import {
+  SIGNED_OUT_LIST,
+  SIGNED_OUT_READ,
   enterAction,
   filterPullRequests,
+  readFailure,
   rovingIndex,
+  signInHint,
   startButtonModel,
   startErrorCode,
   startErrorMessage,
@@ -19,12 +24,21 @@ type ListState =
   | { status: 'loading' }
   | { status: 'ready'; items: PullRequestListItem[] }
   | { status: 'error'; message: string }
+  /** GitHub CLI is not signed in: one muted line, without the CLI's text or the folder's path. */
+  | { status: 'signed-out' }
 
 type ResolvedState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'ready'; resolved: ResolvedPullRequestSummary }
   | { status: 'error'; message: string }
+  | { status: 'signed-out' }
+
+/** A failed read as a state of the list or of the typed pull request. */
+function failed(error: unknown): { status: 'error'; message: string } | { status: 'signed-out' } {
+  const failure = readFailure(error)
+  return failure.signedOut ? { status: 'signed-out' } : { status: 'error', message: failure.message }
+}
 
 interface StartFromPullRequestDialogProps {
   projectId: string
@@ -57,7 +71,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
         if (current) setList({ status: 'ready', items })
       },
       (error: unknown) => {
-        if (current) setList({ status: 'error', message: startErrorMessage(error) })
+        if (current) setList(failed(error))
       }
     )
     return () => {
@@ -80,7 +94,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
           if (current) setResolved({ status: 'ready', resolved: answer })
         },
         (error: unknown) => {
-          if (current) setResolved({ status: 'error', message: startErrorMessage(error) })
+          if (current) setResolved(failed(error))
         }
       )
     }, 300)
@@ -96,6 +110,10 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
   const button = startButtonModel(summary, existing, starting)
   const activeIndex = visible.length === 0 ? -1 : Math.min(active, visible.length - 1)
   const activeItem = activeIndex >= 0 ? visible[activeIndex] : null
+  const computerName = useProjectComputerName(projectId)
+  // The list already says to sign in; a typed pull request that fails the same way adds nothing to it.
+  const signedOut = list.status === 'signed-out'
+  const hint = signInHint(computerName)
 
   useEffect(() => {
     if (activeIndex >= 0) optionRefs.current[activeIndex]?.scrollIntoView?.({ block: 'nearest' })
@@ -144,17 +162,18 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
       }
     >
       <p className="start-from-pr-lead" title="The new thread starts at the pull request's head commit">
-        {projectName} · Starts in its own worktree
+        {computerName ? `${projectName} on ${computerName}` : projectName} · Starts in its own worktree
       </p>
       <input
         className="start-from-pr-input"
         role="combobox"
-        aria-label="Pull request URL, number or gh pr checkout command, or search the list"
+        aria-label={signedOut ? 'Pull request URL or number' : 'Pull request URL, number or gh pr checkout command, or search the list'}
         aria-controls={listId}
         aria-expanded={visible.length > 0}
         aria-autocomplete="list"
         aria-activedescendant={activeItem ? `${listId}-${activeItem.number}` : undefined}
-        placeholder="URL, number or `gh pr checkout` command — or search below"
+        // Signed out there is no list to search: only a pull request named outright can be read once the CLI is signed in.
+        placeholder={signedOut ? 'PR URL or number' : 'URL, number or `gh pr checkout` command — or search below'}
         value={query}
         autoFocus
         onChange={(event) => {
@@ -189,6 +208,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
           </span>
         )}
         {resolved.status === 'error' && <span className="start-from-pr-error">{resolved.message}</span>}
+        {resolved.status === 'signed-out' && !signedOut && <span className="start-from-pr-quiet" title={hint}>{SIGNED_OUT_READ}</span>}
       </div>
       {existing.length > 0 && (
         <p className="start-from-pr-note">
@@ -221,6 +241,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
           </p>
         )}
         {list.status === 'error' && <p className="start-from-pr-error">{list.message}</p>}
+        {list.status === 'signed-out' && <p className="start-from-pr-quiet" title={hint}>{SIGNED_OUT_LIST}</p>}
         {list.status === 'ready' && list.items.length === 0 && <p className="start-from-pr-quiet">No open pull requests.</p>}
         {list.status === 'ready' && list.items.length > 0 && visible.length === 0 && <p className="start-from-pr-quiet">No open pull request matches.</p>}
         {visible.map((item, index) => (

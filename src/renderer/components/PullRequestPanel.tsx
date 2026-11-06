@@ -1,9 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PullRequestComment, PullRequestDetail, PullRequestReview } from '../../shared/pullRequests'
 import { useActiveThreadPullRequest } from '../hooks/useActiveThreadPullRequest'
+import { useProjectComputerName } from '../hooks/useProjectComputerName'
 import { useTransientError } from '../hooks/useTransientError'
 import { gitScopeFor } from '../lib/activeProject'
-import { ChevronDown, ChevronRight, ExternalLink, GitMerge, GitPullRequest, RefreshCw } from '../lib/icons'
+import { GITHUB_SIGN_IN_COMMAND } from '../lib/githubSignIn'
+import { Check, ChevronDown, ChevronRight, Copy, ExternalLink, GitMerge, GitPullRequest, RefreshCw } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import {
   createPullRequestForBranch,
@@ -417,6 +419,49 @@ function Notice({ role, children, action }: { role: 'status' | 'alert'; children
   )
 }
 
+/** How long Copied (or the copy failure) stays. */
+const COPIED_MS = 2_000
+
+/**
+ * GitHub CLI is not signed in: what to run and where, a copy of that command, Try again once it is done, and the
+ * CLI's own words under Details. The command is fixed text; nothing from the failure is copied.
+ */
+export function SignedOutNotice({ message, computerName, onRetry }: { message: string; computerName: string | null; onRetry: () => void }) {
+  const [copy, setCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
+  useEffect(() => {
+    if (copy === 'idle') return
+    const timer = setTimeout(() => setCopy('idle'), COPIED_MS)
+    return () => clearTimeout(timer)
+  }, [copy])
+  const where = computerName ? `Run it in a terminal on ${computerName}` : 'Run it in a terminal'
+  const copyCommand = () => {
+    void Promise.resolve()
+      .then(() => navigator.clipboard.writeText(GITHUB_SIGN_IN_COMMAND))
+      .then(() => setCopy('copied'), () => setCopy('failed'))
+  }
+  return (
+    <div className="pr-panel-notice pr-panel-signin" role="status">
+      <p className="pr-panel-signin-title">{computerName ? `Sign in to GitHub CLI on ${computerName}` : 'Sign in to GitHub CLI'}</p>
+      <div className="pr-panel-signin-row">
+        <code className="pr-panel-signin-command" title={where}>{GITHUB_SIGN_IN_COMMAND}</code>
+        <button type="button" className="pr-panel-action" title={where} onClick={copyCommand}>
+          {copy === 'copied' ? <Check size={13} strokeWidth={2} aria-hidden="true" /> : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+          {copy === 'copied' ? 'Copied' : 'Copy command'}
+        </button>
+        <button type="button" className="pr-panel-action" onClick={onRetry} title="Read the pull request again">
+          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" />
+          Try again
+        </button>
+      </div>
+      {copy === 'failed' && <p className="pr-panel-signin-failed">Could not copy. Select the command and copy it.</p>}
+      <details className="pr-panel-details">
+        <summary>Details</summary>
+        <pre>{message}</pre>
+      </details>
+    </div>
+  )
+}
+
 export interface PullRequestPanelViewProps {
   state: PullRequestPanelState
   now?: number
@@ -431,6 +476,8 @@ export interface PullRequestPanelViewProps {
   headerBelow?: ReactNode
   /** Create PR for a branch with none, when it could get one. */
   createAction?: ReactNode
+  /** The computer that reads the pull request, when it is another of the user's computers. */
+  computerName?: string | null
 }
 
 /** What the panel draws for a state: a message, or the pull request with its checks, reviews and comments. */
@@ -443,7 +490,8 @@ export function PullRequestPanelView({
   initialSelectedKey = null,
   headerActions,
   headerBelow,
-  createAction
+  createAction,
+  computerName = null
 }: PullRequestPanelViewProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialSelectedKey)
   const actions: PanelActions = {
@@ -475,6 +523,8 @@ export function PullRequestPanelView({
         <Notice role="status" action={createAction}>
           {state.branch ? `${state.branch} has no pull request yet.` : 'This branch has no pull request yet.'}
         </Notice>
+      ) : state.kind === 'signed-out' ? (
+        <SignedOutNotice message={state.message} computerName={computerName} onRetry={onRefresh} />
       ) : (
         <Notice role="alert" action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
           {state.message}
@@ -566,6 +616,7 @@ export function PullRequestPanel() {
   const entry = usePullRequestDetail(path, number, projectId, folderThreadId)
   const [refreshing, setRefreshing] = useState(false)
   const state = pullRequestPanelState({ hasBranch: path !== null && branch !== null, branch, lookup, entry })
+  const computerName = useProjectComputerName(projectId)
 
   const refresh = () => {
     if (!path || !branch || refreshing) return
@@ -637,6 +688,7 @@ export function PullRequestPanel() {
         refreshing={refreshing}
         onRefresh={refresh}
         onOpenFile={openFile}
+        computerName={computerName}
         headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={ask} /> : undefined}
         headerBelow={
           <>
