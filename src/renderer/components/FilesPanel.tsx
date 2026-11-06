@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { AlertTriangle, Eye, Pencil, Search, X } from '../lib/icons'
+import { AlertTriangle, Eye, Pencil, Search } from '../lib/icons'
+import { setReferenceDragData } from '../../shared/chatReferences'
 import { useCommand } from '../commands/commandRegistry'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
@@ -18,6 +19,9 @@ import { FilesSearch, type FilesSearchOpenRequest } from './FilesSearch'
 import { openLineDetail, type FilesSearchMode } from './filesSearchState'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ensureProjectReferenceThread } from '../utils/chatLinks'
+import { filesEntryReference } from '../utils/fileReference'
+import { DelayedLoader } from './ui/DelayedLoader'
+import { TabBar } from './ui/TabBar'
 import './filesPanel.css'
 
 const REVALIDATE_MS = 2_000
@@ -94,6 +98,8 @@ export function FilesPanel() {
   const selectedKeyRef = useRef<string | null>(null)
   const openRequestSequence = useRef(0)
   const panelRef = useRef<HTMLDivElement>(null)
+  /** A file closed from the tab strip while focus was in it; if it was the last one, the strip goes away too. */
+  const closedFromStrip = useRef<string | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchRequest, setSearchRequest] = useState<FilesSearchOpenRequest>({ mode: 'files', nonce: 0 })
   const searchReturnFocus = useRef<HTMLElement | null>(null)
@@ -404,19 +410,33 @@ export function FilesPanel() {
       .schedule({ content: value, baseline: current.savedContent })
   }, [ensureQueue, patchFile, selectedKey])
 
-  const closeTab = useCallback(async (path: string) => {
+  /** Closes a file once its edits are saved. Resolves false, leaving it open, while it has unsaved edits or a conflict. */
+  const closeTab = useCallback(async (path: string): Promise<boolean> => {
     const key = fileKey(path)
     await flushPath(key)
     const current = filesRef.current[key]
-    if (saveBlockers.current.has(key) || (current && (current.content !== current.savedContent || current.saveState === 'conflict'))) return
+    if (saveBlockers.current.has(key) || (current && (current.content !== current.savedContent || current.saveState === 'conflict'))) return false
     loadSequences.current.set(key, (loadSequences.current.get(key) ?? 0) + 1)
     queues.current.get(key)?.dispose()
     queues.current.delete(key)
     saveBlockers.current.delete(key)
     if (current?.assetUrl) URL.revokeObjectURL(current.assetUrl)
     replaceFiles((all) => { const next = { ...all }; delete next[key]; return next })
+    if (panelRef.current?.querySelector('.files-editor > .ui-tabs')?.contains(document.activeElement)) closedFromStrip.current = path
     closeFileInStore(scope, path)
+    return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
+
+  // With other files open the strip moves focus to the next tab. Closing the last one removes the strip,
+  // so focus goes to the closed file's row in the tree, or to the empty editor when that row is not shown.
+  useLayoutEffect(() => {
+    const closed = closedFromStrip.current
+    closedFromStrip.current = null
+    if (!closed || openPaths.length > 0) return
+    const panel = panelRef.current
+    const row = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])].find((element) => element.dataset.path === closed)
+    ;(row ?? panel?.querySelector<HTMLElement>('.files-editor-empty'))?.focus()
+  }, [openPaths.length])
 
   const beforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco
@@ -435,13 +455,14 @@ export function FilesPanel() {
     }
   }
 
+  // A saved file says nothing; only a state that needs attention or is in progress shows.
   const saveLabel = useMemo(() => {
-    if (!selected) return ''
+    if (!selected || selected.loading) return ''
     if (selected.saveState === 'saving') return 'Saving…'
     if (selected.saveState === 'dirty') return 'Autosave pending'
     if (selected.saveState === 'conflict') return 'Conflict'
     if (selected.saveState === 'error') return 'Save error'
-    return 'Saved'
+    return ''
   }, [selected])
 
   const supportsPreview = selected?.kind === 'html'
@@ -464,24 +485,21 @@ export function FilesPanel() {
           onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(path, filesRoot))} refreshKey={refreshKey} />
       </ResizablePanelSidebar>
       <div className="files-editor">
-        {openPaths.length > 0 && <div className="files-tabs" role="tablist" aria-label="Open files">
-          {openPaths.map((path) => {
-            const key = fileKey(path)
-            const file = files[key]
-            const dirty = file && file.content !== file.savedContent
-            return <button key={path} type="button" role="tab" aria-selected={path === selectedPath}
-              className={`files-tab ${path === selectedPath ? 'active' : ''}`}
-              draggable onDragStart={(event) => {
-                const absolutePath = /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${filesRoot.replace(/[\\/]$/, '')}/${path}`
-                const payload = JSON.stringify({ kind: 'file', title: basename(path), path: absolutePath, threadId: activeThreadId ?? undefined, projectId: projectId ?? undefined })
-                event.dataTransfer.setData('application/x-mousse-reference', payload)
-                event.dataTransfer.setData('text/plain', path)
-              }} onClick={() => activateFile(scope, path)} title={path}>
-              <span>{basename(path)}{dirty ? ' •' : ''}</span>
-              <span className="files-tab-close" role="button" aria-label={`Close ${basename(path)}`} onClick={(event) => { event.stopPropagation(); void closeTab(path) }}><X size={12} /></span>
-            </button>
+        {openPaths.length > 0 && <TabBar
+          label="Open files"
+          activeId={selectedPath}
+          tabs={openPaths.map((path) => {
+            const file = files[fileKey(path)]
+            const dirty = Boolean(file && file.content !== file.savedContent)
+            return { id: path, name: basename(path), title: dirty ? `${path} (unsaved)` : path, label: `${basename(path)}${dirty ? ' •' : ''}` }
           })}
-        </div>}
+          onSelect={(path) => activateFile(scope, path)}
+          onClose={closeTab}
+          onDragStart={(path, event) => {
+            setReferenceDragData(event.dataTransfer, filesEntryReference({ path, name: basename(path), kind: 'file', filesRoot, threadId: activeThreadId, projectId }))
+            event.dataTransfer.setData('text/plain', path)
+          }}
+        />}
         {/* Until a file is open the body alone says what to do; the header only ever names a real file. */}
         {selectedPath && <div className="panel-toolbar files-editor-toolbar">
           <span className="panel-toolbar-path" title={selectedPath}>{selectedPath}</span>
@@ -490,7 +508,7 @@ export function FilesPanel() {
               <button type="button" className={`btn btn-sm ${!selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: false }))}><Pencil size={13} /> Edit</button>
               <button type="button" className={`btn btn-sm ${selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: true }))}><Eye size={13} /> Preview</button>
             </div>}
-            {selected && <span className={`files-save-status ${selected.saveState}`}>{saveLabel}</span>}
+            {saveLabel && selected && <span className={`files-save-status ${selected.saveState}`}>{saveLabel}</span>}
           </div>
         </div>}
         {selected?.error && <div className={`panel-error ${selected.saveState === 'conflict' ? 'files-conflict' : ''}`}>
@@ -517,7 +535,7 @@ export function FilesPanel() {
             }}>Keep mine</button>
           </div>}
         </div>}
-        {selected?.loading ? <div className="files-editor-empty">Loading…</div>
+        {selected?.loading ? <DelayedLoader label={`Opening ${basename(selected.path)}`} className="files-editor-loader" />
           : selected?.initialLoadFailed ? <div className="files-editor-empty">Unable to read this file. Use Retry open above.</div>
           : selected && selected.kind === 'pdf' && selected.assetUrl ? <iframe className="files-asset-preview files-pdf-preview" src={selected.assetUrl} title={`PDF preview: ${selected.path}`} />
           : selected && selected.kind === 'image' && selected.assetUrl ? <div className="files-asset-preview"><img src={selected.assetUrl} alt={selected.path} /></div>
@@ -526,7 +544,7 @@ export function FilesPanel() {
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
           : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
-          : <div className="files-editor-empty"><p>Select a file from the tree</p></div>}
+          : <div className="files-editor-empty" tabIndex={-1}><p>Select a file from the tree</p></div>}
       </div>
     </div>
   )

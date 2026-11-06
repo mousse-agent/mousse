@@ -18,6 +18,7 @@ import {
 } from './git/gitPanelLogic'
 import { GitOperationStatus } from './git/GitOperationStatus'
 import { GitSyncBar } from './git/GitSyncBar'
+import { DelayedLoader } from './ui/DelayedLoader'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
 
@@ -309,7 +310,7 @@ export function GitPanel() {
 
   const renderSidebarBody = () => {
     if (!folderId) return <div className="git-empty">No project open</div>
-    if (loading) return <div className="git-empty">Loading…</div>
+    if (loading) return <div className="git-empty"><DelayedLoader label="Loading Git status" /></div>
     if (!status?.isRepo) return (
       <div className="github-setup">
         <div className="github-setup-heading"><Cloud size={16} /> Not a Git repository</div>

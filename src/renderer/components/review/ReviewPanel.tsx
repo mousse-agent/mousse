@@ -5,6 +5,7 @@ import { REVIEW_MAX_FILES, type ReviewFileEntry, type ReviewFilesResult, type Re
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
 import { ResizablePanelSidebar } from '../ResizablePanelSidebar'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select, type SelectOption } from '../ui/Select'
 import { Collapse } from '../ui/Collapse'
 import { ReviewDiffPane, WhitespaceToggle } from './ReviewDiffPane'
@@ -334,7 +335,7 @@ export function ReviewPanel() {
             ) : noChanges ? (
               <div className="git-empty git-empty-nested">No changes in {scope ? scopeLabel(scope, choices) : 'this scope'}</div>
             ) : !result && !error ? (
-              <div className="git-empty git-empty-nested">Loading…</div>
+              <div className="git-empty git-empty-nested"><DelayedLoader size="small" label="Loading changes" /></div>
             ) : null}
           </div>
         </div>
