@@ -44,16 +44,17 @@ describe('Add project on an empty new chat', () => {
   it('is in the flow, centred under the composer, not floated over the workspace toolbar', () => {
     const css = rule(app, '.chat-empty-add-project')
     expect(css).not.toContain('position: absolute')
-    expect(css).toContain('margin: var(--space-16) auto 0')
+    expect(css).toContain('margin: 16px auto 0')
     const chat = readFileSync(new URL('../../src/renderer/components/OrchestratorChat.tsx', import.meta.url), 'utf8')
     expect(chat.indexOf('<EmptyThreadAddProject')).toBeGreaterThan(chat.indexOf('<ComposerWorkspaceToolbar'))
   })
 
   it('has the settings button gap and padding, though it renders outside Settings', () => {
     // `.settings-btn` spaces with tokens defined on `.settings-page`; without them the glyph touches the word.
-    const css = rule(app, '.chat-empty-add-project')
-    for (const token of ['--space-4: 4px', '--space-12: 12px', '--space-16: 16px']) expect(css).toContain(token)
+    // The size and tokens live on the class it shares with Create agent.
+    const css = rule(app, '.chat-empty-action')
+    for (const token of ['--space-4: 4px', '--space-12: 12px']) expect(css).toContain(token)
     const button = readFileSync(new URL('../../src/renderer/components/EmptyThreadAddProject.tsx', import.meta.url), 'utf8')
-    expect(button).toContain('className="settings-btn chat-empty-add-project"')
+    expect(button).toContain('className="settings-btn chat-empty-action chat-empty-add-project"')
   })
 })
