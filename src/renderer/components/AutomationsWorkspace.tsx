@@ -104,6 +104,14 @@ function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string;
       if (focus) requestAnimationFrame(() => document.getElementById(`automations-${next}-tab`)?.focus())
     }
   }
+  // Another surface (the Agents tab of the sidebar) can open Automations at a section.
+  const sectionRequest = useAppStore((state) => state.automationsSectionRequest)
+  const handledRequest = useRef(sectionRequest)
+  useEffect(() => {
+    if (!sectionRequest || sectionRequest === handledRequest.current) return
+    handledRequest.current = sectionRequest
+    void selectTab(sectionRequest.section)
+  })
   const workflowCatalogs: WorkflowEditorCatalogs = {
     ...catalogs, subworkflows,
     builtinTools: catalogs.builtinTools.filter((tool) => workflowProjectToolIds.has(tool.id)),

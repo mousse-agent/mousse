@@ -222,6 +222,10 @@ interface AppState {
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
   setScheduledOpen: (open: boolean) => void
+  /** The Automations section to show next; a new object per request so asking twice switches twice. */
+  automationsSectionRequest: { section: AutomationsSection } | null
+  /** Opens Automations at one section (Agents, Workflows, Scheduled or Bots). */
+  openAutomations: (section: AutomationsSection) => void
   setLoading: (loading: boolean) => void
   setAppInfo: (info: AppState['appInfo']) => void
   setThreadsSidebarOpen: (open: boolean) => void
@@ -394,6 +398,9 @@ function savePersonalWorkspace(state: AppState): void {
   } catch { /* quota/private mode */ }
 }
 
+/** The sections of the Automations page. */
+export type AutomationsSection = 'agents' | 'workflows' | 'scheduled' | 'bots'
+
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
   profileReady: false,
@@ -530,6 +537,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, usageOpen: false } : { settingsOpen }),
   setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, usageOpen: false } : { scheduledOpen }),
+  automationsSectionRequest: null,
+  openAutomations: (section) => set({ scheduledOpen: true, settingsOpen: false, usageOpen: false, automationsSectionRequest: { section } }),
   setLoading: (loading) => set({ loading }),
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
