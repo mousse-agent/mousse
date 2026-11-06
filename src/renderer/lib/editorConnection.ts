@@ -106,7 +106,7 @@ export function editorConnectionHelp({ failure, computer, platform, message, com
     case 'setting_off':
       return {
         message: `${computer} is not sharing`,
-        tip: `On ${computer}, turn on "Let my other computers work on this computer's threads" in Settings, Devices.`,
+        tip: `On ${computer}, turn on "Let other computers work here" in Settings, Devices.`,
         actions: [retry]
       }
     case 'capability':

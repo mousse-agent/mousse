@@ -1,10 +1,18 @@
-/* Settings → Account. Rows and groups come from settings.css; these only cover the extras. */
+/* Mousse ID and phones at the top of Settings → Devices. Rows and groups come from settings.css; these only cover the extras. */
 
 .account-note,
 .account-empty {
   margin: 0;
   padding: var(--space-8) 0;
   line-height: 1.5;
+}
+
+/* What this device needs before signing in, with the button that goes to it. */
+.account-note-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
 }
 
 .account-error {

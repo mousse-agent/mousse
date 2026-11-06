@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../../shared/lineEditStats'
 import { LineEditHeatmap } from './LineEditHeatmap'
 
-/** Activity heatmap and token usage, shown on the Account page. */
+/** Activity heatmap and token usage, shown on the Activity page. */
 export function ActivitySection() {
   const [stats, setStats] = useState<LineEditStatsSnapshot | null>(null)
   const [usage, setUsage] = useState<UsageStatsSnapshot | null>(null)

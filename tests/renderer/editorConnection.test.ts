@@ -75,7 +75,7 @@ describe('why an editor cannot open a folder of another computer, state by state
     expect(help('blocked').message).toBe('Blocked by Computer B')
     expect(help('blocked').tip).toContain('Unblock this computer in Settings, Devices on Computer B')
     expect(kinds('blocked')).not.toContain('ask')
-    expect(help('setting_off').tip).toContain('Let my other computers work on this computer')
+    expect(help('setting_off').tip).toContain('Let other computers work here')
     expect(help('capability').tip).toContain('Works on threads')
     expect(kinds('capability')).toEqual(['devices'])
     expect(help('net_off').message).toBe('Mousse Net off on Computer B')
