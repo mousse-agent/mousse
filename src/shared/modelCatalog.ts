@@ -178,3 +178,35 @@ export function catalogModelsOnRoute(catalog: ModelCatalog, key: ModelCatalogRou
     .sort((a, b) => b.entry.released.localeCompare(a.entry.released) || a.index - b.index)
     .map(({ entry }) => entry)
 }
+
+/**
+ * An API provider's model list as the catalog names and orders it, `key` being the provider's route.
+ * A model whose id is a route id on `key` takes that model's `name` and `older`, and these come
+ * first, newest `released` first. A model the catalog does not know keeps its name and its place,
+ * after them. A model whose route this Mousse version does not handle yet (`read` has it, `gated`
+ * does not) is left out. Every other field of a model is kept as it is.
+ */
+export function catalogApiModels<T extends { id: string; label: string; older?: true }>(
+  models: readonly T[],
+  read: ModelCatalog,
+  gated: ModelCatalog,
+  key: ModelCatalogRouteKey
+): T[] {
+  const known = new Map(catalogModelsOnRoute(gated, key).map((entry, rank) => [entry.route.id, { entry, rank }]))
+  const held = new Set(catalogModelsOnRoute(read, key).map((entry) => entry.route.id).filter((id) => !known.has(id)))
+  const named: Array<{ model: T; rank: number }> = []
+  const unknown: T[] = []
+  for (const model of models) {
+    if (held.has(model.id)) continue
+    const match = known.get(model.id)
+    if (!match) {
+      unknown.push(model)
+      continue
+    }
+    const { older: _older, ...rest } = model
+    named.push({ model: { ...rest, label: match.entry.name, ...(match.entry.older ? { older: true as const } : {}) } as T, rank: match.rank })
+  }
+  // Stable: two models with one id keep their order.
+  named.sort((a, b) => a.rank - b.rank)
+  return [...named.map(({ model }) => model), ...unknown]
+}
