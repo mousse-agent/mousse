@@ -141,7 +141,6 @@
 .threads-sidebar-tab svg { flex-shrink: 0; }
 .threads-sidebar-section[hidden] { display: none; }
 
-.threads-sidebar-toolbar-button:focus-visible,
 .threads-sidebar-tab:focus-visible,
 .threads-sidebar-thread:focus-visible,
 .threads-sidebar-project-toggle:focus-visible,

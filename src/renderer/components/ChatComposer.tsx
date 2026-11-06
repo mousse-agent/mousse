@@ -11,6 +11,7 @@ import type {
   SkillChatMode
 } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
+import type { ContextSettings } from '../../shared/settings'
 import {
   applyMentionPick,
   filterComposerCommandSuggestions,
@@ -84,6 +85,8 @@ export interface ChatComposerProps {
   modelReadOnly?: boolean
   onOpenSettings: () => void
   contextUsage: ContextUsageSnapshot
+  /** The Compact context setting, for the ring's compaction mark. */
+  contextCompactionSetting?: ContextSettings
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
   loading?: boolean
@@ -173,6 +176,7 @@ export function ChatComposer({
   modelReadOnly = false,
   onOpenSettings,
   contextUsage,
+  contextCompactionSetting,
   contextOpen,
   onContextOpenChange,
   loading = false,
@@ -889,6 +893,7 @@ export function ChatComposer({
         modelReadOnly={modelReadOnly}
         onOpenSettings={onOpenSettings}
         contextUsage={contextUsage}
+        contextCompactionSetting={contextCompactionSetting}
         contextOpen={contextOpen}
         onContextOpenChange={onContextOpenChange}
         onAttachClick={() => fileInputRef.current?.click()}
