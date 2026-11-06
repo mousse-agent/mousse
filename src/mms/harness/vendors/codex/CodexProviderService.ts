@@ -1050,6 +1050,8 @@ export class CodexProviderService {
   private readonly orphans = new Set<NativeHelpers>()
   private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
+  /** Codex threads compacting for `/compact`, by Codex thread id: resolved by the compaction's `turn/completed`. */
+  private readonly compactions = new Map<string, (turn: CodexTurn) => void>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
   /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
@@ -1431,6 +1433,52 @@ export class CodexProviderService {
   }
 
   /**
+   * `/compact`: Codex's own compaction (`thread/compact/start`) of the thread's saved Codex thread, outside a
+   * turn. False when no saved thread holds this history (the next turn starts a new one anyway) or this
+   * Codex has no compaction, so the caller compacts Mousse's copy instead. The thread keeps its
+   * fingerprint: the next turn resumes the compacted thread.
+   */
+  async compactConversation(threadId: string, history: string, instanceId: string | undefined, signal: AbortSignal): Promise<boolean> {
+    const saved = this.settings.threads?.[threadId]
+    if (!saved || saved.historyKey !== historyKey(history) || (saved.instanceId ?? CODEX_INSTANCE_ID) !== (instanceId ?? CODEX_INSTANCE_ID)) return false
+    if (this.activeThreads.has(threadId)) throw new Error('A Codex turn is already running for this thread')
+    if (this.checkDue()) await this.status()
+    if (!this.configured()) return false
+    this.activeThreads.add(threadId)
+    const codexThreadId = saved.codexThreadId
+    try {
+      const conn = await this.verifiedConnection(signal)
+      const wasLoaded = this.loaded.has(codexThreadId)
+      if (!wasLoaded)
+        await conn.request('thread/resume', {
+          threadId: codexThreadId,
+          excludeTurns: true,
+          cwd: saved.cwd,
+          modelProvider: this.modelProvider,
+          config: { model_provider: this.modelProvider }
+        }, { signal })
+      // Codex runs the compaction as a turn of its own: its `turn/completed` says how it went.
+      const completed = new Promise<CodexTurn>((resolve) => this.compactions.set(codexThreadId, resolve))
+      try {
+        await conn.request('thread/compact/start', { threadId: codexThreadId }, { signal })
+        const turn = await abortable(completed, signal)
+        if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? 'Codex could not compact this thread'))
+      } finally {
+        this.compactions.delete(codexThreadId)
+      }
+      // Loaded only for this: the next turn resumes it with its own settings.
+      if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+      return true
+    } catch (error) {
+      // An older Codex without `thread/compact/start`, or a thread it no longer has.
+      if (error instanceof CodexRpcError) return false
+      throw error
+    } finally {
+      this.activeThreads.delete(threadId)
+    }
+  }
+
+  /**
    * The account of the last live sign-in check, when it was a ChatGPT sign-in: the plan for display
    * and `subject`, the account's email as Codex reports it, which the gateway only hashes (never
    * shown or stored). No subject when Codex reports no email.
@@ -1788,6 +1836,12 @@ export class CodexProviderService {
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
+    const compaction = this.compactions.get(threadId)
+    if (compaction) {
+      const completed = notificationParams(notification, 'turn/completed')
+      if (completed) compaction(completed.turn)
+      return
+    }
     const run = this.turns.get(threadId)
     if (run) return run.handle(notification)
     // A native helper's own thread: its turn belongs to the run that started it.

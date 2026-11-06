@@ -42,6 +42,8 @@ export const GIT_ACCESS = {
   'threads.reorder': 'none',
   'threads.search': 'none',
   'threads.regenerateTitle': 'none',
+  'threads.clearContext': 'none',
+  'threads.compact': 'none',
   'threads.setModel': 'none',
   'threads.setWorktreeEnabled': 'owned',
   'threads.setPermissionMode': 'none',

@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages } from '../../src/renderer/components/QueuedMessages'
+import { ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
 import { readableError } from '../../src/renderer/lib/errorText'
 import type { QueuedMessage } from '../../src/shared/types'
 
 const OVERLOAD = new Error("Error invoking remote method 'queue:list': Error: Too many pending requests")
+/** The queue as the composer renders it: its errors go to the composer's notice slot. */
+const queue = (threadId: string | null) => createElement(ComposerNoticeProvider, null,
+  createElement(Fragment, null, createElement(ComposerNoticeSlot), createElement(QueuedMessages, { threadId })))
 const item = { id: 'q1', content: 'Run the tests next', createdAt: 1 } as unknown as QueuedMessage
 
 describe('loading the queue', () => {
@@ -31,12 +35,12 @@ describe('loading the queue', () => {
   })
 
   const mount = async (threadId = 't1') => {
-    act(() => root.render(createElement(QueuedMessages, { threadId })))
+    act(() => root.render(queue(threadId)))
     // The 120 ms fallback load.
     await act(async () => { await vi.advanceTimersByTimeAsync(150) })
   }
   const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
-  const banner = () => host.querySelector('.queued-messages-error')
+  const banner = () => host.querySelector('.composer-notice')
 
   it('shows no banner or error text while loads keep failing, and retries with backoff then every 5 s', async () => {
     list.mockRejectedValue(OVERLOAD)
@@ -91,7 +95,7 @@ describe('loading the queue', () => {
   it('stops retrying the old thread when the thread changes', async () => {
     list.mockRejectedValue(OVERLOAD)
     await mount('t1')
-    act(() => root.render(createElement(QueuedMessages, { threadId: null })))
+    act(() => root.render(queue(null)))
     const calls = list.mock.calls.length
     await advance(30_000)
     expect(list).toHaveBeenCalledTimes(calls)

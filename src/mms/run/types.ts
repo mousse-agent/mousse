@@ -169,9 +169,11 @@ export interface ThreadEvent {
 
 /**
  * Sources of local-action runs (SPEC §16.3): `undo` and `revert` run Git mechanics in-process, with
- * no effect and no provider; they heartbeat while the action runs (reconciler rule 2).
+ * no effect and no provider; `clear` and `compact` (the composer's `/clear` and `/compact`) replace the
+ * thread's model context, `compact` through the provider's own compaction when it has one. They
+ * heartbeat while the action runs (reconciler rule 2).
  */
-export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert'])
+export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert', 'clear', 'compact'])
 
 /**
  * A Stop ended the run, whether a person pressed it or another thread's agent asked for it
