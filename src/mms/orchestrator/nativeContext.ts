@@ -12,12 +12,13 @@ import type {
   NativeLastTurnUsage,
   NativeLlmContext
 } from '../../shared/types'
+import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
 
+// Shared with Settings, which shows where a thread compacts.
+export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/settings'
 export const NATIVE_CONTEXT_VERSION = 2 as const
-export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
 export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
-export const EXACT_COMPACTION_USAGE_RATIO = 0.95
 const MESSAGE_OVERHEAD = 4
 const MAX_DIRECTIVE_CHARS = 24_000
 const MAX_PROGRESS_CHARS = 2_000
@@ -245,14 +246,8 @@ export function shouldCompactNativeContext(
   reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS,
   configuredThreshold?: number
 ): boolean {
-  if (!Number.isFinite(activeTokens) || !Number.isFinite(contextWindow) || contextWindow <= 0) return false
-  const requestedReserve = Math.max(0, Math.min(reserveTokens, contextWindow - 1))
-  const reserve = contextWindow > requestedReserve * 2 ? requestedReserve : 0
-  const watermark = Math.floor(contextWindow * EXACT_COMPACTION_USAGE_RATIO)
-  const configured = configuredThreshold && configuredThreshold > 0
-    ? Math.min(configuredThreshold, contextWindow)
-    : watermark
-  return activeTokens >= Math.min(watermark, configured, contextWindow - reserve)
+  if (!Number.isFinite(activeTokens)) return false
+  return activeTokens >= contextCompactionPoint(contextWindow, configuredThreshold, reserveTokens)
 }
 
 export function compactNativeContext(
