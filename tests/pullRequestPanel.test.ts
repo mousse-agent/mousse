@@ -282,10 +282,11 @@ describe('what the panel shows', () => {
     expect(pullRequestPanelState({ ...base, lookup: found, entry: { detail: loaded, error: 'rate limit exceeded' } })).toMatchObject({ kind: 'ready', staleError: 'rate limit exceeded' })
   })
 
-  it('says it is loading', () => {
+  it('shows the delayed loader while loading, with no text', () => {
     const html = render({ kind: 'loading' })
-    expect(html).toContain('role="status"')
-    expect(html).toContain('Loading the pull request')
+    expect(html).toContain('pr-panel-notice')
+    expect(html).toContain('ui-loader-slot')
+    expect(html).not.toContain('Loading the pull request')
     expect(html).not.toContain('pr-panel-header')
   })
 
