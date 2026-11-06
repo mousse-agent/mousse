@@ -135,14 +135,19 @@ export function NetDevicesSection() {
   useEffect(() => {
     alive.current = true
     let active = true, running = false
+    // The error the last failed refresh showed; a successful one clears that error, never an action's.
+    let refreshError: string | undefined
     const refresh = async () => {
       if (running) return
       running = true
       try {
         const owner = ++generation.current
         const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
-        if (active && owner === generation.current) { setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh) }
-      } catch (cause) { if (active) { setDevices([]); setManifests([]); setError(String((cause as Error)?.message ?? cause)) } }
+        if (active && owner === generation.current) {
+          setStatus(current); setManifests(addons.manifests); setRecords(addons.records ?? {}); setSaved(addons.settings ?? {}); setDevices(nodes); setSshRecords(ssh)
+          if (refreshError !== undefined) { const failed = refreshError; refreshError = undefined; setError((shown) => (shown === failed ? '' : shown)) }
+        }
+      } catch (cause) { if (active) { refreshError = String((cause as Error)?.message ?? cause); setDevices([]); setManifests([]); setError(refreshError) } }
       finally { running = false }
     }
     void refresh(); const timer = setInterval(() => void refresh(), 5000)

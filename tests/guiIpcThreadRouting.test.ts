@@ -2,10 +2,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown
 const handlers = vi.hoisted(() => new Map<string, (event: unknown, ...args: unknown[]) => unknown>())
+/** Windows a broadcast reaches; empty unless a test opens one. */
+const windows = vi.hoisted(() => [] as Array<{ isDestroyed: () => boolean; webContents: { id: number; send: (channel: string, data: unknown) => void } }>)
 
 vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: Handler) => { handlers.set(channel, handler) }, removeHandler: () => undefined, on: () => undefined },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: { getAllWindows: () => windows },
   Notification: class {},
   app: { getPath: () => '', getVersion: () => '0.0.0', on: () => undefined },
   shell: {},
@@ -60,7 +62,7 @@ beforeAll(() => {
   expect(isQualifiedId(REMOTE)).toBe(true)
   registerGuiIpc({ guiMms: inert(guiMms), presentation, settings: inert(), browserView: inert(), repoRoot: '' } as unknown as GuiIpcServices, () => null)
 })
-beforeEach(() => { calls.length = 0; presentation.setActiveThreadId(null) })
+beforeEach(() => { calls.length = 0; windows.length = 0; presentation.setActiveThreadId(null) })
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('calls about a request name the thread for the router', () => {
@@ -156,6 +158,19 @@ describe('selecting a thread on another computer', () => {
     await invoke('threads:select', 'local-b')
     expect(sent('threads.focus')).toEqual([])
     expect(calls.map((call) => call.method)).toEqual(['snapshot', 'snapshot'])
+  })
+
+  it('names the thread its waiting questions belong to, so a window showing another thread drops them', async () => {
+    const received: Array<{ channel: string; data: unknown }> = []
+    windows.push({ isDestroyed: () => false, webContents: { id: 7, send: (channel, data) => { received.push({ channel, data }) } } })
+    snapshotThread.mockImplementationOnce(async (threadId: string) => ({
+      messages: [], queue: [], claimed: [], activeTurn: { active: true, running: false }, connectionFailed: false,
+      pendingQuestions: [{ requestId: 'req-a', questions: [{ id: 'q', prompt: 'Which?', options: [] }] }]
+    }) as unknown as Awaited<ReturnType<typeof snapshotThread>>)
+    await invoke('threads:select', 'local-a')
+    expect(received.filter((entry) => entry.channel === 'orchestrator:questionsPending').map((entry) => entry.data)).toEqual([
+      { requestId: 'req-a', questions: [{ id: 'q', prompt: 'Which?', options: [] }], threadId: 'local-a' }
+    ])
   })
 
   it('still shows the thread when the hold fails', async () => {

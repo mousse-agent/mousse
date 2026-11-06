@@ -93,47 +93,61 @@ export interface DaemonLifecycleState {
   ownerToken: string | null
   runtimeWritten: boolean
   pollStop: ReturnType<typeof setInterval> | null
+  /** A stop was requested. Stays true; startup checks it after each step. */
   shuttingDown: boolean
+  /** The latest teardown pass. Every shutdown caller waits for it. */
+  teardown?: Promise<void>
 }
 
 /**
- * Idempotent daemon teardown: stop protocol → stop MMS (scheduler) →
- * runtime record → clear stop request. Safe to call multiple times.
+ * Daemon teardown: stop protocol → stop MMS (scheduler) → runtime record →
+ * clear stop request. Safe to call multiple times: each call queues one more
+ * pass behind the running one and waits for it, so a later call stops anything
+ * startup created after the first pass and every caller returns only once
+ * teardown is done.
  */
-export async function shutdownDaemonLifecycle(
+export function shutdownDaemonLifecycle(
   state: DaemonLifecycleState,
   opts?: {
     reason?: string
     onLog?: (msg: string) => void
   }
 ): Promise<void> {
-  if (state.shuttingDown) return
-  state.shuttingDown = true
   const log = opts?.onLog ?? (() => undefined)
-  log(`Shutting down MMS (${opts?.reason ?? 'shutdown'})...`)
+  if (!state.shuttingDown) {
+    state.shuttingDown = true
+    log(`Shutting down MMS (${opts?.reason ?? 'shutdown'})...`)
+  }
+  const pass = (state.teardown ?? Promise.resolve()).then(() => tearDownRemaining(state, log))
+  state.teardown = pass
+  return pass
+}
 
+/** Stops every handle still on `state` and clears it. Never throws. */
+async function tearDownRemaining(
+  state: DaemonLifecycleState,
+  log: (msg: string) => void
+): Promise<void> {
   if (state.pollStop) {
     clearInterval(state.pollStop)
     state.pollStop = null
   }
 
+  const protocolServer = state.protocolServer
+  state.protocolServer = null
   try {
-    if (state.protocolServer) {
-      await state.protocolServer.stop()
-    }
+    await protocolServer?.stop()
   } catch (err) {
     log(`protocol stop failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-  state.protocolServer = null
 
+  const mms = state.mms
+  state.mms = null
   try {
-    if (state.mms) {
-      await state.mms.stop()
-    }
+    await mms?.stop()
   } catch (err) {
     log(`mms.stop failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-  state.mms = null
 
   if (state.runtimeWritten && state.ownerToken) {
     try {

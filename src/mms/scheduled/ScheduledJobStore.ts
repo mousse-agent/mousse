@@ -223,6 +223,32 @@ function pauseIdleJob(job: ScheduledJob, reason: string): void {
   job.updatedAt = job.pausedAt
 }
 
+/**
+ * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
+ * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
+ */
+function pauseFields(job: ScheduledJob, reason?: string): Partial<ScheduledJob> {
+  return {
+    enabled: false,
+    ...(job.state === 'running' ? {} : { state: 'paused' as const }),
+    pausedAt: new Date().toISOString(),
+    pausedReason: reason
+  }
+}
+
+/** The fields that resume a job from its schedule. A running job stays running until its claim is finalized. */
+function resumeFields(job: ScheduledJob): Partial<ScheduledJob> {
+  if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined }
+  const nextRunAt = computeNextRun(job.schedule)
+  return {
+    enabled: true,
+    state: nextRunAt || job.schedule.kind === 'manual' ? 'scheduled' : 'completed',
+    pausedAt: undefined,
+    pausedReason: undefined,
+    nextRunAt
+  }
+}
+
 function labelAgentRuns(job: ScheduledJob): ScheduledJob['runHistory'] {
   if (!job.createdBy) return job.runHistory
   return job.runHistory?.map((record) => (record.agentCreated ? record : { ...record, agentCreated: true as const }))
@@ -496,6 +522,13 @@ export class ScheduledJobStore {
         updated.nextRunAt = computeNextRun(patch.schedule)
         if (updated.state !== 'paused' && updated.state !== 'running') updated.state = updated.nextRunAt || patch.schedule.kind === 'manual' ? 'scheduled' : 'completed'
       }
+      // An edit that turns the job off or on pauses or resumes it, unless the caller already set the pause fields
+      // itself (`pauseJob`, `resumeJob`, `triggerJob`).
+      if (patch.enabled !== undefined && patch.enabled !== jobs[index].enabled && !('pausedAt' in patch) && !('state' in patch)) {
+        const fields = patch.enabled ? resumeFields(updated) : pauseFields(updated)
+        if (patch.enabled && 'nextRunAt' in patch) delete fields.nextRunAt
+        Object.assign(updated, fields)
+      }
       jobs[index] = updated
       this.saveJobs(jobs)
       return updated
@@ -737,15 +770,9 @@ export class ScheduledJobStore {
 
   pauseJob(id: string, reason?: string): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
-      const running = this.getJob(id)?.state === 'running'
-      // A running job keeps its running state and claim: the run in flight must be able to finish. It
-      // settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
-      return this.updateJob(id, {
-        enabled: false,
-        ...(running ? {} : { state: 'paused' as const }),
-        pausedAt: new Date().toISOString(),
-        pausedReason: reason
-      })
+      const job = this.getJob(id)
+      if (!job) return null
+      return this.updateJob(id, pauseFields(job, reason))
     })
   }
 
@@ -753,15 +780,7 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
-      const nextRunAt = computeNextRun(job.schedule)
-      return this.updateJob(id, {
-        enabled: true,
-        // A running job stays running until its claim is finalized.
-        ...(job.state === 'running' ? {} : { state: nextRunAt || job.schedule.kind === 'manual' ? 'scheduled' as const : 'completed' as const }),
-        pausedAt: undefined,
-        pausedReason: undefined,
-        ...(job.state === 'running' ? {} : { nextRunAt })
-      })
+      return this.updateJob(id, resumeFields(job))
     })
   }
 

@@ -271,10 +271,15 @@ export function subscribeToDownloads(): void {
   for (const kind of Object.keys(MODEL_SOURCES) as LocalModelKind[]) {
     const ipc = MODEL_SOURCES[kind].ipc()
     if (!ipc) continue
-    ipc.onLocalModelStatus((status) => receiveLocalModelStatus(kind, status))
+    // A pushed status is newer than the list, which was read before it.
+    const pushed = new Set<string>()
+    ipc.onLocalModelStatus((status) => {
+      pushed.add(status.modelId)
+      receiveLocalModelStatus(kind, status)
+    })
     // Downloads already running when this window loaded (a reload mid-download).
     void ipc.localModels().then((list) => {
-      for (const status of list) if (status.state.status === 'downloading') receiveLocalModelStatus(kind, status)
+      for (const status of list) if (status.state.status === 'downloading' && !pushed.has(status.modelId)) receiveLocalModelStatus(kind, status)
     }).catch(() => undefined)
   }
 }

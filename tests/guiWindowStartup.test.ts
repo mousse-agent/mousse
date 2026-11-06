@@ -4,7 +4,7 @@ import { readStartupAppearanceArgument } from '../src/shared/startupAppearance'
 const startup = vi.hoisted(() => {
   let ready!: (value: unknown) => void
   const pending = new Promise(done => { ready = done })
-  return { pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any }
+  return { pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any, controllers: [] as Array<any>, ipcDeps: null as any, failLoads: 0 }
 })
 
 vi.mock('electron', async () => {
@@ -18,24 +18,28 @@ vi.mock('electron', async () => {
       id: 123, setWindowOpenHandler: vi.fn(), isDestroyed: () => false
     })
     readonly loadURL = vi.fn(async (url: string) => {
+      if (startup.failLoads > 0) { startup.failLoads--; throw new Error('load failed') }
       expect(startup.ipc).toBe(true)
       expect(startup.chrome).toBe(true)
       expect(url).not.toMatch(/^data:/)
       this.emit('ready-to-show')
     })
     readonly loadFile = vi.fn(async () => {
+      if (startup.failLoads > 0) { startup.failLoads--; throw new Error('load failed') }
       expect(startup.ipc).toBe(true)
       expect(startup.chrome).toBe(true)
       this.emit('ready-to-show')
     })
     readonly show = vi.fn()
+    readonly focus = vi.fn()
     // Linux window shaping reads bounds and state on attach.
     readonly getBounds = () => ({ x: 0, y: 0, width: 1200, height: 800 })
     readonly setShape = vi.fn()
     isMaximized() { return false }
     isFullScreen() { return false }
     constructor(readonly options: unknown) { super(); startup.windows.push(this) }
-    isDestroyed() { return false }
+    destroyed = false
+    isDestroyed() { return this.destroyed }
     static getAllWindows() { return startup.windows }
   }
   return {
@@ -60,10 +64,10 @@ vi.mock('../src/main/mms/GuiMmsController', () => ({ GuiMmsController: class {
   on = vi.fn()
   setAttachedBrowserHost = vi.fn()
   getWindowBindingForSender = vi.fn(() => null)
-  constructor() { startup.controller = this }
+  constructor() { startup.controller = this; startup.controllers.push(this) }
 } }))
 vi.mock('../src/main/ipc/registerGuiIpc', () => ({
-  registerGuiIpc: () => { startup.ipc = true },
+  registerGuiIpc: (deps: unknown) => { startup.ipc = true; startup.ipcDeps = deps },
   attachWindowListeners: () => { startup.chrome = true }
 }))
 vi.mock('../src/main/fonts/registerFontIpc', () => ({ registerFontIpc: vi.fn() }))
@@ -101,4 +105,26 @@ it('loads and shows only the real main window while MMS readiness remains withhe
   expect(startup.controller.request).not.toHaveBeenCalled()
   startup.ready({ instanceId: 'ready' })
   await vi.waitFor(() => expect(startup.controller.request).toHaveBeenCalledWith('settings.get'))
+})
+
+it('a startup retry after the first window fails keeps the one service connection IPC uses', async () => {
+  vi.resetModules()
+  startup.windows.length = 0
+  startup.controllers.length = 0
+  startup.ipcDeps = null
+  startup.failLoads = 1
+  const { app } = await import('electron') as unknown as { app: import('node:events').EventEmitter }
+  await import('../src/main/index')
+  await vi.waitFor(() => expect(startup.windows).toHaveLength(1))
+  await vi.waitFor(() => expect(startup.failLoads).toBe(0))
+  expect(startup.controllers).toHaveLength(1)
+  // The failed window is closed; activating the app runs startup again.
+  startup.windows[0].destroyed = true
+  startup.windows.length = 0
+  app.emit('activate')
+  await vi.waitFor(() => expect(startup.windows).toHaveLength(1))
+  await vi.waitFor(() => expect(startup.controllers.filter(c => c.start.mock.calls.length > 0)).toHaveLength(1))
+  expect(startup.controllers).toHaveLength(1)
+  expect(startup.ipcDeps.guiMms).toBe(startup.controllers[0])
+  expect(startup.ipcDeps.guiMms.start).toHaveBeenCalledTimes(1)
 })

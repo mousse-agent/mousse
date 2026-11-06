@@ -495,6 +495,47 @@ describe('WorkflowRunService', () => {
     expect(snap.outputs.bad).toBeUndefined()
   })
 
+  it('cancel leaves a finished run as it was', async () => {
+    const profileRoot = tempDir('mousse-cancel-finished-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const manifest = {
+      schemaVersion: 1,
+      id: '99999999-9999-4999-8999-999999999999',
+      name: 'finished cancel', slug: 'finished_cancel', entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true },
+      outputSchema: {},
+      permissions: { capabilities: [] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'value', type: 'transform', version: 1, config: { value: { literal: 1 } } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'value', pointer: '' } }, config: {} }
+      ],
+      edges: [
+        { from: 'start', port: 'next', to: 'value' },
+        { from: 'value', port: 'success', to: 'end' }
+      ]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [] } })
+    expect(saved.compiled.runnable, saved.compiled.diagnostics).toBe(true)
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    const cancellation = new CancellationRegistry()
+    const service = new WorkflowRunService({ profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation })
+    const done = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(done.manifest.state, done.manifest.terminalError).toBe('succeeded')
+    const aborts: string[] = []
+    const abort = cancellation.abort.bind(cancellation)
+    cancellation.abort = (profileId, id, reason) => { aborts.push(id); abort(profileId, id, reason) }
+
+    const after = await service.cancel(done.manifest.runId, { profileId: 'p1' }, 'late cancel')
+    expect(after.manifest.state).toBe('succeeded')
+    expect(after.manifest.terminalError).toBeUndefined()
+    expect(after.manifest.updatedAt).toBe(done.manifest.updatedAt)
+    expect(after.result).toEqual(1)
+    expect(aborts).toEqual([])
+    const stored = JSON.parse(readFileSync(join(profileRoot, 'workflow-runs', done.manifest.runId, 'manifest.json'), 'utf8'))
+    expect(stored.state).toBe('succeeded')
+  })
+
   it('executes all parallel branches before join and returns deterministic branch order', async () => {
     const profileRoot = tempDir('mousse-parallel-')
     const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
