@@ -64,8 +64,9 @@ function SurfaceChoiceButton({
 }
 
 /**
- * The empty main area. While it is on screen the surface commands are registered, so B/T/F/D/R (or
- * whatever the profile bound) open a surface; the registry applies the text-field and overlay rules.
+ * The empty main area. While it is on screen the surface letters B/T/F/D/R (or whatever the profile
+ * bound) open a surface; the registry applies the text-field and overlay rules. The palette lists the
+ * same commands everywhere through palette-only handlers (`useAppCommands`).
  */
 export function OpenSurfacePicker() {
   useCommands(SURFACE_CHOICES.map((choice) => ({ id: choice.commandId, run: () => openSurface(choice.id) })))

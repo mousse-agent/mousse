@@ -13,12 +13,21 @@ export type CommandId =
   | 'thread.next'
   | 'thread.previous'
   | 'threads.search'
+  | 'thread.rename'
+  | 'thread.pin'
+  | 'thread.archive'
+  | 'project.open'
   | 'chat.findInThread'
   | 'run.stop'
   | 'approval.allow'
   | 'approval.deny'
   | 'sideCard.toggle'
+  | 'sidebar.toggle'
+  | 'mainArea.toggle'
   | 'terminal.open'
+  | 'settings.open'
+  | 'automations.open'
+  | 'usage.open'
   | 'composer.focus'
   | 'files.quickOpen'
   | 'files.textSearch'
@@ -66,6 +75,11 @@ export interface CommandContext {
    * menu) is always `true`: it has no focus to judge. Absent where no one has built it.
    */
   inFilesPanel?: boolean
+  /**
+   * False for a run that is not a key press (palette, menu). A key press and a chord forwarded from
+   * the browser surface leave it absent or true.
+   */
+  fromKey?: boolean
   /** Whether the key press came from the thread's composer. Absent where no one has built it. */
   inComposer?: boolean
 }
@@ -76,7 +90,7 @@ export interface CommandDefinition {
   category: CommandCategory
   /** Extra words the palette matches besides the title. */
   searchTerms?: string[]
-  /** `null`: no key until the user sets one, for a command a slip of the hand must not run. */
+  /** `null`: no key until the user sets one: a palette-only command, or one a slip of the hand must not run. */
   defaultBinding: string | { mac: string; other: string } | null
   scope: CommandScope
   /** Whether the command may run while a text field has focus. */
@@ -91,7 +105,11 @@ export interface CommandDefinition {
 }
 
 const MOD = 'CommandOrControl'
-const mainAreaInProjects = (ctx: CommandContext): boolean => ctx.mainAreaOpen && ctx.projectsMode
+/**
+ * A surface letter is a key only in the empty main area; from the palette or the menu a surface
+ * opens from anywhere (opening one shows the main area).
+ */
+const surfaceAvailable = (ctx: CommandContext): boolean => ctx.fromKey === false || (ctx.mainAreaOpen && ctx.projectsMode)
 const threadIsOpen = (ctx: CommandContext): boolean => ctx.threadOpen
 const inFilesPanel = (ctx: CommandContext): boolean => ctx.inFilesPanel === true
 /** A thread is open and the key, if any, was not typed into another text field (a commit box, a search field). */
@@ -107,7 +125,7 @@ function surfaceCommand(id: CommandId, title: string, letter: string): CommandDe
     textInput: 'deny',
     terminal: 'deny',
     guest: 'deny',
-    when: mainAreaInProjects
+    when: surfaceAvailable
   }
 }
 
@@ -182,6 +200,53 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
+    id: 'thread.rename',
+    title: 'Rename thread',
+    category: 'Thread',
+    searchTerms: ['title', 'name'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow',
+    when: threadIsOpen
+  },
+  {
+    id: 'thread.pin',
+    title: 'Pin or unpin thread',
+    category: 'Thread',
+    searchTerms: ['unpin', 'favourite', 'favorite'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow',
+    when: threadIsOpen
+  },
+  {
+    id: 'thread.archive',
+    title: 'Archive thread',
+    category: 'Thread',
+    searchTerms: ['settle', 'hide', 'done'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow',
+    when: threadIsOpen
+  },
+  {
+    id: 'project.open',
+    title: 'Add project',
+    category: 'Thread',
+    searchTerms: ['open', 'folder', 'repository'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
     // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
     // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
     id: 'chat.findInThread',
@@ -247,11 +312,67 @@ export const COMMANDS: readonly CommandDefinition[] = [
     when: threadIsOpen
   },
   {
+    // Mod+B is unbound elsewhere; a browser page keeps it (bold in web editors).
+    id: 'sidebar.toggle',
+    title: 'Toggle sidebar',
+    category: 'View',
+    searchTerms: ['threads', 'projects', 'hide', 'show'],
+    defaultBinding: `${MOD}+B`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
+    id: 'mainArea.toggle',
+    title: 'Toggle panel',
+    category: 'View',
+    searchTerms: ['app panel', 'surfaces', 'hide', 'show'],
+    defaultBinding: `${MOD}+Shift+B`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
     id: 'terminal.open',
     title: 'Open terminal',
     category: 'View',
     searchTerms: ['shell', 'console'],
     defaultBinding: `${MOD}+J`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
+    id: 'settings.open',
+    title: 'Open settings',
+    category: 'Go',
+    searchTerms: ['preferences', 'options'],
+    defaultBinding: `${MOD}+,`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
+    id: 'automations.open',
+    title: 'Open automations',
+    category: 'Go',
+    searchTerms: ['scheduled', 'workflows', 'bots', 'agents'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
+    id: 'usage.open',
+    title: 'Open usage',
+    category: 'Go',
+    searchTerms: ['subscription', 'limits', 'quota'],
+    defaultBinding: null,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
@@ -544,11 +665,16 @@ export function formatBinding(binding: string, platform: string): string {
   return parts.join('+')
 }
 
-/** The command's default binding on a platform; null for a command with no default key. */
+/** The binding a command has with no override; null for a command that ships without a key. */
 export function defaultBindingFor(id: CommandId, platform: string): string | null {
   const { defaultBinding } = getCommand(id)
-  if (defaultBinding === null) return null
-  return typeof defaultBinding === 'string' ? defaultBinding : isMac(platform) ? defaultBinding.mac : defaultBinding.other
+  if (defaultBinding === null || typeof defaultBinding === 'string') return defaultBinding
+  return isMac(platform) ? defaultBinding.mac : defaultBinding.other
+}
+
+/** `resolveBinding` that passes an unbound (null) binding through. */
+export function resolveOptionalBinding(binding: string | null, platform: string): string | null {
+  return binding === null ? null : resolveBinding(binding, platform)
 }
 
 /** Whether two bindings (null = unbound) are the same key on a platform. */
@@ -875,6 +1001,7 @@ export function normalizeShortcuts(raw: unknown, platform: string): ShortcutOver
   for (const [id, value] of Object.entries(raw)) {
     if (!isCommandId(id) || getCommand(id).fixed) continue
     if (value === null) {
+      // Unbinding a command that ships without a key is no override.
       if (defaultBindingFor(id, platform) !== null) result[id] = null
       continue
     }

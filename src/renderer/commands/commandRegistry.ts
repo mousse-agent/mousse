@@ -4,6 +4,7 @@ import {
   COMMANDS,
   bindingFor,
   commandAllowedInContext,
+  formatBinding,
   getCommand,
   isCommandId,
   reservedMatches,
@@ -21,6 +22,11 @@ export interface CommandHandler {
   run: () => void
   /** False while the command cannot run (nothing to act on). A disabled command is treated as unregistered. */
   enabled?: () => boolean
+  /**
+   * False: the handler answers the palette and the menu but never a key press, so a scoped binding
+   * (a surface letter) stays with the view that owns it while the palette can still list the command.
+   */
+  keys?: boolean
 }
 
 /** Where a run came from; each source builds its text-field and overlay context differently. */
@@ -50,6 +56,10 @@ const handlersOf = (handler: CommandHandler | undefined): readonly CommandHandle
 
 const isEnabled = (handler: CommandHandler): boolean => handler.enabled?.() ?? true
 
+/** Whether a run from `source` may use the handler: key presses and forwarded chords skip `keys: false`. */
+const servesSource = (handler: CommandHandler, source: CommandSource): boolean =>
+  handler.keys !== false || (source !== 'key' && source !== 'guest')
+
 function stacked(stack: readonly CommandHandler[]): CommandHandler {
   if (stack.length === 1) return stack[0]!
   const handler: StackedHandler = {
@@ -58,6 +68,13 @@ function stacked(stack: readonly CommandHandler[]): CommandHandler {
     enabled: () => stack.some(isEnabled)
   }
   return handler
+}
+
+/** The newest enabled handler of a command that a run from `source` may use. */
+function handlerFor(id: CommandId, source: CommandSource): CommandHandler | undefined {
+  return [...handlersOf(useCommandRegistry.getState().handlers.get(id))]
+    .reverse()
+    .find((handler) => isEnabled(handler) && servesSource(handler, source))
 }
 
 /**
@@ -91,20 +108,28 @@ export function useCommand(id: CommandId, run: () => void, enabled?: () => boole
   )
 }
 
-/** `useCommand` for a fixed list of commands, such as the five surface letters or the five model slots. */
-export function useCommands(commands: ReadonlyArray<{ id: CommandId; run: () => void; enabled?: () => boolean }>): void {
+/**
+ * `useCommand` for a fixed list of commands, such as the five surface letters or the five model slots.
+ * `keys: false` registers them for the palette and the menu only.
+ */
+export function useCommands(
+  commands: ReadonlyArray<{ id: CommandId; run: () => void; enabled?: () => boolean }>,
+  options: { keys?: boolean } = {}
+): void {
   const latest = useRef(commands)
   latest.current = commands
   const key = commands.map((command) => command.id).join(',')
+  const keys = options.keys ?? true
   useEffect(() => {
     const unregister = latest.current.map((command, index) =>
       registerCommand(command.id, {
         run: () => latest.current[index]?.run(),
-        enabled: () => latest.current[index]?.enabled?.() ?? true
+        enabled: () => latest.current[index]?.enabled?.() ?? true,
+        ...(keys ? {} : { keys: false })
       })
     )
     return () => unregister.forEach((off) => off())
-  }, [key])
+  }, [key, keys])
 }
 
 /** Marks an overlay as topmost; the returned function removes it. */
@@ -131,8 +156,12 @@ export function setRecording(recording: boolean): void {
   useCommandRegistry.setState({ recording })
 }
 
-/** Whether a handler is mounted for the command and not disabled. */
-export function isCommandRegistered(id: CommandId): boolean {
+/**
+ * Whether a handler is mounted for the command and not disabled. With a `source`, only handlers a run
+ * from there may use count (a key press skips palette-only handlers).
+ */
+export function isCommandRegistered(id: CommandId, source?: CommandSource): boolean {
+  if (source) return handlerFor(id, source) !== undefined
   const handler = useCommandRegistry.getState().handlers.get(id)
   return Boolean(handler) && (handler!.enabled?.() ?? true)
 }
@@ -159,6 +188,7 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
   // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
   if (source !== 'key') context.inFilesPanel = true
+  context.fromKey = source === 'key' || source === 'guest'
   return source === 'guest' ? { ...context, inTextInput: true } : context
 }
 
@@ -172,9 +202,12 @@ export function currentBindings(overrides: ShortcutOverrides, platform: string):
   return bindingsCache.bindings
 }
 
-/** Runs a handler that is known to be eligible. Used by the key dispatcher, which has already resolved the context. */
-export function invokeCommand(id: CommandId): boolean {
-  const handler = useCommandRegistry.getState().handlers.get(id)
+/**
+ * Runs a handler that is known to be eligible. Used by the key dispatcher, which has already resolved
+ * the context; with a `source` the newest handler that serves it runs.
+ */
+export function invokeCommand(id: CommandId, source?: CommandSource): boolean {
+  const handler = source ? handlerFor(id, source) : useCommandRegistry.getState().handlers.get(id)
   if (!handler) return false
   handler.run()
   return true
@@ -189,9 +222,9 @@ export function runCommand(id: CommandId, source: CommandSource, target?: Closes
   if (useCommandRegistry.getState().recording) return false
   const command = getCommand(id)
   if (source === 'guest' && command.guest === 'deny') return false
-  if (!isCommandRegistered(id)) return false
+  if (!isCommandRegistered(id, source)) return false
   if (!commandAllowedInContext(command, currentContext(source, target))) return false
-  return invokeCommand(id)
+  return invokeCommand(id, source)
 }
 
 /** What the preload offers for commands started outside the renderer (the menu, the browser surface). */
@@ -219,7 +252,7 @@ export function guestShortcutEntries(): GuestShortcutEntry[] {
       const command = getCommand(candidate)
       return (
         command.guest === 'allow' &&
-        isCommandRegistered(candidate) &&
+        isCommandRegistered(candidate, 'guest') &&
         commandAllowedInContext(command, context) &&
         reservedMatches(binding, context.platform, candidate).length === 0
       )
@@ -273,4 +306,17 @@ export function useCommandBindings(): Record<CommandId, string | null> {
     () => Object.fromEntries(COMMANDS.map((command) => [command.id, bindingFor(command.id, overrides, platform)])) as Record<CommandId, string | null>,
     [overrides, platform]
   )
+}
+
+/** A tooltip that names its shortcut: `Hide sidebar · Ctrl+B`, or the label alone when unbound. */
+export function shortcutTitle(label: string, binding: string | null, platform: string): string {
+  const keys = binding === null ? '' : formatBinding(binding, platform)
+  return keys ? `${label} · ${keys}` : label
+}
+
+/** `shortcutTitle` for a command under the bound profile's overrides. */
+export function useShortcutTitle(label: string, id: CommandId): string {
+  const binding = useCommandBindings()[id]
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? (typeof window === 'undefined' ? '' : window.mousse?.platform ?? '')
+  return shortcutTitle(label, binding, platform)
 }
