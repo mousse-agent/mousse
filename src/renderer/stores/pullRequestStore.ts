@@ -48,9 +48,14 @@ interface PullRequestState {
   details: Record<string, PullRequestDetailEntry>
   /** The scope the create form is open for; the form shows in the section of that folder and branch. */
   createForm: PullRequestScope | null
+  /** The surface whose button opened the form; only that surface shows it, so it never opens twice. */
+  createFormHost: PullRequestFormHost
 }
 
-export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null }))
+/** The surfaces that can show the Create PR form: the side card's Git section, the Git panel's diff toolbar and the pull request panel. */
+export type PullRequestFormHost = 'side-card' | 'git-panel' | 'pull-request-panel'
+
+export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null, createFormHost: 'side-card' }))
 
 /** Lookups kept in memory; the least recently fetched ones that no section shows go first. */
 const MAX_PULL_REQUEST_ENTRIES = 200
@@ -358,8 +363,8 @@ export function setPullRequestTracked(path: string, branch: string, tracked: boo
  * Opens the create form for a scope. The scope is captured here and carried by the form, its draft and
  * its submit; nothing reads the active thread or the current checkout later.
  */
-export function openCreatePullRequestForm(scope: PullRequestScope): void {
-  useGitPullRequestStore.setState({ createForm: scope })
+export function openCreatePullRequestForm(scope: PullRequestScope, host: PullRequestFormHost = 'side-card'): void {
+  useGitPullRequestStore.setState({ createForm: scope, createFormHost: host })
 }
 
 export function closeCreatePullRequestForm(): void {
@@ -367,8 +372,8 @@ export function closeCreatePullRequestForm(): void {
 }
 
 /** The entry point of every "create a pull request" action: opens the form for the scope and resolves once it is open. */
-export async function createPullRequestForBranch(scope: PullRequestScope): Promise<void> {
-  openCreatePullRequestForm(scope)
+export async function createPullRequestForBranch(scope: PullRequestScope, host: PullRequestFormHost = 'side-card'): Promise<void> {
+  openCreatePullRequestForm(scope, host)
 }
 
 /** A title, description and base proposed for the scope's branch. */

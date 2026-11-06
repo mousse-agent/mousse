@@ -504,3 +504,33 @@ button.pr-panel-line:hover {
     animation: none;
   }
 }
+
+/* Holds the panel and its header actions without a box of its own. */
+.pr-panel-host {
+  display: contents;
+}
+
+.pr-panel-merge {
+  height: 26px;
+}
+
+.pr-panel-action.pr-panel-menu {
+  width: 26px;
+  padding: 0;
+  justify-content: center;
+}
+
+.pr-panel-action.pr-panel-menu[aria-expanded='true'] {
+  background: var(--ui-pressed);
+}
+
+.pr-panel-create[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The Merge or Close confirmation sits under the header, across the panel. */
+.pr-panel-confirm .side-card-git-pr-confirm {
+  margin: 0;
+  padding: 10px 0 0;
+}

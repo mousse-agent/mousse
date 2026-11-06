@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { PullRequestListItem, PullRequestSummary } from '../src/shared/pullRequests'
 import {
+  enterAction,
   filterPullRequests,
+  rovingIndex,
   startButtonModel,
   startErrorCode,
   startErrorMessage,
@@ -87,5 +89,30 @@ describe('start errors', () => {
     expect(startErrorMessage(refused)).toBe('"PR #7" already works on pull request #7.')
     expect(startErrorCode(new Error('plain'))).toBeNull()
     expect(startErrorMessage({})).toBe('The thread could not be started.')
+  })
+})
+
+describe('keys in the dialog', () => {
+  it('starts at once from a typed reference, as before', () => {
+    expect(enterAction({ query: 'https://github.com/acme/app/pull/12', active: 3, picked: null })).toBe('start')
+    expect(enterAction({ query: '#12', active: null, picked: null })).toBe('start')
+  })
+
+  it('picks the highlighted result first when the words only narrow the list, and starts on the next Enter', () => {
+    expect(enterAction({ query: 'retry', active: 7, picked: null })).toBe('pick')
+    expect(enterAction({ query: 'retry', active: 7, picked: 7 })).toBe('start')
+    // Another result highlighted since: Enter moves the pick instead of starting the earlier one.
+    expect(enterAction({ query: 'retry', active: 9, picked: 7 })).toBe('pick')
+    expect(enterAction({ query: 'nothing matches', active: null, picked: null })).toBe('none')
+  })
+
+  it('moves through the results with wrapping arrows, Home and End, and ignores other keys', () => {
+    expect(rovingIndex(0, 'ArrowDown', 3)).toBe(1)
+    expect(rovingIndex(2, 'ArrowDown', 3)).toBe(0)
+    expect(rovingIndex(0, 'ArrowUp', 3)).toBe(2)
+    expect(rovingIndex(1, 'Home', 3)).toBe(0)
+    expect(rovingIndex(1, 'End', 3)).toBe(2)
+    expect(rovingIndex(1, 'Enter', 3)).toBeNull()
+    expect(rovingIndex(0, 'ArrowDown', 0)).toBeNull()
   })
 })
