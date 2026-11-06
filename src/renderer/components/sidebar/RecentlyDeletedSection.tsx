@@ -16,7 +16,7 @@ export interface RecentlyDeletedActions {
   onRetry: (taskId: string) => void
 }
 
-/** Trashed threads, restorable or permanently deletable, under the Settled block. */
+/** Trashed threads, restorable or permanently deletable, under the Archived block. */
 export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)

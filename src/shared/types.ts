@@ -1084,7 +1084,7 @@ export interface Thread {
   permissionMode?: PermissionMode
   /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
-   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
    * Toggleable from the new-chat input bar before the first message; locked once a
    * workspace is provisioned or the thread has started.

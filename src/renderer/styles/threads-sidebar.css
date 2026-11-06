@@ -378,7 +378,8 @@
 }
 
 .threads-sidebar-thread-container:hover .threads-sidebar-thread-actions,
-.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions {
+.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions,
+.threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
 }
@@ -603,11 +604,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   gap: 2px;
 }
 
-.threads-sidebar-thread.settled {
-  cursor: default;
-  opacity: 1;
-}
-
 .threads-sidebar-settled-count {
   opacity: 0.7;
 }
@@ -696,7 +692,9 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-project-row:hover .threads-sidebar-project-new-chat,
-.threads-sidebar-project-new-chat:focus-visible {
+.threads-sidebar-project-row:focus-within .threads-sidebar-project-new-chat,
+.threads-sidebar-project-new-chat:focus-visible,
+.threads-sidebar-project-new-chat[aria-expanded="true"] {
   opacity: 1;
 }
 
@@ -728,22 +726,23 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 1;
 }
 
+/* The thread and project menu: the shared menu surface and rows (--ui-menu-* in polish.css), neutral hover and focus. */
 .threads-context-menu {
   position: fixed;
   z-index: var(--z-floating, 50000);
-  min-width: 160px;
-  padding: 4px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 8px;
+  min-width: 168px;
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
   background: rgba(var(--surface-strong-rgb), 0.98);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 8px 24px rgba(var(--surface-base-rgb), 0.45);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 /* What a project's menu acts on, when that is a project on another computer. */
 .threads-context-menu-label {
-  padding: 5px 10.5px 6px;
+  padding: 5px var(--ui-menu-row-x) 6px;
   font-size: 11.5px;
   color: var(--text-secondary);
 }
@@ -753,9 +752,10 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 7.5px 10.5px;
-  border-radius: 4px;
-  font-size: 13.5px;
+  min-height: 30px;
+  padding: 5px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  font-size: 13px;
   color: var(--text-primary);
   text-align: left;
   transition: background 0.15s, color 0.15s;
@@ -767,17 +767,20 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   flex-shrink: 0;
 }
 
-.threads-context-menu-item:hover {
-  background: rgba(var(--accent-rgb), 0.16);
+.threads-context-menu-item:hover,
+.threads-context-menu-item:focus-visible {
+  outline: none;
+  background: var(--ui-hover);
 }
 
 .threads-context-menu-item-danger {
-  color: #f87171;
+  color: var(--danger);
 }
 
-.threads-context-menu-item-danger:hover {
-  background: rgba(239, 68, 68, 0.14);
-  color: #fca5a5;
+.threads-context-menu-item-danger:hover,
+.threads-context-menu-item-danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .threads-sidebar-rename-input {
@@ -1140,6 +1143,13 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .trash-delete-kind {
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+/* The "Remove project" confirmation: one line. */
+.threads-sidebar-remove-project {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
 }
 
 /* Where a row dragged in the Threads tab will land. */

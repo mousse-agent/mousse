@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import type { EditorSshStatus } from '../../../shared/net/local'
 import { useEditorSsh } from '../../lib/editorSsh'
-import { FloatingPortal } from '../../lib/floatingLayer'
+import { ToastView } from '../ui/Toast'
 
 /** How long the toast stays before it counts as seen. */
 export const EDITOR_SSH_TOAST_MS = 8_000
@@ -20,13 +20,13 @@ export function EditorSshToastView({
 }) {
   if (!status?.noticePending) return null
   return (
-    <FloatingPortal>
-      <div className="editor-ssh-toast" role="status">
-        <span>Added Mousse to {status.userConfig || '~/.ssh/config'}</span>
-        <button type="button" className="editor-ssh-toast-action" data-action="undo" disabled={busy} onClick={onUndo}>Undo</button>
-        <button type="button" className="editor-ssh-toast-action" data-action="dismiss" disabled={busy} aria-label="Dismiss" onClick={onDismiss}>OK</button>
-      </div>
-    </FloatingPortal>
+    <ToastView
+      message={`Added Mousse to ${status.userConfig || '~/.ssh/config'}`}
+      actions={[
+        { label: 'Undo', dataAction: 'undo', disabled: busy, onClick: onUndo },
+        { label: 'OK', dataAction: 'dismiss', ariaLabel: 'Dismiss', disabled: busy, onClick: onDismiss }
+      ]}
+    />
   )
 }
 

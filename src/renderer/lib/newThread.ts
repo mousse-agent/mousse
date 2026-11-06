@@ -31,7 +31,7 @@ export function isNewEmptyThread(
 
 /**
  * The workspace draft for the new chat, falling back to what the thread already has. A thread that never
- * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new chats in a worktree" setting.
+ * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new threads in a worktree" setting.
  */
 export function composerWorkspaceFor(
   draft: ComposerWorkspace | undefined,

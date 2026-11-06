@@ -34,7 +34,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Project colors on threads', section: 'appearance', anchor: 'appearance-project-colors', keywords: ['tint', 'color'] },
   { title: 'Changed files after each turn', section: 'appearance', anchor: 'appearance-turn-changed-files', keywords: ['edits', 'summary', 'diff'] },
   { title: 'Default permission mode', section: 'general', anchor: 'general-permission-mode', keywords: ['permissions', 'approvals', 'ask'] },
-  { title: 'Start new chats in a worktree', section: 'general', anchor: 'general-worktree-default', keywords: ['branch'] },
+  { title: 'Start new threads in a worktree', section: 'general', anchor: 'general-worktree-default', keywords: ['branch', 'chats'] },
   { title: 'Resume after usage limits reset', section: 'general', anchor: 'general-resume', keywords: ['rate limit', 'paused', 'continue'] },
   { title: 'Completion sound', section: 'general', anchor: 'general-completion-sound', keywords: ['notifications', 'alert', 'notification sound'] },
   { title: 'All threads on my other computers', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote'] },

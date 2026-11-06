@@ -21,6 +21,7 @@ import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
+import { ToastHost } from './components/ui/Toast'
 
 import { openSurface } from './lib/surfaces'
 import { selectThread } from './lib/threadActions'
@@ -593,6 +594,8 @@ export default function App() {
       </div>
 
       <CommandPalette />
+
+      <ToastHost />
 
     </div>
 
