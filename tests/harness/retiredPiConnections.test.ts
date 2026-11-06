@@ -348,7 +348,7 @@ describe('retired legacy-only Pi connections', () => {
     })
 
     const result = await profile.harness.instances.move('pi:openai-codex', MANAGED)
-    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'removed', rewritten: ['Default model', 'Chat titles: Automatic'] })
+    expect(result).toMatchObject({ from: 'pi:openai-codex', to: MANAGED, oldSignIn: 'removed', rewritten: ['Default model', 'Thread titles: Automatic'] })
     const model = read('thread.json').modelOverride.model
     // The default follows the entry; the title model becomes Automatic (Codex cannot name chats).
     expect(profile.settings().provider).toMatchObject({ instanceId: MANAGED, model })
