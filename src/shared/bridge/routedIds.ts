@@ -67,8 +67,6 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'threads.setPermissionMode': THREAD_AND_PROJECT,
   // A lifecycle record names its thread `taskId`, and what the thread owns names it `ownerTaskId`.
   'threads.delete': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
-  'threads.trash': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
-  'threads.restore': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
   'threads.inventory': {
     threads: [
       'taskId',

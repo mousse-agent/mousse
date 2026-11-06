@@ -399,8 +399,6 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.pin': write('thread', ['threadId', 'pinned']),
   'threads.settle': write('thread', ['threadId', 'settled']),
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.trash': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.restore': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
   'threads.setWorktreeEnabled': write('thread', ['threadId', 'enabled']),
   'thread.fork': write(
@@ -800,9 +798,9 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
   },
   {
-    methods: ['threads.purge'],
+    methods: ['threads.purge', 'threads.trash', 'threads.restore'],
     reason:
-      'Permanent delete cannot be undone, so it stays on the computer that runs the thread; Restore is routed.'
+      'They are steps of a permanent delete, which stays on the computer that runs the thread; another computer can archive it.'
   },
   {
     methods: ['threads.focus'],
