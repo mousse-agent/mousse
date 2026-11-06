@@ -19,7 +19,7 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload } from '../../src/mms/run/types'
-import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
+import type { BotDefinitionV1 as BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 
 let base: string

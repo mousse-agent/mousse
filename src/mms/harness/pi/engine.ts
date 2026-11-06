@@ -48,7 +48,7 @@ import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, typ
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
 import { PI_NATIVE_TOOLS } from './nativeTools'
-import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
@@ -1132,7 +1132,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const bot = turn.host.bot
     if (bot && builtin) {
       const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
-      if (!decided.ok) return { allow: false, reason: wallMessage(decided.wall) }
+      if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
     }
     // A bot's app tool is checked here too (the registry checks it again when it runs), so a
     // refused call never costs a tool call.

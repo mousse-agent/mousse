@@ -21,7 +21,7 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import { foldersOf, type BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
+import { foldersOf, type BotDefinitionV1 as BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
 import { permissionText, withPermission, type BotEscalationSummary } from '../../src/shared/bots/personal/escalation'
 import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 

@@ -309,6 +309,7 @@ export interface BotAskCard {
   title: string // "read files in ~/Documents/Invoices"
   note: string  // one line on the limit: "Only this folder. It can't change anything."
   status: 'open' | 'allowed' | 'not_now' | 'withdrawn'
+  kind?: 'permission' | 'export_memory' // export_memory: Allow opens the folder picker (§5.11)
 }
 
 export interface BotChatMessage {
@@ -356,7 +357,7 @@ export function botState(input: { paused: boolean; error?: BotError; openAsks: n
 ```ts
 export type BotCheck =
   | { ok: true }
-  | { ok: false; wall: BotWall }                           // ends the dispatch (chat turns, budget)
+  | { ok: false; wall: WallReason }                        // ends the dispatch (chat turns, budget)
   | { ok: false; refused: { text: string; askId: string } } // tool error; the dispatch continues (unattended asks)
 ```
 
@@ -527,7 +528,7 @@ If no runtime can run the bot, the activation fails before dispatch. The bot the
 
 **Fingerprint.** `canonicalJSON(permission)` over the `withPermission` kinds (`escalation.ts:114-144`): tool, app tool, skill, MCP tool, folder plus access, budget kind.
 
-**Title and note.** `permissionText(permission)` in `src/shared/bots/personal/askText.ts` (new):
+**Title and note.** `askText(request, {home?, budget?}) → {title, note}` in `src/shared/bots/personal/askText.ts` (new). It is not called `permissionText`, because `escalation.ts` already exports a `permissionText` that returns one string.
 
 | Permission | Title | Note |
 |---|---|---|
@@ -601,7 +602,7 @@ export interface BotModelCandidate {
   released?: string
   limitedUntil?: string
 }
-export type BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited'
+// BotModelProblem = 'no_provider' | 'named_unavailable' | 'all_limited' is defined in src/mms/bots/seams.ts (WP0), which the resolver seam needs first
 export function chooseBotModel(choice: BotModelChoice, candidates: BotModelCandidate[], now: Date):
   | { selection: ProviderSelection }
   | { problem: BotModelProblem; until?: string; instanceId?: string }
@@ -797,7 +798,7 @@ The capability is `bots.personal.v2`. The v1 form methods (`definitions.save`, `
 | `bots.memory.list` | `{botId, history?} → {entries, gauge}`: the same entries as `memory_list` | none in Phase 1; About "Memory" is Phase 2 |
 | `bots.memory.forget` | `{botId, id} → {forgotten, redacted}`: the owner forgets directly, with chat-lane rights | — |
 | `bots.memory.export` | `{botId, dir} → {files}`: `memory.md`, `memory.jsonl`, `journal.jsonl`, the definition | "export your memory" (asking) |
-| `bots.memory.reindex` | `{botId?} → {}`: rebuild the FTS tables | support and recovery |
+| ~~`bots.memory.reindex`~~ | Not a client method in Phase 1 (§7.9): rebuilding at open covers recovery, and `BotMemoryAdmin.reindex` stays an engine function. Exposed in Phase 2. | support and recovery |
 | event `bots.changed` | `{botId}` (existing) | list and state refresh |
 | event `bots.message` | `{botId, message: BotChatMessage}` | chat push, notifications |
 | event `bots.activity` | `{botId, activationId, chip: BotChip \| null}` | live chip (C3) |
@@ -811,7 +812,7 @@ The capability is `bots.personal.v2`. The v1 form methods (`definitions.save`, `
   - **Allow** opens a folder picker in the renderer, which then calls `bots.memory.export`.
   - **Not now** does nothing.
   - WP2 adds the ask kind (`escalation.ts`, `askText.ts`). WP4 adds the folder picker to `BotAskCard`.
-- **Who registers what.** The four `bots.memory.*` methods are registered by WP2 in `registerMethods.ts`. Their handlers come from WP6 (`botMemoryMethods(admin)`).
+- **Who registers what.** The three `bots.memory.*` methods are registered by WP2 in `registerMethods.ts`. Their handlers come from WP6 (`botMemoryMethods(admin)`).
 
 ### 5.12 Renderer (Bot UI Phase 1)
 
@@ -1299,7 +1300,7 @@ The specification is [`bot-context.md`](bot-context.md), §3–§9 and §11.
     - a bot never sees another bot's rows.
   - [ ] **Forget:** it tombstones the entry, redacts the cited journal rows and their FTS rows, blanks the matching `bot_messages` text, and blocks re-learning by hash.
   - [ ] **The guard** rejects bidi and invisible characters, credential shapes and instruction-shaped text on save and on journal text entering a pack.
-  - [ ] **FTS:** search over the journal and memories returns dated hits with refs, and `memory_read` scrolls around a hit. A corrupted FTS index is rebuilt at open and by `bots.memory.reindex`.
+  - [ ] **FTS:** search over the journal and memories returns dated hits with refs, and `memory_read` scrolls around a hit. A corrupted FTS index is rebuilt at open and by `BotMemoryAdmin.reindex`.
   - [ ] **Export** writes `memory.md` (exactly the injected text), `memory.jsonl`, `journal.jsonl` and the definition.
   - [ ] **Purge** removes every memory row of a bot and nothing of another bot.
 - **Tests (new)**, from bot-context.md §11:

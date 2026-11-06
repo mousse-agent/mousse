@@ -324,6 +324,12 @@ function dispatchOf(row: Row): BotDispatchRow {
   }
 }
 
+/**
+ * The `bots.db` connection as seen inside `BotStore.db.transaction(…)`: what another module's
+ * writes go through so they join the caller's transaction (`BotJournal.appendInTx`, Bot Phase 1 §7.1).
+ */
+export type BotStoreTx = Pick<ProfileDatabase, 'statement' | 'inTransaction'>
+
 /** The profile's `bots.db`: typed reads and the writes the bot engine and its scopes make. */
 export class BotStore {
   readonly db: ProfileDatabase

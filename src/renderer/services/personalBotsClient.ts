@@ -1,4 +1,4 @@
-import type { BotAcknowledgement, BotActivationSummary, BotApprovalView, BotDefinition, BotSummary } from '../../shared/bots/personal/definition'
+import type { BotAcknowledgement, BotActivationSummary, BotApprovalView, BotDefinitionV1 as BotDefinition, BotSummaryV1 as BotSummary } from '../../shared/bots/personal/definition'
 import type { BotEscalationAnswer, BotEscalationSummary } from '../../shared/bots/personal/escalation'
 import type { PlatformRequestApi } from '../../shared/platform'
 

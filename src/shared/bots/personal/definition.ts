@@ -1,6 +1,7 @@
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
 import type { BotEscalationSummary } from './escalation'
+import type { BotLook } from './look'
 
 /**
  * A personal bot (PR 6 §4): a role, the thread it works in on each activation, and the permissions
@@ -73,8 +74,74 @@ export interface BotBudget {
   maxUsd?: number
 }
 
+/**
+ * How much time a bot takes (Bot Phase 1 §5.6). Mousse maps it to a model tier and an effort:
+ * `quick` the standard tier at low effort, `normal` the standard tier at its default effort, `deep`
+ * the frontier tier at high effort.
+ */
+export type BotDepth = 'quick' | 'normal' | 'deep'
+export const BOT_DEPTHS: readonly BotDepth[] = ['quick', 'normal', 'deep']
+
+/**
+ * What a bot thread runs on. Never shown: `auto` is resolved per activation from the owner's ready
+ * providers; `named` is a model the owner asked for in words (a catalog id, the instance's model
+ * id, or a family word), used only while it is available.
+ */
+export type BotModelChoice =
+  | { mode: 'auto'; depth: BotDepth }
+  | { mode: 'named'; model: string; depth: BotDepth }
+
+/** A new bot's model: automatic, at normal depth. */
+export const DEFAULT_BOT_MODEL: BotModelChoice = { mode: 'auto', depth: 'normal' }
+
 /** The thread a bot works in: who it is (an agent definition or plain instructions) and what it runs on. */
 export interface BotThreadSpec {
+  key: string
+  title: string
+  agent: { definitionId: string; pinRevision: string } | { instructions: string }
+  /** Replaces format 1's fixed `selection`. */
+  model: BotModelChoice
+  /** Removes permissions for this thread only; never adds any. */
+  narrow?: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>>
+}
+
+/** The format a definition is written in. Format 1 files are upgraded on read (Bot Phase 1 §5.2). */
+export const BOT_DEFINITION_FORMAT = 2
+/** Longest bot name, shown everywhere. */
+export const MAX_BOT_NAME_CHARS = 60
+/** Longest description: the owner's sentence. */
+export const MAX_BOT_DESCRIPTION_CHARS = 500
+
+/** A personal bot, format 2 (Bot Phase 1 §5.1.1): made from a look and one sentence. */
+export interface BotDefinition {
+  format: 2
+  id: string
+  /** Content hash of the published revision (absent on a draft). */
+  revision?: string
+  /** At most `MAX_BOT_NAME_CHARS`. */
+  name: string
+  /** The owner's sentence, at most `MAX_BOT_DESCRIPTION_CHARS`: the header and About. */
+  description: string
+  look: BotLook
+  /** Reserved for Teams; `team` is refused until then. */
+  owner: { kind: 'person'; id: 'self' }
+  /** Reserved for bot servers (Phase 3). */
+  placement: { kind: 'this_computer' }
+  /** The bot's own working instructions; starts as the description. */
+  role: string
+  main: BotThreadSpec
+  /** Context threads it consults (6c-2); at most 8. */
+  context: BotThreadSpec[]
+  permissions: BotManifest
+  /** Manual activation always. Schedules live in `bots.db` (`bot_schedules`), not on the definition. */
+  triggers: { manual: true }
+}
+
+/**
+ * A format-1 thread: a fixed model selection. Read only to upgrade old files.
+ * TODO(WP2): the engine and the definition store still run on format 1; move them to `BotThreadSpec`.
+ */
+export interface BotThreadSpecV1 {
   key: string
   title: string
   agent: { definitionId: string; pinRevision: string } | { instructions: string }
@@ -83,19 +150,29 @@ export interface BotThreadSpec {
   narrow?: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>>
 }
 
-export interface BotDefinition {
+/**
+ * A format-1 definition (no `format` field), as the Automations → Bots form wrote it. Read only to
+ * upgrade old files (Bot Phase 1 §5.2). TODO(WP2): retire with the form editor.
+ */
+export interface BotDefinitionV1 {
   id: string
   /** Content hash of the published revision (absent on a draft). */
   revision?: string
   name: string
   role: string
-  main: BotThreadSpec
+  main: BotThreadSpecV1
   /** Context threads it consults (6c-2); at most 8. */
-  context: BotThreadSpec[]
+  context: BotThreadSpecV1[]
   permissions: BotManifest
   /** Manual activation always; schedules on the bot itself (6d). */
   triggers: { manual: true; schedules?: BotSchedule[] }
 }
+
+/** Which lane an activation runs in: the owner's chat on the home thread, or a run on a child thread. */
+export type BotLane = 'chat' | 'run'
+
+/** How long a deleted bot's chat, memory and threads are kept before the purge (Bot Phase 1 §5.3.3). */
+export const BOT_DELETE_PURGE_MS = 30 * 24 * 60 * 60_000
 
 /**
  * A schedule of a bot (PR 6 §6): each occurrence is one activation with `prompt` as its input.
@@ -186,8 +263,11 @@ export interface BotThreadCheck {
   reason?: string
 }
 
-/** One bot, as the Bots tab lists it. */
-export interface BotSummary {
+/**
+ * One bot, as the Automations → Bots form lists it. The Bot UI's summary is `BotSummary` in
+ * `chat.ts`. TODO(WP2/WP4): retire with the form editor.
+ */
+export interface BotSummaryV1 {
   id: string
   name: string
   role: string

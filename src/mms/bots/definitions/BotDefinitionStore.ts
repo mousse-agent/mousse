@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { MAX_BOT_CONTEXT_THREADS, MAX_BOT_SCHEDULES, type BotDefinition, type BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { MAX_BOT_CONTEXT_THREADS, MAX_BOT_SCHEDULES, type BotDefinitionV1 as BotDefinition, type BotThreadSpecV1 as BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'

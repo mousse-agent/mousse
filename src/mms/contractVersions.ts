@@ -27,6 +27,12 @@ export const CONTRACT_VERSIONS = {
   netEnvelope: ENVELOPE_VERSION,
   /** Run Engine database schema: the newest migration. */
   runDatabase: RUN_MIGRATIONS[RUN_MIGRATIONS.length - 1]!.version,
+  /**
+   * Personal bots' `bots.db` schema: the newest of `BOTS_MIGRATIONS` (`src/mms/bots/store/BotStore.ts`).
+   * Written out rather than imported so the CLI doesn't load `node:sqlite` for it.
+   * TODO(WP2): the v4 migration (Bot Phase 1 §5.1.2) lands this value.
+   */
+  botsDb: 4,
   mousseConf: MOUSSE_CONF_VERSION,
   installation: INSTALLATION_SCHEMA_VERSION,
   profile: PROFILE_CONTRACT_VERSION,

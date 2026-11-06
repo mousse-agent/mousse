@@ -20,7 +20,7 @@ import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
-import type { BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
+import type { BotDefinitionV1 as BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
 
 let base: string
 let profile: string

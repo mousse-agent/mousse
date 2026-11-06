@@ -4,7 +4,7 @@ import { isAbsolute } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
-import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
@@ -290,7 +290,7 @@ export class ClaudeLockedGate {
         if (patternEscapes(toolName === 'Glob' ? args.pattern : toolName === 'Grep' ? args.glob : undefined))
           return { ok: false, reason: `This bot searches only inside its folders: give ${toolName} a relative pattern and a path.` }
         const decided = checkBuiltinCall(authority, CLAUDE_NATIVE_TOOLS, toolName, args)
-        return decided.ok ? { ok: true, classified } : { ok: false, reason: wallMessage(decided.wall) }
+        return decided.ok ? { ok: true, classified } : { ok: false, reason: checkMessage(decided) }
       }
     }
   }

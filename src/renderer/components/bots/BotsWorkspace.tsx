@@ -7,9 +7,9 @@ import {
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotApprovalView,
-  type BotDefinition,
+  type BotDefinitionV1 as BotDefinition,
   type BotPermissionLine,
-  type BotSummary
+  type BotSummaryV1 as BotSummary
 } from '../../../shared/bots/personal/definition'
 import { ChevronRight, Plus } from '../../lib/icons'
 import { Modal } from '../ui/Modal'

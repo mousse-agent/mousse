@@ -1,4 +1,4 @@
-import type { BotDefinition } from '../../shared/bots/personal/definition'
+import type { BotDefinitionV1 as BotDefinition } from '../../shared/bots/personal/definition'
 import { BOT_ESCALATION_ANSWERS, type BotEscalationAnswer } from '../../shared/bots/personal/escalation'
 import { BOTS_PERSONAL_CAPABILITY, BOTS_PERSONAL_METHODS, type BotsPersonalMethod } from '../../shared/bots/personal/methods'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'

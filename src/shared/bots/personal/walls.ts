@@ -1,4 +1,4 @@
-import type { BotAuthority, WallReason } from './authority'
+import type { BotAuthority, BotCheck, BotCheckDenied, WallReason } from './authority'
 import { neutralToolsOf, type NativeToolTable } from '../../harness/tools'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
@@ -21,15 +21,20 @@ export function wallMessage(wall: WallReason): string {
   }
 }
 
+/** What the model is told when a check did not allow its call: the wall, or the ask's refusal. */
+export function checkMessage(denied: BotCheckDenied): string {
+  return 'refused' in denied ? denied.refused.text : wallMessage(denied.wall)
+}
+
 /**
  * A runtime's built-in call (`nativeName` in `table`) under a bot's authority: allowed when any
  * neutral tool the name stands for passes `check`. A name with no neutral tool is never granted.
  */
-export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
+export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>): BotCheck {
   const neutrals = neutralToolsOf(table, nativeName)
   if (!neutrals.length) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
   if (bot.checkAny) return bot.checkAny(neutrals.map((tool) => ({ kind: 'builtin' as const, tool, nativeName, args })))
-  let refused: { ok: false; wall: WallReason } | undefined
+  let refused: BotCheckDenied | undefined
   for (const tool of neutrals) {
     const decided = bot.check({ kind: 'builtin', tool, nativeName, args })
     if (decided.ok) return decided
@@ -51,9 +56,9 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills'>, n
     // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
     if (!bot.skills.size) return wallMessage({ kind: 'tool', tool: name })
     const decided = bot.check({ kind: 'app', tool: name, args })
-    if (!decided.ok && decided.wall.kind !== 'tool') return wallMessage(decided.wall)
+    if (!decided.ok && ('refused' in decided || decided.wall.kind !== 'tool')) return checkMessage(decided)
     return undefined
   }
   const decided = bot.check({ kind: 'app', tool: name, args })
-  return decided.ok ? undefined : wallMessage(decided.wall)
+  return decided.ok ? undefined : checkMessage(decided)
 }

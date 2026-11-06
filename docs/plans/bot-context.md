@@ -296,7 +296,7 @@ memory_forget({ id?: string; refs?: string[]; reason: string })
   - `bots.memory.list {botId}` returns the same entries as `memory_list`.
   - `bots.memory.forget {botId, id}`.
   - `bots.memory.export {botId, dir}`.
-  - `bots.memory.reindex {botId?}`.
+  - `bots.memory.reindex {botId?}`: an engine function in Phase 1, a client method in Phase 2 (bot-architecture §7.9).
 
   Payloads carry no model names.
 - **UI.** No new surface in Phase 1. The `memory` chips and asking are the interface.

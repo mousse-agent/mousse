@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { BotAuthority, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import {
   BOT_ESCALATION_TTL_MS,
   MAX_BOT_WALLS,
@@ -16,7 +16,7 @@ import {
   type BotWallKind
 } from '../../../shared/bots/personal/escalation'
 import { BOT_APP_TOOLS, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
-import { wallMessage } from '../../../shared/bots/personal/walls'
+import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
 import { isNeutralTool } from '../../../shared/harness/tools'
@@ -27,12 +27,12 @@ import {
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotActivationTrigger,
-  type BotDefinition,
+  type BotDefinitionV1 as BotDefinition,
   type BotManifest,
   type BotPermissionLine,
-  type BotSummary,
+  type BotSummaryV1 as BotSummary,
   type BotThreadCheck,
-  type BotThreadSpec
+  type BotThreadSpecV1 as BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset } from '../../../shared/bots/personal/manifest'
 import type { Enforceability, HarnessError, RunPolicy } from '../../../shared/harness/types'
@@ -103,7 +103,7 @@ export interface BotEngineHost {
   setTimer?(fn: () => void, ms: number): { clear(): void }
 }
 
-export type { BotAcknowledgement, BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
+export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
 
 interface LiveDispatch {
   controller: AbortController
@@ -903,9 +903,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       time: { deadline: () => input.deadline, signal: controller.signal },
       spend: input.spend
     })
-    const check = (call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } => {
+    const check = (call: NormalisedCall): BotCheck => {
       const decided = base.check(call)
-      if (decided.ok || !ESCALATABLE.has(decided.wall.kind)) return decided
+      // TODO(WP2): an unattended run's permission refusal becomes an ask (`refused`), not a wall.
+      if (decided.ok || 'refused' in decided || !ESCALATABLE.has(decided.wall.kind)) return decided
       // Only app tools a bot can be granted are worth asking for; any other is just refused.
       if (call.kind === 'app' && !BOT_APP_TOOLS.has(call.tool)) return decided
       const permission = permissionOfWall(call, decided.wall)
@@ -916,7 +917,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...base,
       check,
       checkAny: (calls: readonly NormalisedCall[]) => {
-        let refused: { ok: false; wall: WallReason } | undefined
+        let refused: BotCheckDenied | undefined
         for (const call of calls) {
           const decided = base.check(call)
           if (decided.ok) return decided
@@ -929,7 +930,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const problem = permissionProblem(request.permission)
         if (problem) return `${problem} Ask for a tool, a folder, a skill, an MCP tool or a limit.`
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
-        if (!live.ok && live.wall.kind !== 'tool') return wallMessage(live.wall)
+        if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         const wall = this.raiseWall(row.id, {
           dispatchN: input.mainN,
           kind: 'escalate',
