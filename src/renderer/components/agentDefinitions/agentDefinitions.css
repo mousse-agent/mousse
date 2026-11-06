@@ -28,7 +28,7 @@
   flex-wrap: wrap;
 }
 
-.agent-defs__header h1,
+.agent-defs__header h2,
 .agent-defs__title {
   margin: 0;
   font-size: 16px;
@@ -79,7 +79,7 @@
 
 .agent-defs .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; min-height: 34px; border: 1px solid var(--ad-border); border-radius: 8px; background: var(--ad-bg); color: var(--ad-fg); cursor: pointer; }
 .agent-defs .btn:hover:not(:disabled) { background: color-mix(in srgb, var(--ad-accent) 14%, var(--ad-bg)); }
-.agent-defs .btn-primary, .agent-defs .btn.active { background: color-mix(in srgb, var(--ad-accent) 25%, var(--ad-bg)); border-color: color-mix(in srgb, var(--ad-accent) 50%, var(--ad-border)); }
+.agent-defs .btn.active { background: color-mix(in srgb, var(--ad-accent) 25%, var(--ad-bg)); border-color: color-mix(in srgb, var(--ad-accent) 50%, var(--ad-border)); }
 .agent-defs .btn:disabled { opacity: .5; cursor: default; }
 .agent-library-toolbar .search-input-row { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 160px; padding: 0 10px; height: 38px; border: 1px solid var(--ad-border); border-radius: 8px; background: var(--ad-bg); color: var(--ad-muted); }
 .agent-library-toolbar .search-input-row:focus-within { border-color: var(--ad-accent); }
@@ -251,6 +251,26 @@
   gap: 10px 16px;
   align-items: center;
   margin: 0 0 12px;
+}
+
+.agent-field > .ui-select {
+  width: 100%;
+}
+
+/* An on/off row: text left, the shared switch right. */
+.agent-switch-row {
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  min-height: 28px;
+}
+
+.agent-switch-row > label {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.agent-switch-row .toggle-switch {
+  flex-shrink: 0;
 }
 
 .agent-validation a {

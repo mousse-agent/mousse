@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
-import { mousseIdName, mousseIdOrigin, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdAvailable, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
+import { mousseIdName, mousseIdOrigin, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdAvailable, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdSection } from './MousseIdSection'
 import { ActivitySection } from './ActivitySection'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
@@ -50,17 +50,19 @@ function MousseIdAccount() {
     if (result === 'no-service') setNotice('This build has no Mousse ID service address. Set MOUSSE_ID_ORIGIN and restart Mousse.')
   }
 
-  const title = plus?.connected ? mousseIdName(plus) : pending ? 'Signing in…' : 'Not signed in'
+  const signedIn = mousseIdSignedIn(plus)
+  const title = signedIn ? mousseIdName(plus) : pending ? 'Signing in…' : 'Not signed in'
   const description = plus?.connected
     ? [plus.email ?? `Account ${plus.accountId ?? ''}`, plus.plan, host].filter(Boolean).join(' · ')
-    : !loaded ? 'Checking Mousse ID…'
-      : plus?.configured ? 'Disconnected. Sign in again to reconnect.'
-        : 'Optional. Sign in to reach this computer from your phone and from your other computers signed in to it.'
-  const setupStep = !plus?.connected && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
+    : plus?.reconnecting ? [plus.email ?? `Account ${plus.accountId ?? ''}`, 'Reconnecting…'].join(' · ')
+      : !loaded ? 'Checking Mousse ID…'
+        : plus?.configured ? 'Disconnected. Sign in again to reconnect.'
+          : 'Optional. Sign in to reach this computer from your phone and from your other computers signed in to it.'
+  const setupStep = !signedIn && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
 
   return (
     <>
-      <SettingsGroup title="Mousse ID" icon={UserCircle} className="account-group">
+      <SettingsGroup anchor="account-mousse-id" title="Mousse ID" icon={UserCircle} className="account-group">
         <SettingsRow
           title={title}
           description={description}
@@ -71,7 +73,7 @@ function MousseIdAccount() {
                   <Logout size={14} />Sign out
                 </button>
               )}
-              {!plus?.connected && !pending && (
+              {!signedIn && !pending && (
                 <button type="button" className="settings-btn" disabled={busy} onClick={() => void start()}>
                   {busy ? 'Connecting…' : 'Sign in'}
                 </button>

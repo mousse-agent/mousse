@@ -5,7 +5,8 @@ import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
-import { CODE_FONT } from "../../../../lib/typography";
+import { Collapse } from "../../../../components/ui/Collapse";
+import { CODE_FONT_VAR } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
@@ -279,7 +280,7 @@ export function EditToolDiffCard({
   // active theme in both modes. `colorScheme` keeps the library's
   // `light-dark()` backgrounds in sync with the shiki `themeType` tokens —
   // without it dark text lands on a dark background (unreadable).
-  // Font matches the Git tab diff (Monaco `fontFamily`).
+  // Font is the code font setting, like the Git tab diff.
   const diffCssVars = React.useMemo(
     () =>
       ({
@@ -288,7 +289,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": CODE_FONT,
+        "--diffs-font-family": CODE_FONT_VAR,
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -306,7 +307,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: ${CODE_FONT};
+  --diffs-font-family: ${CODE_FONT_VAR};
   color-scheme: ${themeType};
 }
 `,
@@ -387,15 +388,17 @@ export function EditToolDiffCard({
         )}
         {canToggle && (
           <IconChevronRight
-            className={
-              "pointer-events-none w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
-              (isExpanded ? "rotate-90" : "rotate-0")
-            }
+            className="pointer-events-none ui-collapse-chevron w-4 h-4 shrink-0 text-an-tool-color-muted ml-1"
+            data-open={isExpanded || undefined}
           />
         )}
       </div>
-      {hasBody && (!isCollapsible || isExpanded) ? (
-        <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
+      <Collapse
+        open={hasBody && (!isCollapsible || isExpanded)}
+        animate={isCollapsible}
+        className={`${diffClassName} text-[12px]`}
+        style={diffCssVars}
+      >
               {sections
                 ? sections.map((section, index) => (
                     <div key={`${section.path}:${index}`}>
@@ -471,8 +474,7 @@ export function EditToolDiffCard({
                       }}
                     />
                   )}
-        </div>
-      ) : null}
+      </Collapse>
       {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
     </div>
   );

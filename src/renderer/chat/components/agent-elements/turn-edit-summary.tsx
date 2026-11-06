@@ -3,6 +3,7 @@ import type { UIMessage } from "ai";
 import { ChevronDown, FileText } from "../../../lib/icons";
 import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
 import { useTurnChangedFiles } from "../../../lib/turnChangedFilesSetting";
+import { Collapse } from "../../../components/ui/Collapse";
 import { useAppStore } from "../../../stores/appStore";
 import { openTurnInReview } from "../../../components/review/openReview";
 import { FileExtIcon } from "./icons/file-ext-icon";
@@ -244,8 +245,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           <ChevronDown size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
         </button>
       </div>
-      {open && (
-        <ul className="turn-edits-files">
+      <Collapse open={open} as="ul" className="turn-edits-files" itemCount={summary.files.length}>
           {summary.files.map((file) => {
             const { name, folder } = splitPath(file.path);
             return (
@@ -265,8 +265,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
               </li>
             );
           })}
-        </ul>
-      )}
+      </Collapse>
     </section>
   );
 }

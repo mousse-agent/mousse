@@ -24,8 +24,9 @@ export const FIXED_SURFACE_THEMES: Partial<
     '--acrylic-soft-rgb': '10, 58, 69',
     '--terminal-bg': '#002b36',
     '--floating-surface': '#073642',
-    '--text-primary': '#839496',
-    '--text-secondary': 'rgba(147, 161, 161, 0.78)',
+    // base1 / base0 tones: the dimmer pair falls under 4.5:1 on Settings surfaces.
+    '--text-primary': '#93a1a1',
+    '--text-secondary': 'rgba(147, 161, 161, 0.92)',
     '--border': 'rgba(131, 148, 150, 0.11)'
   },
   'github-dark': {

@@ -251,6 +251,7 @@ export class StorageUsageService {
   private interval?: ReturnType<typeof setInterval>
   private rescan?: ReturnType<typeof setTimeout>
   private stopping = false
+  private started = false
   private readonly now: () => number
   private readonly measureRoot: typeof measureTree
 
@@ -260,17 +261,39 @@ export class StorageUsageService {
   }
 
   start(): void {
-    if (this.interval) return
+    if (this.started) return
+    this.started = true
     this.stopping = false
-    const first = setTimeout(() => { this.timers.delete(first); void this.background() }, this.deps.firstScanDelayMs ?? FIRST_SCAN_DELAY_MS)
+    // The repeating timer counts from the first timed scan, so a pass is not measured twice in a row.
+    const first = setTimeout(() => {
+      this.timers.delete(first)
+      this.interval = setInterval(() => { void this.background() }, this.deps.intervalMs ?? SCAN_INTERVAL_MS)
+      this.interval.unref()
+      void this.background()
+    }, this.firstScanDelay())
     first.unref()
     this.timers.add(first)
-    this.interval = setInterval(() => { void this.background() }, this.deps.intervalMs ?? SCAN_INTERVAL_MS)
-    this.interval.unref()
+  }
+
+  /**
+   * How long after a start the first timed scan waits. A complete pass in the cache is measured again
+   * only when it is as old as the scan interval: a restart does not walk every worktree again minutes
+   * after the last pass. An unfinished pass, or none, carries on after the usual short delay.
+   */
+  private firstScanDelay(): number {
+    const delay = this.deps.firstScanDelayMs ?? FIRST_SCAN_DELAY_MS
+    this.load()
+    if (!this.loadedComplete || !this.results.size) return delay
+    let oldest = Infinity
+    for (const result of this.results.values()) if (result.measuredAt < oldest) oldest = result.measuredAt
+    // A measurement dated in the future (the clock went back) counts as fresh.
+    const age = Math.max(0, this.now() - oldest)
+    return Math.max(delay, (this.deps.intervalMs ?? SCAN_INTERVAL_MS) - age)
   }
 
   /** Stops the timers and the walk in progress (at its next entry), and waits for it to end. */
   async stop(): Promise<void> {
+    this.started = false
     this.stopping = true
     for (const timer of this.timers) clearTimeout(timer)
     this.timers.clear()

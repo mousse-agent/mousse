@@ -281,7 +281,7 @@ describe('device defaults of a moved entry', () => {
       provider: { llmProvider: 'claude:api', model: 'opus', instanceId: 'claude:api' },
       title: { llmProvider: '', model: '', instanceId: '' }
     })
-    expect(rewritten).toEqual(['Default model: Claude Opus instead of Claude Opus 4.1', 'Chat titles: Automatic'])
+    expect(rewritten).toEqual(['Default model: Claude Opus instead of Claude Opus 4.1', 'Thread titles: Automatic'])
   })
 
   it('leaves defaults on other entries alone', () => {

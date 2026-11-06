@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import { registerNavigationGuard } from '../../services/navigationGuards'
 import { ChevronRight } from '../../lib/icons'
 import { ModalClose, useDialogFocus } from '../ui/Modal'
+import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 
 export function useIntegrationBoundary(...identity: unknown[]) {
   const state = useRef({ identity, epoch: 0, mounted: true })
@@ -50,7 +51,7 @@ export function IntegrationModal({ title, hideTitle = false, onClose, children, 
 
 /** The app's disclosure: a chevron and a quiet label, no native triangle. Pass `open`/`onOpenChange` to control it. */
 export function IntegrationDisclosure({ label, open, onOpenChange, children }: { label: string; open?: boolean; onOpenChange?: (open: boolean) => void; children: ReactNode }) {
-  return <details className="integration-disclosure" open={open} onToggle={onOpenChange ? (event) => onOpenChange(event.currentTarget.open) : undefined}>
+  return <details className={`integration-disclosure ${COLLAPSE_DETAILS_CLASS}`} open={open} onToggle={onOpenChange ? (event) => onOpenChange(event.currentTarget.open) : undefined}>
     <summary><ChevronRight size={14} aria-hidden="true" className="integration-disclosure-chevron" />{label}</summary>
     <div className="integration-disclosure-body">{children}</div>
   </details>

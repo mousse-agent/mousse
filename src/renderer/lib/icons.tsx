@@ -24,6 +24,7 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
+import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
 import BubbleChatQuestionIcon from '@hugeicons/core-free-icons/BubbleChatQuestionIcon'
@@ -319,12 +320,12 @@ export const VolumeHigh = /* @__PURE__ */ createIcon('VolumeHigh', VolumeHighIco
 export const ArchiveRestore = /* @__PURE__ */ createIcon('ArchiveRestore', ArchiveRestoreIcon)
 export const Clean = /* @__PURE__ */ createIcon('Clean', CleanIcon)
 export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
+export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
 export const IconBrain = Brain
 export const IconArrowBackUp = Undo2
 export const IconArrowDown = ArrowDown
-export const IconArrowUp = ArrowUp
 export const IconCheck = Check
 export const IconChecklist = ClipboardList
 export const IconChevronDown = ChevronDown
@@ -348,10 +349,7 @@ export const IconInfoCircle = Info
 export const IconLogout = Logout
 export const IconMessageCircleQuestion = MessageQuestion
 export const IconMessagePlus = MessageSquarePlus
-export const IconPaperclip = Paperclip
 export const IconPhoto = Image
-export const IconPlayerStopFilled = Stop
-export const IconPlus = Plus
 export const IconSearch = Search
 export const IconSend = Send
 export const IconSparkles = Sparkles
