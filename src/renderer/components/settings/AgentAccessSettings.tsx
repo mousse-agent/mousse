@@ -1,4 +1,3 @@
-import { useId, type KeyboardEvent } from 'react'
 import {
   normalizeAgentAccessSettings,
   type AgentAccessLevel,
@@ -6,9 +5,9 @@ import {
   type MousseSettingsUpdate
 } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { MoreDetails, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
-import { Check, ShieldCheck } from '../../lib/icons'
+import { ShieldCheck } from '../../lib/icons'
 import { useComputers } from '../../lib/computers'
 
 /** What each level lets an agent do, in the words the screen uses (SPEC §15.1). */
@@ -16,17 +15,17 @@ export const AGENT_ACCESS_LEVELS: ReadonlyArray<{ value: AgentAccessLevel; label
   {
     value: 'lineage',
     label: 'Lineage only',
-    summary: 'An agent works on its own thread and the subagents it starts. It cannot see or change any other thread.'
+    summary: 'Agents see only their own thread and the subagents they start.'
   },
   {
     value: 'read',
     label: 'Read',
-    summary: 'An agent can also list and search other threads and see what they ran. It cannot read their messages or change them.'
+    summary: 'Agents can also list and search other threads and see what they ran, but not read their messages.'
   },
   {
     value: 'manage',
     label: 'Manage',
-    summary: 'An agent can also read the full events and messages of other threads. Tools that change other threads will need this level.'
+    summary: 'Agents can also read the full events and messages of other threads.'
   }
 ]
 
@@ -37,27 +36,10 @@ export const CAPPED_THREADS: ReadonlyArray<{ id: string; label: string; cap: str
   { id: 'plan', label: 'Turns in Plan mode, and read-only subagents', cap: 'Read at most' }
 ]
 
-const ROW_SELECTOR = '[role="checkbox"]'
-
-/** Arrow keys, Home and End move between the project rows; Tab leaves the list as usual. */
-function moveFocus(event: KeyboardEvent<HTMLElement>): void {
-  const keys: Record<string, number> = { ArrowDown: 1, ArrowUp: -1, Home: 0, End: 0 }
-  if (!(event.key in keys)) return
-  const rows = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(ROW_SELECTOR))
-  if (rows.length === 0) return
-  const at = rows.indexOf(document.activeElement as HTMLElement)
-  let next: number
-  if (event.key === 'Home') next = 0
-  else if (event.key === 'End') next = rows.length - 1
-  else next = Math.min(rows.length - 1, Math.max(0, at < 0 ? 0 : at + keys[event.key]))
-  event.preventDefault()
-  rows[next].focus()
-}
-
 /**
  * Settings > Agents > Agent access: how far an agent may reach beyond its own thread and its
  * subagents, and in which projects. The stored project list is empty for "every project", so the
- * screen names that choice outright and never lets a limited list become empty by unchecking its
+ * screen names that choice outright and never lets a limited list become empty by switching off its
  * last project, which the daemon would read as every project.
  */
 export function AgentAccessSettings({
@@ -71,8 +53,6 @@ export function AgentAccessSettings({
 }) {
   const access = normalizeAgentAccessSettings(settings.agentAccess)
   const level = AGENT_ACCESS_LEVELS.find((entry) => entry.value === access.level) ?? AGENT_ACCESS_LEVELS[0]
-  const projectsId = useId()
-  const computersId = useId()
   const { routed, byNode } = useComputers()
   const computers = Object.values(byNode).sort((a, b) => a.name.localeCompare(b.name))
   // Allowed computers that are no longer the user's stay visible so the person can remove them.
@@ -96,20 +76,24 @@ export function AgentAccessSettings({
     save({ projectIds: access.projectIds.filter((entry) => entry !== id) })
   }
 
-  const projectRow = (id: string, label: string, checked: boolean, onClick: () => void, locked = false) => (
-    <button
-      key={id}
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      aria-disabled={locked || undefined}
-      className={`agent-access-row${checked ? ' on' : ''}`}
-      onClick={onClick}
-    >
-      <span className="agent-access-check" aria-hidden="true">{checked && <Check size={14} strokeWidth={2} />}</span>
-      <span className="agent-access-label">{label}</span>
-    </button>
-  )
+  /** One project or computer: its name and a switch, under the row it refines. */
+  const choiceRow = (kind: 'project' | 'computer', key: string, label: string, checked: boolean, onChange: () => void, locked?: string) => {
+    const id = `agent-access-${kind}-${key}`
+    return (
+      <SettingsRow
+        key={id}
+        indent
+        title={label}
+        htmlFor={id}
+        control={
+          <span title={locked}>
+            <Switch id={id} label={label} checked={checked} disabled={Boolean(locked)} onChange={onChange} />
+          </span>
+        }
+      />
+    )
+  }
+  const lastProject = 'Keep at least one project on, or turn on All projects.'
 
   return (
     <SettingsGroup title="Agent access" icon={ShieldCheck}>
@@ -119,8 +103,7 @@ export function AgentAccessSettings({
         titleId="agent-access-level-title"
         description={<>
           <span id="agent-access-level-summary">{level.summary}</span>
-          <br />
-          Lowering this applies to agents that are already running; raising it applies from their next turn.
+          <MoreDetails>Lowering this applies to agents that are already running; raising it applies from their next turn.</MoreDetails>
         </>}
         control={
           <Select
@@ -134,40 +117,24 @@ export function AgentAccessSettings({
         }
       />
       {access.level !== 'lineage' && (
-        <SettingsRow
-          title="Projects"
-          titleId={projectsId}
-          description={everyProject
-            ? 'Agents can reach threads in every project, including threads without a project.'
-            : 'Agents can reach only threads in the checked projects. New projects are not added. Keep at least one checked, or choose All projects.'}
-        >
-          <div
-            role="group"
-            aria-labelledby={projectsId}
-            className="agent-access-projects"
-            onKeyDown={moveFocus}
-          >
-            {projectRow('all-projects', 'All projects', everyProject, () => { if (!everyProject) save({ projectIds: [] }) })}
-            {projects.map((project) =>
-              projectRow(
-                project.id,
-                project.name,
-                access.projectIds.includes(project.id),
-                () => toggleProject(project.id),
-                !everyProject && access.projectIds.length === 1 && access.projectIds[0] === project.id
-              )
-            )}
-            {removed.map((id) =>
-              projectRow(
-                id,
-                'Removed project',
-                true,
-                () => toggleProject(id),
-                access.projectIds.length === 1
-              )
-            )}
-          </div>
-        </SettingsRow>
+        <>
+          <SettingsRow
+            title="Projects"
+            description={everyProject
+              ? 'Every project, including threads without a project. Turn on a project to limit this.'
+              : `Only the projects turned on. New projects are not added. ${lastProject}`}
+          />
+          {/* Every project is widened to by its own switch; it is turned off by turning on a project. */}
+          {choiceRow('project', '*', 'All projects', everyProject, () => { if (!everyProject) save({ projectIds: [] }) },
+            everyProject ? 'Turn on a project to limit access to it.' : undefined)}
+          {projects.map((project) =>
+            choiceRow('project', project.id, project.name, !everyProject && access.projectIds.includes(project.id), () => toggleProject(project.id),
+              !everyProject && access.projectIds.length === 1 && access.projectIds[0] === project.id ? lastProject : undefined)
+          )}
+          {removed.map((id) =>
+            choiceRow('project', id, 'Removed project', true, () => toggleProject(id), access.projectIds.length === 1 ? lastProject : undefined)
+          )}
+        </>
       )}
       {access.level === 'manage' && (
         <SettingsRow
@@ -175,11 +142,14 @@ export function AgentAccessSettings({
           anchor="agents-access-approvals"
           htmlFor="agent-access-answer-approvals"
           description={<>
-            <strong>Use with care.</strong> An agent can approve a command, a file change or a tool that
-            another thread asked to run, in the projects above, without you seeing the request first. It can approve only what its own permission
-            mode would allow without asking, never &ldquo;Always for this thread&rdquo;, and never its own thread. Each answer shows in that
-            thread as approved by an agent. Requests the provider asks for itself (such as Claude Code&rsquo;s own safety check) and turns you
-            started yourself stay yours. Off by default, and switched off again when the level above is lowered.
+            <strong>Use with care.</strong> Agents approve what other threads in these projects ask for, within their own permission mode.
+            <MoreDetails>
+              An agent can approve a command, a file change or a tool that another thread asked to run, without you seeing the request
+              first. It can approve only what its own permission mode would allow without asking, never &ldquo;Always for this
+              thread&rdquo;, and never its own thread. Each answer shows in that thread as approved by an agent. Requests the provider
+              asks for itself (such as Claude Code&rsquo;s own safety check) and turns you started yourself stay yours. Off by
+              default, and switched off again when the level above is lowered.
+            </MoreDetails>
           </>}
           control={
             <Switch
@@ -192,34 +162,36 @@ export function AgentAccessSettings({
         />
       )}
       <SettingsRow
-        title="Allow agents to create Subagents on other Devices"
+        title="Let agents start subagents on your other devices"
         anchor="agents-remote-subagents"
         htmlFor="agent-access-remote-subagents"
         description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
-          ? 'No other computers are connected yet. Pair them in Settings → Devices, then check the ones agents may use.'
-          : 'An agent can start a subagent on another of your computers. It runs there under that computer\'s agents and accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one. Off by default.'}
+          ? 'No other computers are connected yet. Pair them in Settings → Devices, then turn on the ones agents may use.'
+          : <>
+            Runs on the computers you turn on, at no more than Auto-accept edits.
+            <MoreDetails>
+              An agent can start a subagent on another of your computers. It runs there under that computer&rsquo;s agents and
+              accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one.
+              Off by default.
+            </MoreDetails>
+          </>}
         control={
           <Switch
             id="agent-access-remote-subagents"
-            label="Allow agents to create Subagents on other Devices"
+            label="Let agents start subagents on your other devices"
             checked={access.remoteSubagents}
             onChange={(remoteSubagents) => save({ remoteSubagents })}
           />
         }
       />
       {access.remoteSubagents && ((routed && computers.length > 0) || goneComputers.length > 0) ? (
-        <SettingsRow
-          title="Computers"
-          titleId={computersId}
-          description="Agents can start subagents only on the checked computers. None are checked at first."
-        >
-          <div role="group" aria-labelledby={computersId} className="agent-access-projects" onKeyDown={moveFocus}>
-            {computers.map((computer) =>
-              projectRow(computer.node, computer.online ? computer.name : `${computer.name} (offline)`, access.computers.includes(computer.node), () => toggleComputer(computer.node))
-            )}
-            {goneComputers.map((node) => projectRow(node, 'Removed computer', true, () => toggleComputer(node)))}
-          </div>
-        </SettingsRow>
+        <>
+          <SettingsRow title="Computers" description="Only the computers turned on. None are on at first." />
+          {computers.map((computer) =>
+            choiceRow('computer', computer.node, computer.online ? computer.name : `${computer.name} (offline)`, access.computers.includes(computer.node), () => toggleComputer(computer.node))
+          )}
+          {goneComputers.map((node) => choiceRow('computer', node, 'Removed computer', true, () => toggleComputer(node)))}
+        </>
       ) : null}
       <SettingsRow
         title="Capped threads"

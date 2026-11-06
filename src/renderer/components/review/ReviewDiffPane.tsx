@@ -11,6 +11,7 @@ import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
 import { languageForPath } from '../../utils/fileEditor'
 import { commentDecorations, commentScopeLabel, commentsForFile, scopeKey, selectedLineRange } from './reviewComments'
 import { isPlaceholderSide, placeholderFor, viewChangeLabel } from './reviewModel'
+import { DelayedLoader } from '../ui/DelayedLoader'
 
 const NO_REFERENCES: ChatReference[] = []
 
@@ -365,7 +366,7 @@ export function ReviewDiffPane({
         </div>
       )
     }
-    if (!current) return <div className="git-diff-empty">Loading diff…</div>
+    if (!current) return <div className="git-diff-empty"><DelayedLoader label="Loading diff" /></div>
     const { original, modified } = current
     if (isPlaceholderSide(original) || isPlaceholderSide(modified) || (original === null && modified === null)) {
       return <Placeholders original={original} modified={modified} />

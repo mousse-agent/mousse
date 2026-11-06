@@ -307,7 +307,7 @@ export class StorageCleanupService {
 
   /**
    * One run at a time: a request during a run gets that run's report. The exception is a manual run
-   * ("Clean up now") asked for during a scheduled one: the scheduled run looks at one batch of worktrees
+   * ("Preview cleanup", then confirmed) asked for during a scheduled one: the scheduled run looks at one batch of worktrees
    * and five trash records, so the manual request follows it and gets its own full run. Repeated manual
    * requests share that one queued run.
    */
@@ -1236,7 +1236,7 @@ export class StorageCleanupService {
       const base = this.dispatchWorktreeBase(kept)
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
-      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Clean up now lists it.` }); continue }
+      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Preview cleanup lists it.` }); continue }
       // The ignored files go, as confirmed; Git's own data of the worktree is kept, as a copy the dispatch owns.
       let owner: string | undefined
       try { owner = dispatchKeptFilesOwner(this.deps.store.profileHome, kept.dispatchId) } catch { owner = undefined }

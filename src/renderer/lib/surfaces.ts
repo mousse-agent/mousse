@@ -2,6 +2,7 @@ import type { CommandId } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import type { BrowserTabState, ProjectTerminalTab } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import type { TerminalLocation } from './folderLabel'
 
 export interface SurfaceChoice {
   id: MainView
@@ -27,6 +28,10 @@ export interface SurfaceTabItem {
   closable: boolean
   /** A browser tab kept in every thread rather than owned by one. */
   everyThread?: boolean
+  /** Where the tab works, in short words beside the label: a terminal's folder. */
+  detail?: string
+  /** The tab's tooltip: the label and the full folder (and computer) it works in. */
+  title?: string
 }
 
 export function surfaceTabItems(input: {
@@ -34,17 +39,22 @@ export function surfaceTabItems(input: {
   terminals: ProjectTerminalTab[]
   browsers: BrowserTabState[]
   documents: Array<{ id: string; title: string }>
+  /** Each terminal's folder, by tab id (see `terminalLocations`). */
+  terminalLocations?: Record<string, TerminalLocation>
 }): SurfaceTabItem[] {
   const items: SurfaceTabItem[] = []
   for (const kind of input.opened) {
     if (kind === 'terminal') {
       input.terminals.forEach((tab) => {
+        const label = tab.title || 'Terminal'
+        const location = input.terminalLocations?.[tab.id]
         items.push({
           key: `terminal:${tab.id}`,
           view: 'terminal',
-          label: tab.title || 'Terminal',
+          label,
           resourceId: tab.id,
-          closable: true
+          closable: true,
+          ...(location ? { detail: location.label, title: `${label} · ${location.title}` } : {})
         })
       })
     } else if (kind === 'browser') {
