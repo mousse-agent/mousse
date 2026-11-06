@@ -279,6 +279,7 @@ export function HomeRow({ snapshot }: { snapshot: InstanceSnapshot }) {
   return (
     <SettingsRow
       title="Account home"
+      anchor="providers-home"
       description={
         config.home === 'private'
           ? 'Private to this provider. It signs in separately from your terminal.'
@@ -310,6 +311,7 @@ export function ExecutableRow({
   return (
     <SettingsRow
       title="Executable path"
+      anchor="providers-executable"
       description={withError(busy === 'path' ? 'Checking the executable…' : saved ? undefined : 'Leave empty to use the one Mousse finds.', error)}
       control={
         <span className="settings-icon-actions">
@@ -361,6 +363,7 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
   return (
     <SettingsRow
       title="Launch arguments"
+      anchor="providers-arguments"
       description={withError(config ? undefined : CONFIG_UNREADABLE, error)}
       control={
         <input
@@ -403,6 +406,7 @@ export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot;
   return (
     <SettingsRow
       title="Telemetry"
+      anchor="providers-telemetry"
       description={withError(undefined, error)}
       control={setting === 'none'
         ? <span className="prov-model-chip" title="This agent documents no way to turn its telemetry off, so Mousse sets nothing.">No switch</span>
@@ -457,6 +461,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
   return (
     <SettingsRow
       title="Variables"
+      anchor="providers-variables"
       description={withError(config ? undefined : CONFIG_UNREADABLE, error)}
       control={
         <button
