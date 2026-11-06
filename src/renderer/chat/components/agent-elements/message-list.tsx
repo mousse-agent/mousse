@@ -84,6 +84,8 @@ import { useTurnWindow } from "./virtual/use-turn-window";
 import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
 import { useThreadFind } from "./find/use-thread-find";
+import { flashLocated, revealMessage } from "./reveal-message";
+import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
@@ -1446,6 +1448,42 @@ export const MessageList = memo(function MessageList({
         : undefined,
     [windowed],
   );
+
+  // `scrollToMessage` from elsewhere (search, the composer's approval cue): the transcript that has
+  // the message takes the request, lands its turn, centres it and highlights it for a moment.
+  const messageRequest = useChatNavigationStore((state) => state.message);
+  useEffect(() => {
+    if (!messageRequest) return;
+    const { settleMessage } = useChatNavigationStore.getState();
+    if (isStale(messageRequest)) {
+      settleMessage(messageRequest.seq);
+      return;
+    }
+    const { messageId } = messageRequest;
+    const index = turns.findIndex(
+      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !container || !rows || !virtualization) return;
+    settleMessage(messageRequest.seq);
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    void revealMessage(
+      { turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current), messageId },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      if (element) flashLocated(element);
+    });
+  }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
