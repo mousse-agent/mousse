@@ -17,6 +17,7 @@ import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../s
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
+import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -1162,6 +1163,89 @@ function lifecycleExpectedGeneration(params: Record<string, unknown>): number | 
   return value as number
 }
 
+export const ARCHIVE_BEFORE_DELETE = 'Archive the thread before deleting it.'
+
+/** A thread counts as archived when it, or the thread a person started at the top of its subagent chain, is archived. */
+function isArchivedThread(ctx: HandlerContext, thread: Thread): boolean {
+  if (thread.settledAt) return true
+  const root = thread.lineage?.rootThreadId
+  return Boolean(root && root !== thread.id && ctx.mms.threads.getThread(root)?.settledAt)
+}
+
+/**
+ * The subagent threads under `threadId`, deepest first, that are deleted on their own. A thread whose lifecycle
+ * record is owned by another (a bot's execution thread) goes with its owner's delete instead.
+ */
+function subagentThreadsToDelete(ctx: HandlerContext, threadId: string): string[] {
+  const children = new Map<string, string[]>()
+  for (const thread of ctx.mms.threads.listAllThreads()) {
+    const parent = thread.lineage?.parentThreadId
+    if (parent && parent !== thread.id) children.set(parent, [...(children.get(parent) ?? []), thread.id])
+  }
+  const order: string[] = [], seen = new Set([threadId])
+  const visit = (id: string): void => {
+    for (const child of children.get(id) ?? []) {
+      if (seen.has(child)) continue
+      seen.add(child)
+      visit(child)
+      if (!ctx.mms.threads.lifecycleStore.get(child)?.parentTaskId) order.push(child)
+    }
+  }
+  visit(threadId)
+  return order
+}
+
+/**
+ * Deletes an archived thread and its subagent threads for good. Its subagent threads go first, deepest first, each
+ * one through the same trash and reviewed purge as every permanent delete; the thread itself goes last.
+ */
+async function deleteArchivedThread(
+  ctx: HandlerContext,
+  threadId: string,
+  options: { operationId?: string; expectedGeneration?: number; discard: boolean }
+): Promise<TaskLifecycleRecord> {
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  if (!isArchivedThread(ctx, thread)) throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
+  // Permanent delete stays on the computer that runs the thread, as it always has; another computer can archive it.
+  if (ctx.connection?.clientType === 'bridge') throw new DomainRpcError('not_available_remotely', 'Delete the thread on the computer that runs it.', { threadId })
+  const human = ctx.connection?.clientType === 'gui'
+  for (const subagent of subagentThreadsToDelete(ctx, threadId)) {
+    if (ctx.mms.threads.getThread(subagent)) await purgeOneThread(ctx, subagent, { human, discard: options.discard })
+  }
+  return purgeOneThread(ctx, threadId, { ...options, human })
+}
+
+/**
+ * One thread's permanent delete: the trash stops and fences it, then the purge removes exactly what its preview
+ * lists. Only a Mousse window may discard unpublished work; anyone else is refused when there is some. Until the
+ * purge starts, a refusal puts the thread back where it was, so nothing is lost without a delete that went through.
+ */
+async function purgeOneThread(
+  ctx: HandlerContext,
+  threadId: string,
+  options: { operationId?: string; expectedGeneration?: number; discard: boolean; human: boolean }
+): Promise<TaskLifecycleRecord> {
+  const { human } = options
+  const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', options.operationId)
+  await ctx.mms.trashThread(threadId, operationId, options.expectedGeneration)
+  try {
+    const preview = await ctx.mms.lifecycle.cleanup.preview(threadId)
+    if (preview.blockers.length) throw new DomainRpcError('thread_delete_blocked', `The thread could not be deleted: ${preview.blockers.join('; ')}`, { threadId })
+    if (preview.items.some((item) => item.discardRequired) && !(human && options.discard))
+      throw new DomainRpcError('thread_has_unpublished_work', 'The thread has unpublished work. Delete it from the Mousse app.', { threadId })
+    return await ctx.mms.lifecycle.purge({ taskId: threadId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: human && options.discard, human })
+  } catch (error) {
+    // Not started: the thread goes back to Archived. A purge that started finishes on its own and is never undone.
+    if (ctx.mms.threads.lifecycleStore.get(threadId)?.state === 'trashed') {
+      await ctx.mms.restoreThread(threadId).catch((restoreError: unknown) => {
+        console.warn('a refused delete could not put the thread back', { threadId, error: restoreError instanceof Error ? restoreError.message : String(restoreError) })
+      })
+    }
+    throw error
+  }
+}
+
 export async function dispatchMethod(
   ctx: HandlerContext,
   method: string,
@@ -1507,12 +1591,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
-      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
-      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
-      const threads = ctx.mms.threads.listAllThreads()
-      ctx.emitEvent?.('threads.updated', { threads })
-      return { threads: listedThreadsFor(ctx, threads), lifecycle, operationResult }
+      // Archive first, then delete: only an archived thread is deleted, and for good.
+      try {
+        const lifecycle = await deleteArchivedThread(ctx, threadId, {
+          operationId: asOptionalString(p.operationId, 256),
+          expectedGeneration: lifecycleExpectedGeneration(p),
+          discard: asOptionalBoolean(p.discard, 'discard') === true
+        })
+        const threads = ctx.mms.threads.listAllThreads()
+        return { threads: listedThreadsFor(ctx, threads), lifecycle }
+      } finally {
+        // Also after a refusal: a thread put back in Archived shows there again.
+        ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -3961,19 +4052,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
           } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
         }
-        // Recently deleted also lists what is in the trash of the user's other computers (each with a short
-        // deadline). Another caller of this method, such as Storage settings, asks about this computer alone.
-        const remote =
-          p.includeComputers === true && ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
-            ? await ctx.mms.remoteLists.inventory(ctx.connection.id)
-            : undefined
         return {
-          lifecycles: remote ? [...lifecycles, ...remote.lifecycles] : lifecycles,
-          taskNames: remote ? { ...taskNames, ...remote.taskNames } : taskNames,
+          lifecycles,
+          taskNames,
           migrationDiagnostics,
           trashPolicy: ctx.mms.lifecycle.cleanup.policy(),
-          trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus(),
-          ...(remote?.skipped.length ? { skipped: remote.skipped } : {})
+          trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus()
         }
       }
       const threadId = asString(p.threadId, 'threadId', 256)

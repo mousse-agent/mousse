@@ -13,8 +13,8 @@ import { testHarness } from '../src/mms/run/testkit/harness'
 import { piAdapter } from './run/phase6Fixture'
 
 describe('lifecycle public protocol acceptance', () => {
-  it('threads.delete preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
-    const method = 'threads.delete'
+  it('threads.trash preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
+    const method = 'threads.trash'
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'recoverable task' })
@@ -129,7 +129,7 @@ describe('lifecycle public protocol acceptance', () => {
       runId = run.runId
       await vi.waitFor(async () => expect((await f.rpc.request<WorkflowRunView>('workflowRuns.get', { profileId: f.alice.id, runId })).state).toBe('waiting-approval'))
       for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow(/active|busy|drain|workflow|blocked/i)
+        await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow(/Archive the thread|active|busy|drain|workflow|blocked/i)
         expect(existsSync(join(path, 'meta.json'))).toBe(true)
       }
     } finally {
@@ -156,7 +156,7 @@ describe('lifecycle public protocol acceptance', () => {
       pending = f.rpc.request('orchestrator.send', { threadId: thread.id, content: 'wait in provider seam' })
       await started
       for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(peer.request(method, { threadId: thread.id })).rejects.toThrow(/active|busy|drain|running|blocked/i)
+        await expect(peer.request(method, { threadId: thread.id })).rejects.toThrow(/Archive the thread|active|busy|drain|running|blocked/i)
       }
       release()
       await pending
@@ -185,7 +185,7 @@ describe('lifecycle public protocol acceptance', () => {
       ptyId = created.ptyId
       expect(f.services.ptyManager.isAlive(ptyId)).toBe(true)
       for (const method of ['threads.delete', 'threads.trash']) {
-        await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow(/active|busy|drain|PTY|blocked/i)
+        await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow(/Archive the thread|active|busy|drain|PTY|blocked/i)
         expect(existsSync(join(path, 'meta.json'))).toBe(true)
         expect(f.services.ptyManager.isAlive(ptyId)).toBe(true)
       }
