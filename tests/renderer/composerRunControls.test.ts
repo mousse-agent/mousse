@@ -7,6 +7,7 @@ import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/com
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { LlmModelOption } from '../../src/shared/settings'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -35,11 +36,12 @@ function provider(models: LlmModelOption[], autoPermissionMode = true, label = '
   return { id, label, models, caps: { toolControl: 'exact', autoPermissionMode, contextUsage: 'none' } as ProviderWithStatus['caps'] }
 }
 
-function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[] } = {}) {
+function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean; providers?: ProviderWithStatus[]; footer?: Partial<ComposerFooterProps> } = {}) {
   const onModelMenuOpenChange = vi.fn()
   const onModelSelect = vi.fn()
   const onPermission = vi.fn()
   const props: ComposerFooterProps = {
+    ...options.footer,
     providers: options.providers ?? [provider(options.models ?? [opus, sonnet, plain], options.auto ?? true, options.agent)],
     selectedProviderId: 'claude-subscription',
     selectedModelId: options.modelId ?? 'opus:high',
@@ -69,8 +71,8 @@ const checkedLevel = () => column()!.querySelector('[aria-checked="true"]')!.tex
 const note = () => column()!.querySelector('[role="note"]')?.textContent ?? null
 const footer = () => document.querySelector<HTMLElement>('.model-picker-footer')
 const speeds = () => [...document.querySelectorAll<HTMLElement>('.model-picker-footer [role="radiogroup"][aria-label="Speed"] [role="radio"]')]
-const permissionButton = () => document.querySelector<HTMLButtonElement>('.model-picker-permission-btn')!
-const permissionMenu = () => document.querySelector<HTMLElement>('.model-picker-permission-menu')
+const permissionButton = () => host.querySelector<HTMLButtonElement>('.composer-permission-chip')!
+const permissionMenu = () => document.querySelector<HTMLElement>('.composer-permission-menu')
 const openPermissions = () => act(() => permissionButton().click())
 const modes = () => [...permissionMenu()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission')]
 const lineItems = () => [...permissionMenu()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission-line-item')]
@@ -99,9 +101,9 @@ describe('composer model picker', () => {
     expect(host.querySelector('.composer-run-controls')!.textContent).toBe('Opus 5.5High')
     expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High')
     expect(modelButton().getAttribute('aria-label')).toBe('Model: Opus 5.5 High')
-    // The button names only the model and level; the permission mode lives in the picker's footer.
+    // The button names only the model and level; the permission mode is its own chip.
     expect(modelButton().querySelector('svg.lucide')).toBeNull()
-    expect(host.querySelectorAll('button')).toHaveLength(3)
+    expect([...host.querySelectorAll('button')].map((button) => button.getAttribute('aria-label'))).toEqual(['Permissions: Auto-accept edits', 'Model: Opus 5.5 High', 'Attach files', 'Send message'])
     expect(host.querySelector('.composer-run-btn, .composer-run-sep, .composer-pill-btn')).toBeNull()
     act(() => modelButton().click())
     expect(onModelMenuOpenChange).toHaveBeenCalledWith(true)
@@ -124,10 +126,10 @@ describe('composer model picker', () => {
     expect(checkedLevel()).toBe('High')
     expect(level('High').querySelector('.model-picker-level-check svg')).not.toBeNull()
     expect(level('Low').querySelector('.model-picker-level-check svg')).toBeNull()
-    // Speed and permissions are not in the column; Opus has one speed, so the footer holds only the permission button.
+    // Speed and permissions are not in the column; Opus has one speed, so there is no footer.
     expect(column()!.querySelector('[aria-label="Speed"], .composer-run-menu-permission')).toBeNull()
     expect(speeds()).toHaveLength(0)
-    expect(permissionButton().textContent).toBe('Auto-accept edits')
+    expect(footer()).toBeNull()
     expect(document.querySelector('[role="menu"][aria-label="Run options"]')).toBeNull()
   })
 
@@ -248,12 +250,11 @@ describe('composer model picker', () => {
     render()
     const panel = () => document.querySelector('.model-picker-panel')!
     expect(panel().classList.contains('is-fixed')).toBe(true)
-    // A search with no results keeps the column (its header alone) and the footer in place.
+    // A search with no results keeps the column (its header alone) in place.
     type('nothing like this')
     expect(document.querySelectorAll('.model-picker-row')).toHaveLength(0)
     expect(panel().classList.contains('is-fixed')).toBe(true)
     expect(document.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
-    expect(footer()).not.toBeNull()
     // The box's size comes from the stylesheet alone: a fixed width and height, the list and column scrolling inside.
     const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
     const rule = css.slice(css.indexOf('.model-picker-panel.is-fixed {'), css.indexOf('}', css.indexOf('.model-picker-panel.is-fixed {')))
@@ -288,13 +289,14 @@ describe('composer model picker', () => {
     expect(levelItems()).toHaveLength(0)
   })
 
-  it('shows only the permission button for a model without reasoning or speeds', () => {
+  it('has no footer for a model without speeds, and never a permission control inside the picker', () => {
     render({ models: [plain], modelId: 'plain' })
     expect(modelButton().querySelector('.composer-model-btn-level')).toBeNull()
     expect(modelButton().getAttribute('aria-label')).toBe('Model: Plain 1')
     expect(document.querySelector('.model-picker-run')).toBeNull()
     expect(speeds()).toHaveLength(0)
-    expect(permissionButton()).not.toBeNull()
+    expect(footer()).toBeNull()
+    expect(document.querySelector('.composer-model-picker-shell .composer-run-menu-permission, .model-picker-shell .composer-run-menu-permission')).toBeNull()
   })
 
   it('moves through models, into their levels and on to the footer with the keyboard', () => {
@@ -306,14 +308,9 @@ describe('composer model picker', () => {
     key(search(), 'ArrowDown')
     expect(activeOption().textContent).toContain('Sonnet 5')
     expect(columnModel()).toBe('Sonnet 5')
-    // Right moves into the levels on the one the model would run at; Down past the last reaches the footer.
+    // Right moves into the levels on the one the model would run at; Left goes back to the list.
     act(() => search().focus())
     key(search(), 'ArrowRight')
-    expect(document.activeElement!.textContent).toBe('High')
-    key(document.activeElement!, 'ArrowDown')
-    expect(document.activeElement).toBe(permissionButton())
-    // Up from the footer goes back to the levels, Left back to the list.
-    key(document.activeElement!, 'ArrowUp')
     expect(document.activeElement!.textContent).toBe('High')
     key(document.activeElement!, 'ArrowLeft')
     expect(document.activeElement).toBe(search())
@@ -335,10 +332,14 @@ describe('composer model picker', () => {
     expect(document.activeElement!.textContent).toBe('Standard')
   })
 
-  it('opens the permission modes above the footer, keeps focus inside, and closes on Escape back to the button', () => {
-    const { onModelMenuOpenChange } = render({ mode: 'ask' })
+  it('shows the mode as a chip left of the model button, opens the modes in one click, and closes on Escape back to the chip', () => {
+    const { onModelMenuOpenChange } = render({ mode: 'ask', open: false })
+    const controls = [...host.querySelectorAll<HTMLButtonElement>('.composer-footer-left button')]
+    expect(controls.indexOf(permissionButton())).toBe(controls.indexOf(modelButton()) - 1)
     expect(permissionButton().getAttribute('aria-expanded')).toBe('false')
-    expect(permissionButton().textContent).toBe('Ask before acting')
+    expect(permissionButton().getAttribute('aria-label')).toBe('Permissions: Ask before acting')
+    expect(permissionButton().getAttribute('title')).toBe('Permissions: Ask before acting')
+    expect(permissionButton().textContent).toBe('')
     openPermissions()
     expect(permissionButton().getAttribute('aria-expanded')).toBe('true')
     expect(permissionMenu()!.getAttribute('role')).toBe('menu')
@@ -351,12 +352,45 @@ describe('composer model picker', () => {
     key(document.activeElement!, 'Escape')
     expect(permissionMenu()).toBeNull()
     expect(document.activeElement).toBe(permissionButton())
-    // Only the permission menu closed, not the picker.
-    expect(onModelMenuOpenChange).not.toHaveBeenCalledWith(false)
+    // The model picker is a separate control.
+    expect(onModelMenuOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('after a pointer open, focuses the chosen mode once the menu shows, and Escape closes it back to the chip', () => {
+    render({ mode: 'ask', open: false })
+    // Record whether the menu was visible when a row took focus (a hidden row cannot take focus).
+    const focus = HTMLElement.prototype.focus
+    const visibleAtFocus: boolean[] = []
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      const menu = this.closest<HTMLElement>('.composer-permission-menu')
+      if (menu) visibleAtFocus.push(menu.style.visibility === 'visible')
+      focus.call(this, options)
+    })
+    act(() => { permissionButton().dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    spy.mockRestore()
+    expect(permissionMenu()).not.toBeNull()
+    expect(visibleAtFocus).toEqual([true])
+    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
+    // Escape still closes when focus stayed on the chip.
+    act(() => permissionButton().focus())
+    key(permissionButton(), 'Escape')
+    expect(permissionMenu()).toBeNull()
+    expect(permissionButton().getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(permissionButton())
+  })
+
+  it('tints only Full access, and names a limit in the tooltip', () => {
+    render({ mode: 'full', open: false })
+    expect(permissionButton().classList.contains('is-full')).toBe(true)
+    act(() => root.unmount())
+    root = createRoot(host)
+    render({ mode: 'accept_edits', ceiling: 'accept_edits', open: false })
+    expect(permissionButton().classList.contains('is-full')).toBe(false)
+    expect(permissionButton().getAttribute('title')).toBe('Permissions: Auto-accept edits. This computer allows up to Auto-accept edits.')
   })
 
   it('offers permission modes as a row of named icon buttons, highlighted without a check', () => {
-    const { onPermission, onModelSelect, onModelMenuOpenChange } = render({ mode: 'ask' })
+    const { onPermission, onModelSelect } = render({ mode: 'ask', open: false })
     openPermissions()
     expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
     const selected = modes().filter((mode) => mode.getAttribute('aria-checked') === 'true')
@@ -371,11 +405,11 @@ describe('composer model picker', () => {
     expect(onPermission).toHaveBeenCalledWith('full')
     // The permission belongs to the thread: the model stays as it is.
     expect(onModelSelect).not.toHaveBeenCalled()
-    expect(onModelMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(permissionMenu()).toBeNull()
   })
 
   it('draws every mode line in one place and shows only the active one, so the menu never resizes on hover', () => {
-    render({ mode: 'ask' })
+    render({ mode: 'ask', open: false })
     openPermissions()
     // All four lines are rendered (the menu takes the size of the longest); one is visible and read out.
     expect(lineItems().map((item) => item.querySelector('.composer-run-menu-permission-name')!.textContent)).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
@@ -388,8 +422,8 @@ describe('composer model picker', () => {
   })
 
   it('hides Auto on an agent without an auto mode and shows a thread set to Auto as Auto-accept edits', () => {
-    const { onPermission } = render({ mode: 'auto', auto: false, agent: 'Grok' })
-    expect(permissionButton().textContent).toBe('Auto-accept edits')
+    const { onPermission } = render({ mode: 'auto', auto: false, agent: 'Grok', open: false })
+    expect(permissionButton().getAttribute('aria-label')).toBe('Permissions: Auto-accept edits')
     openPermissions()
     expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Full access'])
     expect(modes().find((mode) => mode.getAttribute('aria-checked') === 'true')!.getAttribute('aria-label')).toBe('Auto-accept edits')
@@ -399,7 +433,7 @@ describe('composer model picker', () => {
   })
 
   it('keeps a mode above the limit in the row, dimmed, and says why on hover', () => {
-    const { onPermission } = render({ mode: 'accept_edits', ceiling: 'accept_edits' })
+    const { onPermission } = render({ mode: 'accept_edits', ceiling: 'accept_edits', open: false })
     openPermissions()
     const full = modes()[3]!
     expect(full.getAttribute('aria-disabled')).toBe('true')
@@ -410,18 +444,121 @@ describe('composer model picker', () => {
     expect(onPermission).not.toHaveBeenCalled()
   })
 
-  it('opens only the run settings for an assigned model, where just the permission mode changes', () => {
+  it('names an assigned model without opening anything, and keeps its permission chip', () => {
     const { onPermission } = render({ readOnly: true })
-    expect(modelButton().disabled).toBe(false)
+    expect(modelButton().disabled).toBe(true)
     expect(modelButton().getAttribute('aria-label')).toBe('Assigned model: Opus 5.5 High')
-    expect(document.querySelector('.model-picker-row')).toBeNull()
-    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Run options"]')!
-    expect([...menu.querySelectorAll<HTMLButtonElement>('[aria-label="Reasoning"] [role="menuitemradio"]')].every((item) => item.disabled)).toBe(true)
-    act(() => menu.querySelectorAll<HTMLButtonElement>('.composer-run-menu-permission')[0]!.click())
+    expect(document.querySelector('.model-picker-row, [role="menu"][aria-label="Run options"]')).toBeNull()
+    openPermissions()
+    act(() => modes()[0]!.click())
     expect(onPermission).toHaveBeenCalledWith('ask')
     act(() => root.unmount())
     root = createRoot(host)
     render({ readOnly: true, permission: false, open: false })
     expect(modelButton().disabled).toBe(true)
+    expect(host.querySelector('.composer-permission-chip')).toBeNull()
+  })
+})
+
+describe('composer send slot', () => {
+  const actions = () => [...host.querySelectorAll<HTMLButtonElement>('.composer-footer-right button')].map((button) => button.getAttribute('aria-label'))
+  const button = (label: string) => host.querySelector<HTMLButtonElement>(`.composer-footer-right button[aria-label="${label}"]`)!
+  const slot = (footer: Partial<ComposerFooterProps>) => {
+    const handlers = { onSend: vi.fn(), onStop: vi.fn(), onStartRecording: vi.fn(), onStopRecording: vi.fn() }
+    render({ open: false, footer: { ...handlers, ...footer } })
+    return handlers
+  }
+
+  afterEach(() => useAppStore.setState({ appInfo: null }))
+
+  it('shows one Stop during a run with an empty box, with the shortcut in its tooltip', () => {
+    useAppStore.setState({ appInfo: { platform: 'win32' } as never })
+    const { onStop } = slot({ loading: true })
+    expect(actions()).toEqual(['Attach files', 'Stop run'])
+    expect(button('Stop run').title).toBe('Stop · Ctrl+Shift+Backspace')
+    act(() => button('Stop run').click())
+    expect(onStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps Stop beside Queue once the box has text, and Stop does not send', () => {
+    const { onStop, onSend } = slot({ loading: true, canSend: true })
+    expect(actions()).toEqual(['Attach files', 'Stop run', 'Queue message'])
+    expect(button('Queue message').title).toContain('Steer ·')
+    act(() => button('Stop run').click())
+    expect(onStop).toHaveBeenCalledTimes(1)
+    expect(onSend).not.toHaveBeenCalled()
+    act(() => button('Queue message').click())
+    expect(onSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows Stop while a run waits on an approval, beside Send when the box has text', () => {
+    slot({ stoppable: true })
+    expect(actions()).toEqual(['Attach files', 'Stop run'])
+    act(() => root.unmount())
+    root = createRoot(host)
+    slot({ stoppable: true, canSend: true })
+    expect(actions()).toEqual(['Attach files', 'Stop run', 'Send message'])
+  })
+
+  it('uses the macOS symbols in the Stop tooltip on a Mac', () => {
+    useAppStore.setState({ appInfo: { platform: 'darwin' } as never })
+    slot({ loading: true })
+    expect(button('Stop run').title).toMatch(/^Stop · .*⌘/)
+  })
+
+  it('gives dictation its own button when idle, and keeps Send in the slot', () => {
+    const { onStartRecording, onSend } = slot({})
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Send message'])
+    expect(button('Send message').disabled).toBe(true)
+    act(() => button('Dictate').click())
+    expect(onStartRecording).toHaveBeenCalledTimes(1)
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('shows only Stop recording in the slot while recording', () => {
+    const { onStopRecording } = slot({ isRecording: true })
+    expect(actions()).toEqual(['Attach files', 'Stop recording'])
+    act(() => button('Stop recording').click())
+    expect(onStopRecording).toHaveBeenCalledTimes(1)
+  })
+
+  it('draws Send, Queue, Stop, Stop recording and the mic as circles, and nothing else in the footer', () => {
+    const css = readFileSync('src/renderer/styles/polish.css', 'utf8').replace(/\r\n/g, '\n')
+    const match = /\.app \.chat-input-area :is\(([^)]*)\) \{\n {2}border-radius: 50%;\n\}/.exec(css)
+    expect(match).not.toBeNull()
+    const round = match![1].split(',').map((selector) => selector.trim().replace(/^\./, ''))
+    // The rule beats the shared 9px square (one more class) and keeps its 30px size.
+    expect(css.indexOf(match![0])).toBeGreaterThan(css.indexOf('.app .chat-input-area .composer-action-btn {\n  width: 30px;\n  height: 30px;\n  border-radius: 9px;'))
+    const isRound = (label: string) => round.some((name) => button(label).classList.contains(name))
+    const states: Array<[Partial<ComposerFooterProps>, string[]]> = [
+      [{ canSend: true }, ['Dictate', 'Send message']],
+      [{ loading: true }, ['Stop run']],
+      [{ loading: true, canSend: true }, ['Stop run', 'Queue message']],
+      [{ isRecording: true }, ['Stop recording']]
+    ]
+    for (const [footer, labels] of states) {
+      slot(footer)
+      for (const label of labels) expect(isRound(label), label).toBe(true)
+      expect(isRound('Attach files')).toBe(false)
+      expect(round.some((name) => permissionButton().classList.contains(name))).toBe(false)
+      act(() => root.unmount())
+      root = createRoot(host)
+    }
+    // The focus ring is a shadow on the same box, so it follows the circle.
+    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  box-shadow: var(--ui-focus-ring);\n}`)
+  })
+})
+
+describe('composer send button', () => {
+  const sendButton = () => host.querySelector<HTMLButtonElement>('.composer-action-btn-active')!
+
+  it('says what sending does: send, queue, or what the parent names (answering open questions)', () => {
+    render({ open: false, footer: { canSend: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Send message')
+    render({ open: false, footer: { canSend: true, loading: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Queue message')
+    render({ open: false, footer: { canSend: true, loading: true, sendLabel: 'Answer this question' } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Answer this question')
+    expect(sendButton().title).toBe('Answer this question')
   })
 })

@@ -1,11 +1,25 @@
-import { memo, useMemo, useState, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PullRequestComment, PullRequestDetail, PullRequestReview } from '../../shared/pullRequests'
 import { useActiveThreadPullRequest } from '../hooks/useActiveThreadPullRequest'
-import { ChevronDown, ChevronRight, ExternalLink, GitPullRequest, RefreshCw } from '../lib/icons'
+import { useProjectComputerName } from '../hooks/useProjectComputerName'
+import { useTransientError } from '../hooks/useTransientError'
+import { gitScopeFor } from '../lib/activeProject'
+import { GITHUB_SIGN_IN_COMMAND } from '../lib/githubSignIn'
+import { Check, ChevronDown, ChevronRight, Copy, ExternalLink, GitMerge, GitPullRequest, RefreshCw } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
-import { refreshPullRequest, refreshPullRequestDetail, usePullRequestDetail } from '../stores/pullRequestStore'
+import {
+  createPullRequestForBranch,
+  refreshPullRequest,
+  refreshPullRequestDetail,
+  useGitPullRequestStore,
+  usePullRequestDetail
+} from '../stores/pullRequestStore'
 import { routeLink } from '../utils/chatLinks'
+import { useGitActionRunner } from './git/GitActionButtons'
+import { RowMenu } from './integrations/RowMenu'
 import { PullRequestMarkdown, openExternalUrl } from './PullRequestMarkdown'
+import { PullRequestCreateForm } from './sideCard/PullRequestCreateForm'
+import { PullRequestConfirm, pullRequestActions } from './sideCard/PullRequestConfirm'
 import {
   PANEL_LIMITS,
   commentCountLabel,
@@ -15,6 +29,7 @@ import {
   prepareCommentBody,
   pullRequestBadge,
   pullRequestPanelState,
+  pullRequestQuestionIdentity,
   relativeTime,
   reviewLabel,
   reviewTone,
@@ -27,8 +42,19 @@ import {
   type PullRequestPanelState,
   type ReviewerSummary
 } from './pullRequestPanelLogic'
-import { pullRequestCheckRows } from './sideCard/gitSectionLogic'
+import {
+  GIT_BUSY_REASON,
+  gitActionLock,
+  gitActionRowModel,
+  gitErrorMessage,
+  pullRequestCheckRows,
+  pullRequestRows,
+  type GitAction,
+  type PullRequestFoundRow
+} from './sideCard/gitSectionLogic'
+import { Collapse } from './ui/Collapse'
 import './pullRequestPanel.css'
+import { DelayedLoader } from './ui/DelayedLoader'
 
 export interface PanelActions {
   now: number
@@ -180,21 +206,19 @@ function FileGroupView({ group, initiallyOpen, actions }: { group: PullRequestFi
         {group.outdatedCount > 0 && <span className="pr-panel-badge" data-tone="neutral">{group.outdatedCount} outdated</span>}
         <span className="pr-panel-count">{commentCountLabel(group.commentCount)}</span>
       </button>
-      {open && (
-        <>
-          <ul className="pr-panel-threads" aria-label={`Comments on ${group.path}`}>
-            {threads.items.map((thread) => (
-              <ThreadView key={thread.key} thread={thread} actions={actions} />
-            ))}
-          </ul>
-          {threads.hidden > 0 && (
-            <button type="button" className="pr-panel-more" onClick={() => setShownThreads(shownThreads + PANEL_LIMITS.step)}>
-              Show {Math.min(PANEL_LIMITS.step, threads.hidden)} more {threads.hidden === 1 ? 'thread' : 'threads'}
-              <span className="pr-panel-more-count">{threads.hidden} not shown</span>
-            </button>
-          )}
-        </>
-      )}
+      <Collapse open={open} itemCount={threads.items.length}>
+        <ul className="pr-panel-threads ui-collapse-items" aria-label={`Comments on ${group.path}`}>
+          {threads.items.map((thread) => (
+            <ThreadView key={thread.key} thread={thread} actions={actions} />
+          ))}
+        </ul>
+        {threads.hidden > 0 && (
+          <button type="button" className="pr-panel-more" onClick={() => setShownThreads(shownThreads + PANEL_LIMITS.step)}>
+            Show {Math.min(PANEL_LIMITS.step, threads.hidden)} more {threads.hidden === 1 ? 'thread' : 'threads'}
+            <span className="pr-panel-more-count">{threads.hidden} not shown</span>
+          </button>
+        )}
+      </Collapse>
     </li>
   )
 }
@@ -334,11 +358,14 @@ export function PullRequestPanelDetail({ detail, actions }: { detail: PullReques
 function PanelHeader({
   detail,
   refreshing,
-  onRefresh
+  onRefresh,
+  actions
 }: {
   detail: PullRequestDetail
   refreshing: boolean
   onRefresh: () => void
+  /** Merge… and the overflow menu of an open pull request. */
+  actions?: ReactNode
 }) {
   const badge = pullRequestBadge(detail)
   const decision = detail.state === 'open'
@@ -368,6 +395,7 @@ function PanelHeader({
           <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
           Open on GitHub
         </button>
+        {actions}
       </div>
       <div className="pr-panel-meta">
         <span className="pr-panel-badge" data-tone={badge.tone}>{badge.label}</span>
@@ -391,6 +419,49 @@ function Notice({ role, children, action }: { role: 'status' | 'alert'; children
   )
 }
 
+/** How long Copied (or the copy failure) stays. */
+const COPIED_MS = 2_000
+
+/**
+ * GitHub CLI is not signed in: what to run and where, a copy of that command, Try again once it is done, and the
+ * CLI's own words under Details. The command is fixed text; nothing from the failure is copied.
+ */
+export function SignedOutNotice({ message, computerName, onRetry }: { message: string; computerName: string | null; onRetry: () => void }) {
+  const [copy, setCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
+  useEffect(() => {
+    if (copy === 'idle') return
+    const timer = setTimeout(() => setCopy('idle'), COPIED_MS)
+    return () => clearTimeout(timer)
+  }, [copy])
+  const where = computerName ? `Run it in a terminal on ${computerName}` : 'Run it in a terminal'
+  const copyCommand = () => {
+    void Promise.resolve()
+      .then(() => navigator.clipboard.writeText(GITHUB_SIGN_IN_COMMAND))
+      .then(() => setCopy('copied'), () => setCopy('failed'))
+  }
+  return (
+    <div className="pr-panel-notice pr-panel-signin" role="status">
+      <p className="pr-panel-signin-title">{computerName ? `Sign in to GitHub CLI on ${computerName}` : 'Sign in to GitHub CLI'}</p>
+      <div className="pr-panel-signin-row">
+        <code className="pr-panel-signin-command" title={where}>{GITHUB_SIGN_IN_COMMAND}</code>
+        <button type="button" className="pr-panel-action" title={where} onClick={copyCommand}>
+          {copy === 'copied' ? <Check size={13} strokeWidth={2} aria-hidden="true" /> : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+          {copy === 'copied' ? 'Copied' : 'Copy command'}
+        </button>
+        <button type="button" className="pr-panel-action" onClick={onRetry} title="Read the pull request again">
+          <RefreshCw size={13} strokeWidth={2} aria-hidden="true" />
+          Try again
+        </button>
+      </div>
+      {copy === 'failed' && <p className="pr-panel-signin-failed">Could not copy. Select the command and copy it.</p>}
+      <details className="pr-panel-details">
+        <summary>Details</summary>
+        <pre>{message}</pre>
+      </details>
+    </div>
+  )
+}
+
 export interface PullRequestPanelViewProps {
   state: PullRequestPanelState
   now?: number
@@ -399,6 +470,14 @@ export interface PullRequestPanelViewProps {
   onOpenFile?: (comment: PullRequestComment, threadKey: string) => void
   /** The thread marked as selected when the panel opens. */
   initialSelectedKey?: string | null
+  /** Merge… and Close pull request… for an open pull request, in the header. */
+  headerActions?: ReactNode
+  /** Under the header: the confirmation Merge… or Close opened, and what the last one did. */
+  headerBelow?: ReactNode
+  /** Create PR for a branch with none, when it could get one. */
+  createAction?: ReactNode
+  /** The computer that reads the pull request, when it is another of the user's computers. */
+  computerName?: string | null
 }
 
 /** What the panel draws for a state: a message, or the pull request with its checks, reviews and comments. */
@@ -408,7 +487,11 @@ export function PullRequestPanelView({
   refreshing = false,
   onRefresh = () => undefined,
   onOpenFile = () => undefined,
-  initialSelectedKey = null
+  initialSelectedKey = null,
+  headerActions,
+  headerBelow,
+  createAction,
+  computerName = null
 }: PullRequestPanelViewProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialSelectedKey)
   const actions: PanelActions = {
@@ -423,7 +506,8 @@ export function PullRequestPanelView({
     <div className="pr-panel" data-state={state.kind}>
       {state.kind === 'ready' ? (
         <>
-          <PanelHeader detail={state.detail} refreshing={refreshing} onRefresh={onRefresh} />
+          <PanelHeader detail={state.detail} refreshing={refreshing} onRefresh={onRefresh} actions={headerActions} />
+          {headerBelow}
           {state.staleError && (
             <p className="pr-panel-error" role="alert" title={state.staleError}>
               Could not refresh: {state.staleError}
@@ -432,13 +516,15 @@ export function PullRequestPanelView({
           <PullRequestPanelDetail detail={state.detail} actions={actions} />
         </>
       ) : state.kind === 'loading' ? (
-        <Notice role="status">Loading the pull request…</Notice>
+        <div className="pr-panel-notice"><DelayedLoader label="Loading the pull request" /></div>
       ) : state.kind === 'no-branch' ? (
         <Notice role="status">Open a project on a Git branch to see its pull request.</Notice>
       ) : state.kind === 'none' ? (
-        <Notice role="status">
-          {state.branch ? `${state.branch} has no pull request yet.` : 'This branch has no pull request yet.'} Create one from the Git section of the side card.
+        <Notice role="status" action={createAction}>
+          {state.branch ? `${state.branch} has no pull request yet.` : 'This branch has no pull request yet.'}
         </Notice>
+      ) : state.kind === 'signed-out' ? (
+        <SignedOutNotice message={state.message} computerName={computerName} onRetry={onRefresh} />
       ) : (
         <Notice role="alert" action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
           {state.message}
@@ -448,16 +534,89 @@ export function PullRequestPanelView({
   )
 }
 
+/** How long a merge or close notice stays. */
+const NOTICE_MS = 15_000
+
+/**
+ * Create PR in the panel of a branch with none: the same form the side card opens, shown here. Dimmed with the reason
+ * while the branch is not on the remote yet.
+ */
+function CreatePullRequestAction({ enabled, reason, onCreate, opening, path, branch }: {
+  enabled: boolean
+  reason: string | null
+  onCreate: () => void
+  opening: boolean
+  path: string
+  branch: string
+}) {
+  const anchorRef = useRef<HTMLButtonElement>(null)
+  const form = useGitPullRequestStore((state) => (state.createFormHost === 'pull-request-panel' ? state.createForm : null))
+  return (
+    <>
+      <button
+        ref={anchorRef}
+        type="button"
+        className="pr-panel-action pr-panel-create"
+        title={reason ?? undefined}
+        aria-disabled={!enabled || undefined}
+        aria-label={reason ? `Create pull request: ${reason}` : 'Create pull request'}
+        onClick={() => { if (enabled) onCreate() }}
+      >
+        <GitPullRequest size={13} strokeWidth={1.8} aria-hidden="true" />
+        {opening ? 'Opening…' : 'Create PR'}
+      </button>
+      <PullRequestCreateForm scope={form && form.path === path && form.branch === branch ? form : null} anchorRef={anchorRef} />
+    </>
+  )
+}
+
+/** Merge… (the primary action once the host would merge it; dimmed with the reason otherwise) and an overflow menu with Close pull request…. */
+function HeaderActions({ row, running, onAsk }: { row: PullRequestFoundRow; running: GitAction | null; onAsk: (action: 'merge' | 'close') => void }) {
+  const merge = row.merge
+  if (!merge) return null
+  const busy = running !== null
+  return (
+    <>
+      <button
+        type="button"
+        className="side-card-git-pr-merge pr-panel-merge"
+        data-ready={merge.enabled || undefined}
+        title={busy ? GIT_BUSY_REASON : merge.reason ?? `Merge ${row.number} into ${row.base}`}
+        aria-label={merge.reason ? `Merge pull request ${row.number}: ${merge.reason}` : `Merge pull request ${row.number}`}
+        aria-disabled={!merge.enabled || busy || undefined}
+        onClick={() => { if (merge.enabled && !busy) onAsk('merge') }}
+      >
+        <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
+        <span>Merge…</span>
+      </button>
+      <RowMenu
+        label={`More actions for pull request ${row.number}`}
+        buttonClassName="pr-panel-action pr-panel-menu"
+        iconSize={13}
+        disabled={busy}
+        items={[{ label: 'Close pull request…', danger: true, onSelect: () => onAsk('close') }]}
+      />
+    </>
+  )
+}
+
 /** The pull request of the active thread: reviews and comments grouped by file and line, read through the daemon. */
 export function PullRequestPanel() {
   const threadId = useAppStore((state) => state.activeThreadId)
   const source = useActiveThreadPullRequest(threadId)
   const { path, branch, projectId, folderThreadId, lookup } = source
+  const { running, begin, end } = useGitActionRunner()
+  // The open Merge or Close question, with the thread, folder and pull request it was asked about.
+  const [asked, setAsked] = useState<{ action: 'merge' | 'close'; identity: string } | null>(null)
+  const [actionError, setActionError] = useTransientError()
+  const [notice, setNotice] = useTransientError(NOTICE_MS)
+  const headerRef = useRef<HTMLDivElement>(null)
   const number = lookup?.state === 'found' ? lookup.pullRequest.number : null
   // Any state is read in full here; the side card reads only open ones. Same entry, same flight, when it is open.
   const entry = usePullRequestDetail(path, number, projectId, folderThreadId)
   const [refreshing, setRefreshing] = useState(false)
   const state = pullRequestPanelState({ hasBranch: path !== null && branch !== null, branch, lookup, entry })
+  const computerName = useProjectComputerName(projectId)
 
   const refresh = () => {
     if (!path || !branch || refreshing) return
@@ -473,5 +632,97 @@ export function PullRequestPanel() {
     if (link) routeLink(link, { threadId: threadId ?? undefined })
   }
 
-  return <PullRequestPanelView state={state} refreshing={refreshing} onRefresh={refresh} onOpenFile={openFile} />
+  // The same row, merge rules and expected head the side card uses, for the pull request the panel shows.
+  const inWorktree = source.location.workspaceThreadId !== null
+  const row = state.kind === 'ready' && path
+    ? pullRequestRows(lookup, source.git.status, state.detail, source.link, inWorktree).find((item) => item.value === state.detail.number) ?? null
+    : null
+  const changes = path
+    ? pullRequestActions({ path, branch, projectId, threadId: folderThreadId, begin, end, onNotice: setNotice })
+    : null
+  // A question belongs to what it was asked about: on another thread, folder, branch or pull request it is gone, never
+  // shown for (or run on) the new one.
+  const identity = pullRequestQuestionIdentity({ threadId, projectId, folderThreadId, path, branch, number })
+  // It also ends if the pull request stops being shown, so it is never reopened on a newer head without asking.
+  const askedStillShown = asked !== null && asked.identity === identity && row !== null
+  const confirm = askedStillShown ? asked.action : null
+  useEffect(() => {
+    if (asked && !askedStillShown) setAsked(null)
+  }, [asked, askedStillShown])
+  const ask = (action: 'merge' | 'close') => setAsked({ action, identity })
+  // Focus goes back to what opened the prompt: Merge…, or the menu Close was chosen from.
+  const dismiss = (action: 'merge' | 'close') => {
+    setAsked(null)
+    const selector = action === 'merge' ? '.pr-panel-merge' : '.pr-panel-menu'
+    requestAnimationFrame(() => headerRef.current?.querySelector<HTMLElement>(selector)?.focus())
+  }
+
+  const model = path && state.kind === 'none'
+    ? gitActionRowModel({
+      path,
+      scope: gitScopeFor(source.location),
+      projectId,
+      ownThreadId: source.ownThreadId,
+      status: source.git.status,
+      commitCount: source.git.commits.length,
+      pullRequest: lookup
+    })
+    : null
+  const createPullRequest = async () => {
+    if (!model?.createScope || !begin('pullRequest')) return
+    setActionError(null)
+    try {
+      await createPullRequestForBranch(model.createScope, 'pull-request-panel')
+    } catch (error) {
+      setActionError(gitErrorMessage(error))
+    } finally {
+      end()
+    }
+  }
+  const createLock = gitActionLock(running, 'pullRequest')
+
+  return (
+    <div ref={headerRef} className="pr-panel-host">
+      <PullRequestPanelView
+        state={state}
+        refreshing={refreshing}
+        onRefresh={refresh}
+        onOpenFile={openFile}
+        computerName={computerName}
+        headerActions={row?.merge && confirm === null ? <HeaderActions row={row} running={running} onAsk={ask} /> : undefined}
+        headerBelow={
+          <>
+            {row && confirm && changes && (
+              <div className="pr-panel-confirm">
+                <PullRequestConfirm
+                  key={`${confirm}\u0000${identity}`}
+                  row={row}
+                  action={confirm}
+                  running={running}
+                  onChange={changes.change}
+                  readMergeMethod={changes.readMergeMethod}
+                  onDone={() => setAsked(null)}
+                  onDismiss={() => dismiss(confirm)}
+                />
+              </div>
+            )}
+            {notice && <p className="pr-panel-note" role="status">{notice}</p>}
+          </>
+        }
+        createAction={model?.createRow && model.branch && path ? (
+          <>
+            <CreatePullRequestAction
+              enabled={model.createRow.enabled && !createLock.disabled}
+              reason={createLock.reason ?? model.createRow.hint}
+              opening={running === 'pullRequest'}
+              onCreate={() => void createPullRequest()}
+              path={path}
+              branch={model.branch}
+            />
+            {actionError && <p className="pr-panel-error" role="alert">{actionError}</p>}
+          </>
+        ) : undefined}
+      />
+    </div>
+  )
 }

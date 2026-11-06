@@ -17,7 +17,8 @@ export function WorkflowDiagnostics({
   return (
     <ul data-diagnostics="" className="wf-diagnostics">
       {diagnostics.map((item, index) => (
-        <li key={`${item.code}:${item.nodeId ?? ''}:${index}`} data-severity={item.severity}>
+        // Focusable so "Fix N issues to publish" can take focus to the first error.
+        <li key={`${item.code}:${item.nodeId ?? ''}:${index}`} data-severity={item.severity} tabIndex={-1}>
           <strong>{item.code}</strong> {item.message}
           {item.nodeId ? (
             <button type="button" className="btn btn-sm" onClick={() => onSelectNode?.(item.nodeId!)}>

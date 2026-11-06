@@ -159,7 +159,7 @@ describe('a waiting permission request in the turn', () => {
     })
     expect(buttons()).toEqual([])
     expect(request()!.querySelector('.permission-request-answer')!.textContent).toBe('Always allowed')
-    expect(indicator()).toMatch(/^Working for/)
+    expect(indicator()).toMatch(/^Working · /)
   })
 })
 
@@ -217,7 +217,7 @@ describe('answering through the daemon', () => {
     daemon.setHistory([saved('r1', 2, { status: 'answered', decision: 'allow', scope: 'once', answeredBy: { kind: 'user', via: 'gui' } })])
     await daemon.clear('r1')
     expect(request()!.querySelector('.permission-request-answer')!.textContent).toBe('Approved')
-    expect(indicator()).toMatch(/^Working for/)
+    expect(indicator()).toMatch(/^Working · /)
   })
 
   it('a message sent while the request waits denies it: the row shows Denied and is no longer answerable', async () => {
