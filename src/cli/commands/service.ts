@@ -78,6 +78,8 @@ export interface DaemonForegroundOptions {
   failAfter?: 'protocol-start' | 'set-endpoint' | 'runtime-publish'
   /** When true, do not register SIGINT/SIGTERM (tests). */
   skipSignals?: boolean
+  /** Test inject: aborting it stops the daemon like a signal would. */
+  stopSignal?: AbortSignal
   onLog?: (msg: string) => void
 }
 
@@ -107,7 +109,11 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
   }
 
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
-    if (state.shuttingDown) return
+    if (state.shuttingDown) {
+      // Already stopping: wait for teardown (and stop anything startup made since).
+      await shutdownDaemonLifecycle(state)
+      return
+    }
     await shutdownDaemonLifecycle(state, {
       reason,
       onLog: (msg) => log(`\n${msg}`)
@@ -116,6 +122,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     resolveLifetime()
   }
   let releaseElectronQuit: (() => void) | undefined
+  opts.stopSignal?.addEventListener('abort', () => void shutdown('stop-signal'), { once: true })
 
   // Production daemon only (tests pass skipSignals): persist diagnostics and
   // register crash handlers. Handlers are never installed by library modules.
@@ -133,7 +140,25 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     })
   }
 
+  // A stop that arrives while startup is still running: stop what startup has
+  // made so far and go no further.
+  const stoppedDuringStartup = async (): Promise<boolean> => {
+    if (!state.shuttingDown) return false
+    await shutdownDaemonLifecycle(state)
+    return true
+  }
+
   try {
+    // Before owner creation, so an Electron quit during startup is held too.
+    if (!opts.skipSignals) {
+      releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
+        log(
+          `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        )
+      })
+      if (await stoppedDuringStartup()) return state
+    }
+
     // Sole production owner construction path (kind: daemon).
     const opened = await createDaemonOwner(
       {
@@ -143,26 +168,22 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       { start: true }
     )
     state.mms = opened.mms
-    if (!opts.skipSignals) {
-      releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
-        log(
-          `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
-        )
-      })
-    }
+    if (await stoppedDuringStartup()) return state
     state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
     if (!state.ownerToken) {
       throw new Error('Daemon started without owner lease')
     }
 
     // Protocol server after MMS start; publish endpoint on owner then readiness.
-    state.protocolServer = new MmsProtocolServer({
+    const protocolServer = new MmsProtocolServer({
       mms: opened.mms,
       commandRouter: opened.mms.browserCommandRouter,
       ownerToken: state.ownerToken,
       version: tryReadPackageVersion()
     })
-    const endpoint = await state.protocolServer.start()
+    state.protocolServer = protocolServer
+    const endpoint = await protocolServer.start()
+    if (await stoppedDuringStartup()) return state
     if (opts.failAfter === 'protocol-start') {
       throw new Error('Injected protocol-start failure')
     }
@@ -216,6 +237,9 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       await shutdown('owner-busy', 1)
       return state
     }
+    // A stop during startup can make a startup step fail (the protocol server
+    // refuses to listen once stopped). That is the stop finishing, not a failure.
+    if (await stoppedDuringStartup()) return state
     const message = err instanceof Error ? err.message : String(err)
     log(`MMS failed to start: ${message}`)
     // CRITICAL: any failure after owner/MMS creation must tear down fully.
