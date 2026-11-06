@@ -3,7 +3,8 @@ import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
 import { File, FilePlus, GitCompare, IconChevronRight, Pencil } from "../../../../lib/icons";
-import { CODE_FONT } from "../../../../lib/typography";
+import { Collapse } from "../../../../components/ui/Collapse";
+import { CODE_FONT_VAR } from "../../../../lib/typography";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
@@ -286,7 +287,7 @@ function EditDiff({ diff }: { diff: DiffSource }) {
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": CODE_FONT,
+        "--diffs-font-family": CODE_FONT_VAR,
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -306,7 +307,7 @@ function EditDiff({ diff }: { diff: DiffSource }) {
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: ${CODE_FONT};
+  --diffs-font-family: ${CODE_FONT_VAR};
   color-scheme: ${themeType};
 }
 `,
@@ -446,10 +447,8 @@ function EditLine({
           {canOpen && (
             <IconChevronRight
               aria-hidden="true"
-              className={cn(
-                "an-edit-row-chevron shrink-0 size-[18px] -ml-1 text-muted-foreground transition-transform duration-150 ease-out",
-                open && "rotate-90",
-              )}
+              className="an-edit-row-chevron ui-collapse-chevron shrink-0 size-[18px] -ml-1 text-muted-foreground"
+              data-open={open || undefined}
             />
           )}
         </button>
@@ -459,7 +458,7 @@ function EditLine({
           </span>
         )}
       </div>
-      {open && children}
+      <Collapse open={open}>{children}</Collapse>
     </div>
   );
 }

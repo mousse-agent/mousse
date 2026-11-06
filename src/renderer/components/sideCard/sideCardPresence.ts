@@ -1,5 +1,15 @@
+import { scaleMotionMs } from '../../lib/motion'
+
 /** Keep in sync with the opacity/transform transitions on `.thread-side-card` and the scrim, and the column transition in sideCard.css. */
 export const SIDE_CARD_FADE_MS = 180
+
+/**
+ * The exit wait at the current animation speed. Never shorter than 180ms: reduced motion keeps
+ * a 180ms fade (sideCard.css), and with motion off the card is already invisible meanwhile.
+ */
+export function sideCardFadeMs(): number {
+  return Math.max(SIDE_CARD_FADE_MS, scaleMotionMs(SIDE_CARD_FADE_MS))
+}
 
 /**
  * Where the card is in its life:
@@ -112,7 +122,7 @@ export function createSideCardPresence(
     cancel?.()
     cancel = null
     if (phase === 'entering') cancel = scheduler.afterPaint(() => move({ type: 'painted' }))
-    else if (phase === 'exiting') cancel = scheduler.after(SIDE_CARD_FADE_MS, () => move({ type: 'faded' }))
+    else if (phase === 'exiting') cancel = scheduler.after(sideCardFadeMs(), () => move({ type: 'faded' }))
   }
 
   function move(event: SideCardPresenceEvent) {

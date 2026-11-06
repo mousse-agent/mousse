@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UIMessage } from 'ai'
 import { TurnEditSummary } from '../../src/renderer/chat/components/agent-elements/turn-edit-summary'
-import { GeneralSettings } from '../../src/renderer/components/settings/GeneralSettings'
+import { AppearanceSettings } from '../../src/renderer/components/settings/AppearanceSettings'
 import { setTurnChangedFiles } from '../../src/renderer/lib/turnChangedFilesSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useReviewStore } from '../../src/renderer/stores/reviewStore'
@@ -106,7 +106,7 @@ describe('changed files after a turn', () => {
   })
 })
 
-describe('Settings > General > Changed files after each turn', () => {
+describe('Settings > Appearance > Changed files after each turn', () => {
   let home: string
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'mousse-turn-files-setting-')) })
   afterEach(() => rmSync(home, { recursive: true, force: true }))
@@ -114,7 +114,7 @@ describe('Settings > General > Changed files after each turn', () => {
   it('saves the choice, and a fresh settings store reads it back', () => {
     const store = new SettingsStore(MousseConfigStore.load(home))
     const before = store.get().appearance
-    const drawSettings = () => act(() => root.render(createElement(GeneralSettings, {
+    const drawSettings = () => act(() => root.render(createElement(AppearanceSettings, {
       settings: store.get(),
       options: { themes: THEME_OPTIONS, accentColors: [], llmProviders: [], agentTypes: [] },
       onUpdate: async (partial) => { store.set(partial); drawSettings() },

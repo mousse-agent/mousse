@@ -103,9 +103,9 @@ describe('the line above the composer', () => {
 describe('older messages of a long thread', () => {
   it('says how many are left and offers to load them', () => {
     const bar = html(createElement(EarlierMessagesBarView, { count: 40, busy: false, onLoad: () => undefined }))
-    expect(bar).toContain('40 earlier messages are not loaded')
-    expect(bar).toContain('Load earlier messages')
-    expect(html(createElement(EarlierMessagesBarView, { count: 1, busy: false, onLoad: () => undefined }))).toContain('1 earlier message is not loaded')
+    expect(bar).toContain('40 earlier messages')
+    expect(bar).toContain('>Load<')
+    expect(html(createElement(EarlierMessagesBarView, { count: 1, busy: false, onLoad: () => undefined }))).toContain('1 earlier message<')
   })
 
   it('shows progress and a failure', () => {

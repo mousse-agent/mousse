@@ -1,4 +1,17 @@
 @import "tailwindcss";
+/* `dark:` follows the app theme, not the OS: every theme except Light is dark,
+   and System follows the OS. Streamdown's code-block token colours and a few
+   chat icons use `dark:`, so a Light app on a dark OS kept dark code colours. */
+@custom-variant dark {
+  &:where(html:not([data-theme='light']):not([data-theme='system']) *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(html[data-theme='system'] *) {
+      @slot;
+    }
+  }
+}
 /* Streamdown renders its own Tailwind classes at runtime (space-y-4 rhythm,
    code-block padding, dark: shiki variants) from inside node_modules, which
    automatic content detection skips (gitignored). Register it explicitly or
@@ -10,7 +23,7 @@
 @import './linux-window.css';
 @import "../chat/components/agent-elements/agent-ui.css";
 
-/* Bridge mousse dark theme into agent-elements — app is always dark ( --surface-base #1b1c23 ), not .dark class */
+/* Bridge the dark themes into agent-elements. Light overrides these below. */
 :root {
   --an-background: var(--surface-base);
   --an-background-secondary: var(--surface-soft);
@@ -37,8 +50,21 @@
   --syntax-number: #79c0ff;
   --syntax-function: #d2a8ff;
 }
-/* Light themes need the github-light token ramp instead of the dark one. */
+/* Light: the transcript, tables, code chips and the user bubble take the
+   theme's text and surface tokens instead of the dark bridge above, and
+   inline code uses the github-light token ramp. */
 html[data-theme='light'] {
+  --an-foreground: var(--text-primary);
+  --an-foreground-muted: var(--text-secondary);
+  --an-foreground-subtle: var(--text-secondary);
+  --an-border-color: var(--ui-line-strong);
+  --an-user-message-bg: color-mix(in srgb, var(--text-primary) 7%, var(--surface-base));
+  --an-user-message-text: var(--text-primary);
+  --an-tool-background: color-mix(in srgb, var(--text-primary) 5%, var(--surface-base));
+  --an-tool-border-color: var(--ui-line-strong);
+  --an-tool-color: var(--text-primary);
+  --an-tool-color-muted: var(--text-secondary);
+  --an-input-placeholder-color: var(--text-secondary);
   --syntax-keyword: #cf222e;
   --syntax-string: #0a3069;
   --syntax-number: #0550ae;
@@ -46,6 +72,17 @@ html[data-theme='light'] {
 }
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] {
+    --an-foreground: var(--text-primary);
+    --an-foreground-muted: var(--text-secondary);
+    --an-foreground-subtle: var(--text-secondary);
+    --an-border-color: var(--ui-line-strong);
+    --an-user-message-bg: color-mix(in srgb, var(--text-primary) 7%, var(--surface-base));
+    --an-user-message-text: var(--text-primary);
+    --an-tool-background: color-mix(in srgb, var(--text-primary) 5%, var(--surface-base));
+    --an-tool-border-color: var(--ui-line-strong);
+    --an-tool-color: var(--text-primary);
+    --an-tool-color-muted: var(--text-secondary);
+    --an-input-placeholder-color: var(--text-secondary);
     --syntax-keyword: #cf222e;
     --syntax-string: #0a3069;
     --syntax-number: #0550ae;
@@ -60,17 +97,6 @@ html[data-theme='light'] {
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
    hold regardless of Tailwind layer ordering. */
-/* Primary call-to-action fill for tool cards (quick-action approve).
-   Same solid fill as `.btn-primary` (gradient accent + white text) so the
-   button reads as a CTA in every theme instead of the pale an-primary wash,
-   whose white send-button text loses contrast on light accents. */
-.an-approve-fill {
-  background: var(--gradient-accent);
-  color: #fff;
-}
-.an-approve-fill:hover {
-  filter: brightness(1.08);
-}
 /* Headerless highlighted code (quick-action bash preview): the surrounding
    "Action" label already names the block, so the Streamdown language header
    row is hidden — highlighting and the themed border stay. */
@@ -456,6 +482,18 @@ html.platform-darwin .overlay-titlebar {
 *::before,
 *::after {
   will-change: auto;
+}
+
+/* Animation speed Off (lib/motion.ts sets data-motion="off" on <html>, also when the OS
+   reduces motion). Spinners and loading shimmers keep moving so pending work still reads
+   as pending. 0.01ms rather than 0s so transitionend and animationend still fire. Same
+   specificity as the reduced-motion rule below: the attribute plus five :not() classes. */
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text),
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text)::before,
+[data-motion='off'] *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.shimmer-text)::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }
 
 /* Six :not() classes of specificity on purpose: sideCard.css beats this rule by one class.

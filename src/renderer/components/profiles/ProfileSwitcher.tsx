@@ -7,7 +7,7 @@ import { nextProfileColor, profileColor } from '../../lib/profilePalette'
 import { beginProfileSwitch } from '../../lib/providerSnapshots'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
-import { devicesLine, mousseIdName, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
+import { devicesLine, mousseIdName, mousseIdSignedIn, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 import { MousseIdAvatar } from '../MousseIdAvatar'
 import { ProfileEditDialog, type ProfileEditMode, type ProfileEditValues } from './ProfileEditDialog'
@@ -43,7 +43,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   // With a Mousse ID service the sidebar footer doubles as the account control.
   const withAccount = useMousseIdAvailable()
   const account = useMousseId(withAccount)
-  const signedIn = withAccount && !!account.plus?.connected
+  const signedIn = withAccount && mousseIdSignedIn(account.plus)
   const menuStyle = useFloatingPosition({
     open, anchorRef: triggerRef, contentRef: menuRef, placement: 'above-start',
     deps: [profiles.length, error, withAccount, signedIn]

@@ -12,6 +12,7 @@ import { McpTool, unwrapMcpOutput } from "./mcp-tool";
 import { ThinkingTool } from "./thinking-tool";
 import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
+import { AnsweredQuestionsTool } from "../question/answered-questions-tool";
 import { QuickActionTool } from "./quick-action-tool";
 import { SubagentTool } from "./SubagentCard";
 import type { CustomToolRendererProps } from "../types";
@@ -32,6 +33,11 @@ function deriveToolStatus(
   if (part.state === "output-error") return "error";
   const { isPending } = getToolStatus(part, chatStatus);
   return isPending ? "pending" : "success";
+}
+
+/** "Failed Read"; a title that already says the call failed is kept. */
+export function failedToolTitle(title: string, toolName: string): string {
+  return /^(failed|couldn't|could not)/i.test(title) ? title : `Failed ${toolName}`;
 }
 
 export const ToolRenderer = memo(function ToolRenderer({
@@ -60,6 +66,8 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <TodoTool part={part} chatStatus={chatStatus} />;
     case "tool-Question":
       return <QuestionTool part={part} chatStatus={chatStatus} />;
+    case "tool-QuestionAnswers":
+      return <AnsweredQuestionsTool part={part} />;
     case "tool-QuickAction":
       return <QuickActionTool part={part} chatStatus={chatStatus} />;
     case "tool-Subagent":
@@ -107,10 +115,12 @@ export const ToolRenderer = memo(function ToolRenderer({
   const meta = toolRegistry[partType];
   if (meta) {
     const { isPending, isError } = getToolStatus(part, chatStatus);
+    const title = meta.title(part);
     return (
       <GenericTool
         icon={meta.icon}
-        title={meta.title(part)}
+        title={title}
+        failedTitle={failedToolTitle(title, partType.replace(/^tool-/, ""))}
         subtitle={meta.subtitle?.(part)}
         isPending={isPending}
         isError={isError}
@@ -124,6 +134,7 @@ export const ToolRenderer = memo(function ToolRenderer({
   return (
     <GenericTool
       title={isPending ? `Running ${toolName}` : toolName}
+      failedTitle={`Failed ${toolName}`}
       isPending={isPending}
       isError={isError}
     />

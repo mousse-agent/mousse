@@ -1,5 +1,7 @@
-import { useId, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 import { ChevronRight, type IconComponent } from '../../lib/icons'
+import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
+import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 
 /**
  * Settings primitives. Layout rules live at the top of styles/settings.css:
@@ -27,6 +29,7 @@ export function SettingsGroup({
   description,
   action,
   id,
+  anchor,
   className,
   children
 }: {
@@ -37,6 +40,8 @@ export function SettingsGroup({
   /** Optional control aligned with the heading, e.g. a switch for the whole group. */
   action?: ReactNode
   id?: string
+  /** Where a settings search result lands (lib/settingsSearch.ts). */
+  anchor?: string
   className?: string
   children?: ReactNode
 }) {
@@ -46,6 +51,7 @@ export function SettingsGroup({
       id={id}
       className={`settings-group${className ? ` ${className}` : ''}`}
       aria-labelledby={title ? headingId : undefined}
+      data-settings-anchor={anchor}
     >
       {(title || action) && (
         <div className="settings-group-head">
@@ -77,11 +83,14 @@ export function SettingsRow({
   titleId,
   disabled,
   indent,
+  anchor,
   className,
   children,
   ...rest
 }: {
   title: ReactNode
+  /** Where a settings search result lands (lib/settingsSearch.ts): Enter focuses the row's control. */
+  anchor?: string
   /** Small inline action right after the title text, e.g. a reset icon button. */
   titleAction?: ReactNode
   description?: ReactNode
@@ -110,7 +119,7 @@ export function SettingsRow({
     <span id={titleId} className="settings-item-title">{title}</span>
   )
   return (
-    <div className={classes.join(' ')} {...rest}>
+    <div className={classes.join(' ')} data-settings-anchor={anchor} {...rest}>
       <div className="settings-item-text">
         {titleAction ? (
           <div className="settings-item-title-row">
@@ -132,7 +141,10 @@ export interface SegmentedOption<T extends string | number> {
   title?: string
 }
 
-/** Single-choice control; the selected segment is raised. */
+/**
+ * Single-choice control; the selected segment is raised. One tab stop: the arrow keys move
+ * between segments and choose, Home and End go to the ends.
+ */
 export function Segmented<T extends string | number>({
   value,
   options,
@@ -150,6 +162,7 @@ export function Segmented<T extends string | number>({
   ariaLabelledBy?: string
   id?: string
 }) {
+  const anyOn = options.some((option) => option.value === value)
   return (
     <div
       id={id}
@@ -158,8 +171,9 @@ export function Segmented<T extends string | number>({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
       aria-disabled={disabled || undefined}
+      onKeyDown={onRadioGroupKeyDown}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const on = option.value === value
         return (
           <button
@@ -167,6 +181,7 @@ export function Segmented<T extends string | number>({
             type="button"
             role="radio"
             aria-checked={on}
+            tabIndex={radioTabIndex(on, index, anyOn)}
             title={option.title}
             disabled={disabled}
             className={on ? 'on' : undefined}
@@ -185,12 +200,15 @@ export function Switch({
   checked,
   onChange,
   label,
+  labelledBy,
   id,
   disabled
 }: {
   checked: boolean
   onChange: (next: boolean) => void
   label?: string
+  /** Id of visible text that names the switch, when that text is richer than a plain label. */
+  labelledBy?: string
   id?: string
   disabled?: boolean
 }) {
@@ -201,6 +219,7 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-labelledby={labelledBy}
       disabled={disabled}
       className={`toggle-switch${checked ? ' on' : ''}`}
       onClick={() => onChange(!checked)}
@@ -211,12 +230,33 @@ export function Switch({
 /** The one "Advanced" disclosure a page may have, for rarely changed settings. */
 export function SettingsAdvanced({ label = 'Advanced', children }: { label?: string; children: ReactNode }) {
   return (
-    <details className="settings-advanced">
+    <details className={`settings-advanced ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         {label}
       </summary>
       <div className="settings-advanced-body">{children}</div>
     </details>
+  )
+}
+
+/**
+ * The exact rules behind a one-line description, folded behind a small "Details" toggle. Built from
+ * phrasing elements only, so it fits inside a heading's description paragraph as well as a row's.
+ * The text stays in the document while folded; the toggle reports its state to screen readers.
+ */
+export function MoreDetails({ label = 'Details', children }: { label?: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  return (
+    <>
+      {' '}
+      <button type="button" className="settings-more-btn" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((value) => !value)}>
+        {label}
+      </button>
+      <span id={bodyId} className="settings-more-body" hidden={!open}>
+        {children}
+      </span>
+    </>
   )
 }

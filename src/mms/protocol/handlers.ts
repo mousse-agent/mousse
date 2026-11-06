@@ -44,7 +44,7 @@ import type { ScheduledConfigSection } from '../config/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { DiscardedCopy, GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
-import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
+import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
 import {
@@ -2059,11 +2059,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const pending = ctx.mms.questions.getPending(requestId)
       const settled = ctx.mms.questions.settle(requestId, answers, questionAnswerer(ctx))
       if (settled.ok && pending) {
-        // Answers reach the model through the tool result; mirror them as a
-        // visible user message so the transcript shows what the user said.
+        // Answers reach the model through the tool result; the transcript records them too, shown
+        // as a step of the agent's turn (`questionAnswers`).
         ctx.mms.orchestrator.recordQuestionResponseMessage(
           pending.threadId,
-          formatQuestionAnswersMessage(pending.questions, answers)
+          formatQuestionAnswersMessage(pending.questions, answers),
+          describeQuestionAnswers(pending.questions, answers)
         )
       }
       // The loser of a race learns who won and what they decided (SPEC §17.4).

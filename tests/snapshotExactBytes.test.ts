@@ -964,6 +964,8 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
   it('files under a filter are never all held in memory at once: at most a bounded amount of their bytes is', async () => {
     filter('plain', 'cat', 'cat', '*.bin -text')
     for (let at = 0; at < 24; at++) writeFileSync(join(cwd, `m${String(at).padStart(2, '0')}.bin`), Buffer.alloc(20 * 1024 * 1024, at))
+    // Every file is checked in this one snapshot, however slow the disk: the bound is on memory, not time.
+    ROUND_TRIP_BUDGET.ms = 45_000
     const base = process.memoryUsage().arrayBuffers
     let peak = base
     const timer = setInterval(() => { peak = Math.max(peak, process.memoryUsage().arrayBuffers) }, 5)

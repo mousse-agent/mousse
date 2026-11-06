@@ -682,7 +682,7 @@
 
 .permission-request-chevron {
   opacity: 0.6;
-  transition: transform 0.15s;
+  transition: transform var(--ui-dur);
 }
 
 .permission-request-chevron.is-open {

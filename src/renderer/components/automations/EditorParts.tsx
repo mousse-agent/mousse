@@ -1,0 +1,67 @@
+import { Modal } from '../ui/Modal'
+import { fixIssuesLabel, SAVE_STATE_LABELS, type DefinitionSaveState } from './editorState'
+import './automations.css'
+
+/** The draft's state next to the editor title. `data-editor-status` is what scripted checks read. */
+export function SaveStateLabel({ state, extra }: { state: DefinitionSaveState; extra?: string | null }) {
+  return (
+    <span className="automation-save-state" data-editor-status="" data-state={state}>
+      {SAVE_STATE_LABELS[state]}
+      {extra ? <span className="automation-save-state__extra"> · {extra}</span> : null}
+    </span>
+  )
+}
+
+/** Shown while blocking issues keep Publish disabled: names the count, and takes you to the first one. */
+export function FixIssuesLink({ id, issues, onShow }: { id?: string; issues: readonly { message: string }[]; onShow: () => void }) {
+  if (issues.length === 0) return null
+  return (
+    <button type="button" id={id} className="automation-issue-link" data-action="show-blocking-issue" title={issues[0].message} onClick={onShow}>
+      {fixIssuesLabel(issues.length)}
+    </button>
+  )
+}
+
+/**
+ * Archive always asks, even for a clean draft. Focus starts on the dialog, not on Archive, and
+ * Escape or Cancel leaves the definition as it was.
+ */
+export function ArchiveDefinitionDialog({
+  open,
+  kind,
+  name,
+  dirty,
+  onCancel,
+  onConfirm
+}: {
+  open: boolean
+  kind: 'agent' | 'workflow'
+  name: string
+  dirty: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const library = kind === 'agent' ? 'Agents' : 'Workflows'
+  return (
+    <Modal
+      open={open}
+      title={`Archive “${name}”?`}
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn" data-action="cancel-archive" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-danger" data-action="confirm-archive" onClick={onConfirm}>
+            Archive
+          </button>
+        </>
+      }
+    >
+      <p>
+        It leaves the {library} library.
+        {dirty ? ' Your unsaved edits are discarded.' : ''}
+      </p>
+    </Modal>
+  )
+}
