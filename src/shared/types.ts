@@ -813,6 +813,8 @@ export interface OrchestratorResponse {
    */
   queued?: boolean
   queueItem?: QueuedMessage
+  /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
+  heldByPause?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
