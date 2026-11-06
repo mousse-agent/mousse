@@ -6,6 +6,8 @@ import {
   ArrowSyncRegular,
   DeleteRegular,
   EditRegular,
+  GitPullRequest,
+  MessageSquarePlus,
   PinOffRegular,
   PinRegular,
   ShieldCheck
@@ -41,6 +43,10 @@ interface ThreadsContextMenuProps {
   onRemove: () => void
   /** Projects only: record the repository's own Git filters as the user's again. */
   onTrustGitSettings?: () => void
+  /** Projects only: start a thread in the project. */
+  onNewThread?: () => void
+  /** Projects only: start a thread from one of the project's pull requests. */
+  onNewThreadFromPullRequest?: () => void
 }
 
 export function ThreadsContextMenu({
@@ -53,7 +59,9 @@ export function ThreadsContextMenu({
   onRegenerateTitle,
   onRename,
   onRemove,
-  onTrustGitSettings
+  onTrustGitSettings,
+  onNewThread,
+  onNewThreadFromPullRequest
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
@@ -118,6 +126,18 @@ export function ThreadsContextMenu({
       >
         {target.type === 'project' && target.computerName && (
           <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
+        )}
+        {target.type === 'project' && onNewThread && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
+            <MessageSquarePlus />
+            <span>New thread</span>
+          </button>
+        )}
+        {target.type === 'project' && onNewThreadFromPullRequest && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
+            <GitPullRequest />
+            <span>New thread from a pull request</span>
+          </button>
         )}
         {!target.settled && (
           <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>

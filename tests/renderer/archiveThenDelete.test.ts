@@ -113,7 +113,10 @@ describe('the Archived section', () => {
   })
 
   const row = (id: string) => host.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(id)}"]`)?.closest<HTMLElement>('.threads-sidebar-thread-container')
-  const open = async () => { if (byLabel('Expand archived threads')) await click(byLabel('Expand archived threads')) }
+  const open = async () => {
+    const toggle = host.querySelector<HTMLButtonElement>('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')
+    if (toggle?.getAttribute('aria-expanded') === 'false') await click(toggle)
+  }
 
   it('is called Archived, and a thread in use has no Delete', async () => {
     expect(host.textContent).toContain('Archived')

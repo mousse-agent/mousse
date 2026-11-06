@@ -40,19 +40,18 @@ html:not(.platform-darwin) .app {
 
 .app .threads-sidebar { --threads-sidebar-row-height: 28px; }
 
+.app .threads-sidebar-tabs-row { margin: 8px; }
+
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 8px;
   padding: 2px;
   border-radius: 7px;
   background: transparent;
 }
 
 .app .threads-sidebar-tab {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  padding: 0;
+  height: 28px;
+  min-height: 28px;
   border-radius: 5px;
 }
 
@@ -85,11 +84,9 @@ html:not(.platform-darwin) .app {
 .app .threads-sidebar-thread-root { padding-left: 9px; }
 .app .threads-sidebar-thread-name-text { will-change: auto; }
 .app .threads-sidebar-thread.active { background: rgba(var(--accent-rgb), 0.09); }
-.app .threads-sidebar-selected-dot { display: none; }
 .app .threads-sidebar-section-settled { margin-top: 8px; }
 .app .threads-sidebar-empty { padding: 5px 7px; font-size: 12px; }
 .app .threads-sidebar-show-more { min-height: 26px; padding: 4px 7px; font-size: 12px; }
-.app .threads-sidebar-open-project { min-height: 28px; gap: 7px; padding: 5px 6px; margin: 3px 8px; border-radius: 5px; font-size: 12px; }
 .app .threads-sidebar-recent { margin-top: 10px; padding-top: 4px; }
 .app .threads-sidebar-recent-heading { padding: 6px 14px; }
 .app .threads-sidebar-device { gap: 8px; margin: 6px 8px 8px; padding: 7px 8px; border-radius: 7px; }
@@ -157,11 +154,10 @@ html:not(.platform-darwin) .app {
 .app .threads-sidebar-section-feed {
   flex: 1 0 auto;
 }
+/* The footer is the one scroll container for these; a height cap of their own would clip their rows. */
 .app .threads-sidebar-section-settled,
 .app .threads-sidebar-bottom-recent {
   flex: 0 0 auto;
   margin-top: 0;
   padding-top: 8px;
-  max-height: 40%;
-  overflow-y: auto;
 }

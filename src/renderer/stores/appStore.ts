@@ -22,6 +22,7 @@ import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
+import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
 import type { ShortcutOverrides } from '../../shared/commands'
 
 /** What the command palette leads with when it opens. */
@@ -402,8 +403,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
-  sidebarWidth: 30,
-  threadsSidebarWidth: 260,
+  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+  threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
   usageOpen: false,
   setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false } : { usageOpen }),
   settingsOpen: false,
@@ -603,19 +604,17 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
     const key = ownerThreadId ?? '__standalone__'
-    set((s) => {
-      const title = `Terminal ${s.projectTerminalTabs.length + 1}`
-      return {
-        projectTerminalTabs: [
-          ...s.projectTerminalTabs,
-          { id, ownerThreadId, ptyId: null, title, exited: false }
-        ],
-        activeProjectTerminalTabByThread: {
-          ...s.activeProjectTerminalTabByThread,
-          [key]: id
-        }
+    // The tab strip numbers plain terminals by position (`surfaceTabItems`).
+    set((s) => ({
+      projectTerminalTabs: [
+        ...s.projectTerminalTabs,
+        { id, ownerThreadId, ptyId: null, title: 'Terminal', exited: false }
+      ],
+      activeProjectTerminalTabByThread: {
+        ...s.activeProjectTerminalTabByThread,
+        [key]: id
       }
-    })
+    }))
     return id
   },
   closeProjectTerminalTab: (tabId) =>
@@ -695,8 +694,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],
-      sidebarWidth: 30,
-      threadsSidebarWidth: 260,
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
       threadsSidebarOpen: true,
       mainAreaOpen: false,
       sideCardCollapsed: {} as Record<string, boolean>,
