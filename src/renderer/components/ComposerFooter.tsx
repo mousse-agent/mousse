@@ -8,7 +8,8 @@ import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
-import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
+import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
+import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
 import { useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
@@ -55,6 +56,8 @@ export interface ComposerFooterProps {
   modelReadOnly?: boolean
   onOpenSettings: () => void
   contextUsage: ContextUsageSnapshot
+  /** The Compact context setting; the ring marks where it compacts once it is read. */
+  contextCompactionSetting?: ContextSettings
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
   onAttachClick: () => void
@@ -100,6 +103,7 @@ export function ComposerFooter({
   modelReadOnly = false,
   onOpenSettings,
   contextUsage,
+  contextCompactionSetting,
   contextOpen,
   onContextOpenChange,
   onAttachClick,
@@ -129,6 +133,13 @@ export function ComposerFooter({
   const namedParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
+  // No ring while the context's fill is unknown: a new chat, a provider that reports none, no capacity.
+  const contextShown = showsContextGauge(selectedProvider) && contextUsageKnown(contextUsage)
+  const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
+  // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
+  useEffect(() => {
+    if (!contextShown && contextOpen) onContextOpenChange(false)
+  }, [contextShown, contextOpen, onContextOpenChange])
   // A selected instance that needs a step (signed out, not found) says so on the model button.
   const providerAttention = selectedProvider?.status && selectedProvider.status.tone !== 'ready' ? selectedProvider.status : null
   // The permission mode belongs to the thread; what it can be depends on the agent serving the model.
@@ -290,10 +301,9 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {showsContextGauge(selectedProvider) && <div className="composer-context-anchor">
+        {contextShown && <div className="composer-context-anchor">
           <ContextUsageRing
-            percent={contextUsage.percent}
-            capacityKnown={contextUsage.limit > 0}
+            usage={contextUsage}
             onClick={() => onContextOpenChange(!contextOpen)}
             active={contextOpen}
             ref={contextBtnRef}
@@ -302,6 +312,7 @@ export function ComposerFooter({
             open={contextOpen}
             onClose={() => onContextOpenChange(false)}
             usage={contextUsage}
+            compaction={compaction}
             providerId={selectedProviderId}
             anchorRef={contextBtnRef}
           />

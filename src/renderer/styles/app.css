@@ -131,6 +131,32 @@ html.platform-darwin .titlebar-left {
   flex-shrink: 0;
 }
 
+/* Relative so the attention badge sits on the toggle button in any title bar layout. */
+.titlebar-sidebar-toggle {
+  position: relative;
+}
+
+/* While the sidebar is closed: how many threads need the person, inside the corner of its toggle,
+   so it never reaches a neighbouring title bar button whatever the layout. */
+.titlebar-attention-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  z-index: 2;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--status-input);
+  color: var(--surface-base);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .titlebar-logo-icon {
   flex-shrink: 0;
   width: calc(var(--titlebar-height) * 0.64);
@@ -2738,6 +2764,28 @@ html[data-theme='high-contrast'] .chat-input-area {
   50% { opacity: 0.65; }
 }
 
+/* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */
+.context-usage-ring {
+  color: var(--accent-hover);
+}
+
+.context-usage-ring.is-warning {
+  color: var(--warning);
+}
+
+.context-usage-ring.is-danger {
+  color: var(--danger);
+}
+
+.context-usage-ring-track {
+  stroke: currentColor;
+  stroke-opacity: 0.2;
+}
+
+.context-usage-ring-arc {
+  stroke: currentColor;
+}
+
 /* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
 .context-usage-popover {
   position: absolute;
@@ -2786,43 +2834,30 @@ html[data-theme='high-contrast'] .chat-input-area {
   color: var(--ui-faint);
 }
 
-.context-usage-settings {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: -3px -4px -3px 0;
-  border-radius: var(--ui-menu-row-radius);
-  color: var(--ui-faint);
-  transition: background 0.12s, color 0.12s;
-}
-
-.context-usage-settings:hover {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
+/* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
 .context-usage-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  margin-bottom: -4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-faint);
 }
 
-.context-usage-percent {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
+/* Holds the bar and the compaction mark, which stands 2px proud of the clipped bar. */
+.context-usage-bar-track {
+  position: relative;
 }
 
-.context-usage-total {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+/* Where the context compacts, in the text colour so it never reads as usage (accent) or as a fill
+   warning (amber, red). */
+.context-usage-bar-compaction {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-primary);
+  opacity: 0.7;
 }
 
 /* Filled against the model's capacity; the empty track is the room left. */
@@ -2878,6 +2913,34 @@ html[data-theme='high-contrast'] .chat-input-area {
 .context-usage-item-value {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+/* "Compacts at 300K" and its Change action, on one line. */
+.context-usage-compaction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-compaction-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The shared small ghost button (btn btn-ghost btn-sm), a little tighter to fit the line. */
+.context-usage-compaction-change {
+  flex-shrink: 0;
+  margin: -3px 0;
+  padding: 3px 10px;
+  color: var(--text-primary);
+}
+
+.context-usage-compaction-change:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .context-usage-notes {

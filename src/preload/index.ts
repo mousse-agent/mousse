@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
+import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
@@ -91,7 +92,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -1066,6 +1067,24 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    },
+    /** How many threads need the person in this window, shown on the dock or taskbar icon. 0 clears it. */
+    setAttentionCount: (count: number): Promise<void> =>
+      ipcRenderer.invoke('app:attentionCount', count),
+    /** A thread the person asked to open from outside the window, such as by clicking its notification. */
+    onOpenThread: (cb: (threadId: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, threadId: string) => cb(threadId)
+      ipcRenderer.on('app:openThread', handler)
+      return () => ipcRenderer.removeListener('app:openThread', handler)
+    },
+    /** Settings' "Try it": shows the system notification and plays the sound an event would use. */
+    previewNotification: (request: { kind: ThreadNotificationEvent; system: boolean; sound: boolean }): Promise<void> =>
+      ipcRenderer.invoke('notifications:preview', request),
+    /** A thread event to show as a toast: one the person is not looking at finished, needs them, or stopped. */
+    onThreadToast: (cb: (toast: ThreadToastPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, toast: ThreadToastPayload) => cb(toast)
+      ipcRenderer.on('notifications:threadToast', handler)
+      return () => ipcRenderer.removeListener('notifications:threadToast', handler)
     }
   },
   /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */

@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
-import type { LlmProviderOption } from '../../shared/settings'
+import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
@@ -88,10 +88,11 @@ import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 
+/** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
   used: 0,
-  limit: 128_000,
+  limit: 0,
   modelName: null,
   source: 'estimated',
   categories: []
@@ -299,6 +300,7 @@ export function OrchestratorChat() {
   )
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
+  const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -549,6 +551,12 @@ export function OrchestratorChat() {
     ])
     setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
+    const compaction = normalizeContextSettings(settings.context)
+    setContextCompactionSetting((current) =>
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+        ? current
+        : compaction
+    )
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setProfileDefault((current) =>
       current?.llmProvider === settings.provider.llmProvider &&
@@ -1467,6 +1475,7 @@ export function OrchestratorChat() {
               onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
               onOpenSettings={() => setSettingsOpen(true)}
               contextUsage={contextUsage}
+              contextCompactionSetting={contextCompactionSetting}
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
