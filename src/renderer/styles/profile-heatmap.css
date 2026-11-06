@@ -223,7 +223,8 @@
   width: 150px;
 }
 
-.activity-loading {
+.activity-loading,
+.activity-empty {
   margin: 0;
   padding: var(--settings-row-y) 0;
 }

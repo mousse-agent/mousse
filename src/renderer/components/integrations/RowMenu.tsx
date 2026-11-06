@@ -8,6 +8,10 @@ export interface RowMenuItem {
   onSelect: () => void
   disabled?: boolean
   danger?: boolean
+  /** Tooltip, e.g. why the item is disabled. */
+  title?: string
+  /** `data-action` on the item, for tests and scripted checks. */
+  action?: string
   /** A fuller name for assistive tech, when the label leaves out what the item acts on. */
   ariaLabel?: string
 }
@@ -80,6 +84,8 @@ export function RowMenu({ label, items, disabled, buttonClassName = 'settings-ic
           role="menuitem"
           className={`row-menu-item${item.danger ? ' danger' : ''}`}
           disabled={item.disabled}
+          title={item.title}
+          data-action={item.action}
           aria-label={item.ariaLabel}
           onClick={() => { setOpen(false); buttonRef.current?.focus(); item.onSelect() }}
         >{item.label}</button>)}

@@ -187,15 +187,15 @@ describe('review comments in the composer', () => {
       useReviewStore.getState().revealComment('t1', { scope: { kind: 'turn', turnId: TURN_2 }, absolutePath: '/repo/src/a.ts', line: 12 })
       expect(useReviewStore.getState().byThread.t1).toMatchObject({
         scope: { kind: 'turn', turnId: TURN_2 },
-        pendingComment: { absolutePath: '/repo/src/a.ts', line: 12 }
+        pendingFile: { path: '/repo/src/a.ts', line: 12 }
       })
     })
 
     it('selects the file the list maps it to and offers the line once', () => {
       const store = useReviewStore.getState()
       store.revealComment('t1', { scope: { kind: 'thread' }, absolutePath: '/repo/src/a.ts', line: 12 })
-      store.resolveCommentReveal('t1', 'src/a.ts')
-      expect(useReviewStore.getState().byThread.t1.pendingComment).toBeUndefined()
+      store.resolvePendingFile('t1', 'src/a.ts')
+      expect(useReviewStore.getState().byThread.t1.pendingFile).toBeUndefined()
       expect(useReviewStore.getState().byThread.t1.selectedPath).toBe('src/a.ts')
       expect(useReviewStore.getState().takeReveal('t1', 'src/a.ts')).toEqual({ path: 'src/a.ts', line: 12 })
       expect(useReviewStore.getState().takeReveal('t1', 'src/a.ts')).toBeUndefined()
@@ -205,8 +205,8 @@ describe('review comments in the composer', () => {
       const store = useReviewStore.getState()
       store.selectFile('t1', 'src/other.ts')
       store.revealComment('t1', { scope: { kind: 'thread' }, absolutePath: '/repo/src/a.ts', line: 12 })
-      store.resolveCommentReveal('t1', null)
-      expect(useReviewStore.getState().byThread.t1.pendingComment).toBeUndefined()
+      store.resolvePendingFile('t1', null)
+      expect(useReviewStore.getState().byThread.t1.pendingFile).toBeUndefined()
       expect(useReviewStore.getState().byThread.t1.selectedPath).toBe('src/other.ts')
       expect(useReviewStore.getState().byThread.t1.reveal).toBeUndefined()
     })
@@ -216,7 +216,7 @@ describe('review comments in the composer', () => {
       openChatReference(comment({ reviewScope: 'worktree:staged' }))
       expect(useReviewStore.getState().byThread.t1).toMatchObject({
         scope: { kind: 'worktree', staged: true },
-        pendingComment: { absolutePath: '/repo/src/a.ts', line: 12 }
+        pendingFile: { path: '/repo/src/a.ts', line: 12 }
       })
       expect(useAppStore.getState().mainView).toBe('review')
     })
