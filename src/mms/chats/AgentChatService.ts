@@ -15,7 +15,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { getExecutionLeasePath, isExecutionLeaseHeld, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { getExecutionLeasePath, heartbeatExecutionLease, isExecutionLeaseHeld, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { isOwnerLive } from '../queue/processLiveness'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -32,7 +32,11 @@ export interface AgentChatServiceOptions {
   device?: ChatDevice
   onChanged?: (snapshot: ChatsSnapshot) => void
 }
-interface ActiveChatRun { threadId: string; id: string; controller: AbortController; lease: ThreadLeaseHandle; promise?: Promise<void>; executionId?: string; agentId?: string }
+interface ActiveChatRun { threadId: string; id: string; controller: AbortController; lease: ThreadLeaseHandle; heartbeat?: ReturnType<typeof setInterval>; promise?: Promise<void>; executionId?: string; agentId?: string }
+/** A running response refreshes its backing thread's lease this often. */
+const CHAT_LEASE_HEARTBEAT_MS = 10_000
+/** A lease not refreshed for this long belongs to no running response, whatever its process id now names. */
+const CHAT_LEASE_STALE_MS = 30_000
 export interface ChatResourceBinding {
   profileId: string
   chatId: string
@@ -69,6 +73,7 @@ export class AgentChatService {
   private browserRuntime?: BrowserRuntimePort
   private networkBindingGuard?: (chatId: string) => boolean
   private readonly changeListeners = new Set<() => void>()
+  private recoveryTimer?: ReturnType<typeof setTimeout>
   constructor(private readonly options: AgentChatServiceOptions) {
     this.profileId = options.services.profileId
     if (options.registry.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Chat agents do not belong to this profile')
@@ -97,6 +102,8 @@ export class AgentChatService {
   getActiveCount(): number { return this.lifecycle.count }
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer)
+    this.recoveryTimer = undefined
     for (const run of this.active.values()) this.options.services.questions.dismissAllForThread(run.threadId)
   }
   async dispose(): Promise<void> { this.beginShutdown(); await this.lifecycle.waitForIdle() }
@@ -257,12 +264,15 @@ export class AgentChatService {
       this.options.services.orchestrator.recordAgentDefinitionMessages(record.conversation.threadId, [{
         id: user.id, role: 'user', content: input.text, timestamp: at, turnId: runId
       }])
+      owned.heartbeat = setInterval(() => { heartbeatExecutionLease(lease) }, CHAT_LEASE_HEARTBEAT_MS)
+      owned.heartbeat.unref()
       owned.promise = this.lifecycle.run('chat-run', () => Promise.resolve().then(() => this.execute(input.chatId, owned, targets, user, workspaceRoot)))
       void owned.promise.catch(() => { /* Execution persists its terminal failure; ownership releases only after settlement. */ })
       this.changed()
       return this.get(input.chatId)
     } catch (error) {
       if (!owned.promise) {
+        clearInterval(owned.heartbeat)
         this.active.delete(input.chatId)
         releaseExecutionLeaseHandle(lease)
         record.conversation.run.state = 'failed'
@@ -431,6 +441,7 @@ export class AgentChatService {
         try { this.options.services.questions.dismissAllForThread(owned.threadId) }
         finally {
           this.active.delete(chatId)
+          clearInterval(owned.heartbeat)
           if (!releaseExecutionLeaseHandle(owned.lease)) throw new Error('Chat execution lost its backing thread lease')
           // What queued on the backing thread during the response runs now that the chat released it.
           this.options.services.orchestrator.resumeThreadQueue?.(owned.threadId)
@@ -479,18 +490,34 @@ export class AgentChatService {
       return { status: 'cancelled' as const }
     }
   }
-  private recoverInterrupted(): void {
+  /**
+   * Marks responses a stopped daemon left running as interrupted. A response whose lease another process
+   * still refreshes is left alone and checked again later; it never stops the profile from starting. A
+   * lease nobody refreshes is stale even when its process id now names some other live process.
+   */
+  private recoverInterrupted(): boolean {
+    let waiting = false, changed = false
     for (const record of this.store.list()) {
-      if (record.conversation.run?.state !== 'running') continue
+      if (record.conversation.run?.state !== 'running' || this.active.has(record.conversation.id)) continue
       const thread = this.options.services.threads.getThread(record.conversation.threadId)
       const owner = thread ? readLeaseOwner(getExecutionLeasePath(this.options.services.threads.getThreadDir(thread.id))) : null
-      if (owner && isOwnerLive(owner)) throw new DomainRpcError('chat_busy', 'A live daemon still owns this chat response')
+      if (owner && isOwnerLive(owner, { staleHeartbeatMs: CHAT_LEASE_STALE_MS })) { waiting = true; continue }
       record.conversation.run.state = 'interrupted'
       record.conversation.run.error = 'The daemon restarted before this response finished. Send another message to continue.'
       record.conversation.run.finishedAt = new Date().toISOString()
       record.conversation.updatedAt = record.conversation.run.finishedAt
       this.store.write(record)
+      changed = true
     }
+    if (waiting && !this.lifecycle.stopping) {
+      this.recoveryTimer = setTimeout(() => {
+        this.recoveryTimer = undefined
+        if (this.lifecycle.stopping) return
+        try { if (this.recoverInterrupted()) this.changed() } catch (error) { console.warn('chat recovery check failed', error) }
+      }, CHAT_LEASE_STALE_MS)
+      this.recoveryTimer.unref()
+    }
+    return changed
   }
   private changed(): void {
     try { this.options.onChanged?.(this.snapshot()) } catch { /* Notifications cannot invalidate an admitted durable message. */ }
