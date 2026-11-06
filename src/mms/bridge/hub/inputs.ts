@@ -159,6 +159,17 @@ export class DispatchInputJournal {
       )
       .run(plan.id, plan.target, plan.idem, record)
   }
+  /** Saves a step of the publication, unless the plan was cancelled meanwhile: a cancel is never written over. */
+  private saveUnlessCancelled(plan: InputPlan): void {
+    const row = this.hub.options.db.database
+      .prepare('SELECT record FROM net_bridge_hub_inputs WHERE id=?')
+      .get(plan.id)
+    if (row && (JSON.parse(String(row.record)) as InputPlan).phase === 'cancelled') {
+      plan.phase = 'cancelled'
+      return fail('cancelled')
+    }
+    this.save(plan)
+  }
   prepare(
     target: NodeId,
     value: Omit<BridgeDispatchInput, 'inputBundle'>,
@@ -414,7 +425,7 @@ export class DispatchInputJournal {
           plan.envelope = Buffer.from(envelope).toString('base64url')
           plan.sig = Buffer.from(this.hub.options.keys.signAsNode(envelope)).toString('base64url')
           plan.phase = 'publishing'
-          this.save(plan)
+          this.saveUnlessCancelled(plan)
           db.checkpoint('bridge.hub.input.publication.beforeCommit')
         })
       }
@@ -428,12 +439,14 @@ export class DispatchInputJournal {
         Buffer.from(plan.envelope!, 'base64url'),
         Buffer.from(plan.sig!, 'base64url')
       )
+      if (signal?.aborted) return fail('cancelled')
       db.transaction(() => {
         plan.phase = 'published'
-        this.save(plan)
+        this.saveUnlessCancelled(plan)
         db.checkpoint('bridge.hub.input.published.beforeCommit')
       })
     }
+    if (signal?.aborted) return fail('cancelled')
     const request = this.hub.prepare(
       plan.target,
       'bridge.dispatch',

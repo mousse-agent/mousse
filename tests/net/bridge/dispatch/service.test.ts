@@ -355,6 +355,41 @@ it('keeps unpublished publishing work uncertain after terminal transaction rollb
   expect(f.effects()).toBe(1)
 })
 
+it('recovers an interrupted dispatch that sorts after more than a page of uncertain ones', async () => {
+  const f = await fixture()
+  const insert = f.db.database.prepare('INSERT INTO net_dispatches VALUES(?,?,?,?,?,?,?)')
+  const row = (id: string, state: DispatchRecord['state'], phase: DispatchRecord['phase']) => {
+    const record = {
+      id,
+      execution: `execution_${id}`,
+      caller: f.context.caller.node,
+      user: f.context.caller.user,
+      rpc: f.context.id,
+      requestHash: 'hash',
+      request: f.request,
+      binding: { path: f.repo, options: {} },
+      state,
+      phase
+    } as unknown as DispatchRecord
+    insert.run(record.execution, id, record.caller, record.user, state, phase, JSON.stringify(record))
+    return record
+  }
+  // Uncertain dispatches stay for the owner; they are never completed by a start.
+  for (let index = 0; index < 101; index++)
+    row(`dispatch_a${String(index).padStart(3, '0')}`, 'uncertain', 'running')
+  const interrupted = row('dispatch_z', 'accepted', 'preparing')
+  await f.service.recover()
+  expect(f.service.query(interrupted.execution, f.context)).toMatchObject({
+    state: 'failed',
+    error: 'cancelled',
+    phase: 'complete'
+  })
+  expect(f.service.query('execution_dispatch_a000', f.context)).toMatchObject({
+    state: 'uncertain',
+    phase: 'running'
+  })
+})
+
 it('imports a missing exact base through verified incremental quarantine without copying dirty files', async () => {
   const f = await fixture(),
     sender = join(f.root, 'sender')
