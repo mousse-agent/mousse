@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
+import { BrowserTab, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
+import { terminalLocations } from '../lib/folderLabel'
+import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { SurfaceChoiceList } from './OpenSurfaceMenu'
 
 const TAB_ICONS = {
@@ -22,6 +24,7 @@ export function MainViewTabs() {
   const activeThreadId = useAppStore((state) => state.activeThreadId)
   const opened = useAppStore((state) => state.openedSurfaceKinds)
   const terminals = useAppStore((state) => state.projectTerminalTabs)
+  const threads = useAppStore((state) => state.threads)
   const browsers = useAppStore((state) => state.browserTabs)
   const documentTabs = useAppStore((state) => state.documentTabs)
   const documentsTabVisible = useAppStore((state) => state.documentsTabVisible)
@@ -40,11 +43,23 @@ export function MainViewTabs() {
   const visibleBrowsers = browsers.filter(
     (tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null
   )
+  // A terminal runs on its thread's computer; its folder is the one the app started it in.
+  const terminalNodes = visibleTerminals.map((tab) => ({
+    tab,
+    node: tab.ownerThreadId ? threads.find((thread) => thread.id === tab.ownerThreadId)?.node : undefined
+  }))
+  const { byNode } = useComputers(terminalNodes.some((entry) => entry.node))
   const items = surfaceTabItems({
     opened,
     terminals: visibleTerminals,
     browsers: visibleBrowsers,
-    documents
+    documents,
+    terminalLocations: terminalLocations(terminalNodes.map(({ tab, node }) => ({
+      id: tab.id,
+      cwd: tab.cwd,
+      node,
+      computerName: node ? byNode[node]?.name ?? UNKNOWN_COMPUTER_NAME : undefined
+    })))
   })
   const visibleViews = items.map((item) => item.view).join(',')
 
@@ -132,24 +147,28 @@ export function MainViewTabs() {
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
       {items.map((item) => {
-        const Icon = TAB_ICONS[item.view]
+        const Icon = item.everyThread ? BrowserTab : TAB_ICONS[item.view]
         const selected = active(item)
+        const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
           <div key={item.key} className={`main-view-tab${selected ? ' active' : ''}`}>
             <button
               type="button"
               className="main-view-tab-select"
               aria-current={selected ? 'page' : undefined}
+              aria-label={item.detail ? name : undefined}
+              title={item.title ?? (item.everyThread ? 'Kept in every thread' : undefined)}
               onClick={() => void select(item)}
             >
               <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />
               <span className="main-view-tab-label">{item.label}</span>
+              {item.detail && <span className="main-view-tab-detail">{item.detail}</span>}
             </button>
             {item.closable && (
               <button
                 type="button"
                 className="main-view-tab-close"
-                aria-label={`Close ${item.label}`}
+                aria-label={`Close ${name}`}
                 onClick={() => close(item)}
               >
                 <X size={12} strokeWidth={2} />
