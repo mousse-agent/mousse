@@ -2,6 +2,7 @@
  * Which threads need the person: the "Needs me" group at the top of the Projects and Threads views, the
  * state of a project row, and the count on the titlebar's sidebar toggle while the sidebar is closed.
  */
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -123,7 +124,18 @@ describe('the sidebar toggle', () => {
     setStore({ projects, threads, threadActivity: waiting, threadsSidebarOpen: false })
     const html = titleBar()
     expect(html).toContain('class="titlebar-attention-badge" aria-hidden="true">2<')
-    expect(html).toContain('aria-label="Open threads sidebar · 2 threads need you"')
+    // The count is in the toggle's accessible label; the rest of the wording belongs to the title bar.
+    const toggle = html.match(/<button[^>]*titlebar-sidebar-toggle[^>]*>/)?.[0] ?? ''
+    expect(toggle.match(/aria-label="([^"]*)"/)?.[1]).toMatch(/(^|\D)2(\D|$)/)
+    // The badge is part of the toggle button, placed against the button and not the rail width.
+    expect(html).toMatch(/<button[^>]*titlebar-sidebar-toggle--badged[^>]*>(?:(?!<\/button>)[\s\S])*titlebar-attention-badge/)
+    const css = readFileSync(new URL('../../src/renderer/styles/app.css', import.meta.url), 'utf8')
+    const badge = css.match(/\.titlebar-attention-badge\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(badge).not.toMatch(/navigation-rail-width|titlebar-height/)
+    expect(css).toMatch(/\.titlebar-sidebar-toggle\s*\{[^}]*position:\s*relative/)
+    // One placement: inside the button's corner, so it never reaches a neighbouring button.
+    expect(badge).toMatch(/top:\s*1px/)
+    expect(badge).toMatch(/right:\s*1px/)
   })
 
   it('has no badge while the sidebar is open or nothing waits', () => {

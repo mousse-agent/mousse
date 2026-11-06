@@ -34,7 +34,7 @@ export function rewriteMovedDefaults(
   }
   if (names(settings.title, from)) {
     patch.title = { llmProvider: '', model: '', instanceId: '' }
-    rewritten.push('Chat titles: Automatic')
+    rewritten.push('Thread titles: Automatic')
   }
   return rewritten.length ? { patch, rewritten } : { rewritten }
 }

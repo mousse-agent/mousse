@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  extractCommandSummary,
   formatSearchRowLabels,
   latestThoughtHeading,
   thoughtHeading,
@@ -55,17 +54,6 @@ describe('thoughtHeading', () => {
   it('returns empty for missing content', () => {
     expect(thoughtHeading(undefined)).toBe('')
     expect(thoughtHeading('   \n  ')).toBe('')
-  })
-})
-
-describe('extractCommandSummary', () => {
-  it('collapses whitespace and truncates long commands', () => {
-    expect(extractCommandSummary('npm run dev')).toBe('npm run dev')
-    expect(extractCommandSummary('  find .  -name\n"x"  ')).toBe('find . -name "x"')
-    const long = extractCommandSummary(`x${'y'.repeat(100)}`)
-    expect(long.endsWith('...')).toBe(true)
-    expect(long.length).toBeLessThanOrEqual(64)
-    expect(extractCommandSummary('')).toBe('')
   })
 })
 

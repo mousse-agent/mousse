@@ -1,6 +1,7 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
-import { findUnstartedThread } from '../../shared/threadTitle'
+import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
+import type { Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -37,6 +38,34 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   await selectThread(thread.id)
 }
 
+/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+export async function addProjectAndStartThread(): Promise<void> {
+  const project = await window.mousse.projects.open()
+  if (!project) return
+  await createAndSelectProjectThread(project.id)
+}
+
+/** The open thread when it has a sidebar row (started); a draft has nothing to rename, pin or archive yet. */
+export function openStartedThread(): Thread | null {
+  const { activeThreadId, threads } = useAppStore.getState()
+  const thread = activeThreadId ? threads.find((candidate) => candidate.id === activeThreadId) : undefined
+  return thread && isThreadStarted(thread) ? thread : null
+}
+
+/** Pins the open thread, or unpins it when it is pinned. */
+export async function togglePinOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread) return
+  await window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+}
+
+/** Archives the open thread; it stays open. */
+export async function archiveOpenThread(): Promise<void> {
+  const thread = openStartedThread()
+  if (!thread || thread.settledAt) return
+  await window.mousse.threads.settle(thread.id, true)
+}
+
 /**
  * Starts a thread from a pull request, opens it, and puts the pull request's title, description and review comments in
  * its composer for the person to send or edit. The daemon has already created the worktree at the pull request's head.
@@ -52,9 +81,9 @@ export async function openThreadFromPullRequest(input: StartPullRequestThreadInp
 
 /** Moves to the next (1) or previous (-1) thread in the sidebar's order, wrapping at the ends. */
 export async function selectAdjacentThread(direction: 1 | -1): Promise<void> {
-  const { projects, threads, threadsSidebarView, activeThreadId } = useAppStore.getState()
+  const { projects, threads, threadsSidebarView, threadFeedOrder, activeThreadId } = useAppStore.getState()
   const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
-  const ids = orderedThreadIds({ projects, threads, view: threadsSidebarView, excluded })
+  const ids = orderedThreadIds({ projects, threads, view: threadsSidebarView, excluded, arranged: threadFeedOrder })
   if (ids.length === 0) return
   // A subagent thread has no row of its own; its parent's row is the one that is highlighted.
   const current = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null

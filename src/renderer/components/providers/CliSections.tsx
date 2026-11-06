@@ -186,22 +186,28 @@ function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSna
  * The signed-in account by its label (the id is an opaque hash, never shown); sign-out only where
  * the daemon says Mousse owns the sign-in.
  */
-export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; actions: InstanceActions }) {
+/**
+ * The signed-in account. `onOpenUsage` adds a plain link to the Subscription usage page: the
+ * numbers live there, never here.
+ */
+export function AccountRow({ snapshot, actions, onOpenUsage }: { snapshot: InstanceSnapshot; actions: InstanceActions; onOpenUsage?: () => void }) {
   const { busy, error, run } = useAsyncAction()
   const { auth } = snapshot
   if (auth.state !== 'signed_in' && auth.state !== 'expired') return null
   const description = [auth.account?.label, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in'
+  const usage = onOpenUsage && auth.state === 'signed_in'
+    ? <button type="button" className="prov-link" data-testid="prov-account-usage" onClick={onOpenUsage}>Usage</button>
+    : undefined
+  const signOut = auth.canSignOut
+    ? <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signout', actions.signOut)}>
+        Sign out
+      </button>
+    : undefined
   return (
     <SettingsRow
       title="Account"
       description={withError(description, error)}
-      control={
-        auth.canSignOut ? (
-          <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signout', actions.signOut)}>
-            Sign out
-          </button>
-        ) : undefined
-      }
+      control={usage || signOut ? <span className="prov-account-actions">{usage}{signOut}</span> : undefined}
     />
   )
 }
@@ -279,6 +285,7 @@ export function HomeRow({ snapshot }: { snapshot: InstanceSnapshot }) {
   return (
     <SettingsRow
       title="Account home"
+      anchor="providers-home"
       description={
         config.home === 'private'
           ? 'Private to this provider. It signs in separately from your terminal.'
@@ -310,6 +317,7 @@ export function ExecutableRow({
   return (
     <SettingsRow
       title="Executable path"
+      anchor="providers-executable"
       description={withError(busy === 'path' ? 'Checking the executable…' : saved ? undefined : 'Leave empty to use the one Mousse finds.', error)}
       control={
         <span className="settings-icon-actions">
@@ -361,6 +369,7 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
   return (
     <SettingsRow
       title="Launch arguments"
+      anchor="providers-arguments"
       description={withError(config ? undefined : CONFIG_UNREADABLE, error)}
       control={
         <input
@@ -403,6 +412,7 @@ export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot;
   return (
     <SettingsRow
       title="Telemetry"
+      anchor="providers-telemetry"
       description={withError(undefined, error)}
       control={setting === 'none'
         ? <span className="prov-model-chip" title="This agent documents no way to turn its telemetry off, so Mousse sets nothing.">No switch</span>
@@ -457,6 +467,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
   return (
     <SettingsRow
       title="Variables"
+      anchor="providers-variables"
       description={withError(config ? undefined : CONFIG_UNREADABLE, error)}
       control={
         <button

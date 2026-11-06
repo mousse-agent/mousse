@@ -45,17 +45,23 @@
         "tests/harness/boundary.test.ts",
         "tests/chatLayoutStyles.test.ts",
         "tests/chatMarkdown.test.ts",
+        "tests/chatThemeTokens.test.ts",
         "tests/commandPalette.test.ts",
         "tests/composerMentionList.test.ts",
+        "tests/composerQuestions.test.ts",
         "tests/composerRenderingPerformance.test.ts",
+        "tests/dialogFooterStyles.test.ts",
         "tests/filesSearch.test.ts",
         "tests/gitBranchActions.test.ts",
         "tests/gitPanelLogic.test.ts",
+        "tests/lightTextContrast.test.ts",
         "tests/movedShortcuts.test.ts",
         "tests/platformMarkdownEditor.test.ts",
+        "tests/primaryButtonStyles.test.ts",
         "tests/ptyLiveness.test.ts",
         "tests/pullRequestPanel.test.ts",
         "tests/quickActionWorkspace.test.ts",
+        "tests/settingsContrast.test.ts",
         "tests/sideCardActions.test.ts",
         "tests/sideCardDevice.test.ts",
         "tests/sideCardGit.test.ts",
@@ -63,7 +69,8 @@
         "tests/slashCommandPopoverStyles.test.ts",
         "tests/subagentCardView.test.ts",
         "tests/subagentComposerBanner.test.ts",
-        "tests/titleBarLayout.test.ts"
+        "tests/titleBarLayout.test.ts",
+        "tests/titleBarThreadLabel.test.ts"
       ]
     },
     {

@@ -228,6 +228,8 @@ const markdownRemend = { katex: false };
 // handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
 // canonical mousse-file scheme reaches our anchor renderer.
 const markdownLinkSafety = { enabled: false };
+// Code blocks offer Copy only: saving a snippet as a file is rare, and the agent writes files itself.
+const markdownControls = { code: { copy: true, download: false } };
 
 function renderInlineCode(children: ReactNode, props: ComponentProps<"code">): ReactNode {
   return (
@@ -420,6 +422,7 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
         isAnimating={drawingDiagram}
         urlTransform={safeMarkdownUrl}
         linkSafety={markdownLinkSafety}
+        controls={markdownControls}
       >
         {safeContent}
       </Streamdown>

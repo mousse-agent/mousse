@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import { sortSidebarThreads } from '../src/shared/threadSidebarSort'
+import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../src/shared/threadSidebarSort'
 
 function thread(partial: Partial<Thread> & Pick<Thread, 'id'>): Thread {
   return {
@@ -71,5 +71,41 @@ describe('sortSidebarThreads', () => {
     ]
     sortSidebarThreads(threads)
     expect(threads.map((entry) => entry.id)).toEqual(['second', 'first'])
+  })
+})
+
+describe('sortThreadFeed', () => {
+  it('puts the newest started thread first, whatever its project order or later activity', () => {
+    const busy = thread({ id: 'busy', projectId: 'p1', order: -46, startedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-03-01T00:00:00.000Z' })
+    const fresh = thread({ id: 'fresh', projectId: 'p2', order: -1, startedAt: '2026-02-01T00:00:00.000Z' })
+    expect(sortThreadFeed([busy, fresh]).map((entry) => entry.id)).toEqual(['fresh', 'busy'])
+  })
+
+  it('falls back to creation for a thread without startedAt, and breaks ties with id', () => {
+    const legacy = thread({ id: 'legacy', createdAt: '2026-01-05T00:00:00.000Z' })
+    const b = thread({ id: 'b', startedAt: '2026-01-02T00:00:00.000Z' })
+    const a = thread({ id: 'a', startedAt: '2026-01-02T00:00:00.000Z' })
+    expect(sortThreadFeed([b, a, legacy]).map((entry) => entry.id)).toEqual(['legacy', 'a', 'b'])
+  })
+})
+
+describe('dragging rows in the Threads tab', () => {
+  const started = (id: string, day: number, projectId?: string) =>
+    thread({ id, ...(projectId ? { projectId } : {}), startedAt: `2026-01-0${day}T00:00:00.000Z` })
+
+  it('keeps the dragged order across projects, with threads started since on top', () => {
+    const rows = [started('a', 1, 'p1'), started('b', 2, 'p2'), started('c', 3), started('d', 4, 'p1')]
+    // Dragged earlier into a, c, b; d started afterwards.
+    expect(sortThreadFeed(rows, ['a', 'c', 'b']).map((entry) => entry.id)).toEqual(['d', 'a', 'c', 'b'])
+    // Ids of threads that are gone do not matter.
+    expect(sortThreadFeed(rows, ['gone', 'b', 'a', 'd', 'c']).map((entry) => entry.id)).toEqual(['b', 'a', 'd', 'c'])
+  })
+
+  it('moves a row before or after another, or to the end', () => {
+    const shown = ['a', 'b', 'c', 'd']
+    expect(arrangeThreadFeed(shown, 'd', 'a')).toEqual(['d', 'a', 'b', 'c'])
+    expect(arrangeThreadFeed(shown, 'a', 'c', true)).toEqual(['b', 'c', 'a', 'd'])
+    expect(arrangeThreadFeed(shown, 'a', 'd', true)).toEqual(['b', 'c', 'd', 'a'])
+    expect(arrangeThreadFeed(shown, 'b')).toEqual(['a', 'c', 'd', 'b'])
   })
 })

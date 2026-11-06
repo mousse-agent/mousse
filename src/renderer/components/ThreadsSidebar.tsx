@@ -3,14 +3,14 @@ import { flushSync } from 'react-dom'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Search, Shield } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield } from '../lib/icons'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { pausedStatusLabel } from '../lib/pausedRun'
 import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
-import { sortSidebarThreads } from '../../shared/threadSidebarSort'
+import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
 import { needsMeThreads } from '../lib/needsMe'
@@ -19,12 +19,13 @@ import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { createAndSelectProjectThread, selectThread } from '../lib/threadActions'
 import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
+import { Collapse } from './ui/Collapse'
 
 import {
   ThreadsContextMenu,
@@ -43,6 +44,7 @@ import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { projectHues } from '../lib/projectHues'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
+import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
@@ -71,6 +73,8 @@ interface DraggedSidebarItem {
   projectId?: string
   /** A thread drops only among threads of the same kind: pinned ones always list first. */
   pinned?: boolean
+  /** A row of the Threads tab, which can go anywhere in that tab's one list, across projects. */
+  feed?: boolean
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
@@ -367,10 +371,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const upsertThread = useAppStore((s) => s.upsertThread)
   const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
 
-  // The Search threads dialog is mounted once, in the navigation rail.
-  const setThreadSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
-
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  // The project the user last opened or closed. Only that group animates; one revealed for the thread
+  // being opened (or a project just added) appears at once.
+  const toggledProjectRef = useRef<string | null>(null)
 
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
@@ -423,6 +427,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const draggedItem = useRef<DraggedSidebarItem | null>(null)
   const suppressClick = useRef(false)
+  // Where a row dragged in the Threads tab would land: before or after this thread.
+  const [feedDrop, setFeedDrop] = useState<{ id: string; after: boolean } | null>(null)
+  const threadFeedOrder = useAppStore((s) => s.threadFeedOrder)
+  const setThreadFeedOrder = useAppStore((s) => s.setThreadFeedOrder)
 
   const threadsSidebarWidth = useAppStore((s) => s.threadsSidebarWidth)
 
@@ -444,8 +452,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     () => sortSidebarThreads(listedThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [listedThreads, agentThreadIds]
   )
+  // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
+  // first. Later messages do not move a row.
+  const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
   const archivedThreads = useMemo(
-    () => sortSidebarThreads(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    () => sortThreadFeed(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [listedThreads, agentThreadIds]
   )
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
@@ -458,6 +469,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // match none of this computer's stay groups of their own, named with their computer.
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
+  const threadProjectColors = useThreadProjectColors()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
@@ -498,7 +510,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       setNoProjectExpanded(true)
       return
     }
-    setExpandedProjects((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)))
+    setExpandedProjects((prev) => {
+      if (prev.has(groupId)) return prev
+      // A group opened for the thread being shown appears at once; only a group the user toggles animates.
+      if (toggledProjectRef.current === groupId) toggledProjectRef.current = null
+      return new Set(prev).add(groupId)
+    })
     const position = availableThreads.filter((thread) => groupIdOf(thread.projectId) === groupId).findIndex((thread) => thread.id === shownId)
     if (position >= PROJECT_THREAD_PREVIEW_LIMIT) {
       setExpandedProjectThreadLists((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)))
@@ -508,6 +525,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById])
 
   const toggleProject = (projectId: string) => {
+    toggledProjectRef.current = projectId
 
     setExpandedProjects((prev) => {
 
@@ -577,11 +595,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     setExpandedProjects((prev) => new Set(prev).add(projectId))
     await createAndSelectProjectThread(projectId)
   }, { retry: true })
-
-  const openSearch = () => {
-    if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
-    else setThreadSearchOpen(true)
-  }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -697,8 +710,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       dragged &&
         dragged.type === target.type &&
         dragged.id !== target.id &&
-        (dragged.type === 'project' || (dragged.projectId === target.projectId && Boolean(dragged.pinned) === Boolean(target.pinned)))
+        Boolean(dragged.feed) === Boolean(target.feed) &&
+        (dragged.type === 'project' || dragged.feed || (dragged.projectId === target.projectId && Boolean(dragged.pinned) === Boolean(target.pinned)))
     )
+  }
+
+  /** Moves the row dragged in the Threads tab before or after `target`, or to the end without one. */
+  const dropFeedThread = (target?: string, after = false) => {
+    const dragged = draggedItem.current
+    setFeedDrop(null)
+    if (!dragged?.feed || dragged.id === target) return
+    suppressClick.current = true
+    window.setTimeout(() => { suppressClick.current = false }, 0)
+    setThreadFeedOrder(arrangeThreadFeed(feedThreads.map((thread) => thread.id), dragged.id, target, after))
   }
 
   const reorderBefore = async (target: DraggedSidebarItem) => {
@@ -725,6 +749,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const endDrag = () => {
     draggedItem.current = null
+    setFeedDrop(null)
   }
 
 
@@ -1027,11 +1052,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const showTrailing = Boolean(statusNode || worktree || thread.node)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
-    // Only the Threads tab's cards carry the project's tint; a thread without a project has none.
-    const hue = layout === 'card' && group ? hueByGroup.get(group.id) : undefined
+    // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
+    // project has none.
+    const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
     const menuTarget: ThreadsContextMenuTarget = { type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived }
     const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`
-    const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt) }
     // The tooltip of a title that does not fit. The project is the row's parent or on the card; a row names its
     // computer only by icon, so the tooltip adds the name.
     const computerName = layout === 'row' && thread.node ? computers[thread.node]?.name ?? UNKNOWN_COMPUTER_NAME : undefined
@@ -1044,12 +1069,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     // In the tree the row's own buttons leave the Tab order: the tree is one stop, and the row menu has them all.
     const actionTabIndex = inTree ? -1 : undefined
+    // Cards in the Threads tab can be dragged into an order of their own (archived and Needs me rows cannot).
+    const feed = layout === 'card' && !isArchived && !inNeedsMe
+    const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), pinned: Boolean(thread.pinnedAt), ...(feed ? { feed } : {}) }
+    const dropLine = feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
+    // The lower half of a row drops after it, so a row can also go last.
+    const dropsAfter = (event: React.DragEvent) => {
+      const rect = event.currentTarget.getBoundingClientRect()
+      return event.clientY > rect.top + rect.height / 2
+    }
 
     return (
 
       <div
         key={thread.id}
-        className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}`}
+        className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}${dropLine}`}
         inert={clipped || undefined}
       >
 
@@ -1086,13 +1120,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }}
 
         onDragOver={(event) => {
-          if (!inNeedsMe && canDropOn(dragItem)) event.preventDefault()
+          if (inNeedsMe || !canDropOn(dragItem)) return
+          event.preventDefault()
+          if (!feed) return
+          event.stopPropagation()
+          const after = dropsAfter(event)
+          if (feedDrop?.id !== thread.id || feedDrop.after !== after) setFeedDrop({ id: thread.id, after })
         }}
 
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
-          if (!inNeedsMe) void reorderBefore(dragItem)
+          if (inNeedsMe) return
+          if (feed) dropFeedThread(thread.id, dropsAfter(event))
+          else void reorderBefore(dragItem)
         }}
 
         onDragEnd={endDrag}
@@ -1254,15 +1295,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
     <aside className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
-
-      <div className="threads-sidebar-toolbar">
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
-          <Search size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void runWithToast('start a thread', createAndSelectThread, { retry: true }) }} title={workspaceMode === 'chats' ? 'New chat' : 'New thread'} aria-label={workspaceMode === 'chats' ? 'New chat' : 'New thread'}>
-          <Edit size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-      </div>
 
       <div className="threads-sidebar-tabs-row">
         <div className="threads-sidebar-tabs" role="tablist" aria-label="Sidebar" onKeyDown={onTabKeyDown}>
@@ -1540,9 +1572,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                   </div>
 
-                  {expanded && (
-
-                    <div id={childrenId} className="threads-sidebar-children" role="group">
+                  <Collapse
+                    open={expanded}
+                    animate={toggledProjectRef.current === project.id}
+                    id={childrenId}
+                    role="group"
+                    className="threads-sidebar-children"
+                    itemCount={projectThreadCount}
+                  >
 
                       {projectThreadCount === 0 ? (
 
@@ -1563,7 +1600,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                         <>
                           <div
-                            className={`threads-sidebar-thread-list${showAllProjectThreads ? ' expanded' : ''}`}
+                            className={`threads-sidebar-thread-list ui-collapse-items${showAllProjectThreads ? ' expanded' : ''}`}
                             style={{ '--project-thread-count': projectThreadCount } as CSSProperties}
                             role="none"
                           >
@@ -1593,9 +1630,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       )}
 
-                    </div>
-
-                  )}
+                  </Collapse>
 
                 </div>
 
@@ -1613,12 +1648,30 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
         {sidebarView === 'threads' && renderNeedsMe()}
-        <div className="threads-sidebar-tree threads-sidebar-thread-feed">
-          {availableThreads.length === 0 ? (
+        <div
+          className="threads-sidebar-tree threads-sidebar-thread-feed"
+          // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
+          onDragOver={(event) => {
+            if (!draggedItem.current?.feed) return
+            event.preventDefault()
+            const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
+            const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
+            const last = feedThreads[feedThreads.length - 1]
+            if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
+              setFeedDrop({ id: last.id, after: true })
+            }
+          }}
+          onDrop={(event) => {
+            if (!draggedItem.current?.feed) return
+            event.preventDefault()
+            if (feedDrop) dropFeedThread(feedDrop.id, feedDrop.after)
+          }}
+        >
+          {feedThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No threads</div>
           ) : (
             <>
-              {availableThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
+              {feedThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
             </>
           )}
         </div>
@@ -1643,19 +1696,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </button>
           </div>
           {/* The same rows and indent as a project's threads. */}
-          {noProjectExpanded && (orphanThreads.length === 0 ? (
-            <div className="threads-sidebar-tree">
-              <div className="threads-sidebar-children">
-                <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
+          <Collapse open={noProjectExpanded} itemCount={orphanThreads.length}>
+            {orphanThreads.length === 0 ? (
+              <div className="threads-sidebar-tree">
+                <div className="threads-sidebar-children">
+                  <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="threads-sidebar-tree" role="tree" aria-label="No project" onKeyDown={onTreeKeyDown}>
-              <div className="threads-sidebar-children" role="none">
-                {orphanThreads.map((thread) => renderThreadRow(thread, { inTree: true, treeLevel: 1, tabStop: noProjectTabStop }))}
+            ) : (
+              <div className="threads-sidebar-tree" role="tree" aria-label="No project" onKeyDown={onTreeKeyDown}>
+                <div className="threads-sidebar-children" role="none">
+                  {orphanThreads.map((thread) => renderThreadRow(thread, { inTree: true, treeLevel: 1, tabStop: noProjectTabStop }))}
+                </div>
               </div>
-            </div>
-          ))}
+            )}
+          </Collapse>
         </section>
 
         <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? '' : ' collapsed'}`} aria-label="Archived">
@@ -1672,8 +1727,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </button>
           </div>
 
-          {archivedExpanded && (
-            <>
+          <Collapse open={archivedExpanded} itemCount={archivedThreads.length}>
               <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list">
                 {archivedThreads.length === 0 ? (
                   <div className="threads-sidebar-empty">No archived threads</div>
@@ -1682,8 +1736,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                 )}
               </div>
               <RecentlyDeletedSection nested />
-            </>
-          )}
+          </Collapse>
 
         </section>
 

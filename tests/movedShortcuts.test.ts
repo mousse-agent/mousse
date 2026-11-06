@@ -5,6 +5,7 @@ import { eligibleCommands } from '../src/renderer/commands/paletteItems'
 import {
   pushOverlay,
   registerCommand,
+  runCommand,
   useCommandRegistry
 } from '../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../src/renderer/commands/useCommandShortcuts'
@@ -151,16 +152,21 @@ describe('each moved shortcut can be rebound and is listed', () => {
     ])
   })
 
-  it('shows in the palette while its surface is mounted, and nowhere else', () => {
-    const palette = context()
+  it('shows in the palette while registered; a surface from anywhere, its letter only in the empty panel', () => {
+    const palette = context({ fromKey: false })
     const listed = (registered: CommandId[], ctx = palette) =>
       eligibleCommands(ctx, (id) => registered.includes(id)).map((item) => (item.kind === 'command' ? item.id : null))
     expect(listed(MOVED.filter((id) => !MODEL_SLOTS.includes(id)))).toEqual(
       MOVED.filter((id) => !MODEL_SLOTS.includes(id))
     )
-    // Nothing is listed for a surface that is not mounted, or while the main area is closed.
+    // Nothing is listed that is not registered.
     expect(listed([])).toEqual([])
-    expect(listed(SURFACES.map(([, id]) => id), context({ mainAreaOpen: false }))).toEqual([])
+    // Opening a surface shows the panel, so the palette offers it with the panel closed or in the Chats tab.
+    const surfaces = SURFACES.map(([, id]) => id)
+    expect(listed(surfaces, context({ fromKey: false, mainAreaOpen: false }))).toEqual(surfaces)
+    expect(listed(surfaces, context({ fromKey: false, projectsMode: false }))).toEqual(surfaces)
+    // The letter keys still need the empty panel on screen.
+    expect(listed(surfaces, context({ mainAreaOpen: false }))).toEqual([])
     // The picker owns the keyboard while open, so its slots are never palette rows.
     expect(listed(MODEL_SLOTS)).toEqual([])
   })
@@ -249,6 +255,35 @@ describe('the registry is the only handler', () => {
     expect(terminal).not.toHaveBeenCalled()
     keydown(win, { key: 'x', code: 'KeyX' })
     expect(terminal).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a surface letter with the empty panel while the palette opens the surface from anywhere', () => {
+    const win = stubWindow()
+    attachCommandShortcuts(win as never)
+    const fromPalette = vi.fn()
+    const fromPicker = vi.fn()
+    registerCommand('surface.git', { run: fromPalette, keys: false })
+
+    // Only the palette-only handler is mounted: the letter stays a letter.
+    const typed = keydown(win, { key: 'd', code: 'KeyD' })
+    expect(fromPalette).not.toHaveBeenCalled()
+    expect(typed.defaultPrevented).toBe(false)
+    expect(runCommand('surface.git', 'guest')).toBe(false)
+
+    // The palette runs it with the panel closed.
+    useAppStore.setState({ mainAreaOpen: false })
+    expect(runCommand('surface.git', 'palette')).toBe(true)
+    expect(fromPalette).toHaveBeenCalledTimes(1)
+
+    // With the empty panel on screen the picker's own handler takes the letter.
+    useAppStore.setState({ mainAreaOpen: true })
+    const off = registerCommand('surface.git', { run: fromPicker })
+    keydown(win, { key: 'd', code: 'KeyD' })
+    expect(fromPicker).toHaveBeenCalledTimes(1)
+    expect(fromPalette).toHaveBeenCalledTimes(1)
+    off()
+    keydown(win, { key: 'd', code: 'KeyD' })
+    expect(fromPicker).toHaveBeenCalledTimes(1)
   })
 
   it('leaves the workflow editor with only the keys that cannot be rebound', () => {

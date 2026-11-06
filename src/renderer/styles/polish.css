@@ -53,6 +53,9 @@
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
   --ui-selected: rgba(var(--accent-rgb), 0.15);
+  /* Opaque selection fill (selected settings page, selected theme): the
+     accent tints the raised material enough to read at a glance. */
+  --ui-selected-fill: color-mix(in srgb, var(--accent) 18%, var(--ui-raised));
   --ui-line: color-mix(in srgb, var(--text-primary) 8%, transparent);
   --ui-line-strong: color-mix(in srgb, var(--text-primary) 14%, transparent);
   --ui-faint: color-mix(in srgb, var(--text-primary) 48%, transparent);
@@ -69,6 +72,18 @@
   --ui-focus-ring: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
   --ui-aura-strength: 0.12;
   --ui-on-accent: #15121b;
+
+  /* Primary buttons are the neutral button with accent text: no solid fill,
+     no gradient, no glow. They lead their row through an accent edge, a light
+     accent tint on the neutral surface (deeper on hover) and semibold text.
+     The text keeps the accent's hue and chroma with a lightness floor (ceiling
+     on light themes) so it stays at 4.5:1 or more on the rest and hover fills,
+     for every accent preset. */
+  --btn-primary-fg: oklch(from var(--accent) max(l, 0.76) c h);
+  --btn-primary-border: color-mix(in srgb, var(--accent) 55%, var(--ui-line-strong));
+  --btn-primary-surface: var(--ui-raised);
+  --btn-primary-bg: color-mix(in srgb, var(--accent) 6%, var(--btn-primary-surface));
+  --btn-primary-hover-bg: color-mix(in srgb, var(--accent) 12%, var(--btn-primary-surface));
 
   /* Semantic status colours, vivid enough to read at dot size. */
   --success: #4fd08a;
@@ -88,10 +103,22 @@
   --hue-4: #f1b560;
   --hue-5: #7fa4f8;
   --hue-6: #f38aa0;
+
+  /* Motion. Settings > Appearance > Advanced > Animation speed sets the scale on
+     <html> (lib/motion.ts): Off 0, Fast 0.6, Normal 1, Slow 1.6. UI motion
+     uses these durations, or calc(<ms> * var(--ui-motion-scale)) for a
+     bespoke one, so every speed and Off apply to it. Loaders and status
+     pulses keep their own speed. */
+  --ui-motion-scale: 1;
+  --ui-dur-fast: calc(120ms * var(--ui-motion-scale));
+  --ui-dur: calc(160ms * var(--ui-motion-scale));
+  --ui-dur-slow: calc(200ms * var(--ui-motion-scale));
 }
 
 html[data-theme='light'] {
   --ui-raised: #ffffff;
+  /* White barely differs from the light page, so selection shades it instead. */
+  --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
   --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
   --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
   --ui-glint: transparent;
@@ -110,11 +137,19 @@ html[data-theme='light'] {
   --hue-5: #3f6edb;
   --hue-6: #d34f6c;
   --ui-on-accent: #ffffff;
+  /* Light neutral buttons are see-through, so the primary sits on the same
+     surface as its neighbours rather than on white. */
+  --btn-primary-fg: oklch(from var(--accent) min(l, 0.45) c h);
+  --btn-primary-surface: transparent;
+  --btn-primary-bg: color-mix(in srgb, var(--accent) 5%, var(--btn-primary-surface));
+  /* Lighter than --text-secondary, still 4.5:1 on every light surface. */
+  --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
 }
 
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] {
     --ui-raised: #ffffff;
+    --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
     --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
     --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
     --ui-glint: transparent;
@@ -133,7 +168,16 @@ html[data-theme='light'] {
     --hue-5: #3f6edb;
     --hue-6: #d34f6c;
     --ui-on-accent: #ffffff;
+    --btn-primary-fg: oklch(from var(--accent) min(l, 0.45) c h);
+    --btn-primary-surface: transparent;
+    --btn-primary-bg: color-mix(in srgb, var(--accent) 5%, var(--btn-primary-surface));
+    --ui-faint: color-mix(in srgb, var(--text-primary) 66%, transparent);
   }
+}
+
+/* Solarized's teal surface is lighter than the other dark canvases. */
+html[data-theme='solarized-dark'] {
+  --btn-primary-fg: oklch(from var(--accent) max(l, 0.8) c h);
 }
 
 /* Mousse dark keeps its true-black canvas; depth comes from raised greys. */
@@ -147,11 +191,18 @@ html[data-theme='blacksphere-plus'] {
   --ui-aura-strength: 0.16;
 }
 
+/* Solarized text is dim: an accent tint either vanishes or drops the selected
+   label under 4.5:1, so selection lifts the page neutrally. */
+html[data-theme='solarized-dark'] {
+  --ui-selected-fill: color-mix(in srgb, var(--text-primary) 13.5%, var(--surface-base));
+}
+
 html[data-theme='high-contrast'] {
   --ui-line: rgba(255, 255, 255, 0.4);
   --ui-line-strong: rgba(255, 255, 255, 0.6);
   --ui-aura-strength: 0;
   --ui-selected: rgba(var(--accent-rgb), 0.3);
+  --ui-selected-fill: var(--ui-selected);
   --ui-specular: inset 0 0 0 0 transparent;
   --ui-specular-accent: inset 0 0 0 0 transparent;
   --ui-glint: transparent;
@@ -178,7 +229,7 @@ html[data-theme='high-contrast'] {
   width: 36px;
   height: 36px;
   border-radius: 9px;
-  transition: background 0.15s, color 0.15s, transform 0.15s;
+  transition: background 0.15s, color 0.15s, transform var(--ui-dur);
 }
 
 .app .navigation-rail-button:hover:not(:disabled) {
@@ -208,11 +259,6 @@ html[data-theme='high-contrast'] {
   --threads-sidebar-row-height: var(--ui-row-height);
 }
 
-.app .threads-sidebar-toolbar {
-  padding: 6px var(--ui-gutter) 2px;
-  gap: 2px;
-}
-
 .app .threads-sidebar-toolbar-button {
   border-radius: var(--ui-row-radius);
 }
@@ -222,7 +268,7 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tabs-row {
-  margin: 2px var(--ui-gutter) 8px;
+  margin: 8px var(--ui-gutter);
 }
 
 .app .threads-sidebar-tabs {
@@ -339,8 +385,9 @@ html[data-theme='high-contrast'] {
 .app .threads-sidebar-project:nth-child(6n + 5) .threads-sidebar-project-icon { color: var(--hue-3); }
 .app .threads-sidebar-project:nth-child(6n + 6) .threads-sidebar-project-icon { color: var(--hue-6); }
 
+/* The list sits inside a Collapse, so its bottom margin adds to the project's 2px: 4px + 2px keeps the 6px gap. */
 .app .threads-sidebar-children {
-  margin: 1px 0 6px calc(var(--ui-row-x) + 7px);
+  margin: 1px 0 4px calc(var(--ui-row-x) + 7px);
   padding-left: 6px;
   border-left: 1px solid var(--ui-line-strong);
 }
@@ -650,7 +697,7 @@ html .chat-avatar.group[class*='chat-color-'] {
   border-radius: 16px;
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
-  transition: border-color 0.18s, box-shadow 0.18s, background-position 0.45s ease;
+  transition: border-color 0.18s, box-shadow 0.18s, background-position calc(450ms * var(--ui-motion-scale)) ease;
   /* Quieter than the shared specular, only on the main chat bar. */
   --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
   --ui-glint: rgba(255, 255, 255, 0.28);
@@ -830,7 +877,7 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
   border-radius: 16px;
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
-  transition: border-color 0.18s, box-shadow 0.18s, background-position 0.45s ease;
+  transition: border-color 0.18s, box-shadow 0.18s, background-position calc(450ms * var(--ui-motion-scale)) ease;
 }
 
 .app .agent-chat-composer:focus-within {
@@ -845,23 +892,7 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
 }
 
 html .chat-primary-button {
-  background: var(--gradient-accent);
-  color: var(--ui-on-accent);
   border-radius: var(--ui-control-radius);
-  box-shadow: 0 2px 12px rgba(var(--accent-rgb), 0.28);
-  transition: filter 0.15s, transform 0.15s;
-}
-
-html .chat-primary-button:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
-html .chat-primary-button:active:not(:disabled) {
-  transform: translateY(1px);
-}
-
-html .chat-dialog .chat-primary-button {
-  color: var(--ui-on-accent);
 }
 
 .app .chat-workspace-empty h1 {
@@ -925,7 +956,7 @@ html .settings-nav-item:hover {
 }
 
 html .settings-nav-item.active {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
+  background: var(--ui-selected-fill);
   box-shadow: var(--ui-specular);
   font-weight: 550;
 }
@@ -964,7 +995,7 @@ textarea:focus {
 /* Focusing the field plays the rim glint once, then leaves it centred. */
 .app .chat-input-area .composer:focus-within,
 .app .agent-chat-composer:focus-within {
-  animation: ui-composer-glint 640ms ease-out 1;
+  animation: ui-composer-glint calc(640ms * var(--ui-motion-scale)) ease-out 1;
 }
 
 @keyframes ui-composer-glint {
@@ -1025,7 +1056,7 @@ html .composer-command-suggestion.selected::before {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
   background-size: 36% 100%;
   background-repeat: no-repeat;
-  animation: ui-edge-glint 680ms ease-out 1 forwards;
+  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1 forwards;
 }
 
 @keyframes ui-edge-glint {
@@ -1063,37 +1094,84 @@ html[data-theme='high-contrast'] .composer-command-suggestion.selected::before {
   content: none;
 }
 
-/* Accent-filled controls read as lit, slightly convex buttons. */
-html .btn-primary,
-html .icon-btn-primary,
-html .chat-primary-button,
+/* Send is the one accent-filled control: a lit, slightly convex button. */
 html .chat-send-button,
-html .an-approve-fill,
-.app .chat-input-area .composer-action-btn-active,
-.app .composer-implement-btn {
+.app .chat-input-area .composer-action-btn-active {
   background-image: var(--ui-sheen-accent), var(--gradient-accent);
   background-origin: padding-box;
   background-clip: padding-box;
   box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3);
 }
 
-/* Implement stays a tinted fill; only the light cap is shared with solid CTAs. */
-.app .composer-implement-btn {
-  background-image: var(--ui-sheen-accent);
-  background-color: rgba(var(--accent-rgb), 0.35);
-}
-
-.app .composer-implement-btn:hover:not(:disabled) {
-  background-color: rgba(var(--accent-pale-rgb), 0.45);
-  background-image: var(--ui-sheen-accent);
-  color: white;
-}
-
-html .btn-primary:disabled,
-html .icon-btn-primary:disabled,
-html .chat-primary-button:disabled,
 html .chat-send-button:disabled {
   box-shadow: none;
+}
+
+/* Primary buttons: the neutral button (surface, specular top light) with a
+   light accent tint, an accent edge and semibold accent text; hover deepens
+   the tint. Every
+   primary uses this one rule: add a component's primary class to the list,
+   or give the button `ui-btn-primary`. Components keep their own size and
+   radius. :is() lifts every entry to the specificity of the most specific
+   one, so component rules for these buttons never repaint them. */
+html :is(
+  .ui-btn-primary,
+  .btn-primary,
+  .chat-primary-button,
+  .an-approve-fill,
+  .composer-implement-btn,
+  .composer-question-btn.is-primary,
+  .chat-run-paused-btn-primary,
+  .chat-workspace-recovery-btn-primary,
+  .scheduled-btn.primary,
+  .devices-dialog-btn.primary,
+  .side-card-git-pr-merge[data-ready]
+) {
+  border: 1px solid var(--btn-primary-border);
+  background: var(--btn-primary-bg);
+  box-shadow: var(--ui-specular);
+  color: var(--btn-primary-fg);
+  font-weight: 600;
+  filter: none;
+  transform: none;
+}
+
+html :is(
+  .ui-btn-primary,
+  .btn-primary,
+  .chat-primary-button,
+  .an-approve-fill,
+  .composer-implement-btn,
+  .composer-question-btn.is-primary,
+  .chat-run-paused-btn-primary,
+  .chat-workspace-recovery-btn-primary,
+  .scheduled-btn.primary,
+  .devices-dialog-btn.primary,
+  .side-card-git-pr-merge[data-ready]
+):hover:not(:disabled, [aria-disabled='true']) {
+  background: var(--btn-primary-hover-bg);
+  color: var(--btn-primary-fg);
+}
+
+/* Disabled is the usual dimmed neutral button, without the accent. */
+html :is(
+  .ui-btn-primary,
+  .btn-primary,
+  .chat-primary-button,
+  .an-approve-fill,
+  .composer-implement-btn,
+  .composer-question-btn.is-primary,
+  .chat-run-paused-btn-primary,
+  .chat-workspace-recovery-btn-primary,
+  .scheduled-btn.primary,
+  .devices-dialog-btn.primary,
+  .side-card-git-pr-merge[data-ready]
+):is(:disabled, [aria-disabled='true']) {
+  border-color: var(--ui-line-strong);
+  background: var(--btn-primary-surface);
+  color: var(--text-primary);
+  opacity: 0.5;
+  cursor: default;
 }
 
 html .chat-avatar[class*='chat-color-']:not(.group) {
@@ -1129,8 +1207,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: 22px;
 }
 
+/* The last line ends above the composer and the strip Go to latest sits in. */
 .chat:not(.chat--empty) .an-message-list > div {
-  padding-bottom: calc(var(--chat-composer-stack, 160px) + 32px);
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + 56px);
 }
 
 .chat:not(.chat--empty) .an-message-list {
@@ -1138,8 +1217,8 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
     to bottom,
     transparent 0,
     #000 28px,
-    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 32px)),
-    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) + 24px)),
+    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 56px)),
+    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) - 40px)),
     transparent 100%
   );
   -webkit-mask-image: var(--transcript-mask);
@@ -1150,8 +1229,12 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   bottom: calc(var(--chat-composer-stack, 0px) + 4px);
 }
 
+/*
+ * On the composer's top edge, in a strip the transcript fades out before (see the mask above), so it
+ * never covers text. Hidden while a composer menu or the notice slot is open: they use that space.
+ */
 .chat-jump {
-  bottom: calc(var(--chat-composer-stack, 16px) + 10px);
+  bottom: calc(var(--chat-composer-stack, 32px) + 4px);
   width: 32px;
   height: 32px;
   border: 1px solid var(--ui-line-strong);
@@ -1159,6 +1242,10 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   background: var(--ui-raised);
   color: var(--text-primary);
   box-shadow: var(--ui-raised-shadow);
+}
+
+.chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump {
+  display: none;
 }
 
 .chat-jump-live {
