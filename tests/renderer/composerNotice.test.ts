@@ -125,6 +125,14 @@ describe('the notice slot', () => {
     expect(byName(host, 'Redo')).toBeDefined()
   })
 
+  it('draws the lost service on its own line above a waiting approval, each marked with its priority', () => {
+    render(
+      source('approval', { tone: 'warning', title: 'Approval', priority: 'approval' }),
+      source('service', { tone: 'error', title: 'Service lost', priority: 'service' })
+    )
+    expect(shown().map((line) => [line.dataset.priority, line.getAttribute('aria-label')])).toEqual([['service', 'Service lost'], ['approval', 'Approval']])
+  })
+
   it('a notice that resolves leaves the slot empty', () => {
     render(source('progress', { tone: 'info', title: 'Updating conversation…' }))
     expect(title()).toBe('Updating conversation…')

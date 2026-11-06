@@ -1421,6 +1421,17 @@ html[data-theme='high-contrast'] .chat-input-area {
 /* The lost service is about the link, not a failure of the user's work: a muted icon. */
 .composer-notice[data-priority='service'] .composer-notice-icon { color: var(--text-secondary); }
 
+/* A waiting approval shares only the line's place: its title and Deny / Approve keep full-strength text. */
+.composer-notice[data-priority='approval'] {
+  color: var(--text-primary);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.composer-notice[data-priority='approval'] .composer-notice-btn {
+  color: var(--text-primary);
+}
+
 .composer-notice-text {
   display: flex;
   flex: 1 1 auto;

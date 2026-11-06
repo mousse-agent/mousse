@@ -130,7 +130,12 @@ describe('chat layout styles', () => {
     expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
     const slot = rule('.composer-notice-slot').body
     expect(slot).toMatch(/flex-direction:\s*column;/)
-    expect(slot).toMatch(/gap:\s*6px;/)
+    // Two quiet lines, one above the other, with no divider between them.
+    expect(css).not.toMatch(/\.composer-notice\s*\+\s*\.composer-notice/)
+    // The approval keeps full-strength text; the lost service above it is a muted line with a muted icon.
+    expect(rule(".composer-notice[data-priority='approval']").body).toMatch(/color:\s*var\(--text-primary\);/)
+    expect(rule(".composer-notice[data-priority='approval'] .composer-notice-btn").body).toMatch(/color:\s*var\(--text-primary\);/)
+    expect(rule(".composer-notice[data-priority='service'] .composer-notice-icon").body).toMatch(/color:\s*var\(--text-secondary\);/)
     expect(css).not.toContain('.composer-notice-note')
   })
 })
