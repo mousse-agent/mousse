@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, startTransition, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { ChatWorkspace } from './components/chats/ChatWorkspace'
 import { useChatsStore } from './stores/chatsStore'
@@ -26,6 +26,7 @@ import { ToastHost } from './components/ui/Toast'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 
 import { openSurface } from './lib/surfaces'
+import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
@@ -43,6 +44,25 @@ const MAX_THREADS_SIDEBAR_WIDTH = 480
 
 // Keep in sync with `.sidebar { min-width }` in app.css
 const SIDEBAR_MIN_WIDTH_PX = 280
+
+const threadsSidebarMaxWidth = (): number =>
+  Math.max(MIN_THREADS_SIDEBAR_WIDTH, Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4))
+
+/**
+ * The conversation pane's left edge, width and bounds in pixels. `.sidebar { width: N% }` resolves
+ * against .app-content, so percentages are computed from that same width; deriving it from
+ * window.innerWidth minus the threads sidebar makes the pane outrun the cursor. Dragging measures
+ * from the pane's own left edge, so the handle tracks the cursor whatever sits to its left. The
+ * bounds match the sidebar CSS (min-width: 280px, max-width: 60%).
+ */
+function conversationPane(container: HTMLElement | null, sidebar: HTMLElement | null) {
+  if (!container || !sidebar) return null
+  const containerWidth = container.clientWidth
+  if (containerWidth <= 0) return null
+  const { left, width } = sidebar.getBoundingClientRect()
+  const max = containerWidth * 0.6
+  return { containerWidth, left, width, max, min: Math.min(SIDEBAR_MIN_WIDTH_PX, max) }
+}
 
 // Event delivery is primary. This low-frequency reconciliation covers renderer
 // reload/subscription races without repainting when the list is unchanged.
@@ -122,6 +142,7 @@ export default function App() {
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
+  const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
   const [threadsPeek, setThreadsPeek] = useState(false)
   const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
   const threadsPeekCloseTimer = useRef<number | null>(null)
@@ -410,31 +431,33 @@ export default function App() {
   const applyResize = useCallback((clientX: number) => {
     const { kind } = resizeRef.current
     if (kind === 'threads') {
-      const maxWidth = Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4)
       const paneLeft = threadsPaneRef.current?.getBoundingClientRect().left
       if (paneLeft === undefined) return
-      setThreadsSidebarWidth(Math.min(maxWidth, Math.max(MIN_THREADS_SIDEBAR_WIDTH, clientX - paneLeft)))
+      setThreadsSidebarWidth(Math.min(threadsSidebarMaxWidth(), Math.max(MIN_THREADS_SIDEBAR_WIDTH, clientX - paneLeft)))
       return
     }
     if (kind === 'main') {
-      const container = appContentRef.current
-      const sidebar = sidebarRef.current
-      if (!container || !sidebar) return
-      // `.sidebar { width: N% }` resolves against its containing block (.app-content),
-      // so the percentage must be computed from that same width â€” deriving it from
-      // window.innerWidth minus the threads sidebar makes the pane outrun the cursor.
-      const containerWidth = container.clientWidth
-      if (containerWidth <= 0) return
-      // Measure from the sidebar's own left edge so the handle tracks the cursor
-      // exactly regardless of what sits to its left (threads sidebar, resizers).
-      const sidebarLeft = sidebar.getBoundingClientRect().left
-      // Clamp in pixels to match the sidebar CSS bounds (min-width: 280px, max-width: 60%).
-      const maxPx = containerWidth * 0.6
-      const minPx = Math.min(SIDEBAR_MIN_WIDTH_PX, maxPx)
-      const clampedPx = Math.min(maxPx, Math.max(minPx, clientX - sidebarLeft))
-      setSidebarWidth((clampedPx / containerWidth) * 100)
+      const pane = conversationPane(appContentRef.current, sidebarRef.current)
+      if (!pane) return
+      setSidebarWidth((Math.min(pane.max, Math.max(pane.min, clientX - pane.left)) / pane.containerWidth) * 100)
     }
   }, [setSidebarWidth, setThreadsSidebarWidth])
+
+  // Both dividers are keyboard separators: Left/Right move 16px, Home/End go to the bounds.
+  const onThreadsResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const next = resizerKeyTarget(event.key, threadsSidebarWidth, MIN_THREADS_SIDEBAR_WIDTH, threadsSidebarMaxWidth())
+    if (next === undefined) return
+    event.preventDefault()
+    setThreadsSidebarWidth(next)
+  }
+
+  const onMainResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const pane = conversationPane(appContentRef.current, sidebarRef.current)
+    const next = pane && resizerKeyTarget(event.key, pane.width, pane.min, pane.max)
+    if (!pane || next == null) return
+    event.preventDefault()
+    setSidebarWidth((next / pane.containerWidth) * 100)
+  }
 
   const flushResize = useCallback(() => {
     const { clientX, frame } = resizeRef.current
@@ -503,11 +526,6 @@ export default function App() {
       <TitleBar />
       <LinuxWindowResizeHandles />
 
-      {profileReady && bootstrapError && <div role="alert" style={{ padding: '8px 16px' }}>
-        Could not load workspace: {bootstrapError}{' '}
-        <button type="button" onClick={() => setBootstrapAttempt((attempt) => attempt + 1)}>Retry</button>
-      </div>}
-
       <div className="app-content" ref={appContentRef}>
 
         {/* The closed sidebar peeks from its edge strip only; reaching for the rail moves nothing. */}
@@ -517,7 +535,7 @@ export default function App() {
         <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
-          onRetry={() => setBootstrapAttempt((attempt) => attempt + 1)}
+          onRetry={retryBootstrap}
           sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
         />}
 
@@ -531,9 +549,15 @@ export default function App() {
             resizer={<div
               className="resizer resizer-threads"
               onPointerDown={(event) => startResize('threads', event)}
+              onKeyDown={onThreadsResizerKey}
+              onDoubleClick={() => setThreadsSidebarWidth(Math.min(DEFAULT_THREADS_SIDEBAR_WIDTH, threadsSidebarMaxWidth()))}
               role="separator"
+              tabIndex={0}
               aria-orientation="vertical"
               aria-label="Resize threads sidebar"
+              aria-valuenow={Math.round(threadsSidebarWidth)}
+              aria-valuemin={MIN_THREADS_SIDEBAR_WIDTH}
+              aria-valuemax={MAX_THREADS_SIDEBAR_WIDTH}
             />}
           >
             <ThreadsSidebar />
@@ -567,7 +591,7 @@ export default function App() {
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
-          {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
+          {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
           </KeepMounted>
           <ThreadSideCard />
@@ -576,12 +600,27 @@ export default function App() {
 
 
 
-        {sidebarMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane"><ChatWorkspace key={profileId} /></KeepMounted>}
+        {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
+        {sidebarMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
+          {bootstrapError
+            ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
+            : <ChatWorkspace key={profileId} />}
+        </KeepMounted>}
 
         {mainAreaOpen && sidebarMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
             onPointerDown={(event) => startResize('main', event)}
+            onKeyDown={onMainResizerKey}
+            onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+            role="separator"
+            tabIndex={0}
+            aria-orientation="vertical"
+            aria-label="Resize panels"
+            // The conversation's share of the workspace, in percent; CSS caps it at 60.
+            aria-valuenow={Math.round(sidebarWidth)}
+            aria-valuemin={0}
+            aria-valuemax={60}
           />
         )}
 
