@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { GripVertical, MoreHorizontal, Pencil, Trash2 } from '../lib/icons'
+import { ArrowTurnForward, GripVertical, MoreHorizontal, Pencil, Trash2 } from '../lib/icons'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
@@ -431,13 +431,13 @@ export function QueuedMessages({
               <div className="queued-messages-actions">
                 <button
                   type="button"
-                  className="queued-messages-btn queued-messages-btn-steer"
+                  className="queued-messages-btn queued-messages-btn-icon queued-messages-btn-steer"
                   onClick={() => void handleSteer(item.id)}
                   disabled={busy || isSteering}
-                  title={isSteering ? 'Already steering this turn' : 'Steer active turn with this message'}
-                  aria-label="Steer with queued message"
+                  title={isSteering ? 'Steering…' : 'Send now (steer)'}
+                  aria-label={isSteering ? 'Steering…' : 'Send now (steer)'}
                 >
-                  {isSteering ? 'Steering…' : 'Steer'}
+                  <ArrowTurnForward size={14} strokeWidth={2} />
                 </button>
                 {onEditItem && !item.subagentNotice?.length && (
                   <button

@@ -1,13 +1,14 @@
 import type { UsageGroup } from '../../../shared/storage'
 
-const SIZE = 148
-const STROKE = 20
+/** Compact enough to sit beside the total in the toolbar without pushing Cleanup down. */
+const SIZE = 96
+const STROKE = 14
 const RADIUS = (SIZE - STROKE) / 2
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS
 /** A thin gap between neighbouring arcs so they stay apart in both themes. */
 const GAP = 1.5
 
-/** The six categorical hues; a seventh slice reuses the first. "Other" is always the quiet grey. */
+/** The six categorical hues; a seventh slice reuses the first. "Other" is always the quiet grey. The table's row swatches use the same colour. */
 export function sliceColor(group: UsageGroup, index: number): string {
   const other = group.kind === 'other' || (group.kind === undefined && !group.id)
   return other ? 'var(--text-secondary)' : `var(--hue-${(index % 6) + 1})`
@@ -26,7 +27,7 @@ export function sliceArcs(groups: readonly UsageGroup[]): Array<{ key: string; o
 
 /**
  * A donut drawn as stroked circle arcs, the way the app's other gauges are. It is decoration: the
- * legend and the table beside it carry every number, so the picture is hidden from assistive tech.
+ * table below carries every number, so the picture is hidden from assistive tech.
  */
 export function StorageDonut({ groups }: { groups: readonly UsageGroup[] }) {
   const arcs = sliceArcs(groups)

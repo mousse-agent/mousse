@@ -39,43 +39,6 @@
 /* Compact rows for the built-in tool list under Advanced. */
 .skills-mcp-compact { --settings-row-y: var(--space-4); }
 
-.skills-mcp-chips { display: flex; gap: var(--space-8); }
-
-/* Overflow menu. The shared icon button reads as "delete" on hover; this one does not. */
-.settings-icon-btn.row-menu-btn:hover:not(:disabled) { color: var(--text-primary); }
-.settings-icon-btn.row-menu-btn[aria-expanded='true'] { color: var(--text-primary); background: var(--ui-hover); }
-
-.row-menu {
-  min-width: 148px;
-  padding: 4px;
-  border: 1px solid var(--ui-line-strong);
-  border-radius: var(--ui-control-radius, 8px);
-  background: var(--ui-raised);
-  box-shadow: var(--ui-raised-shadow, 0 8px 24px rgba(0, 0, 0, 0.28));
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.row-menu-item {
-  display: block;
-  width: 100%;
-  height: 28px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: calc(var(--ui-control-radius, 8px) - 2px);
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.row-menu-item:hover:not(:disabled),
-.row-menu-item:focus-visible { background: var(--ui-hover); outline: none; }
-.row-menu-item.danger { color: var(--danger, #e07a8a); }
-.row-menu-item:disabled { opacity: 0.45; cursor: default; }
 
 /* ---------- Dialogs ---------- */
 .integration-modal-backdrop { --int-fg: var(--text-primary, #eff0f6); --int-muted: var(--text-secondary, #9298a5); --int-border: var(--border, #ffffff16); --int-bg: var(--bg-primary, #12141a); --int-panel: var(--bg-secondary, #1a1d24); --int-accent: var(--accent, #b5c9fa); --int-ok: var(--success, #7dcea0); --int-danger: var(--danger, #e07a8a); }
@@ -108,8 +71,8 @@
 .integration-disclosure > summary::-webkit-details-marker { display: none; }
 .integration-disclosure > summary:hover { color: var(--int-fg); }
 .integration-disclosure > summary:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
-.integration-disclosure-chevron { transition: transform 0.15s; }
-.integration-disclosure[open] .integration-disclosure-chevron { transform: rotate(90deg); }
+.integration-disclosure-chevron { transition: transform 130ms var(--ui-collapse-ease-close); }
+.integration-disclosure[open] .integration-disclosure-chevron { transform: rotate(90deg); transition-duration: 160ms; transition-timing-function: var(--ui-collapse-ease); }
 .integration-disclosure-body { padding-top: var(--space-8, 8px); }
 /* One-row choices: icon on the title line, the detail 2px under the title. Selection is a filled background. */
 .integrations-choice, .integration-upload-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-8, 8px); }

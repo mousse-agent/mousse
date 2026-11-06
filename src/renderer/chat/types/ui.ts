@@ -43,7 +43,7 @@ export function chatStatusFromPhase(phase: TurnPhase): ChatStatus {
   if (phase === 'streaming') return 'streaming'
   if (phase === 'tool_running') return 'tool_running'
   if (phase === 'awaiting_input') return 'awaiting_input'
-  // 'paused' is a run waiting for a usage limit: the composer takes a new message, which ends the pause.
+  // 'paused' is a run waiting for a usage limit: the composer takes a new message, which joins the thread's queue.
   return 'ready'
 }
 

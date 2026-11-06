@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { formatBytes, type UsageGroup, type UsageGroupBy, type UsageMachine } from '../../../shared/storage'
 import { ArrowDown, ArrowUp, RefreshCw, Server } from '../../lib/icons'
 import { readDevices } from '../../lib/netDevices'
@@ -21,16 +21,18 @@ import {
 } from '../../lib/storageUsage'
 import { openThread } from '../../lib/openThread'
 import { useAppStore } from '../../stores/appStore'
-import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
+import { SettingsGroup } from '../settings/SettingsRow'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select } from '../ui/Select'
 import { StorageDonut, sliceColor } from './StorageDonut'
 
 const GROUP_OPTIONS: ReadonlyArray<{ value: UsageGroupBy; label: string }> = [
-  { value: 'project', label: 'Project' },
-  { value: 'kind', label: 'Kind' },
-  { value: 'thread', label: 'Thread (top 10)' }
+  { value: 'project', label: 'By project' },
+  { value: 'kind', label: 'By kind' },
+  { value: 'thread', label: 'Top 10 threads' }
 ]
 const NAME_HEADER: Record<UsageGroupBy, string> = { project: 'Project', kind: 'Kind', thread: 'Thread' }
+const MEASURED_TOOLTIP = 'From the last measurement. Opening this page does not scan the disk.'
 
 export interface StorageUsageViewProps {
   machines: readonly MachineChoice[]
@@ -50,10 +52,12 @@ export interface StorageUsageViewProps {
   onOpen: (group: UsageGroup) => void
 }
 
-/** The Disk usage group: dropdowns, donut with legend, and a sortable table that carries the same numbers. */
+/**
+ * The Disk usage group: a donut beside the total and a compact toolbar (grouping, and the computer
+ * when there is a choice), then one sortable table whose row swatches match the donut's slices.
+ */
 export function StorageUsageView(props: StorageUsageViewProps) {
   const { machines, machine, by, results, loading, sort, now } = props
-  const id = useId()
   const groups = results ? groupMachineUsage(results, by) : []
   const total = groups.reduce((sum, group) => sum + group.bytes, 0)
   const unavailable = (results ?? []).flatMap((result) => result.status === 'unavailable' ? [result] : [])
@@ -62,11 +66,13 @@ export function StorageUsageView(props: StorageUsageViewProps) {
   const oldest = results ? oldestMeasuredAt(results) : undefined
   const showMachine = (results?.length ?? 0) > 1
   const rows = sortRows(groups, sort)
+  // Colours follow the chart's order, not the table's sort, so a row keeps its slice's colour.
   const colors = new Map(groups.map((group, index) => [group.key, sliceColor(group, index)]))
+  // This computer, each other computer, and all of them: shown only when another computer exists.
   const machineOptions = [
     { value: 'self', label: SELF_MACHINE.name },
     ...machines.map((choice) => ({ value: choice.node as string, label: choice.online ? choice.name : `${choice.name} · Offline` })),
-    { value: 'all', label: 'All machines' }
+    { value: 'all', label: 'All computers' }
   ]
   const partialTotal = notes.some((note) => note.kind === 'partial')
   const sortHeader = (key: SortKey, label: string) => {
@@ -78,65 +84,68 @@ export function StorageUsageView(props: StorageUsageViewProps) {
     </th>
   }
   return <SettingsGroup
+    anchor="storage-usage"
     title="Disk usage"
     icon={Server}
     id="storage-usage"
-    description="How much space Mousse uses. Numbers come from a saved measurement, so opening this page does not scan your disk."
     action={<span className="storage-usage-actions">
-      {oldest && <span className="settings-muted" data-testid="storage-measured-at">{relativeMeasuredAt(oldest, now)}</span>}
-      <button type="button" className="settings-btn" data-testid="storage-usage-refresh" disabled={loading} aria-busy={loading || undefined} onClick={props.onRefresh}>
-        <RefreshCw size={13} aria-hidden="true" />{loading ? 'Measuring…' : 'Refresh'}
+      {oldest && <span className="settings-muted" data-testid="storage-measured-at" title={MEASURED_TOOLTIP}>{relativeMeasuredAt(oldest, now)}</span>}
+      <button
+        type="button"
+        className="settings-icon-btn"
+        data-testid="storage-usage-refresh"
+        title={loading ? 'Measuring…' : 'Measure again'}
+        aria-label={loading ? 'Measuring disk usage' : 'Measure disk usage again'}
+        disabled={loading}
+        aria-busy={loading || undefined}
+        onClick={props.onRefresh}
+      >
+        <RefreshCw size={14} aria-hidden="true" className={loading ? 'icon-spin' : undefined} />
       </button>
     </span>}
   >
-    {machines.length > 0 && <SettingsRow
-      title="Machine"
-      htmlFor={`${id}-machine`}
-      control={<Select id={`${id}-machine`} data-testid="storage-machine-select" value={machine} onChange={props.onMachine} options={machineOptions} />}
-    />}
-    <SettingsRow
-      title="Group by"
-      htmlFor={`${id}-by`}
-      control={<Select id={`${id}-by`} data-testid="storage-groupby-select" value={by} onChange={(value) => props.onBy(value as UsageGroupBy)} options={GROUP_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />}
-    />
-    {!results && <p className="settings-muted storage-empty" role="status" data-testid="storage-usage-loading">Measuring…</p>}
-    {results && !answered && <p className="settings-muted storage-empty" data-testid="storage-usage-none">No usage to show.</p>}
-    {answered && <div className="storage-usage" data-testid="storage-usage">
-      <div className="storage-usage-chart">
-        <StorageDonut groups={groups} />
-        <p className="storage-usage-total" data-testid="storage-usage-total">{partialTotal ? 'At least ' : ''}{formatBytes(total)}<span className="settings-muted"> in total</span></p>
-        <ul className="storage-legend" aria-label="Legend">
-          {groups.map((group) => <li key={group.key} data-testid="storage-legend-item">
-            <span className="storage-swatch" style={{ background: colors.get(group.key) }} aria-hidden="true" />
-            <span className="storage-legend-label">{group.label}{showMachine && group.machine ? ` · ${group.machine.name}` : ''}</span>
-            <span className="settings-muted">{formatShare(group.share)}</span>
-          </li>)}
-        </ul>
+    <div className="storage-usage-toolbar">
+      {answered && <StorageDonut groups={groups} />}
+      <div className="storage-usage-head">
+        <div className="storage-usage-summary">
+          {!results && <DelayedLoader size="small" label="Measuring disk usage" data-testid="storage-usage-loading" />}
+          {results && !answered && <span className="settings-muted" data-testid="storage-usage-none">No usage to show.</span>}
+          {answered && <p className="storage-usage-total" data-testid="storage-usage-total">
+            {partialTotal ? 'At least ' : ''}<strong>{formatBytes(total)}</strong><span className="settings-muted"> in total</span>
+          </p>}
+        </div>
+        <div className="storage-usage-filters">
+          {machines.length > 0 && <Select ariaLabel="Computer" size="small" data-testid="storage-machine-select" value={machine} onChange={props.onMachine} options={machineOptions} />}
+          <Select ariaLabel="Group by" size="small" data-testid="storage-groupby-select" value={by} onChange={(value) => props.onBy(value as UsageGroupBy)} options={GROUP_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />
+        </div>
       </div>
-      <table className="storage-table" data-testid="storage-usage-table">
-        <caption className="sr-only">Disk usage by {NAME_HEADER[by].toLowerCase()}</caption>
-        <thead>
-          <tr>
-            {sortHeader('name', NAME_HEADER[by])}
-            {showMachine && by !== 'kind' && sortHeader('machine', 'Machine')}
-            {sortHeader('size', 'Size')}
-            {sortHeader('share', 'Share')}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((group) => <tr key={group.key} data-testid="storage-usage-row" data-key={group.key} data-bytes={group.bytes}>
-            <th scope="row">
+    </div>
+    {answered && <table className="storage-table" data-testid="storage-usage-table">
+      <caption className="sr-only">Disk usage by {NAME_HEADER[by].toLowerCase()}</caption>
+      <thead>
+        <tr>
+          {sortHeader('name', NAME_HEADER[by])}
+          {showMachine && by !== 'kind' && sortHeader('machine', 'Computer')}
+          {sortHeader('size', 'Size')}
+          {sortHeader('share', 'Share')}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((group) => <tr key={group.key} data-testid="storage-usage-row" data-key={group.key} data-bytes={group.bytes}>
+          <th scope="row">
+            <span className="storage-row-name">
+              <span className="storage-swatch" data-testid="storage-usage-swatch" style={{ background: colors.get(group.key) }} aria-hidden="true" />
               {props.canOpen(group)
                 ? <button type="button" className="storage-row-link" onClick={() => props.onOpen(group)}>{group.label}</button>
                 : <span>{group.label}</span>}
-            </th>
-            {showMachine && by !== 'kind' && <td>{group.machine?.name ?? ''}</td>}
-            <td className="storage-num">{formatBytes(group.bytes)}</td>
-            <td className="storage-num">{formatShare(group.share)}</td>
-          </tr>)}
-        </tbody>
-      </table>
-    </div>}
+            </span>
+          </th>
+          {showMachine && by !== 'kind' && <td>{group.machine?.name ?? ''}</td>}
+          <td className="storage-num">{formatBytes(group.bytes)}</td>
+          <td className="storage-num">{formatShare(group.share)}</td>
+        </tr>)}
+      </tbody>
+    </table>}
     {notes.length > 0 && <ul className="storage-notes" data-testid="storage-usage-notes">
       {notes.map((note) => <li key={note.kind} className="settings-muted" data-note={note.kind}>{note.text}</li>)}
     </ul>}

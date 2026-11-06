@@ -71,9 +71,9 @@ describe('Setup row: the status and its one next step', () => {
   it('signs a managed ChatGPT entry in with Continue with ChatGPT, and shows no usage on its card', () => {
     const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
-    // Usage lives on the usage page, never in provider settings.
+    // Usage lives on the usage page, never in provider settings: the card only links there.
     const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    expect(editor).not.toMatch(/usage/i)
+    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>Usage<\/button>/, '')).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -280,14 +280,31 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('offers Refresh models beside Refresh provider status', () => {
+  it('heads the list with Add provider, then Refresh provider status and Refresh models; no scope without a project', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
-    expect(html).toContain('title="Refresh provider status"')
-    expect(html).toContain('title="Refresh models"')
-    expect(html.indexOf('title="Refresh provider status"')).toBeLessThan(html.indexOf('title="Refresh models"'))
-    expect(html).toContain('<span>Refresh models</span>')
+    expect(buttons(html)).toEqual(['Add provider', 'Refresh models'])
+    expect(labels(html)).toContain('Refresh provider status')
+    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
+    expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
+    // With no project to choose, the device is implied.
+    expect(html).not.toContain('Settings scope')
+    expect(html).not.toContain('Applying settings for')
+    // Usage stays on its own page.
+    expect(html).not.toMatch(/usage|quota|meter/i)
+  })
+})
+
+describe('Agent editor layout', () => {
+  it('keeps Setup to status and account, with the name and telemetry under Advanced', () => {
+    const entry = snapshot({ telemetry: { setting: 'off', defaultSetting: 'off', variables: ['DISABLE_TELEMETRY'] } })
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    const advanced = html.indexOf('Advanced</summary>')
+    expect(advanced).toBeGreaterThan(html.indexOf('>Setup<'))
+    expect(html.indexOf('Display name')).toBeGreaterThan(advanced)
+    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(advanced)
+    expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
 })
 
@@ -307,6 +324,27 @@ describe('Sign-out', () => {
     const unlabelled = accountRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
     expect(unlabelled).not.toContain('h4sh')
     expect(unlabelled).toContain('Claude Code sign-in')
+  })
+})
+
+describe('Usage from the agent editor', () => {
+  const editor = (overrides: SnapshotOverrides) => {
+    const entry = snapshot(overrides)
+    return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+  }
+
+  it('links a signed-in agent that reports usage to the Usage page, and shows no meter', () => {
+    for (const driver of ['claude', 'codex'] as const) {
+      const html = editor({ driver, auth: { canSignOut: true } })
+      expect(html, driver).toContain('data-testid="prov-account-usage"')
+      expect(buttons(html), driver).toEqual(expect.arrayContaining(['Usage', 'Sign out']))
+      expect(html, driver).not.toMatch(/role="progressbar"|usage-ring|usage-bar|% left/)
+    }
+  })
+
+  it('offers no link where there is no usage to see', () => {
+    expect(editor({ driver: 'pi' })).not.toContain('data-testid="prov-account-usage"')
+    expect(editor({ auth: { state: 'expired' } })).not.toContain('data-testid="prov-account-usage"')
   })
 })
 

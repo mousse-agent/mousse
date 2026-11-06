@@ -17,17 +17,22 @@ import { ownedHome } from './support/fixtureGit'
 const change = vi.hoisted(() => ({ path: null as string | null, to: '', done: false }))
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
-  const readFile = (async (...args: Parameters<typeof real.readFile>) => {
-    // Called synchronously from the check, so its name is on the stack here (before any await).
-    const fromCheck = /\b(proveFrozenContentEntryAsync|assertFrozenContentEntryAsync)\b/.test(new Error().stack ?? '')
-    const value = await real.readFile(...args)
+  const open = (async (...args: Parameters<typeof real.open>) => {
+    // The check reads a file's bytes through `fileDigestAsync`, which opens it synchronously, so its name is on the stack here.
+    const fromCheck = /\bfileDigestAsync\b/.test(new Error().stack ?? '')
+    const handle = await real.open(...args)
     if (fromCheck && !change.done && change.path && String(args[0]) === change.path) {
-      change.done = true
-      await real.writeFile(change.path, change.to)
+      const close = handle.close.bind(handle)
+      // Once the check has read every byte, the file changes.
+      handle.close = async () => {
+        await close()
+        change.done = true
+        await real.writeFile(change.path!, change.to)
+      }
     }
-    return value
-  }) as typeof real.readFile
-  return { ...real, readFile }
+    return handle
+  }) as typeof real.open
+  return { ...real, open }
 })
 
 const roots: string[] = []

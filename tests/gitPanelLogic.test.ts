@@ -7,8 +7,15 @@ import { GitChangesList } from '../src/renderer/components/git/GitChangesList'
 import { GitSyncBar } from '../src/renderer/components/git/GitSyncBar'
 import {
   IDLE_SYNC_ACTIVITY,
+  SECTION_RATIO_MAX,
+  SECTION_RATIO_MIN,
   abortLabel,
+  discardConfirmLabel,
+  discardMenuLabel,
   discardPrompt,
+  keyedSectionRatio,
+  resizeSectionPair,
+  sectionPairRatio,
   fetchResultNotice,
   groupChanges,
   pullChoices,
@@ -21,8 +28,13 @@ import {
   syncControls,
   syncLabel,
   syncState,
+  COMMITS_FLOOR_SHARE,
+  SECTION_FLOOR_ROWS,
+  sectionStyle,
+  type SectionSizes,
   type SyncActivity
 } from '../src/renderer/components/git/gitPanelLogic'
+import { CommitsSection } from '../src/renderer/components/GitPanel'
 import type { GitFileChange, GitScope, GitStatusSnapshot } from '../src/shared/types'
 
 const project: GitScope = { projectId: 'p1', workspaceThreadId: null }
@@ -274,12 +286,12 @@ describe('changes list markup', () => {
     const changes = section(html, 'changes')
     expect(staged).toContain('mm.ts')
     expect(staged).toContain('aria-label="Unstage mm.ts"')
-    expect(staged).toContain('aria-label="Discard changes to mm.ts"')
+    expect(staged).toContain('aria-label="More actions for mm.ts"')
     expect(staged).not.toContain('aria-label="Stage mm.ts"')
     expect(staged).toContain('>Unstage all<')
     expect(changes).toContain('mm.ts')
     expect(changes).toContain('aria-label="Stage mm.ts"')
-    expect(changes).toContain('aria-label="Discard changes to mm.ts"')
+    expect(changes).toContain('aria-label="More actions for mm.ts"')
     expect(changes).not.toContain('aria-label="Unstage mm.ts"')
     expect(changes).toContain('>Stage all<')
   })
@@ -291,20 +303,20 @@ describe('changes list markup', () => {
     expect(section(html, 'changes')).not.toContain('c.ts')
   })
 
-  it('hides stage and unstage in a thread worktree and keeps discard', () => {
+  it('hides stage and unstage in a thread worktree and keeps discard in the More menu', () => {
     const html = render([change('mm.ts', { staged: true }), change('mm.ts'), change('new.ts', { status: 'untracked' })], thread)
     expect(html).not.toContain('aria-label="Stage ')
     expect(html).not.toContain('aria-label="Unstage ')
     expect(html).not.toContain('Stage all')
     expect(html).not.toContain('Unstage all')
-    expect(html).toContain('aria-label="Discard changes to mm.ts"')
-    expect(html).toContain('aria-label="Delete untracked file new.ts"')
+    expect(html).toContain('aria-label="More actions for mm.ts"')
+    expect(html).toContain('aria-label="More actions for new.ts"')
   })
 
   it('disables the buttons while a Git action runs', () => {
     const html = render([change('a.ts')], project, { busy: true })
     expect(html).toMatch(/aria-label="Stage a.ts"[^>]*disabled=""/)
-    expect(html).toMatch(/aria-label="Discard changes to a.ts"[^>]*disabled=""/)
+    expect(html).toMatch(/aria-label="More actions for a.ts"[^>]*disabled=""/)
     expect(html).toMatch(/class="git-section-action" disabled=""/)
   })
 
@@ -326,6 +338,145 @@ describe('changes list markup', () => {
     expect(selected).toContain('background:')
     expect(selected).not.toMatch(/border|box-shadow|outline/)
     expect(css).not.toMatch(/\.git-file-row[^{]*::(before|after)/)
+  })
+})
+
+describe('the More menu, status names and section dividers', () => {
+  const flex = { conflicts: 1, staged: 1, changes: 1, untracked: 1, commits: 1 }
+  const render = (changes: GitFileChange[], onDividerResize?: () => void) =>
+    renderToStaticMarkup(createElement(GitChangesList, {
+      changes,
+      selected: null,
+      onSelect: () => undefined,
+      scope: project,
+      busy: false,
+      onRowAction: () => undefined,
+      onSectionAction: () => undefined,
+      flex,
+      onDividerResize
+    }))
+
+  it('keeps Discard off the row: only Stage or Unstage sits next to the file, Discard waits in More', () => {
+    const html = render([change('a.ts'), change('b.ts', { staged: true })])
+    expect(html).not.toContain('data-action="discard"')
+    expect(html).toContain('aria-label="Stage a.ts"')
+    expect(html).toContain('aria-label="Unstage b.ts"')
+    expect(html).toMatch(/aria-label="More actions for a.ts"[^>]*aria-haspopup="menu"/)
+  })
+
+  it('names the More menu item for what it does to the file', () => {
+    expect(discardMenuLabel(change('a.ts'))).toBe('Discard changes…')
+    expect(discardMenuLabel(change('new.ts', { status: 'untracked' }))).toBe('Delete file…')
+    expect(discardConfirmLabel([change('new.ts', { status: 'untracked' })])).toBe('Delete')
+    expect(discardConfirmLabel([change('new.ts', { status: 'untracked' }), change('a.ts')])).toBe('Discard')
+    expect(discardConfirmLabel([])).toBe('Discard')
+  })
+
+  it("gives every status letter its full name as a tooltip and in the row's name", () => {
+    const html = render([change('a.ts'), change('c.ts', { status: 'conflicted' }), change('n.ts', { status: 'untracked' }), change('d.ts', { status: 'deleted', staged: true })])
+    expect(html).toContain('aria-label="a.ts, modified"')
+    expect(html).toContain('title="Modified" aria-hidden="true">M<')
+    expect(html).toContain('aria-label="c.ts, conflicted"')
+    expect(html).toContain('title="Conflicted" aria-hidden="true">!<')
+    expect(html).toContain('aria-label="n.ts, untracked"')
+    expect(html).toContain('aria-label="d.ts, deleted"')
+  })
+
+  it('lets a divider be focused and reports where it is, with its limits', () => {
+    const html = render([change('a.ts'), change('b.ts', { staged: true })], () => undefined)
+    expect(html).toMatch(/role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Resize Staged and Changes sections" aria-valuenow="50" aria-valuemin="15" aria-valuemax="85"/)
+    // Without a resize handler there is nothing to move with the keyboard, so it is not a tab stop.
+    expect(render([change('a.ts')])).not.toContain('tabindex="0"')
+  })
+
+  it('moves a divider by a step per arrow, to the limits with Home and End, and never past them', () => {
+    expect(keyedSectionRatio(0.5, 'ArrowDown')).toBeCloseTo(0.55)
+    expect(keyedSectionRatio(0.5, 'ArrowUp')).toBeCloseTo(0.45)
+    expect(keyedSectionRatio(0.5, 'Home')).toBe(SECTION_RATIO_MIN)
+    expect(keyedSectionRatio(0.5, 'End')).toBe(SECTION_RATIO_MAX)
+    expect(keyedSectionRatio(0.5, 'Enter')).toBeNull()
+    const moved = resizeSectionPair(flex, 'staged', 'changes', 0.7)
+    expect(sectionPairRatio(moved, 'staged', 'changes')).toBeCloseTo(0.7)
+    expect(moved.staged! + moved.changes!).toBeCloseTo(2)
+    expect(moved.untracked).toBe(1)
+    expect(sectionPairRatio(resizeSectionPair(flex, 'staged', 'changes', 0.99), 'staged', 'changes')).toBeCloseTo(SECTION_RATIO_MAX)
+    expect(sectionPairRatio(resizeSectionPair(flex, 'staged', 'changes', -1), 'staged', 'changes')).toBeCloseTo(SECTION_RATIO_MIN)
+    // A pair still sized by its content has no weights yet: it reads as even until the panel measures it.
+    expect(sectionPairRatio({}, 'staged', 'changes')).toBe(0.5)
+  })
+})
+
+describe('section sizing', () => {
+  const files = (count: number) => Array.from({ length: count }, (_, index) => change(`f${index}.ts`))
+  const render = (changes: GitFileChange[], flex: SectionSizes = {}) =>
+    renderToStaticMarkup(createElement(GitChangesList, {
+      changes,
+      selected: null,
+      onSelect: () => undefined,
+      scope: project,
+      busy: false,
+      onRowAction: () => undefined,
+      onSectionAction: () => undefined,
+      flex
+    }))
+  const styleOf = (html: string, id: string) => html.match(new RegExp(`data-section="${id}" style="([^"]*)"`))?.[1] ?? ''
+  const commits = (count: number, flex?: number) =>
+    renderToStaticMarkup(createElement(CommitsSection, {
+      commits: Array.from({ length: count }, (_, index) => ({
+        hash: `h${index}`, shortHash: `h${index}`, message: `c${index}`, author: 'a', date: 'd', pushed: true, onRemote: true
+      })),
+      flex
+    }))
+
+  it('with no changed files shows a clean tree and gives Commits the panel', () => {
+    expect(render([])).toContain('Working tree clean')
+    expect(styleOf(commits(0), 'commits')).toContain('flex:1 1 0')
+    // An empty history still keeps its one line in view.
+    expect(sectionStyle('commits', 0, undefined).minHeight).toContain('1 * var(--git-row)')
+  })
+
+  it('sizes one changed file to its row, not to a share of the panel', () => {
+    const style = styleOf(render(files(1)), 'changes')
+    expect(style).toContain('flex:0 1 auto')
+    expect(style).toContain('min-height:calc(var(--git-section-head) + 1 * var(--git-row))')
+  })
+
+  it('lets many changed files scroll in their list while a few rows stay in view', () => {
+    const style = styleOf(render(files(200)), 'changes')
+    expect(style).toContain('flex:0 1 auto')
+    expect(style).toContain(`${SECTION_FLOOR_ROWS} * var(--git-row)`)
+    expect(style).not.toContain('200')
+  })
+
+  it('keeps a long history reachable: Commits takes the rest and keeps a share when files fill the panel', () => {
+    const { flex, minHeight } = sectionStyle('commits', 500, undefined)
+    expect(flex).toBe('1 1 0')
+    expect(minHeight).toBe(`min(${COMMITS_FLOOR_SHARE}, calc(var(--git-section-head) + 500 * var(--git-row)))`)
+    // A short history keeps no more than its own rows.
+    expect(sectionStyle('commits', 2, undefined).minHeight).toContain('2 * var(--git-row)')
+  })
+
+  it('keeps a dragged weight, and sizes a section without one by its content', () => {
+    const html = render([...files(3), change('n.ts', { status: 'untracked' })], { changes: 240, commits: 360 })
+    expect(styleOf(html, 'changes')).toContain('flex:240 1 0')
+    expect(styleOf(html, 'untracked')).toContain('flex:0 1 auto')
+    expect(styleOf(commits(4, 360), 'commits')).toContain('flex:360 1 0')
+  })
+
+  it('moves a divider between two weighted sections within the limits and leaves the others', () => {
+    const sizes: SectionSizes = { staged: 100, changes: 300, commits: 400 }
+    expect(resizeSectionPair(sizes, 'staged', 'changes', 0.5)).toEqual({ staged: 200, changes: 200, commits: 400 })
+    expect(resizeSectionPair(sizes, 'staged', 'changes', 0)).toEqual({ staged: 400 * SECTION_RATIO_MIN, changes: 400 * SECTION_RATIO_MAX, commits: 400 })
+    expect(resizeSectionPair({}, 'staged', 'changes', 0.5)).toEqual({})
+  })
+
+  it('lets the whole list scroll when every section is at its floor', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/styles/app.css'), 'utf8')
+    const start = css.indexOf('.git-changes {')
+    const rule = css.slice(start, css.indexOf('}', start))
+    expect(rule).toContain('overflow-y: auto')
+    expect(rule).toContain('--git-section-head:')
+    expect(rule).toContain('--git-row:')
   })
 })
 
