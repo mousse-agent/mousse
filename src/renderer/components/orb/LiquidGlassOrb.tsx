@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react'
+import { useMotionScale } from '../../lib/motion'
 import { normalizeOrbAppearance } from './orbAppearance'
 import './orb.css'
 
@@ -17,15 +18,11 @@ export function LiquidGlassOrb({ appearance, label, className = '', compact = fa
   const frameRef = useRef<number | null>(null)
   const [visible, setVisible] = useState(false)
   const [foreground, setForeground] = useState(false)
-  const [reducedMotion, setReducedMotion] = useState(true)
+  const motionOff = useMotionScale() === 0
 
   useEffect(() => {
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const motion = () => setReducedMotion(media.matches)
     const visibility = () => setForeground(document.visibilityState === 'visible')
-    motion()
     visibility()
-    media.addEventListener('change', motion)
     document.addEventListener('visibilitychange', visibility)
     const host = hostRef.current
     const observer = typeof IntersectionObserver !== 'undefined'
@@ -34,14 +31,13 @@ export function LiquidGlassOrb({ appearance, label, className = '', compact = fa
     if (host && observer) observer.observe(host)
     else setVisible(true)
     return () => {
-      media.removeEventListener('change', motion)
       document.removeEventListener('visibilitychange', visibility)
       observer?.disconnect()
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
     }
   }, [])
 
-  const moving = active && visible && foreground && !reducedMotion && !compact && value.motion > 0
+  const moving = active && visible && foreground && !motionOff && !compact && value.motion > 0
   const canParallax = moving && value.parallax
   function resetParallax() {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)

@@ -6,11 +6,12 @@ import { createReviewComment, joinReviewPath, REVIEW_EXCERPT_MAX_LINES, type Cha
 import type { ReviewFileResult, ReviewFileSide, ReviewScope } from '../../../shared/review'
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
-import { CODE_FONT } from '../../lib/typography'
+import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
 import { languageForPath } from '../../utils/fileEditor'
 import { commentDecorations, commentScopeLabel, commentsForFile, scopeKey, selectedLineRange } from './reviewComments'
 import { isPlaceholderSide, placeholderFor, viewChangeLabel } from './reviewModel'
+import { DelayedLoader } from '../ui/DelayedLoader'
 
 const NO_REFERENCES: ChatReference[] = []
 
@@ -252,6 +253,7 @@ export function ReviewDiffPane({
     }
   }
 
+  const codeFont = useMonacoCodeFont()
   const options = useMemo<editor.IDiffEditorConstructionOptions>(
     () => ({
       automaticLayout: true,
@@ -266,10 +268,10 @@ export function ReviewDiffPane({
       folding: true,
       renderWhitespace: 'selection',
       wordWrap: 'off',
-      fontFamily: CODE_FONT,
+      fontFamily: codeFont,
       fontSize: 12
     }),
-    [ignoreWhitespace]
+    [codeFont, ignoreWhitespace]
   )
 
   const beforeMount: BeforeMount = (monaco) => applyEditorTheme(monaco)
@@ -364,7 +366,7 @@ export function ReviewDiffPane({
         </div>
       )
     }
-    if (!current) return <div className="git-diff-empty">Loading diff…</div>
+    if (!current) return <div className="git-diff-empty"><DelayedLoader label="Loading diff" /></div>
     const { original, modified } = current
     if (isPlaceholderSide(original) || isPlaceholderSide(modified) || (original === null && modified === null)) {
       return <Placeholders original={original} modified={modified} />

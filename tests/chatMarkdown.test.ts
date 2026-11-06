@@ -101,6 +101,12 @@ describe('chat Markdown list rendering', () => {
     expect(markup).not.toContain('an-md-diagram')
   })
 
+  it('offers Copy on a code block and no Download', () => {
+    const markup = render('```ts\nconst a = 1\n```\n')
+    expect(markup).toContain('aria-label="Copy Code"')
+    expect(markup).not.toContain('aria-label="Download file"')
+  })
+
   it('renders inline code compactly without the roomy default pill', () => {
     const markup = render('- item with (`abc123`) code')
 

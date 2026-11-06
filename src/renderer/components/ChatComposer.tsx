@@ -42,6 +42,7 @@ import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
+import { openSettingsSection } from '../lib/settingsNavigation'
 
 export interface AttachedFile {
   id: string
@@ -95,6 +96,8 @@ export interface ChatComposerProps {
    * when Alt+Enter sent the text during a run: it goes into the running turn.
    */
   onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
+  sendLabel?: string
   onStop?: () => void
   /** The thread's last sent prompt, which Up in an empty box brings back. */
   lastPrompt?: () => string | undefined
@@ -176,6 +179,7 @@ export function ChatComposer({
   disabled = false,
   placeholder,
   onSend,
+  sendLabel,
   onStop,
   lastPrompt,
   disableSkillsPicker = false,
@@ -291,7 +295,7 @@ export function ChatComposer({
     : mentionResult?.indexing
       ? 'Indexing files…'
       : mentionResult?.truncated && mentionResult.results.length > 0
-        ? 'Large project: showing the first matches, keep typing'
+        ? 'First matches only'
         : null
   // With nothing to pick and nothing to say the list stays closed, so Enter sends the text as typed.
   const showMentionPicker =
@@ -820,7 +824,7 @@ export function ChatComposer({
           }}
           emptyText={
             enabledSkills.length === 0
-              ? 'No skills enabled. Enable skills in Settings.'
+              ? <>No skills · <button type="button" className="composer-command-suggestion-empty-link" onClick={() => openSettingsSection('integrations')}>Settings</button></>
               : 'No skills match that filter.'
           }
           registerRow={registerSuggestionRow}
@@ -893,6 +897,7 @@ export function ChatComposer({
         recordingPending={recordingPending}
         transcribing={transcribing}
         onSend={() => submit()}
+        sendLabel={sendLabel}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}

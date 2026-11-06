@@ -116,6 +116,18 @@
   gap: 7px;
 }
 .chat-run-interrupted svg { flex-shrink: 0; }
+.chat-run-interrupted-action {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.chat-run-interrupted-action:hover { background: var(--ui-hover); }
+.chat-run-interrupted-action:focus-visible { outline: 1px solid var(--ui-line-strong); outline-offset: 1px; }
 
 /* Browsing earlier messages leaves one input line; focus restores the full draft. */
 .mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input {
@@ -125,8 +137,8 @@
   overflow-y: hidden;
   white-space: nowrap;
 }
+/* No fixed height on the wrap: it follows the textarea, so the two move together while folding. */
 .mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input-wrap {
-  height: 34px;
   min-height: 34px;
   max-height: 34px;
   overflow: hidden;
@@ -134,6 +146,26 @@
 .mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input-backdrop {
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* Scrolling folds and unfolds the input smoothly (data-composer-motion is set only
+   around a scroll-driven change). Focus and typing switch it at once. */
+.mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input,
+.mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input-wrap {
+  transition:
+    height 200ms ease-out,
+    min-height 200ms ease-out,
+    max-height 200ms ease-out;
+}
+/* Mid-animation the input is shorter than its text box: keep its scrollbar from showing. */
+.mousse-chat-shell[data-composer-motion]:not(:has(.composer:focus-within)) .composer-input {
+  overflow-y: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mousse-chat-shell[data-composer-motion] .composer-input,
+  .mousse-chat-shell[data-composer-motion] .composer-input-wrap {
+    transition: none;
+  }
 }
 
 .chat-input-area .composer-input {

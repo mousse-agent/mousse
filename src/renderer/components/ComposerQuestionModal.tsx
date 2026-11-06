@@ -1,5 +1,5 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
-import { Check, X } from '../lib/icons'
+import { useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type Ref } from 'react'
+import { Check, IconMessageCircleQuestion } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
 import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
 
@@ -7,7 +7,14 @@ interface ComposerQuestionModalProps {
   pending: PendingUserQuestions
   onSubmit: (answers: UserQuestionAnswers) => void
   onDismiss: () => void
+  /** Filled with the handle the composer uses to answer the shown question. */
+  handleRef?: Ref<QuestionCardHandle | null>
+  /** Whether a message from the composer would answer the last open question (and so submit), each time that changes. */
+  onComposerSubmitsChange?: (submits: boolean) => void
 }
+
+/** How long a picked single choice stays visible before the next question slides in. */
+export const AUTO_ADVANCE_MS = 250
 
 export function isQuestionAnswered(
   question: UserQuestion,
@@ -44,6 +51,45 @@ export function resolveQuestionAnswers(
 /** The composer's hint while an approval request waits: a message is also an answer. */
 export const APPROVAL_COMPOSER_PLACEHOLDER = 'Type to deny and redirect'
 
+/** The composer's hint while the agent's questions are open above it. */
+export const QUESTION_COMPOSER_PLACEHOLDER = 'Or reply in your own words'
+
+/**
+ * What sending from the composer does while questions are open: the message answers the question the
+ * card shows, and submits all the answers when that was the last one without an answer. A message with
+ * images cannot be an answer; then the questions are skipped and the message is sent.
+ */
+export function questionComposerSend(hasImages: boolean, submits: boolean): { answers: boolean; label: string } {
+  if (hasImages) return { answers: false, label: 'Skip questions and send' }
+  return { answers: true, label: submits ? 'Answer and submit' : 'Answer this question' }
+}
+
+/** The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…" field. */
+export function answerWithMessage(
+  questions: UserQuestion[],
+  step: number,
+  answers: UserQuestionAnswers,
+  customs: Record<string, string>,
+  message: string
+): { answers: UserQuestionAnswers; customs: Record<string, string>; complete: boolean } {
+  const question = questions[step]
+  if (!question) return { answers, customs, complete: false }
+  const nextCustoms = { ...customs, [question.id]: message }
+  // Single choice: the typed answer replaces a picked option, as "Other…" does. Several: it joins the picks.
+  const nextAnswers = question.allowMultiple ? answers : { ...answers, [question.id]: '' }
+  const complete = questions.every((each) => isQuestionAnswered(each, nextAnswers[each.id], nextCustoms[each.id]))
+  return { answers: nextAnswers, customs: nextCustoms, complete }
+}
+
+/** Lets the composer answer the question the card shows. */
+export interface QuestionCardHandle {
+  /**
+   * Answers the shown question with `message`. When every question then has an answer, returns all of them
+   * for the caller to submit; otherwise the card moves on to the next unanswered question and returns null.
+   */
+  answerWithMessage: (message: string) => UserQuestionAnswers | null
+}
+
 /** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
 export function describeAnswerOutcome(outcome: QuestionAnswerOutcome | undefined): string | null {
   if (!outcome || outcome.ok) return null
@@ -72,6 +118,21 @@ export function approvalNotes(approval: PendingApprovalInfo): string[] {
   return notes
 }
 
+/** The dialog's label: "Question", or how many there are ("3 questions"). The dots show the position. */
+export function questionDialogLabel(total: number): string {
+  return total > 1 ? `${total} questions` : 'Question'
+}
+
+/**
+ * Where to go after a question is answered: the next unanswered one after `from`, else the first
+ * unanswered one before it, else the last question (where Submit is).
+ */
+export function nextUnansweredStep(answered: boolean[], from: number): number {
+  for (let index = from + 1; index < answered.length; index++) if (!answered[index]) return index
+  for (let index = 0; index < from; index++) if (!answered[index]) return index
+  return Math.max(answered.length - 1, 0)
+}
+
 function initAnswers(questions: UserQuestion[]): UserQuestionAnswers {
   const initial: UserQuestionAnswers = {}
   for (const question of questions) {
@@ -80,116 +141,303 @@ function initAnswers(questions: UserQuestion[]): UserQuestionAnswers {
   return initial
 }
 
-/** The choices of one question: a filled row marks what is selected; arrow keys move between rows. */
-export function QuestionOptionList({ options, value, allowMultiple, onToggle }: {
+/** A free-text answer offered as the last row: "Other…" until chosen, then a text field. */
+export interface QuestionOtherChoice {
+  open: boolean
+  value: string
+  onOpen: () => void
+  onClose: () => void
+  onChange: (value: string) => void
+  onEnter: () => void
+}
+
+/**
+ * The choices of one question: full-width rows with a radio (one answer) or a checkbox (several);
+ * a filled row and indicator mark what is selected. One Tab stop: arrow keys move between rows,
+ * Enter or Space picks, Tab goes on to the footer.
+ */
+export function QuestionOptionList({ options, value, allowMultiple, onToggle, other, label }: {
   options: UserQuestion['options']
   value: string | string[] | undefined
   allowMultiple?: boolean
   onToggle: (optionId: string) => void
+  other?: QuestionOtherChoice
+  label?: string
 }) {
+  const isSelected = (optionId: string) =>
+    allowMultiple ? Array.isArray(value) && value.includes(optionId) : value === optionId
+  const count = options.length + (other ? 1 : 0)
+  const firstSelected = other?.open && !allowMultiple
+    ? options.length
+    : options.findIndex((option) => isSelected(option.id))
+  const [rover, setRover] = useState(firstSelected >= 0 ? firstSelected : 0)
+  const tabStop = Math.min(rover, Math.max(count - 1, 0))
+  const role = allowMultiple ? 'checkbox' : 'radio'
+
   const moveFocus = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
     if (!step) return
-    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'))
-    const at = rows.indexOf(document.activeElement as HTMLButtonElement)
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('.composer-question-choice'))
+    const at = rows.indexOf(document.activeElement as HTMLElement)
     if (at < 0) return
     event.preventDefault()
     rows[(at + step + rows.length) % rows.length]?.focus()
   }
+
   return (
-    <div className="composer-question-options" onKeyDown={moveFocus}>
-      {options.map((option) => {
-        const selected = allowMultiple
-          ? Array.isArray(value) && value.includes(option.id)
-          : value === option.id
+    <div
+      className="composer-question-options"
+      role={allowMultiple ? 'group' : 'radiogroup'}
+      aria-label={label}
+      onKeyDown={moveFocus}
+    >
+      {options.map((option, index) => {
+        const selected = isSelected(option.id)
         return (
           <button
             key={option.id}
             type="button"
-            className={`composer-question-option${selected ? ' selected' : ''}`}
-            aria-pressed={selected}
+            role={role}
+            aria-checked={selected}
+            tabIndex={index === tabStop ? 0 : -1}
+            className={`composer-question-option composer-question-choice${selected ? ' selected' : ''}`}
+            onFocus={() => setRover(index)}
             onClick={() => onToggle(option.id)}
           >
+            <QuestionIndicator kind={role} checked={selected} />
             <span className="composer-question-option-label">{option.label}</span>
-            {selected && <Check size={14} strokeWidth={2} className="composer-question-option-check" aria-hidden="true" />}
           </button>
         )
       })}
+      {other && (other.open ? (
+        <div className="composer-question-option composer-question-other selected">
+          <span
+            className="composer-question-other-toggle"
+            role={role}
+            aria-checked="true"
+            aria-label="Other"
+            onClick={allowMultiple ? other.onClose : undefined}
+          >
+            <QuestionIndicator kind={role} checked />
+          </span>
+          <input
+            type="text"
+            autoFocus
+            value={other.value}
+            tabIndex={tabStop === options.length ? 0 : -1}
+            className="composer-question-other-input composer-question-choice"
+            aria-label="Other answer"
+            placeholder="Type your answer"
+            onFocus={() => setRover(options.length)}
+            onChange={(event) => other.onChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                other.onEnter()
+              }
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          role={role}
+          aria-checked={false}
+          tabIndex={tabStop === options.length ? 0 : -1}
+          className="composer-question-option composer-question-choice"
+          onFocus={() => setRover(options.length)}
+          onClick={other.onOpen}
+        >
+          <QuestionIndicator kind={role} checked={false} />
+          <span className="composer-question-option-label">Other…</span>
+        </button>
+      ))}
     </div>
   )
 }
 
-export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: ComposerQuestionModalProps) {
+function QuestionIndicator({ kind, checked }: { kind: 'radio' | 'checkbox'; checked: boolean }) {
+  return (
+    <span className={`composer-question-indicator is-${kind}${checked ? ' is-checked' : ''}`} aria-hidden="true">
+      {kind === 'checkbox' && checked && <Check size={11} strokeWidth={2.6} />}
+    </span>
+  )
+}
+
+export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef, onComposerSubmitsChange }: ComposerQuestionModalProps) {
   const total = pending.questions.length
   const [step, setStep] = useState(0)
+  // Which way the current question slid in: 1 from the right, -1 from the left, 0 not at all.
+  const [direction, setDirection] = useState(0)
   const [answers, setAnswers] = useState<UserQuestionAnswers>(() => initAnswers(pending.questions))
   const [customs, setCustoms] = useState<Record<string, string>>({})
+  const [otherOpen, setOtherOpen] = useState<Record<string, boolean>>({})
+  const rootRef = useRef<HTMLDivElement>(null)
+  const advanceTimer = useRef<number | undefined>(undefined)
+  // Where focus goes after moving between questions: the new question's choices, or its dot.
+  const moved = useRef<'choices' | 'dot' | null>(null)
+
+  const cancelAdvance = () => {
+    if (advanceTimer.current !== undefined) window.clearTimeout(advanceTimer.current)
+    advanceTimer.current = undefined
+  }
 
   // Fresh request -> reset wizard state (initializer alone only runs on mount).
   useEffect(() => {
+    cancelAdvance()
     setStep(0)
+    setDirection(0)
     setAnswers(initAnswers(pending.questions))
     setCustoms({})
+    setOtherOpen({})
   }, [pending.requestId])
 
-  const active = pending.questions[Math.min(step, Math.max(total - 1, 0))]
-  if (!active) return null
+  useEffect(() => cancelAdvance, [])
+
   const clampedStep = Math.min(step, Math.max(total - 1, 0))
 
-  const answered = (question: UserQuestion): boolean =>
-    isQuestionAnswered(question, answers[question.id], customs[question.id])
+  // A message from the composer answers the shown question, as its "Other…" text, then the card moves
+  // on to the next unanswered question; focus stays in the composer for the next answer.
+  useImperativeHandle(handleRef, () => ({
+    answerWithMessage: (message: string) => {
+      cancelAdvance()
+      const next = answerWithMessage(pending.questions, clampedStep, answers, customs, message)
+      const question = pending.questions[clampedStep]
+      setAnswers(next.answers)
+      setCustoms(next.customs)
+      if (next.complete) return resolveQuestionAnswers(pending.questions, next.answers, next.customs)
+      // Going back shows the message in that question's "Other…" field (it slides out now, so nothing takes focus).
+      if (question) setOtherOpen((current) => ({ ...current, [question.id]: true }))
+      const answeredNow = pending.questions.map((each) => isQuestionAnswered(each, next.answers[each.id], next.customs[each.id]))
+      const target = nextUnansweredStep(answeredNow, clampedStep)
+      if (target !== clampedStep) {
+        setDirection(target > clampedStep ? 1 : -1)
+        setStep(target)
+      }
+      return null
+    }
+  }))
+
+  // Whether the shown question is the only one left without an answer: then a message from the composer submits.
+  const composerSubmits = pending.questions.every((question, index) =>
+    index === clampedStep || isQuestionAnswered(question, answers[question.id], customs[question.id]))
+  const onComposerSubmitsChangeRef = useRef(onComposerSubmitsChange)
+  onComposerSubmitsChangeRef.current = onComposerSubmitsChange
+  useEffect(() => {
+    onComposerSubmitsChangeRef.current?.(composerSubmits)
+  }, [composerSubmits])
+
+  // After moving between questions, focus follows to the new question's choices.
+  useEffect(() => {
+    const target = moved.current
+    if (!target) return
+    moved.current = null
+    const selector = target === 'dot' ? '.composer-question-dot.is-current' : '.composer-question-choice[tabindex="0"]'
+    rootRef.current?.querySelector<HTMLElement>(selector)?.focus()
+  }, [clampedStep])
+
+  const active = pending.questions[clampedStep]
+  if (!active) return null
+
+  const answered = (question: UserQuestion, current = answers, currentCustoms = customs): boolean =>
+    isQuestionAnswered(question, current[question.id], currentCustoms[question.id])
   const isLast = clampedStep >= total - 1
+  // An empty answer is never sent: Submit waits until every question has one.
+  const allAnswered = pending.questions.every((question) => answered(question))
 
-  const toggleOption = (questionId: string, optionId: string, allowMultiple?: boolean) => {
-    if (allowMultiple) {
-      setAnswers((current) => {
-        const existing = Array.isArray(current[questionId]) ? [...current[questionId]] : []
-        const index = existing.indexOf(optionId)
-        if (index >= 0) {
-          existing.splice(index, 1)
-        } else {
-          existing.push(optionId)
-        }
-        return { ...current, [questionId]: existing }
-      })
+  const goTo = (index: number, focus: 'choices' | 'dot' = 'choices') => {
+    cancelAdvance()
+    const target = Math.max(0, Math.min(index, total - 1))
+    if (target === clampedStep) return
+    moved.current = focus
+    setDirection(target > clampedStep ? 1 : -1)
+    setStep(target)
+  }
+
+  const goToNextUnanswered = (current: UserQuestionAnswers, currentCustoms: Record<string, string>) => {
+    goTo(nextUnansweredStep(pending.questions.map((question) => answered(question, current, currentCustoms)), clampedStep))
+  }
+
+  const submit = () => {
+    if (!allAnswered) return
+    cancelAdvance()
+    onSubmit(resolveQuestionAnswers(pending.questions, answers, customs))
+  }
+
+  const toggleOption = (question: UserQuestion, optionId: string) => {
+    if (question.allowMultiple) {
+      const existing = Array.isArray(answers[question.id]) ? [...answers[question.id]] : []
+      const index = existing.indexOf(optionId)
+      if (index >= 0) existing.splice(index, 1)
+      else existing.push(optionId)
+      setAnswers({ ...answers, [question.id]: existing })
       return
     }
-    // Single-select: picking an option clears the custom answer.
-    setAnswers((current) => ({ ...current, [questionId]: optionId }))
-    setCustoms((current) => (current[questionId] ? { ...current, [questionId]: '' } : current))
+    // Single choice: picking an option closes "Other", then the next question slides in.
+    const nextAnswers = { ...answers, [question.id]: optionId }
+    const nextCustoms = customs[question.id] ? { ...customs, [question.id]: '' } : customs
+    setAnswers(nextAnswers)
+    setCustoms(nextCustoms)
+    setOtherOpen((current) => (current[question.id] ? { ...current, [question.id]: false } : current))
+    if (isLast) return
+    cancelAdvance()
+    advanceTimer.current = window.setTimeout(() => {
+      advanceTimer.current = undefined
+      goToNextUnanswered(nextAnswers, nextCustoms)
+    }, AUTO_ADVANCE_MS)
   }
 
-  const setCustom = (questionId: string, value: string, allowMultiple?: boolean) => {
-    setCustoms((current) => ({ ...current, [questionId]: value }))
-    if (!allowMultiple && value.trim().length > 0) {
-      // Single-select: a custom answer replaces the picked option.
-      setAnswers((current) =>
-        current[questionId] ? { ...current, [questionId]: '' } : current
-      )
-    }
+  const openOther = (question: UserQuestion) => {
+    cancelAdvance()
+    setOtherOpen((current) => ({ ...current, [question.id]: true }))
+    // Single choice: "Other" replaces the picked option.
+    if (!question.allowMultiple) setAnswers((current) => (current[question.id] ? { ...current, [question.id]: '' } : current))
   }
 
-  const goTo = (index: number) => {
-    setStep(Math.max(0, Math.min(index, total - 1)))
+  const closeOther = (question: UserQuestion) => {
+    setOtherOpen((current) => ({ ...current, [question.id]: false }))
+    setCustoms((current) => ({ ...current, [question.id]: '' }))
   }
 
-  const handleNext = () => {
-    if (isLast) {
-      onSubmit(resolveQuestionAnswers(pending.questions, answers, customs))
-      return
-    }
-    goTo(clampedStep + 1)
+  const advance = () => {
+    if (!answered(active)) return
+    if (isLast) submit()
+    else goToNextUnanswered(answers, customs)
   }
 
   const value = answers[active.id]
-  const customValue = customs[active.id] ?? ''
+  const label = questionDialogLabel(total)
+  const otherUsed = Boolean(otherOpen[active.id]) && (customs[active.id] ?? '').trim().length > 0
+  // A single choice moves on by itself; several choices or a typed answer need Next.
+  const showNext = !isLast && answered(active) && (Boolean(active.allowMultiple) || otherUsed)
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return
+    event.preventDefault()
+    event.stopPropagation()
+    cancelAdvance()
+    onDismiss()
+  }
 
   return (
-    <div className="composer-question-modal" role="dialog" aria-label="Assistant questions">
+    <div ref={rootRef} className="composer-question-modal" role="dialog" aria-label={label} onKeyDown={onKeyDown}>
       <div className="composer-question-modal-header">
-        <span className="composer-question-modal-title">Q:</span>
+        <h3 className="composer-question-modal-title">
+          <IconMessageCircleQuestion size={15} aria-hidden="true" />
+          {label}
+        </h3>
         {total > 1 && (
-          <div className="composer-question-steps" role="tablist" aria-label="Question navigator">
+          <div
+            className="composer-question-dots"
+            role="tablist"
+            aria-label="Questions"
+            onKeyDown={(event) => {
+              const offset = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+              if (!offset) return
+              event.preventDefault()
+              goTo(clampedStep + offset, 'dot')
+            }}
+          >
             {pending.questions.map((question, index) => {
               const done = answered(question)
               const current = index === clampedStep
@@ -198,27 +446,25 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
                   key={question.id}
                   type="button"
                   role="tab"
+                  tabIndex={current ? 0 : -1}
                   aria-selected={current}
-                  aria-label={`Question ${index + 1}${done ? ' (answered)' : ''}`}
-                  className={`composer-question-step${current ? ' active' : ''}${done ? ' answered' : ''}`}
+                  aria-label={`Question ${index + 1} of ${total}${done ? ', answered' : ''}`}
+                  title={`Question ${index + 1}`}
+                  className={`composer-question-dot${current ? ' is-current' : ''}${done ? ' is-answered' : ''}`}
                   onClick={() => goTo(index)}
-                >
-                </button>
+                />
               )
             })}
           </div>
         )}
-        <button
-          type="button"
-          className="composer-question-modal-close"
-          aria-label="Dismiss questions"
-          onClick={onDismiss}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
       </div>
       <div className="composer-question-modal-body">
-        <div key={active.id} className="composer-question-block">
+        <div
+          key={active.id}
+          className={`composer-question-slide${direction > 0 ? ' from-next' : direction < 0 ? ' from-previous' : ''}`}
+          role="tabpanel"
+          aria-label={total > 1 ? `Question ${clampedStep + 1} of ${total}` : undefined}
+        >
           <p className={`composer-question-prompt${pending.approval ? ' composer-question-prompt--approval' : ''}`}>{active.prompt}</p>
           {pending.approval && approvalNotes(pending.approval).map((note) => (
             <p key={note} className="composer-question-reason">{note}</p>
@@ -230,40 +476,41 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
             options={active.options}
             value={value}
             allowMultiple={active.allowMultiple}
-            onToggle={(optionId) => toggleOption(active.id, optionId, active.allowMultiple)}
-          />
-          <input
-            type="text"
-            value={customValue}
-            onChange={(event) => setCustom(active.id, event.target.value, active.allowMultiple)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                handleNext()
-              }
+            label={active.prompt}
+            onToggle={(optionId) => toggleOption(active, optionId)}
+            other={{
+              open: Boolean(otherOpen[active.id]),
+              value: customs[active.id] ?? '',
+              onOpen: () => openOther(active),
+              onClose: () => closeOther(active),
+              onChange: (text) => setCustoms((current) => ({ ...current, [active.id]: text })),
+              onEnter: advance
             }}
-            placeholder="Or type a custom answer…"
-            aria-label={`Custom answer for question ${clampedStep + 1}`}
-            className="composer-question-custom"
           />
         </div>
       </div>
       <div className="composer-question-modal-footer">
-        <button
-          type="button"
-          className="composer-question-dismiss"
-          disabled={clampedStep === 0}
-          onClick={() => goTo(clampedStep - 1)}
-        >
-          Back
+        <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
+          Skip
         </button>
-        <button
-          type="button"
-          className="composer-question-submit"
-          onClick={handleNext}
-        >
-          {isLast ? 'Submit' : 'Next'}
-        </button>
+        <span className="composer-question-footer-end">
+          {isLast && !allAnswered && total > 1 && <span className="composer-question-hint">Answer all to submit</span>}
+          {clampedStep > 0 && (
+            <button type="button" className="composer-question-btn" onClick={() => goTo(clampedStep - 1)}>
+              Back
+            </button>
+          )}
+          {showNext && (
+            <button type="button" className="composer-question-btn" onClick={advance}>
+              Next
+            </button>
+          )}
+          {isLast && (
+            <button type="button" className="composer-question-btn is-primary" disabled={!allAnswered} onClick={submit}>
+              Submit
+            </button>
+          )}
+        </span>
       </div>
     </div>
   )

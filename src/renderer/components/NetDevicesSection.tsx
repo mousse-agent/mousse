@@ -315,6 +315,7 @@ export function NetDevicesSection() {
       {!self && (
         <SettingsRow
           title="Device name"
+          anchor="devices-name"
           htmlFor={`${id}-name`}
           control={<input id={`${id}-name`} className="settings-input" value={name} maxLength={120} disabled={busy || !!status?.restartRequired} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />}
         />
@@ -322,6 +323,7 @@ export function NetDevicesSection() {
       {needsPassphrase && (
         <SettingsRow
           title="Passphrase"
+          anchor="devices-passphrase"
           htmlFor={`${id}-new-passphrase`}
           description="Protects network keys instead of the keychain. You enter it after each restart."
           control={
@@ -334,6 +336,7 @@ export function NetDevicesSection() {
       )}
       <SettingsRow
         title={selfDevice?.name ?? 'Networking'}
+        anchor="devices-networking"
         description={networkingLine(status)}
         control={<Switch checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
       />
@@ -351,6 +354,7 @@ export function NetDevicesSection() {
       {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
         <SettingsRow
           title="Let my other computers work on this computer's threads"
+          anchor="devices-inbound"
           description={workOnThreads
             ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
             : 'Off · no other computer can open or change this computer’s threads'}
@@ -361,6 +365,7 @@ export function NetDevicesSection() {
         (!status.protected || locked) ? (
           <SettingsRow
             title={locked ? 'Unlock' : 'Passphrase'}
+            anchor="devices-passphrase"
             htmlFor={`${id}-passphrase`}
             description={locked ? 'Enter the passphrase for this device’s network keys' : 'Protect this device’s network keys with a passphrase'}
             control={
@@ -371,13 +376,14 @@ export function NetDevicesSection() {
             }
           />
         ) : (
-          <SettingsRow title="Passphrase" description="Network keys on this device are protected" />
+          <SettingsRow anchor="devices-passphrase" title="Passphrase" description="Network keys on this device are protected" />
         )
       )}
     </SettingsGroup>
 
     {status && (
       <SettingsGroup
+        anchor="devices-list"
         title="My devices"
         icon={MonitorSmartphone}
         className="devices-group"
@@ -466,7 +472,7 @@ export function NetDevicesSection() {
     )}
 
     {status && served && !showAddons && (
-      <SettingsGroup className="devices-group" title="Tailscale Serve">
+      <SettingsGroup className="devices-group" anchor="devices-tailscale-serve" title="Tailscale Serve">
         <SettingsRow
           title="Tailscale Serve"
           description={servePending ? 'Started but not confirmed · Turn off Serve clears it' : `Still on · tailnet port ${served.servePort} forwards to this device, also while networking is off`}
@@ -479,7 +485,7 @@ export function NetDevicesSection() {
     {status && (
       <SettingsAdvanced>
         {showAddons && (
-          <SettingsGroup className="devices-group" title="Connection add-ons" description="Ways other devices can reach this one">
+          <SettingsGroup className="devices-group" anchor="devices-addons" title="Connection add-ons" description="Ways other devices can reach this one">
             {manifests.map((manifest) => {
               const live = status.transports?.find((t) => t.id === manifest.id)
               const on = !!live?.enabled
@@ -568,6 +574,7 @@ export function NetDevicesSection() {
         )}
 
         <SettingsGroup
+          anchor="devices-checks"
           title="Connection checks"
           className="devices-group"
           action={<button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.doctor', {}, (value) => setDoctor(value as NetDoctor))}><RefreshCw size={14} />Check connection</button>}
