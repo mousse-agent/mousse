@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { formatBinding } from '../../shared/commands'
+import { formatBinding, getCommand } from '../../shared/commands'
 import { Search, X } from '../lib/icons'
 import { currentContext, isCommandRegistered, useCommandBindings, useCommandOverlay, useCommandRegistry } from '../commands/commandRegistry'
 import { chooseCommandPaletteItem, dismissPalette } from '../commands/paletteActions'
@@ -113,7 +113,8 @@ function PaletteDialog() {
     return buildPaletteGroups({ query, commands, threads, projects, computers }).map((group) => ({
       label: group.label,
       items: group.items.map((item) => {
-        const binding = item.kind === 'command' ? bindings[item.id] : null
+        // A scoped binding (a surface letter) works only inside its view, so the palette does not offer it.
+        const binding = item.kind === 'command' && getCommand(item.id).scope === 'global' ? bindings[item.id] : null
         return { ...item, shortcut: binding ? formatBinding(binding, platform) : undefined }
       })
     }))

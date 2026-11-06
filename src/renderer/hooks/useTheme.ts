@@ -7,6 +7,9 @@ import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearV
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
+import { applyFontSettings } from '../lib/appFonts'
+import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
+import { setAnimationSpeed } from '../lib/motion'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -193,6 +196,8 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
+  applyFontSettings(normalized)
+  setAnimationSpeed(normalized.animationSpeed)
 }
 
 async function syncWindowBackground(): Promise<void> {
@@ -237,6 +242,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       if (cancelled) return
       applyAppearance(settings.appearance)
       setRenderMath(normalizeAppearance(settings.appearance).renderMath)
+      setThreadProjectColors(normalizeAppearance(settings.appearance).threadProjectColors)
       if (applyMaterial) {
         await syncWindowBackground()
       }
@@ -247,6 +253,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
     const unsub = window.mousse.settings.onChanged((settings) => {
       applyAppearance(settings.appearance)
       setRenderMath(normalizeAppearance(settings.appearance).renderMath)
+      setThreadProjectColors(normalizeAppearance(settings.appearance).threadProjectColors)
       if (applyMaterial) {
         void syncWindowBackground()
       }

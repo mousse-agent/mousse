@@ -39,12 +39,10 @@ html:not(.platform-darwin) .app {
 }
 
 .app .threads-sidebar { --threads-sidebar-row-height: 28px; }
-.app .threads-sidebar-toolbar { padding: 5px 8px 2px; }
-.app .threads-sidebar-toolbar-button { border-radius: 5px; }
 
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 4px 8px 8px;
+  margin: 8px;
   padding: 2px;
   border-radius: 7px;
   background: transparent;
@@ -81,7 +79,8 @@ html:not(.platform-darwin) .app {
   font-size: 13px;
 }
 
-.app .threads-sidebar-children { margin: 1px 0 4px 14px; padding-left: 4px; }
+/* No bottom margin: inside the Collapse it would add to the project's 4px. */
+.app .threads-sidebar-children { margin: 1px 0 0 14px; padding-left: 4px; }
 .app .threads-sidebar-thread { gap: 7px; padding: 4px 7px; border-radius: 5px; font-size: 13px; }
 .app .threads-sidebar-thread-root { padding-left: 9px; }
 .app .threads-sidebar-thread-name-text { will-change: auto; }

@@ -15,6 +15,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     variant = 'ghost',
     size = 16,
     className = '',
+    children,
     ...props
   },
   ref
@@ -29,6 +30,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       {...props}
     >
       <Icon size={variant === 'titlebar' ? 14 : size} strokeWidth={2} />
+      {children}
     </button>
   )
 })

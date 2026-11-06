@@ -1,6 +1,7 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
@@ -169,6 +170,11 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
+  fonts: {
+    /** A Google Fonts family's cached files; downloads them first only when `download` is true. */
+    loadGoogle: (family: string, role: FontRole, download: boolean): Promise<LoadedGoogleFont | null> =>
+      ipcRenderer.invoke('fonts:loadGoogle', family, role, download)
+  },
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
