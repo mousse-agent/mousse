@@ -711,7 +711,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         dragged.type === target.type &&
         dragged.id !== target.id &&
         Boolean(dragged.feed) === Boolean(target.feed) &&
-        (dragged.type === 'project' || dragged.feed || (dragged.projectId === target.projectId && Boolean(dragged.pinned) === Boolean(target.pinned)))
+        // Threads drop only among threads of the same kind (pinned ones list first); a Threads tab row may cross projects.
+        (dragged.type === 'project' || (Boolean(dragged.pinned) === Boolean(target.pinned) && (dragged.feed || dragged.projectId === target.projectId)))
     )
   }
 

@@ -32,6 +32,9 @@ export function compareThreadFeed(a: Thread, b: Thread): number {
 export function sortThreadFeed<T extends Thread>(threads: readonly T[], arranged: readonly string[] = []): T[] {
   const place = new Map(arranged.map((id, index) => [id, index]))
   return [...threads].sort((a, b) => {
+    // Pinned threads list first; the dragged order applies within each part.
+    const pinned = Number(Boolean(b.pinnedAt)) - Number(Boolean(a.pinnedAt))
+    if (pinned !== 0) return pinned
     const left = place.get(a.id)
     const right = place.get(b.id)
     if (left === undefined || right === undefined) {
