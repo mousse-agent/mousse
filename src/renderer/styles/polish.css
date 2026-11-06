@@ -499,16 +499,6 @@ html[data-theme='high-contrast'] {
   border-top: 1px solid var(--ui-line);
 }
 
-/* Recently deleted sits right under Settled; keep the pair tight. */
-.app .threads-sidebar-section-settled.collapsed:has(+ .threads-sidebar-section-trash:not([hidden])) {
-  margin-bottom: 0;
-}
-
-.app .threads-sidebar-section-settled + .threads-sidebar-section-trash {
-  margin-top: 4px;
-  padding-top: 0;
-}
-
 /* ---------- Chats: roster, groups, recent ---------- */
 .app .chats-sidebar-content {
   padding: 0 var(--ui-gutter) 8px;

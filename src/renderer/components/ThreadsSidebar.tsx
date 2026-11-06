@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search, Shield } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search, Shield, Trash2 } from '../lib/icons'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
@@ -17,7 +17,8 @@ import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
-import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
+import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
+import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { Collapse } from './ui/Collapse'
 
 import {
@@ -360,6 +361,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
   const [settledExpanded, setSettledExpanded] = useState(false)
+  // The archived threads waiting on a delete confirmation, and how that delete is going.
+  const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
+  const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })
+  const archivedHeadingRef = useRef<HTMLButtonElement>(null)
   const [recentExpanded, setRecentExpanded] = useState(false)
   // The project whose "start from a pull request" dialog is open.
   const [pullRequestProject, setPullRequestProject] = useState<{ id: string; name: string } | null>(null)
@@ -424,6 +429,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     [listedThreads, agentThreadIds]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
+  const localSettledCount = settledThreads.filter((thread) => !thread.node).length
 
   // A project that several computers hold for the same repository is one group; the others' projects that
   // match none of this computer's stay groups of their own, named with their computer.
@@ -434,7 +440,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
   )
-  const { byNode: computers } = useComputers(projects.some((project) => project.node))
+  const { byNode: computers } = useComputers(projects.some((project) => project.node) || settledThreads.some((thread) => thread.node))
+  const computerName = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
 
   useEffect(() => {
@@ -703,7 +710,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (target.type === 'thread') {
 
-      await window.mousse.threads.delete(target.id)
+      // Only an archived thread of this computer is deleted, and only after its confirmation.
+      if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
 
     } else {
 
@@ -714,6 +722,38 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }
 
 
+
+  const askDelete = (request: DeleteRequest) => {
+    setDeleteState({ busy: false })
+    setDeleteRequest(request)
+  }
+
+  const cancelDelete = () => {
+    if (deleteState.busy) return
+    setDeleteRequest(null)
+    setDeleteState({ busy: false })
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteRequest || deleteState.busy) return
+    const targets = deleteRequest.kind === 'one' ? [deleteRequest.thread] : deleteRequest.threads
+    setDeleteState({ busy: true })
+    const { deleted, error } = await deleteThreads(targets, (threadId) => window.mousse.threads.delete(threadId))
+    if (error) {
+      // What is still there stays in the dialog; what went is gone from it.
+      const left = targets.filter((thread) => !deleted.includes(thread.id))
+      setDeleteRequest(deleteRequest.kind === 'one' ? deleteRequest : { ...deleteRequest, threads: left })
+      setDeleteState({ busy: false, error })
+      return
+    }
+    setDeleteRequest(null)
+    setDeleteState({ busy: false })
+    // The row the delete started from is gone; keyboard focus goes to the Archived heading, not the page.
+    requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (!active || active === document.body || !active.isConnected) archivedHeadingRef.current?.focus()
+    })
+  }
 
   const submitRename = async (name: string) => {
 
@@ -973,7 +1013,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             pinned: Boolean(thread.pinnedAt),
 
-            settled: isSettled
+            settled: isSettled,
+
+            ...(thread.node ? { node: thread.node, computerName: computerName(thread.node) } : {})
 
           })
 
@@ -1075,6 +1117,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           >
             <Archive size={13} strokeWidth={2} aria-hidden="true" />
           </button>
+          {isSettled && (
+            <button
+              type="button"
+              className="threads-sidebar-thread-action danger"
+              data-action="delete"
+              aria-label={thread.node ? `Delete ${thread.name} on ${computerName(thread.node)}` : `Delete ${thread.name}…`}
+              title={thread.node ? `Delete on ${computerName(thread.node)}` : 'Delete…'}
+              disabled={Boolean(thread.node)}
+              onClick={(event) => {
+                event.stopPropagation()
+                askDelete({ kind: 'one', thread: { id: thread.id, name: thread.name } })
+              }}
+            >
+              <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+            </button>
+          )}
         </span>
       )}
 
@@ -1444,6 +1502,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         <div className="threads-sidebar-heading">
 
           <button
+            ref={archivedHeadingRef}
             type="button"
             className="threads-sidebar-heading-toggle"
             onClick={() => setSettledExpanded((expanded) => !expanded)}
@@ -1451,15 +1510,27 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             aria-label={settledExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
           >
             <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
-            <span>Settled</span>
+            <span>Archived</span>
             <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
           </button>
+          {localSettledCount > 0 && (
+            <button
+              type="button"
+              className="threads-sidebar-heading-action"
+              data-testid="archived-clear-all"
+              aria-label="Delete all archived threads…"
+              title="Delete all archived threads"
+              onClick={() => askDelete(clearAllRequest(settledThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))}
+            >
+              Clear all
+            </button>
+          )}
 
         </div>
 
         <Collapse open={settledExpanded} className="threads-sidebar-tree threads-sidebar-settled-list" itemCount={settledThreads.length}>
           {settledThreads.length === 0 ? (
-            <div className="threads-sidebar-empty">No settled threads</div>
+            <div className="threads-sidebar-empty">No archived threads</div>
           ) : (
             settledThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
           )}
@@ -1467,7 +1538,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       </div>
 
-      <RecentlyDeletedSection hidden={sidebarView !== 'threads'} />
+      {deleteRequest && (
+        <DeleteArchivedDialog
+          request={deleteRequest}
+          busy={deleteState.busy}
+          error={deleteState.error}
+          onConfirm={() => void confirmDelete()}
+          onCancel={cancelDelete}
+        />
+      )}
 
       <ProfileSwitcher onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
 

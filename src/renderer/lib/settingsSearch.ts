@@ -86,9 +86,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
 
   { title: 'Disk usage', section: 'storage', anchor: 'storage-usage', keywords: ['space', 'size'] },
   { title: 'Cleanup', section: 'storage', anchor: 'storage-cleanup', keywords: ['clean up', 'free space'] },
-  { title: STORAGE_RULE_COPY.trash.title, section: 'storage', anchor: 'storage-trash', keywords: ['trash', 'purge', 'retention'] },
   { title: 'Worktree folder', section: 'storage', anchor: 'storage-worktree-folder', keywords: ['drive', 'location'] },
-  { title: STORAGE_RULE_COPY.deletedThreads.title, section: 'storage', anchor: 'storage-deleted-threads', keywords: ['cleanup'] },
   { title: STORAGE_RULE_COPY.inactive.title, section: 'storage', anchor: 'storage-inactive', keywords: ['cleanup', 'retention'] },
   { title: STORAGE_RULE_COPY.merged.title, section: 'storage', anchor: 'storage-merged', keywords: ['cleanup'] },
   { title: STORAGE_RULE_COPY.captures.title, section: 'storage', anchor: 'storage-captures', keywords: ['browser data', 'screenshots'] }

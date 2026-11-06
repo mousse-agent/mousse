@@ -61,14 +61,14 @@ describe('production Electron error bridge', () => {
       ])
       expect(observed.storageErrors).toEqual([
         expect.objectContaining({ code: 'invalid_params', message: 'graceDays must be between 1 and 3650', errorInfo: { category: 'invalid', retryable: false } }),
-        expect.objectContaining({ code: 'resource_purge_preview_stale', message: 'Purge preview changed; review a fresh inventory.', errorInfo: { category: 'conflict', retryable: false } })
+        expect.objectContaining({ code: 'thread_not_archived', message: 'Archive the thread before deleting it.' })
       ])
       // A DomainRpcError thrown by a daemon handler keeps its code across the daemon socket, guiMms.request,
       // ipcMain.handle and the preload: Git mutations rely on that to show fixed copy per code.
       expect(observed.gitErrors).toEqual([
         expect.objectContaining({ code: 'project_not_found', message: 'Project not found', details: { projectId: 'missing_fixture_project' } })
       ])
-      expect(observed.storageStateAfterStalePreview).toBe('trashed')
+      expect(observed.storageStateAfterRefusedDelete).toBe('active')
       expect(observed.controlledNativeFailure).toMatchObject({
         chat: { requestAcknowledged: false, error: { code: 'internal_error', errorInfo: { category: 'internal', retryable: false } } },
         platform: { code: 'platform_request_failed', errorInfo: { category: 'internal', retryable: false } }

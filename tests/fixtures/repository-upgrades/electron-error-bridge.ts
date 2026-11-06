@@ -46,14 +46,13 @@ async function run() {
       const gitErrors = [];
       try { await window.mousse.git.checkout({ projectId: 'missing_fixture_project', workspaceThreadId: null }, 'main') }
       catch (error) { gitErrors.push({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }) }
-      const thread = await window.mousse.threads.create('Disposable stale preview fixture');
-      await window.mousse.threads.delete(thread.id);
-      const { preview } = await window.mousse.threads.purge(thread.id, { preview: true });
-      try { await window.mousse.threads.purge(thread.id, { operationId: 'stale-fixture-purge', expectedGeneration: preview.generation, previewDigest: 'incorrect-fixture-digest' }) }
+      // Deleting a thread that is not archived is refused, and the refusal keeps its code and words.
+      const thread = await window.mousse.threads.create('Disposable not archived fixture');
+      try { await window.mousse.threads.delete(thread.id) }
       catch (error) { storageErrors.push({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }) }
       const inventory = await window.mousse.threads.inventory();
       return { bridgeExposed: typeof window.mousse.orchestrator.sendToThread === 'function', chat, platform, localValidation, storageErrors, gitErrors,
-        storageStateAfterStalePreview: inventory.lifecycles.find(record => record.taskId === thread.id)?.state }
+        storageStateAfterRefusedDelete: inventory.lifecycles.find(record => record.taskId === thread.id)?.state }
     })()`)
     // Controlled GUI transport injection after the actual daemon requests above:
     // Node-style codes must not make arbitrary native exceptions publicly safe.

@@ -13,7 +13,7 @@ import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { git } from './fixtures/gitFoundation'
 
-it('renders unavailable expired Undo, trash restore and permanent deletion for a task holding legacy named-agent data in the full built app', async () => {
+it('renders unavailable expired Undo, archive, unarchive and permanent deletion for a task holding legacy named-agent data in the full built app', async () => {
   const fixture = await seedFullShellFixture()
   let child: ReturnType<typeof spawn> | undefined
   const source = await MousseMainService.create({ homeDir: fixture.home, headless: true, ownerKind: 'test' })
@@ -41,7 +41,7 @@ it('renders unavailable expired Undo, trash restore and permanent deletion for a
     })
     expect(result.code, result.output).toBe(0)
     expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + result.output).toBe(true)
-    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, trashedFromSidebar: true, restoreIdle: true, purged: true, primaryPreserved: true })
+    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, noDeleteBeforeArchive: true, archivedFromSidebar: true, unarchived: true, purged: true, primaryPreserved: true })
     expect(git(fixture.repo, 'rev-parse', 'HEAD')).toBe(fixture.baseSha)
     expect(git(fixture.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
   } finally {

@@ -5,9 +5,7 @@ import { act, createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COLLAPSE_CLOSE_MS, COLLAPSE_LONG_LIST, COLLAPSE_OPEN_MS, Collapse, type CollapseProps } from '../../src/renderer/components/ui/Collapse'
-import { RecentlyDeletedView, type RecentlyDeletedActions } from '../../src/renderer/components/sidebar/RecentlyDeletedSection'
 import { ToolCallsGroup } from '../../src/renderer/chat/components/agent-elements/tools/tool-calls-group'
-import type { TrashState } from '../../src/renderer/lib/trashInventory'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -185,31 +183,6 @@ describe('Collapse', () => {
 })
 
 describe('Collapse adopters', () => {
-  const trash = (): TrashState => ({
-    loaded: true,
-    records: [],
-    taskNames: {},
-    paused: false,
-    policy: { schemaVersion: 1, graceDays: 30, automaticPurge: true }
-  } as unknown as TrashState)
-  const actions: RecentlyDeletedActions = { onToggle: () => {}, onRestore: () => {}, onDelete: () => {}, onRetry: () => {} }
-
-  it('Recently deleted opens and closes its list with the motion and keeps the toggle wired', () => {
-    const view = (expanded: boolean) => act(() => root.render(createElement(RecentlyDeletedView, { state: trash(), expanded, hidden: false, actions })))
-    view(false)
-    expect(host.querySelector('.threads-sidebar-trash-list')).toBeNull()
-    view(true)
-    const toggle = host.querySelector('[aria-controls]')!
-    expect(toggle.getAttribute('aria-expanded')).toBe('true')
-    expect(shell()?.dataset.motion).toBe('enter')
-    expect(host.querySelector(`#${CSS.escape(toggle.getAttribute('aria-controls')!)}`)?.classList.contains('threads-sidebar-trash-list')).toBe(true)
-    view(false)
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
-    expect(shell()?.hasAttribute('inert')).toBe(true)
-    advance(COLLAPSE_CLOSE_MS + 50)
-    expect(host.querySelector('.threads-sidebar-trash-list')).toBeNull()
-  })
-
   it('a tool-calls group starts closed, opens its rows with the motion, and unmounts them after closing', () => {
     act(() => root.render(createElement(ToolCallsGroup, { count: 2, children: [createElement('div', { key: 1 }, 'Read a.ts'), createElement('div', { key: 2 }, 'Read b.ts')] })))
     const toggle = host.querySelector<HTMLButtonElement>('button[aria-expanded]')!

@@ -194,7 +194,7 @@ const swatchesMatch = () => $$(tid('storage-usage-row')).every((row) => {
 })
 const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), arcs: $$(tid('storage-donut-arc')).length, legend: $$('[data-testid="storage-legend-item"]').length, swatchesMatch: swatchesMatch() })
 // The page's sections in document order; the rule-review notice, when shown, is part of it.
-const pageOrder = () => $$('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-trash, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
+const pageOrder = () => $('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
 const valueOf = (testId: string) => $(tid(testId))?.dataset.value
 const unavailable = () => text(tid('storage-usage-unavailable'))
 
@@ -215,7 +215,7 @@ async function run() {
   // A profile that was already in use sees its own rules, a notice, and nothing turned on for it.
   const review: Record<string, unknown> = {}
   await until(() => $(tid('storage-review-notice')), 'review notice')
-  review.legacy = { order: pageOrder(), notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
+  review.legacy = { order: pageOrder(), notice: text(tid('storage-review-notice')), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'), configureCalls: callsOf('storage.configure').length }
   $<HTMLButtonElement>(tid('storage-review-open'))!.click()
   await until(() => $(tid('storage-review-rules')), 'review dialog')
   review.dialog = text(tid('storage-review-rules'))
@@ -239,11 +239,13 @@ async function run() {
 
   // The saved values reach the controls, and the rules say what they delete and never delete.
   evidence.initial = {
-    trash: valueOf('storage-auto-empty-select'), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
-    deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'),
-    ruleRows: ['storage-auto-empty', 'storage-remove-deleted', 'storage-inactive', 'storage-merged', 'storage-captures'].map((id) => ({ id, text: text(tid(id)) })),
+    inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
+    merged: $('#storage-merged-switch')?.getAttribute('aria-checked'),
+    ruleRows: ['storage-inactive', 'storage-merged', 'storage-captures'].map((id) => ({ id, text: text(tid(id)) })),
     worktreesNote: text('#storage-worktrees .settings-group-desc'),
-    groups: ['storage-trash', 'storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
+    groups: ['storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
+    // Threads no longer wait in a trash, and a deleted thread's worktree goes with it: neither has a rule here.
+    noTrashRules: !document.getElementById('storage-trash') && !$(tid('storage-auto-empty')) && !$(tid('storage-remove-deleted')),
     machineSelect: Boolean($(tid('storage-machine-select'))),
     measuredAt: text(tid('storage-measured-at')),
     projectRows: rowsOf(), order: pageOrder()
@@ -299,18 +301,9 @@ async function run() {
   $('#storage-merged-switch')!.click()
   await until(() => $('#storage-merged-switch')?.getAttribute('aria-checked') === 'false', 'merged off')
   policy.mergedOff = daemon.policy.worktrees.removeMerged
-  $('#storage-remove-deleted-switch')!.click()
-  await until(() => $('#storage-remove-deleted-switch')?.getAttribute('aria-checked') === 'false', 'deleted threads off')
-  policy.deletedOff = daemon.policy.worktrees.removeWithDeletedThreads
   await pick('storage-captures-select', '90')
   await until(() => valueOf('storage-captures-select') === '90', 'captures 90')
   policy.captures90 = daemon.policy.browser.captureDays
-  await pick('storage-auto-empty-select', '7')
-  await until(() => valueOf('storage-auto-empty-select') === '7', 'trash 7')
-  policy.trash7 = { ...daemon.trash }
-  const trashCustom = await customDays('storage-auto-empty-select', '12')
-  await until(() => valueOf('storage-auto-empty-select') === '12', 'trash 12')
-  policy.trash12 = { ...trashCustom, saved: { ...daemon.trash } }
   policy.otherRulesKept = structuredClone(daemon.policy)
   evidence.policy = policy
 
@@ -471,17 +464,12 @@ async function run() {
   await settled()
   evidence.usage = usage
 
-  // Trash is reviewed from the sidebar; the row says how many threads wait there.
-  evidence.trash = { row: text(tid('storage-auto-empty')), reviewButton: Boolean($(tid('storage-review-trash-button'))), otherThreads: document.body.textContent?.includes('Other threads') ?? false }
-
   // With every rule off, Preview cleanup has nothing to do and says so.
-  await pick('storage-auto-empty-select', 'never')
-  await until(() => valueOf('storage-auto-empty-select') === 'never', 'trash never')
   await pick('storage-inactive-select', 'off')
   await pick('storage-captures-select', 'off')
   await until(() => valueOf('storage-captures-select') === 'off', 'captures off')
   const planCallsBefore = callsOf('storage.cleanupPlan').length
-  evidence.noRule = { disabled: $<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled, text: text(tid('storage-cleanup-now')), policy: structuredClone(daemon.policy), trash: { ...daemon.trash } }
+  evidence.noRule = { disabled: $<HTMLButtonElement>(tid('storage-cleanup-button'))!.disabled, text: text(tid('storage-cleanup-now')), policy: structuredClone(daemon.policy) }
   $<HTMLButtonElement>(tid('storage-cleanup-button'))!.click()
   await sleep(100)
   evidence.noRule = { ...(evidence.noRule as object), planCallsAdded: callsOf('storage.cleanupPlan').length - planCallsBefore }
