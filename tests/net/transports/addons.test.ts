@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, writeFile, rm, readFile, readdir, chmod } from 'node:fs/promises'
 import { createServer, connect } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,7 @@ import {
   TailscaleTransport
 } from '../../../src/mms/net/transports/tailscale'
 import { cloudflaredAddon, CloudflaredTransport } from '../../../src/mms/net/transports/cloudflared'
+import { ProcessSupervisor } from '../../../src/mms/net/transports/runtime/process'
 import { systemClock } from '../../../src/mms/net/clock'
 import { FakeClock } from '../harness/FakeClock'
 import { fakeTailscale, type FakeTailscale } from '../harness/fakeTailscale'
@@ -763,6 +764,45 @@ describe('cloudflared child supervision', () => {
     await until(() => transport.status().state === 'ready')
     expect(transport.status().routes[0].address).toBe('wss://run1.trycloudflare.com/mousse-net')
   })
+  it('stays down when it is torn down while the listener is still being set up', async () => {
+    const where = await directory(),
+      log = join(where, 'args.json'),
+      fake = await binary(
+        where,
+        'cloudflared',
+        `if(process.argv.includes('--version')){console.log('test');process.exit(0)}require('fs').writeFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2)));console.error('https://late.trycloudflare.com');console.error('Registered tunnel connection');setInterval(()=>{},1000)`
+      )
+    const transport = new CloudflaredTransport({ mode: 'quick', binary: fake }, where)
+    cleanup.push(() => transport.teardown())
+    await transport.provision()
+    const listening = transport.listen((raw) => raw.destroy())
+    const down = transport.teardown()
+    await expect(listening).rejects.toMatchObject({ code: 'cancelled' })
+    await down
+    // Long enough for a late child to start and say it is registered.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await expect(readFile(log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(transport.status()).toEqual({ state: 'disabled', routes: [] })
+    expect((await readdir(where)).some((name) => name.startsWith('net-cloudflared-'))).toBe(false)
+  })
+  it('stays down when it is torn down while waiting for the tunnel to register', async () => {
+    const where = await directory(),
+      log = join(where, 'args.json'),
+      fake = await binary(
+        where,
+        'cloudflared',
+        `if(process.argv.includes('--version')){console.log('test');process.exit(0)}require('fs').writeFileSync(${JSON.stringify(log)},'started');setInterval(()=>{},1000)`
+      )
+    const transport = new CloudflaredTransport({ mode: 'quick', binary: fake }, where)
+    cleanup.push(() => transport.teardown())
+    await transport.provision()
+    const listening = transport.listen((raw) => raw.destroy())
+    listening.catch(() => undefined)
+    await vi.waitFor(() => readFile(log, 'utf8'), { timeout: 5000 })
+    await transport.teardown()
+    await expect(listening).rejects.toMatchObject({ code: 'cancelled' })
+    expect(transport.status()).toEqual({ state: 'disabled', routes: [] })
+  })
   it('rejects named credentials with unsafe permissions and creates only a task-owned config', async () => {
     const where = await directory(),
       credentials = join(where, 'credentials.json'),
@@ -798,4 +838,40 @@ describe('cloudflared child supervision', () => {
     expect(JSON.stringify(transport.status())).not.toContain('not-printed')
     expect(await readFile(credentials, 'utf8')).toBe('{"TunnelSecret":"not-printed"}')
   })
+})
+
+describe('transport process restarts', () => {
+  async function supervised(advanceMs: number, exits: number) {
+    const where = await directory(),
+      fake = await binary(where, 'crashing', 'process.exit(1)'),
+      clock = new FakeClock(),
+      states: string[] = []
+    const supervisor = new ProcessSupervisor({
+      binary: fake,
+      args: [],
+      clock,
+      line: () => undefined,
+      state: (state) => states.push(state)
+    })
+    cleanup.push(() => supervisor.stop())
+    supervisor.start()
+    for (let exit = 1; exit <= exits && !states.includes('failed'); exit++) {
+      await vi.waitFor(
+        () => expect(states.filter((state) => state === 'degraded').length).toBe(exit),
+        { timeout: 5000 }
+      )
+      // The restart fires inside this advance, so the next child runs for the rest of it.
+      clock.advance(advanceMs)
+    }
+    return states
+  }
+  it('keeps restarting a process that ran for a while before each exit', async () => {
+    const states = await supervised(62_000, 10)
+    expect(states).not.toContain('failed')
+  }, 30_000)
+  it('gives up on a process that keeps exiting soon after it starts', async () => {
+    const states = await supervised(60_000, 10)
+    expect(states.filter((state) => state === 'degraded')).toHaveLength(7)
+    expect(states.at(-1)).toBe('failed')
+  }, 30_000)
 })

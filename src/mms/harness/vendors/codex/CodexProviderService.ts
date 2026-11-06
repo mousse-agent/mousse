@@ -869,7 +869,7 @@ class TurnRun {
     const finished = notificationParams(notification, 'item/completed')
     const item = (started ?? finished)?.item
     if (!item) return
-    // Item ids are unique per thread only. A helper's own helpers are not tracked, so their spawns stay out.
+    // Item ids are unique per thread only. A helper's own helpers show no rows, so their spawns stay out.
     const event = item.type === 'collabAgentToolCall' || item.type === 'subAgentActivity' ? undefined : codexToolEvent(item, started ? 'start' : 'complete')
     if (!event) return
     const callId = `${threadId}:${item.id}`
@@ -1854,7 +1854,8 @@ export class CodexProviderService {
     const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
     if (tracker) {
       tracker.handle(notification)
-      owner?.helperNotification(threadId, notification)
+      // A helper's own helpers keep the run open and are stopped with it, but get no rows of their own.
+      if (!tracker.isNested(threadId)) owner?.helperNotification(threadId, notification)
       // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
       if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
@@ -2613,7 +2614,7 @@ export class CodexProviderService {
         if (!undelivered.length) {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle: the thread's whole helper tree when the
-          // process lists it, the direct helpers seen in the thread's items otherwise. Stop interrupts
+          // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
           // them and ends the wait; a steer that arrives meanwhile starts a turn; helpers silent for
           // too long are abandoned.
           const treeMode = this.app?.conn === conn && this.app.tree === 'on'
@@ -2679,8 +2680,8 @@ export class CodexProviderService {
   }
 
   /**
-   * The wait for helpers: the helper tree the server lists when the process does that, else the direct
-   * helpers seen in the thread's items (master's tracking, also the fallback when the tree turns out
+   * The wait for helpers: the helper tree the server lists when the process does that, else the
+   * helpers seen in the items of the thread and its helpers (master's tracking, also the fallback when the tree turns out
    * unusable). Returns when they have settled or a steer wants a turn (nothing returned), or the note
    * of a cap.
    */

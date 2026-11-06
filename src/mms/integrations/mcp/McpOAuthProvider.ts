@@ -1,4 +1,5 @@
 import { createServer } from 'http'
+import { randomBytes } from 'crypto'
 import { existsSync, readFileSync } from 'fs'
 import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
@@ -24,6 +25,8 @@ export interface McpOAuthProviderOptions {
   oauthDir?: string
   profileId?: string
   signal?: AbortSignal
+  /** The local port the sign-in redirect returns to. Tests use a free port; the product always uses 8791. */
+  callbackPort?: number
 }
 
 const MOUSSE_MCP_OAUTH_REDIRECT_PORT = 8791
@@ -82,8 +85,16 @@ async function writeSession(
   }
 }
 
+const callbackPage = (text: string): string =>
+  `<html><body><p>${text}</p></body></html>`
+
+/**
+ * Listens for the sign-in redirect. Only a request to the exact callback path that `accept` takes settles the
+ * attempt; anything else (a stale tab, another app's redirect) gets an error page and the attempt keeps waiting.
+ */
 function waitForOAuthCallback(
   port: number,
+  accept: (callbackUrl: URL) => boolean,
   signal?: AbortSignal
 ): { ready: Promise<void>; result: Promise<URL>; close(): Promise<void> } {
   let removeAbort = () => {}
@@ -128,16 +139,23 @@ function waitForOAuthCallback(
   }
   const result = new Promise<URL>((resolve, reject) => {
     const server = createServer((req, res) => {
-      if (!req.url?.startsWith(MOUSSE_MCP_OAUTH_REDIRECT_PATH)) {
+      const callbackUrl = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
+      if (callbackUrl.pathname !== MOUSSE_MCP_OAUTH_REDIRECT_PATH) {
         res.writeHead(404)
         res.end()
         return
       }
+      if (!accept(callbackUrl)) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(callbackPage('This sign-in link is out of date. Return to Mousse and start the sign-in again if it is still waiting.'))
+        return
+      }
 
-      const callbackUrl = new URL(req.url, `http://127.0.0.1:${port}`)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(
-        '<html><body><p>Authentication complete. You can close this window and return to Mousse.</p></body></html>'
+        callbackPage(callbackUrl.searchParams.has('error')
+          ? 'Sign-in was not completed. You can close this window and return to Mousse.'
+          : 'Authentication complete. You can close this window and return to Mousse.')
       )
       void close().then(() => resolve(callbackUrl), reject)
     })
@@ -181,6 +199,7 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
   private readonly profileId?: string
   private readonly signal?: AbortSignal
   private closed = false
+  private authorizationState: string | undefined
 
   private constructor(
     readonly serverId: string,
@@ -190,13 +209,14 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
     private readonly openExternal: OpenExternalFn,
     oauthDir: string,
     profileId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    callbackPort = MOUSSE_MCP_OAUTH_REDIRECT_PORT
   ) {
     this.session = session
     this.oauthDir = oauthDir
     this.profileId = profileId
     this.signal = signal
-    this.redirectUri = `http://127.0.0.1:${MOUSSE_MCP_OAUTH_REDIRECT_PORT}${MOUSSE_MCP_OAUTH_REDIRECT_PATH}`
+    this.redirectUri = `http://127.0.0.1:${callbackPort}${MOUSSE_MCP_OAUTH_REDIRECT_PATH}`
   }
 
   static async create(
@@ -231,7 +251,8 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
       openExternal,
       oauthDir,
       options.profileId,
-      options.signal
+      options.signal,
+      options.callbackPort
     )
   }
 
@@ -274,6 +295,17 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     this.session.tokens = tokens
     await this.persist()
+  }
+
+  /** A new random value for each sign-in; the SDK puts it in the authorization URL and the callback must return it. */
+  state(): string {
+    this.authorizationState = randomBytes(32).toString('base64url')
+    return this.authorizationState
+  }
+
+  /** True when a callback carries the state of the sign-in this provider started. */
+  isOwnCallback(callbackUrl: URL): boolean {
+    return this.authorizationState !== undefined && callbackUrl.searchParams.get('state') === this.authorizationState
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
@@ -354,7 +386,11 @@ export async function ensureMcpOAuthAuthorized(
     return provider
   }
 
-  const callback = waitForOAuthCallback(MOUSSE_MCP_OAUTH_REDIRECT_PORT, options.signal)
+  const callback = waitForOAuthCallback(
+    options.callbackPort ?? MOUSSE_MCP_OAUTH_REDIRECT_PORT,
+    (callbackUrl) => provider.isOwnCallback(callbackUrl),
+    options.signal
+  )
   const fetchFn: typeof fetch | undefined = options.signal
     ? (url, init) => fetch(url, { ...init, signal: combineAbort(init?.signal, options.signal) })
     : undefined
@@ -370,6 +406,11 @@ export async function ensureMcpOAuthAuthorized(
 
     if (result === 'REDIRECT') {
       const callbackUrl = await callback.result
+      const error = callbackUrl.searchParams.get('error')
+      if (error) {
+        const description = callbackUrl.searchParams.get('error_description')
+        throw new Error(`OAuth sign-in was not completed: ${error}${description ? ` (${description})` : ''}`)
+      }
       const code = callbackUrl.searchParams.get('code')
       if (!code) throw new Error('OAuth callback did not include an authorization code.')
       const finalized = await auth(provider, {
