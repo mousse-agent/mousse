@@ -74,6 +74,8 @@ export interface BotMemoryEntry {
   /** Short id the bot sees: `m12`. */
   id: string
   version: number
+  /** How the bot names this version (`memoryRef`): `m12`, or `m12v2` from the second version on. */
+  ref: string
   kind: BotMemoryKind
   /** Null once forgotten. */
   text: string | null
@@ -133,11 +135,12 @@ export interface BotMemorySaveInput {
   expiresAt?: string
 }
 
+/** `ref` is how the bot names that version next (`memoryRef`). */
 export type BotMemorySaveResult =
-  | { id: string; version: number; gauge: string }
-  | { error: 'over_cap'; core: Array<{ id: string; text: string }> }
+  | { id: string; version: number; ref: string; gauge: string }
+  | { error: 'over_cap'; gauge: string; core: Array<{ id: string; ref: string; text: string }> }
   | { error: 'refused'; reason: string }
-  | { error: 'stale'; current: { id: string; version: number; text: string } }
+  | { error: 'stale'; current: { id: string; version: number; ref: string; text: string } }
 
 export interface BotMemoryForgetInput {
   id?: string
@@ -149,4 +152,39 @@ export interface BotMemoryForgetInput {
 export interface BotMemoryForgetResult {
   forgotten?: string
   redacted: string[]
+}
+
+/** Local search quality notes (bot-context.md §6), kept in `bot_memory_state.search_stats`. */
+export interface BotMemorySearchStats {
+  searches: number
+  zeroHits: number
+  /** Turns with three or more searches and no `memory_read`. */
+  readlessTurns: number
+  /** The latest zero-hit queries, newest last (at most 20). */
+  recentMisses: Array<{ at: string; query: string }>
+}
+
+/** Estimated tokens of a text: four characters a token, as the context gauge estimates. */
+export function estimateTokens(text: string): number {
+  return text ? Math.ceil(text.length / 4) : 0
+}
+
+/** The fill gauge the bot sees: "core 1,240/2,000". */
+export function memoryGauge(label: string, used: number, cap: number): string {
+  return `${label} ${used.toLocaleString('en-US')}/${cap.toLocaleString('en-US')}`
+}
+
+/**
+ * The ref the bot names a memory version by: `m12` for the first version, `m12v3` for the third.
+ * `replaces` must name the current version, or the save returns `stale`.
+ */
+export function memoryRef(id: string, version: number): string {
+  return version > 1 ? `${id}v${version}` : id
+}
+
+/** Reads `m12` / `m12v3` back; undefined when it is not a memory ref. */
+export function parseMemoryRef(ref: string): { id: string; version?: number } | undefined {
+  const match = /^(m\d{1,9})(?:v(\d{1,9}))?$/.exec(ref.trim())
+  if (!match) return undefined
+  return match[2] ? { id: match[1]!, version: Number(match[2]) } : { id: match[1]! }
 }
