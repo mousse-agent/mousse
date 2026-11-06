@@ -98,3 +98,27 @@ describe('closing the last open file', () => {
     expect(document.activeElement).toBe(tab())
   })
 })
+
+describe('background refresh of an open file', () => {
+  it('clears "Refresh failed" once a later refresh reads the file again, even when it did not change', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      let fail = false
+      ;(window as unknown as { mousse: { fs: { readFile: () => Promise<string> } } }).mousse.fs.readFile = async () => {
+        if (fail) throw new Error('disk unavailable')
+        return 'hello'
+      }
+      await openNotes()
+      fail = true
+      await act(async () => { vi.advanceTimersByTime(2_000) })
+      await flush()
+      expect(host.querySelector('.panel-error')?.textContent).toContain('Refresh failed')
+      fail = false
+      await act(async () => { vi.advanceTimersByTime(2_000) })
+      await flush()
+      expect(host.querySelector('.panel-error')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

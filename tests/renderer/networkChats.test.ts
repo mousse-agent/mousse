@@ -113,3 +113,33 @@ it.each(['forbidden', 'cancelled', 'disabled'])('clears an open network view aft
   expect(useChatsStore.getState().conversation).toBeNull()
   expect(useChatsStore.getState().error).toContain('No current read permission')
 })
+
+it('keeps a failed send\'s error when a background refresh succeeds, and clears a failed refresh\'s error', async () => {
+  request.mockRejectedValueOnce(new Error('send failed'))
+  await useChatsStore.getState().send('hello', [])
+  expect(useChatsStore.getState().error).toBe('send failed')
+  request.mockResolvedValueOnce({ agents: [], chats: [], devices: [] }).mockResolvedValueOnce(local())
+  await useChatsStore.getState().refresh()
+  expect(useChatsStore.getState().error).toBe('send failed')
+
+  useChatsStore.setState({ error: null })
+  request.mockRejectedValueOnce(new Error('offline'))
+  await useChatsStore.getState().refresh()
+  expect(useChatsStore.getState().error).toBe('offline')
+  request.mockResolvedValueOnce({ agents: [], chats: [], devices: [] }).mockResolvedValueOnce(local())
+  await useChatsStore.getState().refresh()
+  expect(useChatsStore.getState().error).toBeNull()
+})
+
+it('leaves another chat alone when a send from the previous chat fails late', async () => {
+  let reject!: (error: Error) => void
+  request.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+  const sending = useChatsStore.getState().send('hello', [])
+  const other = { ...local(), id: 'other' }
+  request.mockResolvedValueOnce(other)
+  await useChatsStore.getState().openChat('other')
+  expect(useChatsStore.getState()).toMatchObject({ activeChatId: 'other', loading: false, error: null })
+  reject(new Error('send failed'))
+  await sending
+  expect(useChatsStore.getState()).toMatchObject({ activeChatId: 'other', loading: false, error: null })
+})
