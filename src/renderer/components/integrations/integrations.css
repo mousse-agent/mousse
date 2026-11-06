@@ -39,7 +39,6 @@
 /* Compact rows for the built-in tool list under Advanced. */
 .skills-mcp-compact { --settings-row-y: var(--space-4); }
 
-.skills-mcp-chips { display: flex; gap: var(--space-8); }
 
 /* ---------- Dialogs ---------- */
 .integration-modal-backdrop { --int-fg: var(--text-primary, #eff0f6); --int-muted: var(--text-secondary, #9298a5); --int-border: var(--border, #ffffff16); --int-bg: var(--bg-primary, #12141a); --int-panel: var(--bg-secondary, #1a1d24); --int-accent: var(--accent, #b5c9fa); --int-ok: var(--success, #7dcea0); --int-danger: var(--danger, #e07a8a); }

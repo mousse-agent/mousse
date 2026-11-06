@@ -4,6 +4,7 @@ import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acry
 import { ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
+import { DelayedLoader } from './ui/DelayedLoader'
 import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
 import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import type {
@@ -32,15 +33,6 @@ import { createIntegrationPlatformClient } from '../services/integrationPlatform
 import { confirmNavigation } from '../services/navigationGuards'
 import { useStorageReviewPending } from '../lib/storageReview'
 import '../styles/settings.css'
-
-function SettingsLoader() {
-  return (
-    <div className="settings-loader" role="status" aria-label="Loading settings">
-      <span className="settings-loader-ring" />
-      <span className="settings-loader-core" />
-    </div>
-  )
-}
 
 const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
@@ -423,7 +415,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 </button>
               </>
             ) : (
-              <SettingsLoader />
+              <DelayedLoader label="Loading settings" />
             )}
           </div>
         </div>
