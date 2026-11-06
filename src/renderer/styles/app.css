@@ -335,102 +335,6 @@ html.platform-darwin .titlebar-left {
   color: white;
 }
 
-.usage-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(0, 0, 0, .48); backdrop-filter: blur(6px); -webkit-app-region: no-drag; }
-.usage-dialog { width: min(520px, calc(100vw - 32px)); max-height: min(620px, calc(100vh - 32px)); overflow: auto; padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 24px 70px rgba(0,0,0,.45); }
-.usage-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
-.usage-heading h2 { margin: 0; font-size: 18px; letter-spacing: .01em; }
-.usage-heading h2 .usage-computer { font-weight: 400; color: var(--text-secondary); }
-.usage-heading button { display: grid; place-items: center; padding: 7px; border-radius: 8px; color: var(--text-secondary); }
-.usage-heading button:hover { background: rgba(var(--accent-rgb), .14); color: var(--text-primary); }
-.usage-provider { padding: 14px 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent); margin-top: 12px; }
-.usage-provider:first-of-type { margin-top: 0; }
-.usage-provider > strong { font-size: 13px; letter-spacing: .02em; }
-.usage-window {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 14px;
-  font-size: 12px;
-}
-.usage-window-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.usage-window-label {
-  color: var(--text-primary);
-  font-weight: 600;
-  font-size: 12px;
-}
-.usage-window-reset {
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.usage-window-remaining {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.usage-tone-healthy { color: var(--text-primary); }
-.usage-tone-warn { color: var(--warning, #f59e0b); }
-.usage-tone-low { color: var(--danger, #ef4444); }
-.usage-bar {
-  position: relative;
-  height: 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--text-secondary) 14%, transparent);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .25);
-  overflow: hidden;
-}
-.usage-bar-fill {
-  position: relative;
-  height: 100%;
-  min-width: 6px;
-  border-radius: inherit;
-  width: 0;
-  transition: width calc(600ms * var(--ui-motion-scale)) cubic-bezier(.22, 1, .36, 1);
-}
-.usage-bar-fill::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .38), rgba(255, 255, 255, 0) 55%);
-  pointer-events: none;
-}
-.usage-bar-fill.usage-tone-healthy {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, #22c55e), var(--accent));
-  box-shadow: 0 0 12px rgba(var(--accent-rgb), .45);
-}
-.usage-bar-fill.usage-tone-warn {
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
-  box-shadow: 0 0 12px rgba(245, 158, 11, .4);
-}
-.usage-bar-fill.usage-tone-low {
-  background: linear-gradient(90deg, var(--danger, #ef4444), #f87171);
-  box-shadow: 0 0 12px rgba(239, 68, 68, .45);
-}
-@media (prefers-reduced-motion: reduce) {
-  .usage-bar-fill { transition: none; }
-}
-.usage-message {
-  margin: 8px 0 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.4;
-  word-break: break-word;
-}
-.usage-manage { margin-top: 10px; }
-
 /* Functional progress indicators must keep spinning even when Windows
    reports prefers-reduced-motion (global baseline short-circuits animation). */
 .icon-spin {
@@ -6144,9 +6048,6 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .browser-access-toggle.enabled { background: rgba(var(--accent-rgb), .35); }
 .browser-access-toggle.enabled::after { transform: translateX(12px); background: var(--accent); }
 
-.subscription-usage-page { display: flex; flex-direction: column; flex: 1; min-height: 0; color: var(--text-primary); }
-.subscription-usage-page > .usage-heading { padding: 20px 24px; border-bottom: 1px solid var(--border); }
-.subscription-usage-page-body { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
 
 /* Rail destinations share the window chrome and navigation. */
 .scheduled-page[hidden] { display: none; }
