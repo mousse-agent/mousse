@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { UIMessage } from "ai";
-import { ChevronDown, FileText } from "../../../lib/icons";
+import { ChevronRight, FileText } from "../../../lib/icons";
 import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
 import { useTurnChangedFiles } from "../../../lib/turnChangedFilesSetting";
 import { Collapse } from "../../../components/ui/Collapse";
@@ -242,7 +242,7 @@ export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; t
           title={toggleLabel}
           onClick={() => setUserOpen(!open)}
         >
-          <ChevronDown size={14} strokeWidth={2} className={`turn-edits-chevron${open ? " is-open" : ""}`} />
+          <ChevronRight size={14} strokeWidth={2} className="turn-edits-chevron ui-collapse-chevron" data-open={open || undefined} />
         </button>
       </div>
       <Collapse open={open} as="ul" className="turn-edits-files" itemCount={summary.files.length}>

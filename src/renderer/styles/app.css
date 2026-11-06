@@ -780,11 +780,6 @@ html.platform-darwin .titlebar-left {
 .turn-edits-chevron {
   flex-shrink: 0;
   color: var(--text-secondary);
-  transition: transform var(--ui-dur) ease;
-}
-
-.turn-edits-chevron.is-open {
-  transform: rotate(180deg);
 }
 
 .turn-edits-count {
