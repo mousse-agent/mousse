@@ -32,7 +32,7 @@ import { registerChatMethods, validateChatParams } from '../src/mms/chats/regist
 import { CHAT_CAPABILITY } from '../src/shared/chats'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
-import { tryAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
+import { tryAcquireExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, readLeaseOwner } from '../src/mms/queue/ThreadExecutionLease'
 import { canonicalJson, sha256Hex } from '../src/shared/agents/hashes'
 
 const roots: string[] = []
@@ -245,6 +245,68 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     expect(restarted.get(chat.id).run?.state).toBe('interrupted')
     expect(f.requests).toHaveLength(0)
   })
+  describe('a running response whose lease names another live process', () => {
+    /** A running response on disk, its backing thread's lease owned by a live process (this test's parent) last heard from `heartbeatAgoMs` ago. */
+    const abandoned = async (f: ReturnType<typeof fixture>, heartbeatAgoMs: number) => {
+      const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
+      const store = new ChatStore(f.root, f.profileId), record = store.read(chat.id)
+      record.conversation.run = { id: randomUUID(), state: 'running', startedAt: new Date().toISOString() }
+      store.write(record)
+      const lockPath = getExecutionLeasePath(f.threads.getThreadDir(chat.threadId))
+      const at = new Date(Date.now() - heartbeatAgoMs).toISOString()
+      writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, token: 'reused-pid', processInstanceId: 'elsewhere', acquiredAt: at, heartbeatAt: at, source: 'chat' }))
+      return { chat, lockPath }
+    }
+
+    it('is interrupted when the lease has not been heartbeated for a while, without failing the profile', async () => {
+      const f = fixture()
+      const { chat } = await abandoned(f, 60_000)
+      let restarted!: AgentChatService
+      expect(() => { restarted = new AgentChatService(f.options); services.push(restarted) }).not.toThrow()
+      expect(restarted.get(chat.id).run?.state).toBe('interrupted')
+      expect(f.requests).toHaveLength(0)
+    })
+
+    it('stays running while the lease is fresh, and is interrupted once it goes stale', async () => {
+      const f = fixture()
+      const { chat, lockPath } = await abandoned(f, 0)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        let restarted!: AgentChatService
+        expect(() => { restarted = new AgentChatService(f.options); services.push(restarted) }).not.toThrow()
+        expect(restarted.get(chat.id).run?.state).toBe('running')
+        const stale = new Date(Date.now() - 60_000).toISOString()
+        writeFileSync(lockPath, JSON.stringify({ ...JSON.parse(readFileSync(lockPath, 'utf8')), heartbeatAt: stale }))
+        vi.advanceTimersByTime(30_000)
+        expect(restarted.get(chat.id).run?.state).toBe('interrupted')
+      } finally { vi.useRealTimers() }
+    })
+
+    it('a live response heartbeats its lease', async () => {
+      let finish!: (result: any) => void
+      const f = fixture([], () => new Promise((resolve) => { finish = resolve }))
+      const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        f.service.send({ chatId: chat.id, text: 'wait' })
+        await vi.waitFor(() => expect(f.requests).toHaveLength(1))
+        const lockPath = getExecutionLeasePath(f.threads.getThreadDir(chat.threadId))
+        const before = readLeaseOwner(lockPath)!
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        vi.advanceTimersByTime(10_000)
+        const after = readLeaseOwner(lockPath)!
+        expect(after.token).toBe(before.token)
+        expect(Date.parse(after.heartbeatAt)).toBeGreaterThan(Date.parse(before.heartbeatAt))
+        expect(vi.getTimerCount()).toBe(1)
+        finish({ status: 'completed', text: 'ok', history: [], usage: { elapsedMs: 0 } })
+        await f.service.waitForIdle()
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        vi.useRealTimers()
+        finish?.({ status: 'completed', text: 'ok', history: [], usage: { elapsedMs: 0 } })
+      }
+    })
+  })
   it('uses one existing task worktree for project agent execution and shared resources, including project instructions', async () => {
     const f = fixture(['project response'])
     const repo = join(f.root, 'repo'); mkdirSync(repo)
@@ -356,7 +418,9 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     expect(() => f.service.assertBrowserExecution({ ...context, profileId: 'wrong' })).toThrow(/profile/)
     expect(() => f.service.assertBrowserExecution({ ...context, runId: randomUUID() })).toThrow(/active chat agent/)
     expect(() => f.service.assertBrowserExecution({ ...context, actor: { ...context.actor, definitionId: f.bob } })).toThrow(/active chat agent/)
-    expect(() => new AgentChatService(f.options)).toThrow(/live daemon/)
+    // A second service over the same chats leaves the live response alone instead of refusing to start.
+    const second = new AgentChatService(f.options); services.push(second)
+    expect(second.get(chat.id).run?.state).toBe('running')
     finish({ status: 'completed', text: 'done', history: [], usage: { elapsedMs: 0 } })
     await f.service.waitForIdle()
     expect(() => f.service.assertBrowserExecution(context)).toThrow(/active chat agent/)
