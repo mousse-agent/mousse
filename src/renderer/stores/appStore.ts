@@ -24,6 +24,9 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
 import type { ShortcutOverrides } from '../../shared/commands'
 
+/** What the command palette leads with when it opens. */
+export type PaletteMode = 'all' | 'messages'
+
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
 // Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
 // pins large tool payloads and markdown strings in the renderer heap.
@@ -139,12 +142,11 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
-  /** The Search threads dialog, opened from the threads sidebar, the command palette and its shortcut. */
-  threadSearchOpen: boolean
-  setThreadSearchOpen: (open: boolean) => void
-  /** The command palette. Not persisted. */
+  /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  setPaletteOpen: (open: boolean) => void
+  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). */
+  paletteMode: PaletteMode
+  setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
   /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
@@ -411,10 +413,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
-  threadSearchOpen: false,
-  setThreadSearchOpen: (threadSearchOpen) => set({ threadSearchOpen }),
   paletteOpen: false,
-  setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  paletteMode: 'all',
+  setPaletteOpen: (paletteOpen, mode = 'all') => set({ paletteOpen, paletteMode: mode }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
@@ -718,7 +719,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       workspaceReady: false,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
-      threadSearchOpen: false,
       paletteOpen: false,
       ...next,
       messages: [],
