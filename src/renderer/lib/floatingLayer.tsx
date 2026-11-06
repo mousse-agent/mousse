@@ -34,6 +34,8 @@ export interface FloatingPositionOptions {
   padding?: number
   /** Recompute when these values change (menu content size, etc.). */
   deps?: unknown[]
+  /** Give the layer the anchor's width, so a menu never spills past the control that opened it. */
+  matchAnchorWidth?: boolean
 }
 
 /**
@@ -47,7 +49,8 @@ export function useFloatingPosition({
   placement = 'above-start',
   gap = 8,
   padding = 8,
-  deps = []
+  deps = [],
+  matchAnchorWidth = false
 }: FloatingPositionOptions): CSSProperties {
   const [style, setStyle] = useState<CSSProperties>({
     position: 'fixed',
@@ -75,6 +78,9 @@ export function useFloatingPosition({
       if (!anchor || !content) return
 
       const anchorRect = anchor.getBoundingClientRect()
+      // Set before measuring: the height depends on the width (wrapping, stacked columns).
+      const width = matchAnchorWidth ? anchorRect.width : undefined
+      if (width !== undefined) content.style.width = `${width}px`
       const contentRect = content.getBoundingClientRect()
       const preferAbove = placement.startsWith('above')
       const preferBelow = placement.startsWith('below')
@@ -124,6 +130,7 @@ export function useFloatingPosition({
         position: 'fixed',
         top,
         left,
+        ...(width !== undefined ? { width } : {}),
         zIndex: FLOATING_LAYER_Z_INDEX,
         visibility: 'visible'
       })
@@ -138,7 +145,7 @@ export function useFloatingPosition({
       window.removeEventListener('resize', update)
       window.removeEventListener('scroll', update, true)
     }
-  }, [open, placement, gap, padding, anchorRef, contentRef, ...deps])
+  }, [open, placement, gap, padding, anchorRef, contentRef, matchAnchorWidth, ...deps])
 
   return style
 }

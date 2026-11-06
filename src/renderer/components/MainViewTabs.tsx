@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import type { MainView } from '../../shared/types'
 import { BrowserTab, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
+import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import { terminalLocations } from '../lib/folderLabel'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { SurfaceChoiceList } from './OpenSurfaceMenu'
@@ -35,7 +37,13 @@ export function MainViewTabs() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
   const addRef = useRef<HTMLDivElement>(null)
+  const addButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false)
+    addButtonRef.current?.focus()
+  }, [])
+  const onMenuKeyDown = useMenuKeyboard(menuRef, closeMenu)
 
   const visibleTerminals = terminals.filter(
     (tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null
@@ -76,18 +84,19 @@ export function MainViewTabs() {
       if (!addRef.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMenuOpen(false)
+      if (event.key === 'Escape') closeMenu()
     }
+    const onResize = () => setMenuOpen(false)
     window.addEventListener('pointerdown', dismiss)
     window.addEventListener('keydown', onKey)
-    const closeMenu = () => setMenuOpen(false)
-    window.addEventListener('resize', closeMenu)
+    window.addEventListener('resize', onResize)
+    focusInitialMenuItem(menuRef.current)
     return () => {
       window.removeEventListener('pointerdown', dismiss)
       window.removeEventListener('keydown', onKey)
-      window.removeEventListener('resize', closeMenu)
+      window.removeEventListener('resize', onResize)
     }
-  }, [menuOpen])
+  }, [menuOpen, closeMenu])
 
   if (items.length === 0) return null
 
@@ -143,6 +152,14 @@ export function MainViewTabs() {
     return true
   }
 
+  const openViews = new Set<MainView>(items.map((item) => item.view))
+  // An open panel's menu row focuses its tab; of several browser tabs, the one last selected.
+  const focusOpen = (view: MainView) => {
+    const tabs = items.filter((item) => item.view === view)
+    const item = tabs.find((entry) => entry.view === 'browser' && entry.resourceId === activeBrowserId) ?? tabs[0]
+    if (item) void select(item)
+  }
+
   return (
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
@@ -151,7 +168,13 @@ export function MainViewTabs() {
         const selected = active(item)
         const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
-          <div key={item.key} className={`main-view-tab${selected ? ' active' : ''}`}>
+          <div
+            key={item.key}
+            className={`main-view-tab${selected ? ' active' : ''}`}
+            // Middle-click closes a tab; stopping the press keeps Chromium's autoscroll away.
+            onMouseDown={item.closable ? (event) => { if (event.button === 1) event.preventDefault() } : undefined}
+            onAuxClick={item.closable ? (event) => { if (event.button === 1) close(item) } : undefined}
+          >
             <button
               type="button"
               className="main-view-tab-select"
@@ -179,9 +202,12 @@ export function MainViewTabs() {
       })}
       <div className="main-view-tab-add-wrap" ref={addRef}>
         <button
+          ref={addButtonRef}
           type="button"
           className="main-view-tab-add"
-          aria-label="Open a surface"
+          aria-label="Add panel"
+          title="Add panel"
+          aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={() => {
             const bounds = addRef.current?.getBoundingClientRect()
@@ -195,8 +221,9 @@ export function MainViewTabs() {
           <Plus size={14} strokeWidth={2} />
         </button>
         {menuOpen && createPortal(
-          <div ref={menuRef} className="surface-menu-popover" role="menu" style={{ position: 'fixed', ...menuPosition }}>
-            <SurfaceChoiceList another onPick={() => setMenuOpen(false)} />
+          <div ref={menuRef} className="surface-menu-popover" role="menu" aria-label="Add panel"
+            style={{ position: 'fixed', ...menuPosition }} onKeyDown={onMenuKeyDown}>
+            <SurfaceChoiceList menu openViews={openViews} onFocusOpen={focusOpen} onPick={() => setMenuOpen(false)} />
           </div>,
           document.body
         )}

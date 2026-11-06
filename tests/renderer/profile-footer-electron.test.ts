@@ -44,18 +44,20 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.noAccountRequests).toEqual([])
     expect(report.single.requests).toEqual([])
     expect(report.single.menu).toMatchObject({ role: 'menu', label: 'Profiles', wide: false, heading: 'Profiles', identity: null, rows: ['New profile'], kebabs: ['Adithya profile actions'] })
-    expect(report.single.menu.box.width).toBe(330)
+    // The menu is as wide as the trigger, so it stays inside the sidebar.
+    expect(report.single.menu.box.width).toBe(report.single.menu.trigger.width)
+    expect(report.single.menu.box.left).toBe(report.single.menu.trigger.left)
     expect(report.single.menu.columns.map((column: any) => column.label)).toEqual(['Profiles'])
     expect(report.single.menu.profiles).toEqual([expect.objectContaining({ name: 'Adithya', checked: 'true', check: true, dotSize: 12 })])
     expect(report.single.actions).toEqual(['Rename', 'Colour'])
 
-    // Signed in: account on the left, profiles on the right, device count from the sign-in status.
+    // Signed in: account above profiles in this 260px sidebar, device count from the sign-in status.
     const { menu } = report.signedIn
     expect(menu).toMatchObject({ role: 'menu', label: 'Account and profiles', wide: true, heading: 'Profiles', rows: ['Account settings', 'Sign out', 'New profile'] })
-    expect(menu.box.width).toBe(460)
+    expect(menu.box.width).toBe(menu.trigger.width)
     expect(menu.columns.map((column: any) => column.label)).toEqual(['Account', 'Profiles'])
-    expect(menu.columns[0].box.left).toBeLessThan(menu.columns[1].box.left)
-    expect(menu.columns[0].box.top).toBe(menu.columns[1].box.top)
+    expect(menu.columns[0].box.left).toBe(menu.columns[1].box.left)
+    expect(menu.columns[0].box.top).toBeLessThan(menu.columns[1].box.top)
     expect(menu.identity).toEqual({ name: 'ada.lovelace', email: 'ada.lovelace@example.com', devices: '3 of 5 devices', avatar: 52, emptyAvatar: false })
     expect(menu.profiles.map((row: any) => [row.name, row.checked, row.check])).toEqual([['Adithya', 'true', true], ['Studio', 'false', false], ['Design', 'false', false]])
     expect(menu.kebabs).toEqual(['Adithya profile actions', 'Studio profile actions', 'Design profile actions'])
@@ -89,10 +91,10 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.signedOut.menu.identity).toEqual({ avatar: 52, emptyAvatar: true })
     expect(report.signedOut.trigger).toBe('Sign in, Mousse profile: Adithya')
 
-    // Under 560px the columns stack, account first, at the single-column width.
+    // A narrow window keeps the menu at the trigger's width with the columns stacked, account first.
     const narrow = report.narrow
     expect(narrow.viewport).toBe(500)
-    expect(narrow.menu.box.width).toBe(330)
+    expect(narrow.menu.box.width).toBe(narrow.menu.trigger.width)
     expect(narrow.menu.columns[0].box.left).toBe(narrow.menu.columns[1].box.left)
     expect(narrow.menu.columns[0].box.top).toBeLessThan(narrow.menu.columns[1].box.top)
     expect(narrow.menu.columns.map((column: any) => column.label)).toEqual(['Account', 'Profiles'])
