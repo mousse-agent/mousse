@@ -74,6 +74,9 @@ import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ServiceLostNotice } from './ServiceLostNotice'
+import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -358,7 +361,7 @@ export function OrchestratorChat() {
   }, [messages])
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is
-  // injected mid-turn. Show the steered text as a pill above the composer so
+  // injected mid-turn. Show the steered text as a notice above the composer so
   // the steer is visible in the transcript even before the next drain.
   useEffect(() => {
     const unsub = window.mousse.orchestrator.onTurnSteered?.((payload) => {
@@ -371,13 +374,13 @@ export function OrchestratorChat() {
   useEffect(() => {
     setLastSteer(null)
   }, [activeThreadId])
-  // Clear the pill once the steered user message lands in the transcript.
+  // The "Steered" notice hides once the steered message lands in the transcript, or when the turn ends.
   useEffect(() => {
     if (!lastSteer) return
-    if (messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
+    if (!turnActive || messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
       setLastSteer(null)
     }
-  }, [messages, lastSteer])
+  }, [messages, lastSteer, turnActive])
 
   // Quick-action approvals render inline on the PlanTool-style card instead
   // of the generic question modal. Bridge the pending question (requestId)
@@ -1302,31 +1305,29 @@ export function OrchestratorChat() {
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
+        <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
-          ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
-              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
-          : <ComputerNotice message={sendError} />)}
-        {!sendError && !connectionFailed && <PromptUndoNotice />}
-        {connectionFailed && (
-          <div className="connection-failed-pill" role="alert">
-            <span>Connection Failed</span>
-            <button
-              type="button"
-              onClick={() => {
-                setConnectionFailed(false)
-                setLoading(true)
-                void window.mousse.orchestrator
-                  .retryConnection(activeThreadId ?? undefined)
-                  .then((started) => {
-                    if (!started) setLoading(false)
-                    else void refreshTurnActive()
-                  })
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+          ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
+              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }}
+              onDismiss={() => { setSendError(null); setSendChanges(null) }} />
+          : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
+        <PromptUndoNotice />
+        <PausedRunNotice threadId={activeThreadId} />
+        <ServiceLostNotice
+          lost={connectionFailed}
+          onReconnect={() => {
+            setConnectionFailed(false)
+            setLoading(true)
+            void window.mousse.orchestrator
+              .retryConnection(activeThreadId ?? undefined)
+              .then((started) => {
+                if (!started) setLoading(false)
+                else void refreshTurnActive()
+              })
+          }}
+          onDismiss={() => setConnectionFailed(false)}
+        />
+        <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
           aria-hidden={!showQuestions || undefined}
@@ -1365,6 +1366,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* The dock on the composer's top edge: the top notice, or the queue; one at a time. */}
+        <ComposerNoticeSlot />
         <QueuedMessages
           threadId={activeThreadId}
           optimisticItems={optimisticQueueItems}
@@ -1401,13 +1404,6 @@ export function OrchestratorChat() {
             })()
           }}
         />
-        {lastSteer && (
-          <div className="steer-pill" role="status" aria-label="Steered into active turn">
-            <span className="steer-pill-label">Steered into active turn</span>
-            <span className="steer-pill-text">{lastSteer.text.length > 160 ? `${lastSteer.text.slice(0, 157)}…` : lastSteer.text}</span>
-            <button type="button" className="steer-pill-dismiss" aria-label="Dismiss steer notice" onClick={() => setLastSteer(null)}>×</button>
-          </div>
-        )}
 
             {newChat && (
               <ComposerWorkspaceToolbar
@@ -1471,6 +1467,7 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
+        </ComposerNoticeProvider>
         {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
           <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
         )}
