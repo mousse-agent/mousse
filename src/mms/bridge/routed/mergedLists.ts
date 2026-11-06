@@ -389,6 +389,8 @@ export class MergedLists implements RemoteListsPort {
     if (c) {
       c.retryAt = 0
       c.failures = 0
+      // It may have been upgraded since it was read through the older API: try the stream again.
+      if (c.mode === 'read') c.mode = 'none'
     }
     void this.reconcile()
   }
