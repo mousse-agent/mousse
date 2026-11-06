@@ -15,8 +15,8 @@ let host: HTMLDivElement
 let root: Root
 const onChange = vi.fn<(vocabulary: DictationVocabularyTerm[]) => void>()
 
-async function render(vocabulary: DictationVocabularyTerm[], selection: DictationSelection | null = parakeet) {
-  await act(async () => root.render(createElement(VocabularySetting, { vocabulary, selection, onChange })))
+async function render(vocabulary: DictationVocabularyTerm[]) {
+  await act(async () => root.render(createElement(VocabularySetting, { vocabulary, onChange })))
 }
 
 const button = (label: string) => [...document.querySelectorAll('button')].find((element) => element.textContent?.trim() === label) as HTMLButtonElement
@@ -70,12 +70,6 @@ describe('Settings, Speech: Vocabulary', () => {
     expect(onChange).toHaveBeenCalledWith([{ term: 'Vite', soundsLike: ['vit'] }])
   })
 
-  it('says when the chosen model does not use the list', async () => {
-    await render([], whisper)
-    expect(host.textContent).toContain('Only Parakeet models use them.')
-    await render([], parakeet)
-    expect(host.textContent).not.toContain('Only Parakeet')
-  })
 })
 
 describe('which models use the vocabulary', () => {

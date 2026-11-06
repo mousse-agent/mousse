@@ -1048,12 +1048,14 @@ export function registerGuiIpc(
   ): Promise<unknown> => {
     const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
     if (!targetThreadId) return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(knownAppError({ code: 'thread_not_selected', message: 'Select a thread before sending.' }, { category: 'invalid', retryable: false })) }
+    const previousBusyThreadId = activityTrackerFor().getBusyThreadId()
+    const previousActivity = activityTrackerFor().getState(targetThreadId)
     activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
       const requestId = body.requestId ?? randomUUID()
-      const result = await guiMms.request<{ queued?: boolean; message?: string }>(
+      const result = await guiMms.request<{ queued?: boolean; heldByPause?: boolean; message?: string }>(
         'orchestrator.send',
         {
           threadId: targetThreadId,
@@ -1067,7 +1069,12 @@ export function registerGuiIpc(
           source: 'gui'
         }
       )
-      if (result.queued) {
+      if (result.heldByPause) {
+        // The message waits behind a usage-limit pause: nothing started, so the thread shows what it showed before.
+        // Only this send's own marking is undone: another thread's turn may have started or ended meanwhile.
+        if (activityTrackerFor().getBusyThreadId() === targetThreadId) activityTrackerFor().setBusyThreadId(previousBusyThreadId)
+        setThreadActivity(targetThreadId, previousActivity ?? 'paused')
+      } else if (result.queued) {
         setThreadActivity(targetThreadId, 'processing')
       }
       return result
@@ -1575,6 +1582,29 @@ export function registerGuiIpc(
     )
     broadcast('threads:updated', res.threads)
     return res.thread
+  })
+
+  // `/fork`: the same fork agents make with `thread_fork`, after the thread's latest finished turn.
+  registerHandler('threads:fork', async (_e, threadId: string) => {
+    const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
+      sourceThreadId: threadId,
+      atRunOrdinal: 'latest_stable',
+      // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now.
+      seedFrom: 'current_head',
+      clientRequestId: randomUUID()
+    })
+    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
+    broadcast('threads:updated', threads.threads)
+    await selectThread(forked.threadId)
+    return { threadId: forked.threadId }
+  })
+
+  registerHandler('threads:clearContext', async (_e, threadId: string) => {
+    await guiMms.request('threads.clearContext', { threadId })
+  })
+
+  registerHandler('threads:compact', async (_e, threadId: string, focus?: string) => {
+    await guiMms.request('threads.compact', { threadId, ...(focus ? { focus } : {}) })
   })
 
   registerHandler('threads:regenerateTitle', async (_e, threadId: string) => {
