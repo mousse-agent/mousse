@@ -11,6 +11,7 @@ import { piPermissionKey, piToolAction } from '../../../shared/permissionKeys'
 import { permissionModeAllows } from '../../../shared/permissionMode'
 import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import { harnessAppError } from '../../../shared/harness/types'
+import type { CredentialKind } from '../../../shared/harness/status'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
@@ -42,7 +43,7 @@ import { PI_BRIDGE_ENV, type PiCatalogProvider, type PiGateRequest, type PiGateR
 import { addsThinkingBudget, capHonouring, fallbackModels, grantFloor, multipleCandidates, reservationRates, thinkingBudgetFor, type PiReasoning } from './reservation'
 import type { SpendModelFacts } from '../policy'
 import type { TurnBudget } from '../budget'
-import { piLaunch, startPiProcess, type PiLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
+import { piLaunch, startPiProcess, type PiLaunch, type PiLockedLaunch, type PiProcess, type PiRuntimePaths, type PiThinkingLevel } from './launch'
 import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from './paths'
 import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, type PiOAuthSource } from './oauthBroker'
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
@@ -82,6 +83,12 @@ export const PI_READ_ONLY_BUILTINS: readonly string[] = ['read', 'grep', 'find',
 export const PI_ALL_BUILTINS: readonly string[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
 /** How long the writer waits for a dead process's tree and its sweep (the Windows sweep alone can take 20 s). */
 export const CLEANUP_DEADLINE_MS = 30_000
+
+/**
+ * The variable every bot process carries: its activation. Its children inherit it across `setsid`,
+ * so a later sweep can find what a bot started (Bot Phase 1 §5.9, Phase 2).
+ */
+export const PI_BOT_MARKER = 'MOUSSE_BOT_ACTIVATION'
 /** How long a thread's process stays after its turn ended (successfully or not). */
 export const PI_WARM_MS = 10 * 60_000
 /** How long Pi may take to accept a prompt: its preflight can run a compaction (a model request). */
@@ -156,6 +163,14 @@ export interface PiRpcEngineOptions {
   holdTurn?: () => Promise<void>
   /** Every Pi process started, by pid (tests watch processes come and go). */
   onSpawn?: (pid: number, threadId: string) => void
+  /**
+   * Each process a bot turn starts, by pid and the bot thread (Bot Phase 1 §5.9): its active-time
+   * supervision (`BotProcessRegistry.attachThread`). When it throws, the process is killed and the
+   * turn fails. Without it the engine runs no bot turn.
+   */
+  onBotProcess?: (pid: number, threadId: string) => void
+  /** What the instance runs on (`InstanceSnapshot.auth.credential`), for a bot turn's locked environment. */
+  credentialKind?: () => CredentialKind | Promise<CredentialKind>
   /** Variables for a test build of the extension (`MOUSSE_PI_TEST_*`). */
   testEnv?: Readonly<Record<`MOUSSE_PI_TEST_${string}`, string>>
   /**
@@ -448,8 +463,10 @@ class PiThreadProcess {
     readonly cwd: string,
     public model: string,
     public thinking: PiThinkingLevel,
-    /** An agent definition's turn: a process and an in-memory session of its own, never saved, resumed or kept warm. */
-    readonly ephemeral = false
+    /** An agent definition's or a bot's turn: a process and an in-memory session of its own, never saved, resumed or kept warm. */
+    readonly ephemeral = false,
+    /** A bot's turn: the process runs in the locked environment and is reported to its supervision. */
+    readonly bot?: PiBotProcess
   ) {}
 
   get alive(): boolean {
@@ -472,6 +489,13 @@ class PiThreadProcess {
 }
 
 /** A turn between its first ref and its process: Stop and kill find it by its key. */
+/** What a bot turn's process is started with (Bot Phase 1 §5.9). */
+interface PiBotProcess {
+  /** The bot thread the turn runs on (its supervision finds the dispatch by it). */
+  threadId: string
+  locked: PiLockedLaunch
+}
+
 interface StartingTurn {
   threadId: string
   thread?: PiThreadProcess
@@ -764,8 +788,8 @@ export class PiRpcEngine implements ProviderAdapter {
   /** The thread's process for this turn: the warm one, or a new one that reported ready. */
   private async processFor(
     input: TurnInput, cwd: string, resume: string | undefined, starting: StartingTurn,
-    /** An agent definition's turn: a new process under a key of its own (never the thread's warm one). */
-    ephemeral?: { key: string }
+    /** An agent definition's or a bot's turn: a new process under a key of its own (never the thread's warm one). */
+    ephemeral?: { key: string; bot?: PiBotProcess }
   ): Promise<{ thread: PiThreadProcess; resumed: boolean }> {
     // Before the process is registered: a credential retirement in progress would count it as one
     // of the old credential's and kill it.
@@ -793,7 +817,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (existing) await within(this.kill(existing), INTERRUPT_DEADLINE_MS)
     // Stopped while the old process went: no replacement.
     if (starting.cancelled || this.stopped) throw protocolError(this.options.instanceId, `${this.options.label} was stopped while it started.`)
-    const thread = new PiThreadProcess(processKey, cwd, modelId, thinking, Boolean(ephemeral))
+    const thread = new PiThreadProcess(processKey, cwd, modelId, thinking, Boolean(ephemeral), ephemeral?.bot)
     thread.keyFingerprint = keyFingerprint
     starting.thread = thread
     this.threads.set(processKey, thread)
@@ -904,6 +928,7 @@ export class PiRpcEngine implements ProviderAdapter {
       thinking: thread.thinking,
       ...(sessionId ? { sessionId } : {}),
       ...(thread.ephemeral ? { ephemeral: true } : {}),
+      ...(thread.bot ? { locked: thread.bot.locked } : {}),
       ...(extraEnv ? { extraEnv } : {}),
       engineEnv: { ...(this.options.testEnv ?? {}), [PI_BRIDGE_ENV]: JSON.stringify(registration.address) } as Record<`MOUSSE_PI_${string}`, string>,
       ...(this.options.host ? { host: this.options.host } : {})
@@ -920,13 +945,24 @@ export class PiRpcEngine implements ProviderAdapter {
       if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
       throw stopping()
     }
-    const started = startPiProcess(env, launch, {
-      cwd: thread.cwd,
-      handlers: {
-        event: (event) => this.event(thread, event),
-        exit: (exit) => this.closed(thread, exit)
-      }
-    })
+    const bot = thread.bot
+    const onBotProcess = this.options.onBotProcess
+    let started: PiProcess
+    try {
+      started = startPiProcess(env, launch, {
+        cwd: thread.cwd,
+        handlers: {
+          event: (event) => this.event(thread, event),
+          exit: (exit) => this.closed(thread, exit)
+        },
+        // A bot's process is supervised from its start: one that cannot be is killed at once.
+        ...(bot && onBotProcess ? { onProcess: (pid: number) => onBotProcess(pid, bot.threadId) } : {})
+      })
+    } catch (error) {
+      registration.close()
+      if (this.threads.get(thread.threadId) === thread) this.threads.delete(thread.threadId)
+      throw protocolError(this.options.instanceId, `${this.options.label} could not supervise this bot's process (${error instanceof Error ? error.message : String(error)}), so it was stopped.`)
+    }
     thread.process = started
     if (started.child.pid) this.options.onSpawn?.(started.child.pid, thread.threadId)
     // The process itself is gone: its descendants are killed now, before its output closes.
@@ -1255,9 +1291,9 @@ export class PiRpcEngine implements ProviderAdapter {
       if (!starting.turn && starting.thread) void this.kill(starting.thread)
     }
     input.signal.addEventListener('abort', onEarlyAbort, { once: true })
-    if (definitionTurn) {
+    if (definitionTurn || host.bot) {
       try {
-        return await this.definitionTurn(key, ref, starting, startedAt, input, sink, ctl, host)
+        return await this.ephemeralTurn(key, ref, starting, startedAt, input, sink, ctl, host)
       } finally {
         input.signal.removeEventListener('abort', onEarlyAbort)
         this.turns.delete(key)
@@ -1316,21 +1352,32 @@ export class PiRpcEngine implements ProviderAdapter {
   }
 
   /**
-   * An agent definition's turn: a new Pi process with an in-memory session (`--no-session`) under a
-   * key of its own, so it never resumes, saves or warms a session and never touches the thread's own
-   * process. Its prior conversation goes in the prompt, its system prompt replaces Pi's
-   * (`before_agent_start`), and its tools are exactly its grants. The process is gone when the turn ends.
+   * An agent definition's or a bot's turn: a new Pi process with an in-memory session
+   * (`--no-session`) under a key of its own, so it never resumes, saves or warms a session and never
+   * touches the thread's own process. Its prior conversation goes in the prompt, and the process is
+   * gone when the turn ends. A definition's system prompt replaces Pi's (`before_agent_start`) and
+   * its tools are exactly its grants. A bot's process (Bot Phase 1 §5.9) runs in the locked
+   * environment (`lockedEnv`, with the bot marker) and is reported to its supervision as it starts.
    */
-  private async definitionTurn(
+  private async ephemeralTurn(
     key: string, ref: ProviderRef, starting: StartingTurn, startedAt: number,
     input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost
   ): Promise<TurnResult> {
     const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
     mkdirSync(cwd, { recursive: true })
+    let bot: PiBotProcess | undefined
+    if (host.bot && !host.definition) {
+      if (!this.options.onBotProcess)
+        throw harnessAppError({ code: 'policy_unenforceable', message: `${this.options.label} has no bot supervision here, so a bot does not run on it.`, missing: ['containment'], instanceId: this.options.instanceId })
+      const scratch = host.bot.workspace?.scratch ?? cwd
+      mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
+      const credential = (await this.options.credentialKind?.()) ?? 'unknown'
+      bot = { threadId: input.threadId, locked: { credential, scratch, marker: { [PI_BOT_MARKER]: host.bot.activationId } } }
+    }
     let started: { thread: PiThreadProcess; resumed: boolean }
     try {
       if (input.signal.aborted || starting.cancelled) throw new Error('aborted')
-      started = await this.processFor(input, cwd, undefined, starting, { key: `definition:${key}` })
+      started = await this.processFor(input, cwd, undefined, starting, bot ? { key: `bot:${key}`, bot } : { key: `definition:${key}` })
     } catch (error) {
       if (input.signal.aborted || starting.cancelled) return this.abortedResult(input, ref, startedAt)
       throw error
@@ -1406,7 +1453,7 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.episode.close()
     if (thread.turn === turn) thread.turn = undefined
     // Every ended turn, failed or not, leaves its process for the warm period only (a definition's
-    // process goes when its turn ends: `definitionTurn`).
+    // or a bot's process goes when its turn ends: `ephemeralTurn`).
     if (thread.alive && !thread.ephemeral) {
       thread.warm = setTimeout(() => void this.kill(thread), this.options.warmMs ?? PI_WARM_MS)
       thread.warm.unref?.()
@@ -1532,8 +1579,14 @@ export class PiRpcEngine implements ProviderAdapter {
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     const starting = [...this.turns.values()].filter((entry) => entry.threadId === threadId && !entry.turn)
     for (const entry of starting) entry.cancelled = true
+    // A definition's or a bot's turn runs on a process of its own, under its own key.
+    const ephemeral = [...this.turns.values()].filter((entry) => entry.threadId === threadId && entry.turn && entry.thread?.ephemeral)
+    for (const entry of ephemeral) {
+      await this.stopTurn(entry.thread!, entry.turn!)
+      await within(this.kill(entry.thread!), INTERRUPT_DEADLINE_MS)
+    }
     const thread = this.threads.get(threadId) ?? starting.find((entry) => entry.thread)?.thread
-    if (!thread) return starting.length ? 'stopped' : 'not_active'
+    if (!thread) return starting.length || ephemeral.length ? 'stopped' : 'not_active'
     if (thread.turn) await this.stopTurn(thread, thread.turn)
     await within(this.kill(thread), INTERRUPT_DEADLINE_MS)
     // A start still in progress spawns nothing more; one that already spawned is killed with its tree.

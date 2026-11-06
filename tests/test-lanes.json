@@ -30,6 +30,7 @@
     "tests/harness/cursorHost.test.ts",
     "tests/harness/piAnthropicGuardProcess.test.ts",
     "tests/harness/piBedrockRetry.test.ts",
+    "tests/harness/piBotEphemeral.test.ts",
     "tests/harness/piDefinitionGate.test.ts",
     "tests/harness/piRequestGate.test.ts",
     "tests/harness/piRpcLifecycle.test.ts",

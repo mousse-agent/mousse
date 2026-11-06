@@ -140,6 +140,11 @@ export interface PiRpcDriverOptions {
   identity?(providerId: string): string | undefined | Promise<string | undefined>
   /** Mousse's OAuth credentials for pi-ai's OAuth providers (`piOAuthBroker(providerAuth)`); Mousse is the only refresher. */
   oauth?: PiOAuthSource
+  /**
+   * Each process a bot turn starts, by pid and bot thread: its supervision
+   * (`BotProcessRegistry.attachThread`, Bot Phase 1 §5.9). Without it no bot turn runs on Pi.
+   */
+  onBotProcess?(pid: number, threadId: string): void
   /** Test seams for the evidence check: the platform (default `process.platform`) and the records (default `CONTAINMENT_EVIDENCE`). */
   platform?: NodeJS.Platform
   evidence?: readonly ContainmentEvidence[]
@@ -188,6 +193,15 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     ...(options.userMcpTools ? { userMcpTools: (threadId: string, runId?: string) => options.userMcpTools!(threadId, runId) } : {}),
     // A new session seeded with the chat's history tells the thread (`history_injected`).
     notice: (threadId, { message }) => notice.send(threadId, message),
+    ...(options.onBotProcess ? { onBotProcess: (pid: number, threadId: string) => options.onBotProcess!(pid, threadId) } : {}),
+    // A bot turn's locked environment passes cloud credentials only to an instance that runs on them.
+    credentialKind: async () => {
+      try {
+        return (await base.auth({ force: false })).credential ?? 'unknown'
+      } catch {
+        return 'unknown'
+      }
+    },
     ...options.engine
   })
   // The first turn of the instance on this engine says so, once ("Engine notice").
