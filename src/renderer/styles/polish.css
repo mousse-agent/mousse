@@ -832,6 +832,22 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
   box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.35);
 }
 
+/* The send slot (Send, Queue, Stop, Stop recording), the Stop beside Queue and the mic are circles of
+   the same 30px, and their focus ring is drawn as a shadow so it follows the circle. A filled Send
+   keeps its own light and glow under the ring. */
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn) {
+  border-radius: 50%;
+}
+
+.app .chat-input-area :is(.composer-action-btn, .composer-stop-btn, .composer-dictate-btn):focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.app .chat-input-area .composer-action-btn-active:focus-visible {
+  box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3), var(--ui-focus-ring);
+}
+
 /* The workspace strip is a tab that meets the composer card. It overlaps only
    the card's top border: a deeper overlap shows through the translucent,
    blurred card as a dark band. */

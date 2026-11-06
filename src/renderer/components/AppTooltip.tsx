@@ -68,12 +68,17 @@ const SHOW_DELAY_MS = 380
 /**
  * Replaces the native title tooltip. The title is lifted off the element
  * while the pointer is over it so Windows never draws its own bubble.
+ * A click or a key press closes it until the pointer leaves, as the native
+ * one does, so a button that changes under it (Send, Stop, Send) does not
+ * bring it back.
  */
 export function AppTooltip() {
   const tipRef = useRef<HTMLDivElement>(null)
   const pendingRef = useRef<HTMLElement | null>(null)
   const hostRef = useRef<HTMLElement | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Closed by a click or a key; the title stays lifted until the pointer leaves. */
+  const quietRef = useRef(false)
   const [text, setText] = useState<string | null>(null)
   const [anchor, setAnchor] = useState<Anchor | null>(null)
   const [place, setPlace] = useState<{ top: number; left: number } | null>(null)
@@ -110,6 +115,7 @@ export function AppTooltip() {
       restore(hostRef.current)
       pendingRef.current = null
       hostRef.current = null
+      quietRef.current = false
       setText(null)
       setAnchor(null)
       setPlace(null)
@@ -142,6 +148,18 @@ export function AppTooltip() {
       setPlace(null)
     }
 
+    const dismiss = () => {
+      const current = hostRef.current ?? pendingRef.current
+      if (!current) return
+      clearTimer()
+      hostRef.current = current
+      pendingRef.current = null
+      quietRef.current = true
+      setText(null)
+      setAnchor(null)
+      setPlace(null)
+    }
+
     const titledElement = (target: EventTarget | null) => {
       if (!(target instanceof Element)) return null
       const element = target.closest<HTMLElement>('[title], [data-app-tooltip]')
@@ -159,11 +177,12 @@ export function AppTooltip() {
     }
 
     const onOver = (event: PointerEvent) => {
+      const current = hostRef.current ?? pendingRef.current
+      if (current && event.target instanceof Node && current.contains(event.target)) return
+      // The pointer is somewhere else, even when the way out of the element went unseen.
+      if (current) hide()
       const element = titledElement(event.target)
-      if (!element) return
-      if (element === hostRef.current || element === pendingRef.current) return
-      hide()
-      arm(element)
+      if (element) arm(element)
     }
 
     const onOut = (event: PointerEvent) => {
@@ -177,14 +196,20 @@ export function AppTooltip() {
     const observer = new MutationObserver(() => {
       const element = hostRef.current ?? pendingRef.current
       if (!element) return
+      // A removed element never reports the pointer leaving it.
+      if (!element.isConnected) {
+        hide()
+        return
+      }
       liftTitle(element)
-      if (hostRef.current === element) {
+      if (hostRef.current === element && !quietRef.current) {
         const value = element.dataset.appTooltip?.trim()
         if (value) setText(value)
       }
     })
     observer.observe(document.body, {
       subtree: true,
+      childList: true,
       attributes: true,
       attributeFilter: ['title']
     })
@@ -197,6 +222,8 @@ export function AppTooltip() {
 
     document.addEventListener('pointerover', onOver)
     document.addEventListener('pointerout', onOut)
+    document.addEventListener('pointerdown', dismiss, true)
+    document.addEventListener('keydown', dismiss, true)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('blur', hide)
     return () => {
@@ -204,6 +231,8 @@ export function AppTooltip() {
       observer.disconnect()
       document.removeEventListener('pointerover', onOver)
       document.removeEventListener('pointerout', onOut)
+      document.removeEventListener('pointerdown', dismiss, true)
+      document.removeEventListener('keydown', dismiss, true)
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('blur', hide)
     }

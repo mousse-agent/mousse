@@ -34,6 +34,9 @@ export interface SelectProps<T extends string = string> {
   id?: string
   ariaLabel?: string
   ariaLabelledBy?: string
+  /** For a field with a problem: the message that describes it. */
+  ariaDescribedBy?: string
+  ariaInvalid?: boolean
   size?: 'default' | 'small'
   className?: string
   /** Custom trigger content for the selected option. */
@@ -63,6 +66,8 @@ export function Select<T extends string = string>({
   id,
   ariaLabel,
   ariaLabelledBy,
+  ariaDescribedBy,
+  ariaInvalid,
   size = 'default',
   className,
   renderValue,
@@ -274,6 +279,8 @@ export function Select<T extends string = string>({
         aria-activedescendant={open && active >= 0 ? optionId(active) : undefined}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid || undefined}
         disabled={disabled}
         title={title}
         value={value ?? ''}
