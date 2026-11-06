@@ -4,6 +4,7 @@ import type { BotId } from '../../shared/net'
 import type { ChatNetworkBinding } from '../../shared/chatsNetwork'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from './appStore'
+import { useBotsStore } from './botsStore'
 
 const EMPTY: ChatsSnapshot = { agents: [], chats: [], devices: [] }
 interface ChatsState {
@@ -11,6 +12,8 @@ interface ChatsState {
   snapshot: ChatsSnapshot
   conversation: ChatConversation | null
   activeChatId: string | null
+  /** The bot whose chat is open. A chat and a bot are never open together. */
+  activeBotId: string | null
   error: string | null
   /** What set `error`: a background refresh clears only its own, never an action's. */
   errorSource: 'refresh' | 'action' | null
@@ -23,6 +26,7 @@ interface ChatsState {
   activate(profileId: string): void
   refresh(): Promise<void>
   openChat(chatId: string): Promise<void>
+  openBot(botId: string): Promise<void>
   create(input: ChatCreateInput): Promise<void>
   send(text: string, mentions?: BotId[]): Promise<void>
   publish(): Promise<void>
@@ -33,6 +37,7 @@ interface ChatsState {
 const pendingSends = new Map<string, { text: string; clientMessageId: string; mentions?: BotId[] }>()
 const pendingPublications = new Map<string, string>()
 let epoch = 0
+let stopOpenBot: (() => void) | undefined
 let refreshOperation: Promise<void> | undefined
 // Polling still checks current authorization and metadata. I retain only the
 // already fetched original prefix when the fresh first page proves it unchanged.
@@ -51,7 +56,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 /** The error of something the person did, which a later background refresh leaves on screen. */
 export const actionError = (error: unknown, prefix = '') => ({ error: `${prefix}${errorText(error)}`, errorSource: 'action' as const })
 export const useChatsStore = create<ChatsState>((set, get) => ({
-  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, errorSource: null,
+  profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, error: null, errorSource: null,
   loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
@@ -59,8 +64,12 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     pendingSends.clear()
     pendingPublications.clear()
     refreshOperation = undefined
-    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, errorSource: null, loading: false,
+    set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, activeBotId: null, error: null, errorSource: null, loading: false,
       newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
+    useBotsStore.getState().activate(profileId)
+    // A bot's notification was clicked: open its chat.
+    stopOpenBot?.()
+    stopOpenBot = window.mousse?.app?.onOpenBot?.((botId) => { void get().openBot(botId) })
   },
   async refresh() {
     if (refreshOperation) return refreshOperation
@@ -90,11 +99,19 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     const owner = epoch
     useAppStore.getState().setThreadsSidebarView('chats')
     useAppStore.getState().setSidebarMode('chats')
-    set({ activeChatId: chatId, conversation: null, error: null, errorSource: null, loading: true })
+    set({ activeChatId: chatId, activeBotId: null, conversation: null, error: null, errorSource: null, loading: true })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
       if (owner === epoch && get().activeChatId === chatId) set({ conversation, loading: false })
     } catch (error) { if (owner === epoch && get().activeChatId === chatId) set({ ...actionError(error), loading: false }) }
+  },
+  async openBot(botId) {
+    if (botId !== get().activeBotId && !await confirmNavigation()) return
+    useAppStore.getState().setThreadsSidebarView('chats')
+    useAppStore.getState().setSidebarMode('chats')
+    if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
+    set({ activeBotId: botId, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
+    await useBotsStore.getState().loadChat(botId)
   },
   async create(input) {
     if (!await confirmNavigation()) return
@@ -103,7 +120,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.create', input)
       if (owner !== epoch) return
-      set({ conversation, activeChatId: conversation.id, newChatOpen: false, loading: false })
+      set({ conversation, activeChatId: conversation.id, activeBotId: null, newChatOpen: false, loading: false })
       useAppStore.getState().setThreadsSidebarView('chats')
       useAppStore.getState().setSidebarMode('chats')
       await get().refresh()
