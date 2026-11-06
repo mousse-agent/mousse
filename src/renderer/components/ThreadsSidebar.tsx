@@ -10,6 +10,8 @@ import { pausedStatusLabel } from '../lib/pausedRun'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
+import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
+import { needsMeThreads } from '../lib/needsMe'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -49,6 +51,9 @@ interface RenamingTarget {
 
   name: string
 
+  /** Started from the row's copy in the "Needs me" group: that copy shows the input, not the one in the list. */
+  inNeedsMe?: boolean
+
 }
 
 interface DraggedSidebarItem {
@@ -60,6 +65,11 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
+const PROJECT_ATTENTION_TITLE: Record<Exclude<ThreadAttention, 'quiet' | 'needs-me'>, string> = {
+  working: 'Working',
+  paused: 'Paused',
+  done: 'Done'
+}
 const SIDEBAR_VIEWS = ['projects', 'threads', 'chats'] as const
 type SidebarView = (typeof SIDEBAR_VIEWS)[number]
 
@@ -259,6 +269,7 @@ function ThreadCardBody({
   onCancelRename: () => void
 }) {
   const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
+  const status = threadStatus(activity, awaitsApproval)
   return (
     <>
       {projectName ? (
@@ -271,32 +282,32 @@ function ThreadCardBody({
       <span className="threads-sidebar-card-body">
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
-          {activity === 'processing' ? (
+          {status === 'working' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
               <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
               Working{age && age !== 'now' ? ` ${age}` : ''}
             </span>
-          ) : activity === 'waiting' ? (
+          ) : status === 'waiting' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
               <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
               Waiting{age && age !== 'now' ? ` ${age}` : ''}
             </span>
-          ) : activity === 'awaiting_input' && awaitsApproval ? (
+          ) : status === 'approval' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
               <Shield size={12} strokeWidth={2} aria-hidden="true" />
               Approval
             </span>
-          ) : activity === 'awaiting_input' ? (
+          ) : status === 'question' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
               <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
               Input
             </span>
-          ) : activity === 'paused' ? (
+          ) : status === 'paused' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
               <Pause size={12} strokeWidth={2} aria-hidden="true" />
               {pausedStatusLabel(pause, Date.now())}
             </span>
-          ) : activity === 'completed' ? (
+          ) : status === 'done' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
               <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
               Done
@@ -382,6 +393,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     target: ThreadsContextMenuTarget
 
+    inNeedsMe?: boolean
+
   } | null>(null)
 
   const [renaming, setRenaming] = useState<RenamingTarget | null>(null)
@@ -424,6 +437,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     [listedThreads, agentThreadIds]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
+  const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
+  // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
+  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds), [threads, threadActivity, agentThreadIds])
+  // With one thread in all, its own row already says it: a group of it would only repeat it.
+  const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
 
   // A project that several computers hold for the same repository is one group; the others' projects that
   // match none of this computer's stay groups of their own, named with their computer.
@@ -611,7 +629,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     event: React.MouseEvent,
 
-    target: ThreadsContextMenuTarget
+    target: ThreadsContextMenuTarget,
+
+    inNeedsMe = false
 
   ) => {
 
@@ -621,7 +641,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     event.stopPropagation()
 
-    setContextMenu({ x: event.clientX, y: event.clientY, target })
+    setContextMenu({ x: event.clientX, y: event.clientY, target, inNeedsMe })
 
   }
 
@@ -681,11 +701,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (!contextMenu) return
 
-    const { target } = contextMenu
+    const { target, inNeedsMe } = contextMenu
 
     closeContextMenu()
 
-    setRenaming({ type: target.type, id: target.id, name: target.name })
+    setRenaming({ type: target.type, id: target.id, name: target.name, inNeedsMe })
 
   }
 
@@ -741,81 +761,70 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], threadId)
-
-  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string) => {
-    if (!state || state === 'idle') return null
-
-    if (state === 'processing') {
-      return (
-        <Loader2
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-spinner icon-spin"
-          aria-hidden="true"
-        />
-      )
+  const renderThreadStatus = (threadId: string) => {
+    const status = threadStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], approvalThreads.has(threadId))
+    switch (status) {
+      case 'working':
+        return (
+          <Loader2
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-spinner icon-spin"
+            aria-hidden="true"
+          />
+        )
+      case 'done':
+        return (
+          <CircleCheck
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
+            aria-label="Agent finished"
+          />
+        )
+      case 'approval':
+        return (
+          <Shield
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
+            aria-label="Agent needs approval"
+          />
+        )
+      case 'question':
+        return (
+          <MessageQuestion
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
+            aria-label="Agent needs input"
+          />
+        )
+      case 'waiting':
+        return (
+          <CircleDotDashed
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
+            aria-label="Agent is waiting"
+          />
+        )
+      case 'paused': {
+        const turn = turnStates[threadId]
+        const own = turn?.phase === 'paused' ? turn.pause : undefined
+        const label = pausedStatusLabel(own, Date.now())
+        return (
+          <Pause
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
+            aria-label={label}
+          />
+        )
+      }
+      case 'quiet':
+        return null
     }
-
-    if (state === 'completed') {
-      return (
-        <CircleCheck
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
-          aria-label="Agent finished"
-        />
-      )
-    }
-
-    if (state === 'awaiting_input' && threadId && approvalThreads.has(threadId)) {
-      return (
-        <Shield
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-          aria-label="Agent needs approval"
-        />
-      )
-    }
-
-    if (state === 'awaiting_input') {
-      return (
-        <MessageQuestion
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-          aria-label="Agent needs input"
-        />
-      )
-    }
-
-    if (state === 'waiting') {
-      return (
-        <CircleDotDashed
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
-          aria-label="Agent is waiting"
-        />
-      )
-    }
-
-    if (state === 'paused') {
-      const turn = threadId ? turnStates[threadId] : undefined
-      const own = turn?.phase === 'paused' ? turn.pause : undefined
-      const label = pausedStatusLabel(own, Date.now())
-      return (
-        <Pause
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
-          aria-label={label}
-        />
-      )
-    }
-
-    return null
   }
 
   useEffect(() => {
@@ -878,18 +887,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       if (!thread) return
       // Other panels mark elements with the thread id too: only a sidebar row on screen counts.
       const rows = document.querySelectorAll<HTMLElement>(`.threads-sidebar-thread[data-thread-id="${CSS.escape(thread.id)}"]`)
-      if (![...rows].some((row) => row.offsetParent !== null)) return
+      const visible = [...rows].filter((row) => row.offsetParent !== null)
+      if (visible.length === 0) return
+      // The thread's own row first; its copy in "Needs me" only when that is the one on screen.
+      const row = visible.find((entry) => !entry.closest('.threads-sidebar-needs-me')) ?? visible[0]
       event.preventDefault()
-      setRenaming({ type: 'thread', id: thread.id, name: thread.name })
+      setRenaming({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe: Boolean(row.closest('.threads-sidebar-needs-me')) })
     }
     window.addEventListener('mousse:rename-thread', onRename)
     return () => window.removeEventListener('mousse:rename-thread', onRename)
   }, [threads])
 
-  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: SidebarView = 'projects', layout: 'row' | 'card' = 'row') => {
+  // `inNeedsMe`: a copy of the row in the "Needs me" group, which filters rows and so does not reorder them.
+  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: SidebarView = 'projects', layout: 'row' | 'card' = 'row', inNeedsMe = false) => {
 
     const isSettled = Boolean(thread.settledAt)
-    const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
+    const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
     const showTrailing = Boolean(statusNode || thread.worktreeEnabled || thread.node)
@@ -902,9 +915,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
     const hoverEnabled = !contextMenu && !isDragging && !isRenaming && !searchOpen && sidebarView === view
-    const feed = view === 'threads' && !isSettled
+    // A copy in "Needs me" is never dragged or dropped on, so it is not part of the reorderable feed.
+    const feed = view === 'threads' && !isSettled && !inNeedsMe
     const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), ...(feed ? { feed } : {}) }
-    const dropLine = feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
+    const dropLine = !inNeedsMe && feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
     // The lower half of a row drops after it, so a row can also go last.
     const dropsAfter = (event: React.DragEvent) => {
       const rect = event.currentTarget.getBoundingClientRect()
@@ -947,7 +961,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         data-thread-id={thread.id}
 
-        draggable={!isRenaming && !isSettled}
+        draggable={!isRenaming && !isSettled && !inNeedsMe}
 
         onDragStart={(event) => {
           event.stopPropagation()
@@ -955,7 +969,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }}
 
         onDragOver={(event) => {
-          if (!canDropOn(dragItem)) return
+          if (inNeedsMe || !canDropOn(dragItem)) return
           event.preventDefault()
           if (!feed) return
           event.stopPropagation()
@@ -966,6 +980,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
+          if (inNeedsMe) return
           if (feed) dropFeedThread(thread.id, dropsAfter(event))
           else void reorderBefore(dragItem)
         }}
@@ -992,7 +1007,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             settled: isSettled
 
-          })
+          }, inNeedsMe)
 
         }
 
@@ -1105,6 +1120,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  const renderNeedsMe = (view: SidebarView) => showNeedsMe && (
+    <section className="threads-sidebar-needs-me" aria-label={needsMeLabel(needsMe.length)}>
+      <div className="threads-sidebar-heading">
+        <span className="threads-sidebar-heading-label">Needs me · {needsMe.length}</span>
+      </div>
+      <div className="threads-sidebar-tree threads-sidebar-thread-feed">
+        {needsMe.map((thread) => renderThreadRow(thread, true, view, 'card', true))}
+      </div>
+    </section>
+  )
+
   return (
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
@@ -1147,6 +1173,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={sidebarView !== 'projects'}>
 
+        {sidebarView === 'projects' && renderNeedsMe('projects')}
+
         <div className="threads-sidebar-tree">
 
           {projectGroups.length === 0 ? (
@@ -1165,6 +1193,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
               const projectThreads = availableThreads.filter((thread) => groupIdOf(thread.projectId) === group.id)
               const projectThreadCount = projectThreads.length
+              // The project row carries its threads' state: the worst of them, and while it is closed how many need the person.
+              const projectLevels = projectThreads.map((thread) => attentionOf(thread.id))
+              const projectAttention = worstOf(projectLevels)
+              const projectNeedsMe = projectLevels.filter((level) => level === 'needs-me').length
+              const projectAttentionTitle = projectAttention === 'needs-me'
+                ? needsMeLabel(projectNeedsMe)
+                : projectAttention === 'quiet' ? '' : PROJECT_ATTENTION_TITLE[projectAttention]
 
               const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
 
@@ -1272,6 +1307,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                         <span className="threads-sidebar-project-name">{project.name}</span>
 
+                      )}
+
+                      {projectAttention !== 'quiet' && (
+                        <span
+                          className={`threads-sidebar-project-status threads-sidebar-project-status--${projectAttention}`}
+                          role="img"
+                          aria-label={projectAttentionTitle}
+                          title={projectAttentionTitle}
+                        >
+                          <span className="threads-sidebar-status-dot" aria-hidden="true" />
+                          {!expanded && projectNeedsMe > 0 && (
+                            <span className="threads-sidebar-project-count" aria-hidden="true">{projectNeedsMe}</span>
+                          )}
+                        </span>
                       )}
 
                       <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
@@ -1400,8 +1449,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
       <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
+        {sidebarView === 'threads' && renderNeedsMe('threads')}
         <div
-          className="threads-sidebar-tree threads-sidebar-thread-feed"
+          className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
           // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
           onDragOver={(event) => {
             if (!draggedItem.current?.feed) return
