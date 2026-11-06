@@ -2,22 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
+  BrowserTab,
   Check,
+  Clean,
+  Code2,
+  Cookie,
   Crosshair,
   Globe,
   Minus,
   MoreVertical,
   Plus,
-  RefreshCw
-} from '../lib/icons'
-import {
-  ArrowSyncRegular,
-  BroomRegular,
-  CookiesRegular,
-  DeleteDismissRegular,
-  PinOffRegular,
-  PinRegular,
-  WindowDevToolsRegular
+  RefreshCw,
+  Smartphone
 } from '../lib/icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
@@ -26,8 +22,20 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
+import {
+  BrowserAccessControl,
+  BrowserDeviceToolbar,
+  BrowserNotice,
+  BrowserStartPage,
+  ClearCookiesDialog,
+  DEVICE_PRESETS,
+  browserAgentState,
+  type BrowserNoticeState
+} from './browser/BrowserToolbarParts'
 
 const BLANK_URL = 'about:blank'
+/** How long a success notice stays under the toolbar. Errors stay until dismissed or replaced. */
+const DONE_NOTICE_MS = 4000
 function browserErrorMessage(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message
   return typeof error === 'string' ? error : 'Browser request failed. Please try again.'
@@ -35,13 +43,6 @@ function browserErrorMessage(error: unknown): string {
 // Electron types this as boolean, but React drops boolean attributes on webview.
 // A literal string emits the native attribute and preserves popup navigation.
 const ALLOW_POPUPS_ATTRIBUTE = 'true' as unknown as boolean
-const DEVICE_PRESETS = [
-  { id: 'responsive', label: 'Responsive', width: null },
-  { id: 'iphone-14', label: 'iPhone 14', width: 390 },
-  { id: 'pixel-7', label: 'Pixel 7', width: 412 },
-  { id: 'ipad', label: 'iPad', width: 768 },
-  { id: 'desktop', label: 'Desktop', width: 1280 }
-] as const
 
 /** Treat bare host input as a navigable URL (not a search query). */
 function normalizeUrl(input: string): string {
@@ -333,22 +334,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onSt
   }, [tab.zoomFactor])
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
+  const blank = tab.url === BLANK_URL
   useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
   return (
     <KeepMounted active={active} preserveLayout
-      className={`browser-viewport${active ? ' active' : ''}`}
+      className={`browser-viewport${active ? ' active' : ''}${blank ? ' browser-viewport-blank' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
-      {tab.url === BLANK_URL && (
-        <div className="browser-blank" aria-hidden="true">
-          <MousseLogoOutline className="browser-blank-logo" />
-        </div>
-      )}
+      {blank && <BrowserStartPage />}
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
         inert={agentControlled}
-        className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
+        className={`browser-webview${blank ? ' browser-webview-hidden' : ''}`}
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
@@ -394,9 +392,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const provisionedRequests = useRef(new Set<string>())
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
   const [browserBusy, setBrowserBusy] = useState(false)
-  const [browserError, setBrowserError] = useState('')
+  const [notice, setNotice] = useState<BrowserNoticeState | null>(null)
+  const [confirmClearCookies, setConfirmClearCookies] = useState(false)
+  const setBrowserError = useCallback((error: unknown) => setNotice({ kind: 'error', text: browserErrorMessage(error) }), [])
   const activeControl = activeTab ? controlByTab[activeTab.id] : undefined
   const agentControlled = activeControl?.owner === 'agent'
+  const agentState = browserAgentState(access.allowed, activeControl?.owner)
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
   const manualActive = active && !agentControlled
   const pendingAccess = access.allowed ? undefined : access.pending[0]
@@ -440,6 +441,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
   }), [profileId])
+
+  useEffect(() => {
+    if (notice?.kind !== 'done') return
+    const timer = setTimeout(() => setNotice((current) => (current === notice ? null : current)), DONE_NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
@@ -499,12 +506,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         registrations.current.set(id, registration)
         void registration.catch((error) => {
           registrations.current.delete(id)
-          setBrowserError(browserErrorMessage(error))
+          setBrowserError(error)
         })
       }
     }
     else webviews.current.delete(id)
-  }, [])
+  }, [setBrowserError])
   const handleWebviewState = useCallback((id: string, patch: Partial<BrowserTabState>) => {
     updateTab(id, patch)
     if (id === activeTab?.id && !editingAddress.current && patch.url) {
@@ -541,13 +548,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     if (!activeTab || !webview) return
     const url = normalizeUrl(inputUrl)
     editingAddress.current = false
-    setBrowserError('')
+    setNotice(null)
     const navigation = withWebview(webview, (wv) => wv.loadURL(url), undefined)
     void navigation?.catch((error: unknown) => {
       // A newer navigation or a redirect can intentionally cancel this load.
       const failure = error as { errno?: number; code?: string; message?: string }
       if (failure.errno === -3 || failure.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(failure.message ?? '')) return
-      setBrowserError(browserErrorMessage(error))
+      setBrowserError(error)
     })
   }
 
@@ -588,29 +595,46 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     if (!activeTab || !activeThreadId || browserBusy) return
     const tabId = activeTab.id
     const api = window.mousse?.inAppBrowser
-    setBrowserBusy(true); setBrowserError('')
+    setBrowserBusy(true); setNotice(null)
     try {
       if (!api) throw new Error('In-app browser automation is unavailable')
       if (operation === 'take') await api.takeControl(tabId)
       else await api.resumeAgent(tabId)
-    } catch (error) { setBrowserError(browserErrorMessage(error)) }
+    } catch (error) { setBrowserError(error) }
     finally { setBrowserBusy(false) }
   }
 
   const changeAccess = async (allowed: boolean, requestId?: string) => {
     accessRevision.current += 1
     setBrowserBusy(true)
-    setBrowserError('')
+    setNotice(null)
     try {
       const state = await window.mousse.platformRequest.request<BrowserAccessState>(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
       setAccess(state)
     } catch (error) {
-      setBrowserError(browserErrorMessage(error))
+      setNotice({
+        kind: 'error',
+        text: requestId ? 'Couldn’t answer the access request' : allowed ? 'Couldn’t turn on agent access' : 'Couldn’t turn off agent access',
+        detail: browserErrorMessage(error)
+      })
       // Revocation may have succeeded even if its response was interrupted.
       try { setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })) } catch { /* Keep the original error. */ }
     }
     finally { accessRevision.current += 1; setBrowserBusy(false) }
   }
+
+  const clearBrowserData = async (what: 'cookies' | 'cache') => {
+    setNotice(null)
+    try {
+      if (what === 'cookies') await window.mousse.browser.clearCookies()
+      else await window.mousse.browser.clearCache()
+      setNotice({ kind: 'done', text: what === 'cookies' ? 'Cookies cleared' : 'Cache cleared' })
+    } catch (error) {
+      setNotice({ kind: 'error', text: `Couldn’t clear ${what}`, detail: browserErrorMessage(error) })
+    }
+  }
+
+  const noticeView = notice && <BrowserNotice notice={notice} onDismiss={() => setNotice(null)} />
 
   return (
     <div
@@ -621,7 +645,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       <KeepMountedStack>
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
       {pendingAccess && <div className="browser-agent-controls" role="region" aria-label="Agent browser access request">
-        <span>Let an agent use any tabs in the browser</span>
+        <span>Allow access to all browser tabs?</span>
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(true, pendingAccess.requestId)}>Allow</button>
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(false, pendingAccess.requestId)}>Deny</button>
       </div>}
@@ -630,7 +654,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
           : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
       </div>}
-      {browserError && <div className="browser-agent-controls" role="alert">{browserError}</div>}
+      {!hasVisibleTabs && noticeView}
       {hasVisibleTabs ? (
         <>
           <div className="browser-toolbar">
@@ -640,7 +664,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
               <Globe size={14} className="browser-url-icon" />
-              <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" aria-label="Address" spellCheck={false} />
+              <input className="browser-url-input" aria-label="Browser address" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
             </form>
             <button
               type="button"
@@ -653,6 +677,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
               <Crosshair size={16} />
             </button>
             </div>
+            <BrowserAccessControl state={agentState} allowed={access.allowed} busy={browserBusy} onChange={(allowed) => void changeAccess(allowed)} />
             <div className="browser-menu-wrap">
               <button
                 ref={menuButtonRef}
@@ -672,36 +697,27 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     aria-hidden="true"
                     onPointerDown={() => setMenuOpen(false)}
                   />
-                  <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu">
-                    <button type="button" role="menuitemcheckbox" aria-checked={access.allowed} disabled={browserBusy} onClick={() => void changeAccess(!access.allowed)}>
-                      <span>Agents Browser Access</span><span className={`browser-access-toggle${access.allowed ? ' enabled' : ''}`} aria-hidden="true" />
-                    </button>
-                    <div className="browser-menu-separator" />
+                  <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu" aria-label="Browser menu">
                     <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
-                    <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
-                      <span className="browser-menu-label"><ArrowSyncRegular />Hard reload</span>
+                    <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><RefreshCw size={14} />Hard reload</span>
                     </button>
-                    <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.openDevTools(), undefined); setMenuOpen(false) }}>
-                      <span className="browser-menu-label"><WindowDevToolsRegular />DevTools</span>
+                    <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.openDevTools(), undefined); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><Code2 size={14} />DevTools</span>
                     </button>
-                    <button type="button" onClick={() => updateTab(activeTab.id, { deviceToolbarOpen: !activeTab.deviceToolbarOpen })}>
-                      <span>Show device toolbar</span>{activeTab.deviceToolbarOpen && <Check size={14} />}
+                    <button type="button" role="menuitemcheckbox" aria-checked={activeTab.deviceToolbarOpen} onClick={() => { updateTab(activeTab.id, { deviceToolbarOpen: !activeTab.deviceToolbarOpen }); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><Smartphone size={14} />Device toolbar</span>{activeTab.deviceToolbarOpen && <Check size={14} />}
                     </button>
-                    <div className="browser-menu-zoom"><span>Zoom</span><button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => changeZoom(-0.1)}><Minus size={13} aria-hidden="true" /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => changeZoom(0.1)}><Plus size={13} aria-hidden="true" /></button></div>
-                    <button type="button" onClick={() => updateTab(activeTab.id, { ownerThreadId: activeTab.ownerThreadId === null ? activeThreadId : null })}>
-                      <span>{activeTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}</span>{activeTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
+                    <div className="browser-menu-zoom"><span>Zoom</span><button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => changeZoom(-0.1)}><Minus size={14} aria-hidden="true" /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => changeZoom(0.1)}><Plus size={14} aria-hidden="true" /></button></div>
+                    <button type="button" role="menuitemcheckbox" aria-checked={activeTab.ownerThreadId === null} onClick={() => { updateTab(activeTab.id, { ownerThreadId: activeTab.ownerThreadId === null ? activeThreadId : null }); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><BrowserTab size={14} />Keep tab in every thread</span>{activeTab.ownerThreadId === null && <Check size={14} />}
                     </button>
                     <div className="browser-menu-separator" />
-                    <button type="button" onClick={() => {
-                      setMenuOpen(false)
-                      if (!window.confirm('Clear browser cookies? You are signed out of every site.')) return
-                      void window.mousse.browser.clearCookies().catch((error) => console.error('Clearing browser cookies failed', error))
-                    }}>
-                      <span className="browser-menu-label"><CookiesRegular />Clear cookies</span>
-                      <DeleteDismissRegular />
+                    <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setConfirmClearCookies(true) }}>
+                      <span className="browser-menu-label"><Cookie size={14} />Clear cookies…</span>
                     </button>
-                    <button type="button" onClick={() => { void window.mousse.browser.clearCache().catch((error) => console.error('Clearing the browser cache failed', error)); setMenuOpen(false) }}>
-                      <span className="browser-menu-label"><BroomRegular />Clear cache</span>
+                    <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void clearBrowserData('cache') }}>
+                      <span className="browser-menu-label"><Clean size={14} />Clear cache</span>
                     </button>
                     </div>
                   </div>
@@ -710,13 +726,9 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             </div>
           </div>
           {activeTab?.deviceToolbarOpen && (
-            <div className="browser-device-toolbar">
-              <select value={activeTab.devicePreset} onChange={(event) => updateTab(activeTab.id, { devicePreset: event.target.value })}>
-                {DEVICE_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
-              </select>
-              <span>{DEVICE_PRESETS.find((preset) => preset.id === activeTab.devicePreset)?.width ?? 'Auto'} px</span>
-            </div>
+            <BrowserDeviceToolbar presetId={activeTab.devicePreset} onChange={(devicePreset) => updateTab(activeTab.id, { devicePreset })} />
           )}
+          {noticeView}
         </>
       ) : (
         <div className="browser-empty-state" role="status">
@@ -746,6 +758,15 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       </KeepMounted>
       </KeepMounted>
       </KeepMountedStack>
+      {confirmClearCookies && (
+        <FloatingPortal>
+          <ClearCookiesDialog
+            open
+            onCancel={() => setConfirmClearCookies(false)}
+            onConfirm={() => { setConfirmClearCookies(false); void clearBrowserData('cookies') }}
+          />
+        </FloatingPortal>
+      )}
     </div>
   )
 }
