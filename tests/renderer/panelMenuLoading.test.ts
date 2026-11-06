@@ -221,3 +221,50 @@ describe('the profile footer', () => {
     expect(document.querySelector<HTMLButtonElement>('.profile-menu-kebab')!.title).toBe('Profile options')
   })
 })
+
+describe('archiving the profile in use', () => {
+  const alpha = { id: 'prf_alpha', displayName: 'Work', status: 'active', isDefault: false, revision: 1, color: '#4d6088' }
+  const beta = { id: 'prf_beta', displayName: 'Personal', status: 'active', isDefault: true, revision: 1, color: '#6a4d88' }
+  let finishArchive: () => void
+  let bind: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    useAppStore.setState({ profileId: 'prf_alpha' })
+    bind = vi.fn(async (ref: string) => ({ profile: ref === beta.id ? beta : alpha }))
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      profiles: {
+        list: async () => ({ profiles: [alpha, beta], defaultProfileId: 'prf_beta' }),
+        status: async () => ({ binding: { profileId: 'prf_alpha' } }),
+        bind,
+        archive: () => new Promise<void>((resolve) => { finishArchive = resolve })
+      }
+    }
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+  })
+
+  afterEach(() => {
+    delete (window as unknown as { mousse?: unknown }).mousse
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the profile rows disabled until the archive is done, after moving to the default profile', async () => {
+    await act(async () => root.render(createElement(ProfileSwitcher)))
+    const trigger = host.querySelector<HTMLButtonElement>('.profile-sidebar-trigger')!
+    await act(async () => trigger.click())
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Work profile actions"]')!.click())
+    const archive = [...document.querySelectorAll<HTMLButtonElement>('.profile-row-menu button')].find((button) => button.textContent?.includes('Archive'))!
+    await act(async () => archive.click())
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(bind).toHaveBeenCalledWith('prf_beta')
+
+    // The window moved to the default profile; the archive itself is still running.
+    if (!document.querySelector('.profile-menu-profile')) await act(async () => trigger.click())
+    const rows = () => [...document.querySelectorAll<HTMLButtonElement>('.profile-menu-profile')]
+    expect(rows().length).toBeGreaterThan(0)
+    expect(rows().every((row) => row.disabled)).toBe(true)
+
+    await act(async () => { finishArchive(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(rows().every((row) => !row.disabled)).toBe(true)
+  })
+})
+

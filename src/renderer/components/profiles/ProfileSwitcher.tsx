@@ -156,8 +156,11 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     }
   }, [open])
 
-  /** Binds the window to a profile; true once it is bound. */
-  const switchProfile = async (ref: string): Promise<boolean> => {
+  /**
+   * Binds the window to a profile; true once it is bound. `holdBusy` leaves the busy state on for a
+   * caller that has more to do after the switch (archiving the profile left behind).
+   */
+  const switchProfile = async (ref: string, { holdBusy = false } = {}): Promise<boolean> => {
     if (!await confirmNavigation('profile')) return false
     const epoch = ++requestEpoch.current
     setBusy(true)
@@ -178,7 +181,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
       return false
     } finally {
       endSwitch(switched)
-      if (epoch === requestEpoch.current) setBusy(false)
+      if (epoch === requestEpoch.current && !holdBusy) setBusy(false)
     }
   }
 
@@ -233,7 +236,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
       if (profile.id === profileId) {
         // The window cannot stay on an archived profile; move to the default one first.
         const fallback = active.find((item) => item.isDefault) ?? active.find((item) => item.id !== profile.id)
-        if (!fallback || !await switchProfile(fallback.id)) return
+        if (!fallback || !await switchProfile(fallback.id, { holdBusy: true })) return
       }
       await window.mousse.profiles.archive(profile.id, profile.revision)
       setDialog(null)
