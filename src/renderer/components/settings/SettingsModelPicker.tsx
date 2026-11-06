@@ -4,15 +4,15 @@ import type { LlmProviderOption } from '../../../shared/settings'
 import { ChevronDown } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { listingServes } from '../../../shared/providerInstances'
-import { ComposerEffortPicker } from '../ComposerEffortPicker'
+import { modelPickerRunSettings, runFasterSpeed, runLevelText } from '../ComposerEffortPicker'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from '../ModelFamilyMenu'
 import '../../styles/settingsModelPicker.css'
 
 /**
- * One settings control for a model choice: the composer's model menu plus its
- * reasoning/speed menu, joined into a single 28px control. A choice lands as the
- * provider, the model with its reasoning level apart, and the instance serving
- * it when the listing names one.
+ * One settings control for a model choice: the composer's model menu, with the highlighted model's
+ * reasoning levels beside the list and its speeds under it, so model, level and speed are one choice.
+ * A choice lands as the provider, the model with its reasoning level apart, and the instance serving it
+ * when the listing names one.
  */
 export function SettingsModelPicker({
   providers,
@@ -46,10 +46,13 @@ export function SettingsModelPicker({
   const selected = Boolean(providerId && modelId)
   // The menus offer each level of a model as an id of its own.
   const pickerId = pickerModelId({ model: modelId, effort })
-  const parts = selected ? getGroupedModelButtonParts(providerId, pickerId, providers, false, instanceId) : [placeholder]
-  const label = parts.join(' · ')
   const listing = providers.find((provider) => listingServes(provider, { instanceId, llmProvider: providerId }))
-  const models = listing?.models ?? []
+  const selection = { providerId, modelId: pickerId, models: listing?.models ?? [] }
+  // The level and a faster speed follow the model's name ("Opus 5.5 · High · Fast"); the name drops its "(fast)".
+  const faster = selected ? runFasterSpeed(selection) : ''
+  const named = selected ? getGroupedModelButtonParts(providerId, pickerId, providers, false, instanceId) : [placeholder]
+  const parts = faster ? [named[0]!.replace(/\s*\((?:ultra)?fast\)$/i, ''), ...named.slice(1)] : named
+  const label = [...parts, selected ? runLevelText(selection) : '', faster].filter(Boolean).join(' · ')
 
   useEffect(() => {
     if (!open) return
@@ -71,6 +74,13 @@ export function SettingsModelPicker({
     }
   }, [open])
 
+  const close = () => {
+    setOpen(false)
+    buttonRef.current?.focus()
+  }
+  const choose = (nextProviderId: string, nextModelId: string, nextInstanceId?: string) =>
+    onSelect(nextProviderId, pickedSelection(nextModelId), nextInstanceId)
+
   return (
     <div className="settings-model-picker">
       <button
@@ -89,15 +99,6 @@ export function SettingsModelPicker({
         <span className="settings-model-btn-label">{label}</span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
-      {selected && (
-        <ComposerEffortPicker
-          providerId={providerId}
-          modelId={pickerId}
-          models={models}
-          readOnly={Boolean(disabled)}
-          onSelect={(nextProviderId, nextModelId) => onSelect(nextProviderId, pickedSelection(nextModelId), listing?.instanceId)}
-        />
-      )}
       {open && !disabled && (
         <ModelFamilyMenu
           providers={providers}
@@ -106,10 +107,10 @@ export function SettingsModelPicker({
           selectedModelId={pickerId}
           anchorRef={buttonRef}
           contentRef={menuRef}
+          runSettings={modelPickerRunSettings({ providers, selection, onSelect: choose, onClose: close })}
           onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
-            setOpen(false)
-            onSelect(nextProviderId, pickedSelection(nextModelId), nextInstanceId)
-            buttonRef.current?.focus()
+            close()
+            choose(nextProviderId, nextModelId, nextInstanceId)
           }}
         />
       )}

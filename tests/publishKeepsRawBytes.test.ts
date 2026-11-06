@@ -72,6 +72,8 @@ async function withPath<T>(bin: string, run: () => Promise<T>): Promise<T> {
   const previous = process.env.PATH
   try { process.env.PATH = `${bin}:${previous}`; return await run() } finally { process.env.PATH = previous }
 }
+/** The POSIX shells a person may paste a restore command into, of those installed here (`sh` always is). */
+const SHELLS = ['sh', 'bash', 'zsh'].filter((shell) => shell === 'sh' || spawnSync(shell, ['-c', 'exit 0'], { stdio: 'ignore' }).status === 0)
 /** Runs the command `notice` shows for `path`, in the folder the copy names. */
 function restoreFromNotice(notice: string, ref: string, top: string, path: string, kind?: RestoreKind, shell = 'sh'): void {
   const command = keptCopyRestoreCommand(ref, path, 'posix', kind)
@@ -422,7 +424,7 @@ describe('Publish over files Git converts: shapes, the index and recovery', () =
     expect(settled).toEqual([{ operationId: 'publish-kinds', state: 'cancelled', notRestored: ['lk', 'run.sh'] }])
     const reason = (latest(f.owner, 'publish-kinds')!.details as { reason: string }).reason
     const { ref } = holdingOf(f.owner)
-    for (const shell of ['sh', 'bash', 'zsh']) {
+    for (const shell of SHELLS) {
       rmSync(join(f.cwd, 'run.sh')); rmSync(join(f.cwd, 'lk'))
       restoreFromNotice(reason, ref, f.cwd, 'run.sh', 'executable', shell)
       restoreFromNotice(reason, ref, f.cwd, 'lk', 'link', shell)
@@ -440,7 +442,7 @@ describe('Publish over files Git converts: shapes, the index and recovery', () =
     const [settled] = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
     expect(settled).toMatchObject({ state: 'completed', result: { kept: { files: ['run.sh'] } } })
     const result = (settled as { result: PublishResult }).result
-    for (const shell of ['sh', 'bash', 'zsh']) {
+    for (const shell of SHELLS) {
       restoreFromNotice(result.notice!, result.kept!.ref, f.cwd, 'run.sh', 'executable', shell)
       checkKinds(f.cwd, f.script)
     }

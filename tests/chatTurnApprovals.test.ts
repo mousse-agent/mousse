@@ -71,12 +71,12 @@ async function show(seconds: number, messages: UIMessage[], phase: string) {
 
 describe('a reply with approvals in the middle', () => {
   it('stays one turn with one working indicator, and its time covers the whole reply', async () => {
-    expect(await show(2, [user, command('lint', 1, false)], 'tool_running')).toEqual({ turns: 1, indicators: ['Working for 2 seconds'] })
+    expect(await show(2, [user, command('lint', 1, false)], 'tool_running')).toEqual({ turns: 1, indicators: ['Working · 2s'] })
     // The agent waits for the first approval: still the same reply, still working.
-    expect(await show(6, [user, command('lint', 1, false)], 'awaiting_input')).toEqual({ turns: 1, indicators: ['Working for 6 seconds'] })
+    expect(await show(6, [user, command('lint', 1, false)], 'awaiting_input')).toEqual({ turns: 1, indicators: ['Working · 6s'] })
     // Approved: the command runs, and the next one waits for its own approval.
-    expect(await show(12, [user, command('lint', 1, true), command('test', 10, false)], 'awaiting_input')).toEqual({ turns: 1, indicators: ['Working for 12 seconds'] })
-    expect(await show(20, [user, command('lint', 1, true), command('test', 10, true), reply('r1', 19, 'All green.')], 'streaming')).toEqual({ turns: 1, indicators: ['Working for 20 seconds'] })
+    expect(await show(12, [user, command('lint', 1, true), command('test', 10, false)], 'awaiting_input')).toEqual({ turns: 1, indicators: ['Working · 12s'] })
+    expect(await show(20, [user, command('lint', 1, true), command('test', 10, true), reply('r1', 19, 'All green.')], 'streaming')).toEqual({ turns: 1, indicators: ['Working · 20s'] })
     expect(await show(21, [user, command('lint', 1, true), command('test', 10, true), reply('r1', 19, 'All green.')], 'completed')).toEqual({ turns: 1, indicators: ['Worked for 21s'] })
   })
 

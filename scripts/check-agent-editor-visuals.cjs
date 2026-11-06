@@ -122,7 +122,11 @@ async function main() {
     field.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
   await delay(50)
-  await assert('document.querySelector(\'[aria-label="Export agent"]\').disabled === true', 'dirty draft cannot export stale registry bytes')
+  await js('document.querySelector(\'[aria-label="Agent actions"]\').click()')
+  await delay(50)
+  await assert('document.querySelector(\'[role="menu"] [data-action="export"]\').disabled === true', 'dirty draft cannot export stale registry bytes')
+  await js('document.querySelector(\'[aria-label="Agent actions"]\').click()')
+  await delay(50)
   await js('document.querySelector("[data-action=\\"back\\"]").click()')
   await assert('Boolean(document.querySelector(".modal"))', 'dirty navigation shows review dialog')
   await js('Array.from(document.querySelectorAll(".modal button")).find((el) => el.textContent.includes("Keep editing"))?.click()')

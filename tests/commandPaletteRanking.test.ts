@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { COMMANDS, type CommandContext, type CommandId } from '../src/shared/commands'
-import type { Project, Thread } from '../src/shared/types'
+import type { Project, Thread, ThreadSearchResult } from '../src/shared/types'
 import { rankItems, scoreItem } from '../src/renderer/commands/paletteRank'
 import {
+  MESSAGE_HITS_PER_THREAD,
   RECENT_THREAD_COUNT,
   buildPaletteGroups,
+  categoryLabels,
   eligibleCommands,
   flattenGroups,
+  markMatches,
+  messageQuery,
   paletteKeyAction,
-  type PaletteGroup
+  type PaletteGroup,
+  type PaletteItem
 } from '../src/renderer/commands/paletteItems'
 
 const titles = (query: string, items: string[]) => rankItems(query, items.map((title) => ({ title }))).map((item) => item.title)
@@ -154,19 +159,40 @@ describe('buildPaletteGroups', () => {
   ]
   const build = (query: string, commands = allCommands) => buildPaletteGroups({ query, commands, threads, projects })
 
-  it('shows every eligible command and the newest threads for an empty query', () => {
+  it('shows the newest threads, then every eligible command, for an empty query', () => {
     const groups = build('')
-    expect(groups.map((group) => group.label)).toEqual(['Commands', 'Threads'])
-    expect(groups[0]!.items).toHaveLength(allCommands.length)
+    expect(groups.map((group) => group.label)).toEqual(['Recent', 'Commands'])
     // Newest first; the settled thread and the empty draft are not listed.
-    expect(groups[1]!.items.map((item) => item.id)).toEqual(['t2', 't1', 't3'])
+    expect(groups[0]!.items.map((item) => item.kind === 'thread' && item.id)).toEqual(['t2', 't1', 't3'])
+    expect(groups[1]!.items).toHaveLength(allCommands.length)
+  })
+
+  it('shows only the recent threads in message mode before anything is typed; commands wait for text or >', () => {
+    const groups = buildPaletteGroups({ query: '', commands: allCommands, threads, projects, mode: 'messages' })
+    expect(groups.map((group) => group.label)).toEqual(['Recent'])
+    const commandsOnly = buildPaletteGroups({ query: '>', commands: allCommands, threads, projects, mode: 'messages' })
+    expect(commandsOnly.map((group) => group.label)).toEqual(['Commands'])
+  })
+
+  it("names a command's category once per run of same-category rows", () => {
+    const command = (id: string, category: string) => ({ ...allCommands[0]!, key: `command:${id}`, category }) as PaletteItem
+    const rows: PaletteItem[] = [
+      command('a', 'Thread'),
+      command('b', 'Thread'),
+      command('c', 'Thread'),
+      command('d', 'View'),
+      command('e', 'Thread'),
+      { kind: 'thread', key: 'thread:t1', id: 't1', title: 'Fix login' }
+    ]
+    expect(categoryLabels(rows)).toEqual(['Thread', undefined, undefined, 'View', 'Thread', undefined])
   })
 
   it('caps the recent threads', () => {
     const many = Array.from({ length: 12 }, (_, i) => thread(`m${i}`, `Thread ${i}`, { updatedAt: `2026-06-${String(i + 10)}T00:00:00.000Z` }))
     const groups = buildPaletteGroups({ query: '', commands: [], threads: many, projects: [] })
+    expect(RECENT_THREAD_COUNT).toBe(5)
     expect(groups[0]!.items).toHaveLength(RECENT_THREAD_COUNT)
-    expect(groups[0]!.items[0]!.id).toBe('m11')
+    expect(groups[0]!.items[0]).toMatchObject({ kind: 'thread', id: 'm11' })
   })
 
   it('finds a command and a thread with the same words, commands first', () => {
@@ -175,7 +201,7 @@ describe('buildPaletteGroups', () => {
   })
 
   it('finds a thread with an accented title and a project by name, with the project\'s newest thread as its target', () => {
-    expect(build('resume').find((group) => group.label === 'Threads')!.items.map((item) => item.id)).toEqual(['t3'])
+    expect(build('resume').find((group) => group.label === 'Threads')!.items).toMatchObject([{ id: 't3' }])
     const projectRows = build('mous').find((group) => group.label === 'Projects')!.items
     expect(projectRows).toMatchObject([{ kind: 'project', id: 'p1', threadId: 't1' }])
     expect(build('web').find((group) => group.label === 'Projects')!.items).toMatchObject([{ id: 'p2', threadId: 't2' }])
@@ -204,6 +230,101 @@ describe('buildPaletteGroups', () => {
 
   it('shows nothing when nothing matches', () => {
     expect(build('qqqqzz')).toEqual([])
+  })
+})
+
+describe('message hits in the palette', () => {
+  const hit = (threadId: string, messageId: string, over: Partial<ThreadSearchResult> = {}): ThreadSearchResult => ({
+    threadId,
+    threadName: `Thread ${threadId}`,
+    projectName: 'acme-web',
+    matchType: 'message',
+    messageId,
+    snippet: `…the Checkout test ${messageId}…`,
+    ...over
+  })
+  // The search returns a thread's hits oldest first.
+  const messages = [
+    ...['m1', 'm2', 'm3', 'm4', 'm5'].map((id) => hit('a', id)),
+    hit('b', 'n1', { node: 'nod_other', projectName: undefined }),
+    // Title and project matches are the palette's own rows; only message hits are used.
+    { threadId: 'c', threadName: 'Checkout', matchType: 'thread' } as ThreadSearchResult
+  ]
+  const computers = { nod_other: { name: 'Studio' } }
+  const build = (query: string, extra: Partial<Parameters<typeof buildPaletteGroups>[0]> = {}) =>
+    buildPaletteGroups({ query, commands: allCommands, threads: [], projects: [], computers, messages, ...extra })
+  const messageRows = (groups: PaletteGroup[]) =>
+    groups.find((group) => group.label === 'Messages')!.items.map((item) => `${item.kind}:${item.title}`)
+
+  it('shows one row per thread, then its newest three hits and a "+N more" row', () => {
+    expect(MESSAGE_HITS_PER_THREAD).toBe(3)
+    expect(messageRows(build('checkout'))).toEqual([
+      'thread:Thread a',
+      'message:…the Checkout test m5…',
+      'message:…the Checkout test m4…',
+      'message:…the Checkout test m3…',
+      'more:+2 more',
+      'thread:Thread b',
+      'message:…the Checkout test n1…'
+    ])
+    const rows = build('checkout').find((group) => group.label === 'Messages')!.items
+    expect(rows[0]).toMatchObject({ kind: 'thread', id: 'a', detail: 'acme-web' })
+    expect(rows[1]).toMatchObject({ kind: 'message', id: 'm5', threadId: 'a', match: 'checkout' })
+    expect(rows[5]).toMatchObject({ kind: 'thread', id: 'b', detail: 'Studio' })
+  })
+
+  it('shows every hit of an expanded thread', () => {
+    const rows = messageRows(build('checkout', { expanded: new Set(['a']) }))
+    expect(rows.filter((row) => row.startsWith('message:') && row.includes(' m'))).toHaveLength(5)
+    expect(rows.some((row) => row.startsWith('more:'))).toBe(false)
+  })
+
+  it('lists a thread that matches by title once, with its hits under its Threads row', () => {
+    const threads = [thread('a', 'Checkout flow')]
+    const groups = build('checkout', { threads })
+    expect(groups.find((group) => group.label === 'Threads')!.items.map((item) => `${item.kind}:${item.title}`)).toEqual([
+      'thread:Checkout flow',
+      'message:…the Checkout test m5…',
+      'message:…the Checkout test m4…',
+      'message:…the Checkout test m3…',
+      'more:+2 more'
+    ])
+    expect(messageRows(groups)).toEqual(['thread:Thread b', 'message:…the Checkout test n1…'])
+    expect(flattenGroups(groups).filter((item) => item.kind === 'thread' && item.id === 'a')).toHaveLength(1)
+  })
+
+  it('says "N+ more" when the search stopped at its hit limit', () => {
+    expect(messageRows(build('checkout', { messagesCapped: true }))).toContain('more:2+ more')
+  })
+
+  it('puts messages after commands, threads and projects, and first in message mode', () => {
+    const projects = [project('p1', 'Checkout service')]
+    const threads = [thread('t1', 'Checkout flow')]
+    const stopHit = [hit('a', 'm1', { snippet: 'stop the run' })]
+    expect(build('checkout', { projects, threads }).map((group) => group.label)).toEqual(['Threads', 'Projects', 'Messages'])
+    expect(build('stop', { messages: stopHit }).map((group) => group.label)).toEqual(['Commands', 'Messages'])
+    expect(build('checkout', { projects, threads, mode: 'messages' }).map((group) => group.label)).toEqual(['Messages', 'Threads', 'Projects'])
+    expect(build('stop', { messages: stopHit, mode: 'messages' }).map((group) => group.label)).toEqual(['Messages', 'Commands'])
+  })
+
+  it('searches messages from two characters, and never behind >', () => {
+    expect(messageQuery('c')).toBeNull()
+    expect(messageQuery(' ch ')).toBe('ch')
+    expect(messageQuery('>checkout')).toBeNull()
+    expect(build('c').some((group) => group.label === 'Messages')).toBe(false)
+    expect(build('>checkout').some((group) => group.label === 'Messages')).toBe(false)
+  })
+
+  it('marks every occurrence of the query in a snippet, ignoring case', () => {
+    expect(markMatches('The checkout test: Checkout.', 'checkout')).toEqual([
+      { text: 'The ', match: false },
+      { text: 'checkout', match: true },
+      { text: ' test: ', match: false },
+      { text: 'Checkout', match: true },
+      { text: '.', match: false }
+    ])
+    expect(markMatches('nothing here', 'zz')).toEqual([{ text: 'nothing here', match: false }])
+    expect(markMatches('aaa', 'aa')).toEqual([{ text: 'aa', match: true }, { text: 'a', match: false }])
   })
 })
 

@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
@@ -225,6 +225,11 @@ export interface HarnessGateway {
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
+   * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
+   */
+  compactConversation(request: NativeCompactRequest): Promise<boolean>
   /** Where runtimes with live processes per thread report (every instance's, now and later). */
   setLiveHost(host: LiveProcessHost | null): void
   /** The profile's Mousse MCP server, which turn bridges attach (null: none). */
@@ -1762,6 +1767,11 @@ export class Harness implements HarnessGateway {
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason
     return 'not_active'
+  }
+
+  async compactConversation(request: NativeCompactRequest): Promise<boolean> {
+    const runtime = this.recordOrUndefined(request.instanceId)?.runtime
+    return runtime?.compactConversation ? runtime.compactConversation(request) : false
   }
 
   setLiveHost(host: LiveProcessHost | null): void {

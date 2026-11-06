@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Loader2, Mic, X } from '../lib/icons'
+import { Loader2, Mic, RefreshCw, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
 import type { ProviderWithStatus } from '../lib/providerSnapshots'
 import type {
@@ -29,7 +29,7 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -40,6 +40,10 @@ import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
+import { formatBinding } from '../../shared/commands'
+import { useAppStore } from '../stores/appStore'
+import { openSettingsSection } from '../lib/settingsNavigation'
+import { useComposerNotice } from './ComposerNotice'
 
 export interface AttachedFile {
   id: string
@@ -83,14 +87,21 @@ export interface ChatComposerProps {
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
   loading?: boolean
+  /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
+  stoppable?: boolean
   disabled?: boolean
   placeholder?: string
-  /** What the empty input says while a turn runs; the composer queues the next message unless the parent says otherwise. */
-  loadingPlaceholder?: string
-  /** Receives the inline `@skill` token (if any) so the parent can send this
-   * prompt in skill mode without flipping the global chat mode. */
-  onSend: (skillMode?: SkillChatMode) => void
+  /**
+   * Receives the inline `@skill` token (if any) so the parent can send this
+   * prompt in skill mode without flipping the global chat mode. `steer` is set
+   * when Alt+Enter sent the text during a run: it goes into the running turn.
+   */
+  onSend: (skillMode?: SkillChatMode, options?: { steer?: boolean }) => void
+  /** What the send button says it does, when the parent sends somewhere other than the thread (see `ComposerFooter`). */
+  sendLabel?: string
   onStop?: () => void
+  /** The thread's last sent prompt, which Up in an empty box brings back. */
+  lastPrompt?: () => string | undefined
   /** When true, `/skills` is treated as literal text instead of opening the skill picker. */
   disableSkillsPicker?: boolean
   /** A row above the input, such as a subagent asking a question; it brings its own layout. */
@@ -165,11 +176,13 @@ export function ChatComposer({
   contextOpen,
   onContextOpenChange,
   loading = false,
+  stoppable = loading,
   disabled = false,
-  placeholder = 'Describe a task or ask a question',
-  loadingPlaceholder = 'Running… send queues next',
+  placeholder,
   onSend,
+  sendLabel,
   onStop,
+  lastPrompt,
   disableSkillsPicker = false,
   banner,
   searchMentions,
@@ -178,6 +191,9 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  // The prompt Up brought back, until it is sent or edited: Escape clears it again.
+  const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
   useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
   const resizeDraft = useCallback(() => {
@@ -239,6 +255,16 @@ export function ChatComposer({
   const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
   const [pendingReferences, setPendingReferences] = useState(0)
+  // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
+  useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)
+  useComposerNotice(recordingPending ? { tone: 'info', title: 'Requesting microphone access…' } : null)
+  useComposerNotice(dictation.notice ? { tone: 'info', title: dictation.notice } : null)
+  useComposerNotice(dictation.error ? {
+    tone: 'error',
+    title: dictation.error.message,
+    actions: [{ label: 'Retry microphone', icon: <RefreshCw size={14} strokeWidth={1.8} />, disabled: loading || disabled || recordingPending || transcribing, onClick: dictation.start }],
+    onDismiss: dictation.dismissError
+  } : null)
   // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
   const skillsPickerDisabled = disableSkillsPicker
   // Inline `@skill` token embedded in the typed text (painted as a pill by
@@ -280,7 +306,7 @@ export function ChatComposer({
     : mentionResult?.indexing
       ? 'Indexing files…'
       : mentionResult?.truncated && mentionResult.results.length > 0
-        ? 'Large project: showing the first matches, keep typing'
+        ? 'First matches only'
         : null
   // With nothing to pick and nothing to say the list stays closed, so Enter sends the text as typed.
   const showMentionPicker =
@@ -514,12 +540,14 @@ export function ChatComposer({
     }).finally(() => setPendingReferences((count) => count - 1))
   }
 
-  const submit = () => {
+  const submit = (options?: { steer?: boolean }) => {
     if (!canSend) return
     const skillMode: SkillChatMode | undefined = skillToken
       ? { type: 'skill', skillId: skillToken.skillId }
       : undefined
-    onSend(skillMode)
+    recalledRef.current = null
+    if (options?.steer) onSend(skillMode, options)
+    else onSend(skillMode)
   }
 
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
@@ -583,9 +611,9 @@ export function ChatComposer({
           } else {
             const suggestion = suggestions[selectedSuggestion]
             if (suggestion) {
-              // An exact no-argument command is already complete: execute it instead of
+              // An exact command that needs no text is already complete: execute it instead of
               // making users press Enter twice (first to re-apply the same suggestion).
-              if (e.key === 'Enter' && !suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
+              if (e.key === 'Enter' && suggestion.argument !== 'required' && input.trim().toLowerCase() === `/${suggestion.name}`) {
                 submit()
               } else {
                 applySuggestion(suggestion)
@@ -606,9 +634,29 @@ export function ChatComposer({
       onRemoveBrowserElement(browserElements[browserElements.length - 1].id)
       return
     }
+    const plainKey = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey
+    // Up in an empty box brings back the last prompt, caret at its end.
+    if (e.key === 'ArrowUp' && plainKey && input.length === 0) {
+      const recalled = lastPrompt?.()
+      if (recalled) {
+        e.preventDefault()
+        recalledRef.current = recalled
+        commitEdit({ value: recalled, caret: recalled.length })
+      }
+      return
+    }
+    if (e.key === 'Escape' && recalledRef.current !== null && input === recalledRef.current) {
+      e.preventDefault()
+      e.stopPropagation()
+      recalledRef.current = null
+      onInputChange('')
+      setCaret(0)
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      submit()
+      // Alt+Enter during a run steers the running turn; otherwise it sends like Enter.
+      submit(e.altKey && !e.ctrlKey && !e.metaKey && loading ? { steer: true } : undefined)
     }
   }
 
@@ -646,7 +694,6 @@ export function ChatComposer({
   return (
     <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
-      {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
       {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
@@ -732,9 +779,9 @@ export function ChatComposer({
           onPaste={handlePaste}
           onFocus={resizeDraft}
           placeholder={
-            loading
-              ? loadingPlaceholder
-              : placeholder
+            placeholder ?? (loading
+              ? `Queue a follow-up · ${formatBinding(STEER_BINDING, platform)} steers`
+              : 'Ask anything · @ files · / commands')
           }
           rows={3}
           disabled={disabled}
@@ -787,7 +834,7 @@ export function ChatComposer({
           }}
           emptyText={
             enabledSkills.length === 0
-              ? 'No skills enabled. Enable skills in Settings.'
+              ? <>No skills · <button type="button" className="composer-command-suggestion-empty-link" onClick={() => openSettingsSection('integrations')}>Settings</button></>
               : 'No skills match that filter.'
           }
           registerRow={registerSuggestionRow}
@@ -831,13 +878,6 @@ export function ChatComposer({
         tabIndex={-1}
       />
 
-      {recordingPending && <p role="status">Requesting microphone access…</p>}
-      {dictation.notice && <p role="status">{dictation.notice}</p>}
-      {dictation.error && <div className="composer-recording-error" role="alert">
-        <p>{dictation.error.message}</p>
-        <button type="button" className="btn btn-ghost btn-sm" disabled={loading || disabled || recordingPending || transcribing} onClick={dictation.start}>Retry microphone</button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={dictation.dismissError}>Dismiss</button>
-      </div>}
       <ComposerFooter
         providers={providers}
         selectedProviderId={selectedProviderId}
@@ -853,12 +893,14 @@ export function ChatComposer({
         onContextOpenChange={onContextOpenChange}
         onAttachClick={() => fileInputRef.current?.click()}
         loading={loading}
+        stoppable={stoppable}
         disabled={disabled}
         canSend={canSend}
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}
-        onSend={submit}
+        onSend={() => submit()}
+        sendLabel={sendLabel}
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}

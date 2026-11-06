@@ -27,6 +27,7 @@ async function fixture(
     routeOffline?: boolean
     rendezvousReply?: () => Response | Promise<Response>
     revokeStatus?: number
+    renewReply?: (body: any) => Response | undefined
   } = {}
 ) {
   const p = await profile({ protect: !options.plain }),
@@ -80,9 +81,12 @@ async function fixture(
       )
     }
     if (path === '/v1/net/registrations')
-      return Response.json({ registration, connectorToken, relayAudience: configuration.audience })
+      return Response.json({
+        registration: { ...registration, expiresAt: (options.now?.() ?? Date.now()) + 60000 },
+        connectorToken, relayAudience: configuration.audience })
     if (path.endsWith('/revoke') && options.revokeStatus)
       return Response.json({ error: { code: 'UNAUTHORIZED' } }, { status: options.revokeStatus })
+    if (path.endsWith('/renew') && options.renewReply?.(body)) return options.renewReply(body)!
     if (path.endsWith('/renew'))
       return Response.json({ ...registration, expiresAt: (options.now?.() ?? Date.now()) + 60000 })
     if (path === '/v1/net/routes' && options.routeOffline) return Response.json({}, { status: 503 })
@@ -499,4 +503,145 @@ it('does not erase newer custody when an older rendezvous receives a rejection',
     JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
   ).toEqual(replacement)
   await expect(p.service.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+})
+
+const savedPending = (p: Awaited<ReturnType<typeof fixture>>) =>
+  JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+
+it('drops a saved renewal Mousse ID refused after its challenge expired and renews with a fresh one', async () => {
+  let now = Date.now()
+  const stale = new Set<string>(),
+    options = {
+      now: () => now,
+      renewReply: (body: any) =>
+        stale.has(body.operationId)
+          ? Response.json({ error: { code: 'expired' } }, { status: 410 })
+          : undefined
+    },
+    p = await fixture(options)
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  // The renewal is signed, then the network drops before it reaches Mousse ID.
+  const offline = new HostedProfileService({
+    ...p.hostedOptions,
+    fetch: async (url, input) => {
+      if (String(url).endsWith('/renew')) throw new Error('Network down')
+      return p.hostedOptions.fetch(url, input)
+    }
+  })
+  await expect(offline.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  stale.add(savedPending(p).body.operationId)
+  // A night asleep: the registration lapsed, but the computer is still signed in.
+  now += 8 * 3600_000
+  expect(p.service.status()).toMatchObject({ connected: false, reconnecting: true })
+  const status = await p.service.renew()
+  expect(status.connected).toBe(true)
+  expect(status.reconnecting).toBeUndefined()
+  expect(savedPending(p)).toBeUndefined()
+  const renewals = p.bodies.filter((row) => row.path.endsWith('/renew'))
+  // The offline attempt never reached Mousse ID: its replay was refused, then a fresh one renewed.
+  expect(renewals).toHaveLength(2)
+  expect(renewals[1].body.operationId).not.toBe(renewals[0].body.operationId)
+  expect(stale.has(renewals[0].body.operationId)).toBe(true)
+})
+
+it('keeps a saved renewal when the reply does not show Mousse ID refused it', async () => {
+  let reply: Response | undefined = new Response('Bad gateway', { status: 502 })
+  const p = await fixture({ renewReply: () => reply })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'route_unreachable' })
+  const original = savedPending(p)
+  reply = new Response('<html>Not found</html>', { status: 404 })
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'route_unreachable' })
+  expect(savedPending(p)).toEqual(original)
+  reply = undefined
+  await p.service.renew()
+  const renewals = p.bodies.filter((row) => row.path.endsWith('/renew'))
+  expect(renewals.map((row) => row.body.operationId)).toEqual(
+    Array(3).fill(original.body.operationId)
+  )
+})
+
+it('asks for a new sign-in only after Mousse ID refuses a fresh renewal, and signing in clears it', async () => {
+  let now = Date.now(),
+    refuse = true
+  const p = await fixture({
+    now: () => now,
+    renewReply: () =>
+      refuse ? Response.json({ error: { code: 'revoked' } }, { status: 403 }) : undefined
+  })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  now += 120000
+  expect(p.service.status().reconnecting).toBe(true)
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'forbidden' })
+  expect(p.service.status()).toMatchObject({ configured: true, connected: false })
+  expect(p.service.status().reconnecting).toBeUndefined()
+  expect(savedPending(p)).toBeUndefined()
+  refuse = false
+  await p.service.connect(p.accountToken)
+  now += 120000
+  expect(p.service.status().reconnecting).toBe(true)
+})
+
+it('signs in again over a saved renewal instead of failing as uncertain', async () => {
+  const p = await fixture({ renewReply: () => new Response('Bad gateway', { status: 502 }) })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'route_unreachable' })
+  expect(savedPending(p).purpose).toBe('renew')
+  expect((await p.service.connect(p.accountToken)).connected).toBe(true)
+  expect(savedPending(p)).toBeUndefined()
+})
+
+it('stops an expired, uncertain rendezvous from blocking renewal', async () => {
+  let now = Date.now()
+  const p = await fixture({
+    now: () => now,
+    rendezvousReply: () => {
+      throw new Error('Response lost')
+    }
+  })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.rendezvous(now + 60000, 'enrollment')).rejects.toMatchObject({
+    code: 'outcome_uncertain'
+  })
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  now += 61000
+  expect((await p.service.renew()).connected).toBe(true)
+  expect(savedPending(p)).toBeUndefined()
+})
+
+it('renews within seconds of waking when the computer slept through the renewal time', async () => {
+  const p = await fixture({ now: () => Date.now() })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const status = p.service.status()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  try {
+    const startedAt = Date.now(),
+      renewedAt: number[] = []
+    let leaseEnd = startedAt + 600000
+    vi.spyOn(p.service, 'status').mockImplementation(() => ({
+      ...status,
+      connected: leaseEnd > Date.now(),
+      expiresAt: leaseEnd
+    }))
+    vi.spyOn(p.service, 'renew').mockImplementation(async () => {
+      renewedAt.push(Date.now() - startedAt)
+      leaseEnd = Date.now() + 600000
+      return status as never
+    })
+    fakeClockController(p).resumeRenewal()
+    await vi.advanceTimersByTimeAsync(10000)
+    // Asleep for eight hours: the wall clock moves on, timers do not.
+    vi.setSystemTime(startedAt + 8 * 3600_000)
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(renewedAt).toHaveLength(1)
+    expect(renewedAt[0]).toBeLessThan(8 * 3600_000 + 15000)
+  } finally {
+    vi.useRealTimers()
+  }
 })

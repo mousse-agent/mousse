@@ -39,7 +39,7 @@
   opacity: 0.2;
   transform: scaleX(0.35);
   transform-origin: left;
-  transition: width 150ms ease, transform 150ms ease, opacity 150ms ease;
+  transition: width var(--ui-dur) ease, transform var(--ui-dur) ease, opacity var(--ui-dur) ease;
 }
 .chat-prompt-tick[aria-current] span { opacity: 0.75; }
 .chat-prompt-rail:is(:hover, :focus-within, .is-active) .chat-prompt-tick span { transform: scaleX(1); }
@@ -213,7 +213,7 @@ html.platform-darwin .titlebar-left {
   opacity: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: max-width 0.2s ease, opacity 0.2s ease, margin-left 0.2s ease;
+  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin-left var(--ui-dur-slow) ease;
   margin-left: 0;
 }
 
@@ -337,18 +337,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
-.icon-btn-primary {
-  width: 36px;
-  height: 36px;
-  background: var(--gradient-accent);
-  color: white;
-  flex-shrink: 0;
-}
-
-.icon-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
 .icon-btn-titlebar {
   width: 32px;
   height: 32px;
@@ -377,102 +365,6 @@ html.platform-darwin .titlebar-left {
   background: var(--danger);
   color: white;
 }
-
-.usage-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(0, 0, 0, .48); backdrop-filter: blur(6px); -webkit-app-region: no-drag; }
-.usage-dialog { width: min(520px, calc(100vw - 32px)); max-height: min(620px, calc(100vh - 32px)); overflow: auto; padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 24px 70px rgba(0,0,0,.45); }
-.usage-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
-.usage-heading h2 { margin: 0; font-size: 18px; letter-spacing: .01em; }
-.usage-heading h2 .usage-computer { font-weight: 400; color: var(--text-secondary); }
-.usage-heading button { display: grid; place-items: center; padding: 7px; border-radius: 8px; color: var(--text-secondary); }
-.usage-heading button:hover { background: rgba(var(--accent-rgb), .14); color: var(--text-primary); }
-.usage-provider { padding: 14px 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent); margin-top: 12px; }
-.usage-provider:first-of-type { margin-top: 0; }
-.usage-provider > strong { font-size: 13px; letter-spacing: .02em; }
-.usage-window {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 14px;
-  font-size: 12px;
-}
-.usage-window-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.usage-window-label {
-  color: var(--text-primary);
-  font-weight: 600;
-  font-size: 12px;
-}
-.usage-window-reset {
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.usage-window-remaining {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.usage-tone-healthy { color: var(--text-primary); }
-.usage-tone-warn { color: var(--warning, #f59e0b); }
-.usage-tone-low { color: var(--danger, #ef4444); }
-.usage-bar {
-  position: relative;
-  height: 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--text-secondary) 14%, transparent);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .25);
-  overflow: hidden;
-}
-.usage-bar-fill {
-  position: relative;
-  height: 100%;
-  min-width: 6px;
-  border-radius: inherit;
-  width: 0;
-  transition: width .6s cubic-bezier(.22, 1, .36, 1);
-}
-.usage-bar-fill::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .38), rgba(255, 255, 255, 0) 55%);
-  pointer-events: none;
-}
-.usage-bar-fill.usage-tone-healthy {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, #22c55e), var(--accent));
-  box-shadow: 0 0 12px rgba(var(--accent-rgb), .45);
-}
-.usage-bar-fill.usage-tone-warn {
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
-  box-shadow: 0 0 12px rgba(245, 158, 11, .4);
-}
-.usage-bar-fill.usage-tone-low {
-  background: linear-gradient(90deg, var(--danger, #ef4444), #f87171);
-  box-shadow: 0 0 12px rgba(239, 68, 68, .45);
-}
-@media (prefers-reduced-motion: reduce) {
-  .usage-bar-fill { transition: none; }
-}
-.usage-message {
-  margin: 8px 0 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.4;
-  word-break: break-word;
-}
-.usage-manage { margin-top: 10px; }
 
 /* Functional progress indicators must keep spinning even when Windows
    reports prefers-reduced-motion (global baseline short-circuits animation). */
@@ -712,8 +604,21 @@ html.platform-darwin .titlebar-left {
   text-overflow: ellipsis;
 }
 
+/* A terminal's folder: quieter than its name, and the first to give way. */
+.main-view-tab-detail {
+  min-width: 0;
+  max-width: 20ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 2;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 @container main-area (max-width: 520px) {
-  .main-view-tab-label {
+  .main-view-tab-label,
+  .main-view-tab-detail {
     display: none;
   }
 
@@ -844,49 +749,67 @@ html.platform-darwin .titlebar-left {
   padding: 0;
 }
 
+/* Changed files at the end of a turn: a quiet meta line like "Worked for …"
+   (no surface), and, when expanded, the file list on one subtle surface. */
 .turn-edits {
-  margin-top: 4px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-  background: color-mix(in srgb, var(--ui-raised, #161616) 92%, transparent);
-  overflow: hidden;
+  margin-top: var(--space-16, 16px);
 }
 
-.turn-edits-head {
+.turn-edits-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 6px 4px 4px;
+  gap: var(--space-8, 8px);
+  min-height: 22px;
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
+  font-size: 12.5px;
+  font-weight: 450;
+  letter-spacing: -0.011em;
+  line-height: 1.3;
+}
+
+.turn-edits-icon {
+  flex-shrink: 0;
+}
+
+.turn-edits-line .turn-edits-stat {
+  margin-left: 0;
+  font-size: 12.5px;
+}
+
+.turn-edits-review,
+.turn-edits-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.turn-edits-review {
+  padding: 0 6px;
+  margin-left: var(--space-4, 4px);
 }
 
 .turn-edits-toggle {
-  flex: 1;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
+  width: 22px;
+  padding: 0;
+  margin-left: -4px;
 }
 
+.turn-edits-review:hover,
 .turn-edits-toggle:hover {
-  background: rgba(var(--accent-rgb), 0.08);
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
 .turn-edits-chevron {
   flex-shrink: 0;
   color: var(--text-secondary);
-  transition: transform 0.15s ease;
-}
-
-.turn-edits-chevron.is-open {
-  transform: rotate(90deg);
 }
 
 .turn-edits-count {
@@ -910,48 +833,66 @@ html.platform-darwin .titlebar-left {
   color: #f07178;
 }
 
-.turn-edits-open {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 13px;
-}
-
-.turn-edits-open:hover {
-  background: rgba(var(--accent-rgb), 0.1);
-  color: var(--text-primary);
-}
-
-.turn-edits-folders {
+.turn-edits-files {
   list-style: none;
-  margin: 0;
-  padding: 0 8px 8px;
+  margin: var(--space-8, 8px) 0 0;
+  padding: var(--space-4, 4px);
   display: flex;
   flex-direction: column;
   gap: 2px;
+  border-radius: var(--ui-card-radius);
+  background: color-mix(in srgb, var(--ui-raised) 92%, transparent);
+  box-shadow: var(--ui-specular);
 }
 
-.turn-edits-folder {
+.turn-edits-file {
+  width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 28px;
-  color: var(--text-secondary);
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
   font-size: 13px;
+  text-align: left;
 }
 
-.turn-edits-folder-name {
+.turn-edits-file:hover {
+  background: var(--ui-hover);
+}
+
+.turn-edits-file:focus-visible,
+.turn-edits-review:focus-visible,
+.turn-edits-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.turn-edits-file-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.turn-edits-file-name {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-edits-file-folder {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 .placeholder-view {
@@ -997,20 +938,6 @@ html.platform-darwin .titlebar-left {
   font-size: 13px;
   font-weight: 500;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.btn-primary {
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.btn-primary:hover {
-  filter: brightness(1.08);
-}
-
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .btn-ghost {
@@ -1164,24 +1091,79 @@ html.platform-darwin .titlebar-left {
   }
 }
 
+/* Above the composer, one at a time: a notice line (ComposerNoticeSlot) or the queued-messages strip.
+   The notice is a bare line of text. The queue is the composer's width, surface, hairline and top light,
+   with the composer's top corners, and sits flush on it; the composer's top corners square off under it,
+   so the two read as one card. Either fades in; the queue fades out after a brief reveal (`is-leaving`). */
+.chat-input-area {
+  --composer-dock-fade: 160ms;
+  --composer-dock-glint: rgba(255, 255, 255, 0.11);
+}
+
+html[data-theme='blacksphere-plus'] .chat-input-area {
+  --composer-dock-glint: rgba(255, 255, 255, 0.14);
+}
+
+html[data-theme='high-contrast'] .chat-input-area {
+  --composer-dock-glint: transparent;
+}
+
+.chat-input-area > :is(.composer-notice-slot, .queued-messages) {
+  animation: composer-dock-in var(--composer-dock-fade) ease-out;
+}
+
+.chat-input-area > .queued-messages {
+  position: relative;
+  /* Over the composer's drop shadow, which would otherwise darken the dock's lower edge. */
+  z-index: 1;
+  margin: 0;
+  border: 1px solid var(--ui-line-strong);
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+  background: var(--ui-raised);
+  box-shadow: inset 0 1px 0 var(--composer-dock-glint);
+  overflow: visible;
+  transition: opacity var(--composer-dock-fade) ease, border-color 0.18s;
+}
+
+.chat-input-area:has(.composer:focus-within) > .queued-messages {
+  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
+}
+
+.chat-input-area > .queued-messages.is-leaving {
+  opacity: 0;
+}
+
+/* On a new thread the workspace row is the composer's own tab; the queue sits above it and the composer
+   keeps its corners. */
+.app .chat-input-area:has(> .queued-messages):not(:has(.composer-workspace-toolbar)) .composer {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+@keyframes composer-dock-in {
+  from { opacity: 0; }
+}
+
+/* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
+/* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
+.chat-empty-add-project {
+  --space-4: 4px;
+  --space-12: 12px;
+  --space-16: 16px;
+  display: flex;
+  height: 28px;
+  width: fit-content;
+  margin: var(--space-16) auto 0;
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
+}
+
 /* Queued messages stack — visually attached above the composer */
 .queued-messages {
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin: 0 0 -1px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 14px 14px 0 0;
-  background: var(--bg-secondary);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  overflow: visible;
-}
-
-.chat-input-area:has(.queued-messages) .composer {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
 }
 
 .queued-messages-list {
@@ -1229,53 +1211,6 @@ html.platform-darwin .titlebar-left {
 .queued-messages-row.is-steering {
   border-color: rgba(var(--accent-rgb, 99, 102, 241), 0.35);
   background: rgba(var(--accent-pale-rgb), 0.08);
-}
-
-.steer-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 4px 0;
-  padding: 6px 8px 6px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(var(--accent-rgb, 99, 102, 241), 0.35);
-  background: rgba(var(--accent-pale-rgb), 0.1);
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--text-primary);
-}
-
-.steer-pill-label {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: normal;
-  color: var(--accent-color, var(--text-primary));
-}
-
-.steer-pill-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.steer-pill-dismiss {
-  flex-shrink: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  border-radius: 6px;
-  padding: 2px 6px;
-}
-
-.steer-pill-dismiss:hover {
-  background: rgba(var(--accent-pale-rgb), 0.14);
-  color: var(--text-primary);
 }
 
 .queued-messages-handle {
@@ -1367,11 +1302,7 @@ html.platform-darwin .titlebar-left {
 }
 
 .queued-messages-btn-steer {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
   color: var(--accent-color, var(--text-primary));
-  padding: 4px 8px;
 }
 
 .queued-messages-btn-icon {
@@ -1423,65 +1354,159 @@ html.platform-darwin .titlebar-left {
   cursor: not-allowed;
 }
 
-.queued-messages-error {
+/* The notice above the composer (ComposerNoticeSlot): one quiet line in the transcript's metadata type,
+   no surface of its own. Its text starts at the composer's text inset (1px border + 14px padding), and its
+   actions are text buttons on the right. Colour is on the tone icon and the asked-for action only. */
+.composer-notice-slot {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 8px 2px;
-  padding: 6px 8px 6px 10px;
-  border-radius: 8px;
-  background: rgba(220, 80, 80, 0.12);
-  color: var(--text-primary);
-  font-size: 11px;
-  line-height: 1.35;
+  flex-direction: column;
+  margin-bottom: 8px;
+  container: composer-notice / inline-size;
 }
 
-.queued-messages-error-dismiss {
-  margin-left: auto;
+.composer-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  box-sizing: border-box;
+  padding: 0 4px 0 15px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 450;
+  letter-spacing: -0.011em;
+  line-height: 1.3;
+}
+
+.composer-notice-icon {
   display: inline-flex;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.composer-notice[data-tone='warning'] .composer-notice-icon { color: var(--warning); }
+.composer-notice[data-tone='error'] .composer-notice-icon { color: var(--danger); }
+/* The lost service is about the link, not a failure of the user's work: a muted icon. */
+.composer-notice[data-priority='service'] .composer-notice-icon { color: var(--text-secondary); }
+
+/* A waiting approval shares only the line's place: its title and Deny / Approve keep full-strength text. */
+.composer-notice[data-priority='approval'] {
+  color: var(--text-primary);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.composer-notice[data-priority='approval'] .composer-notice-btn {
+  color: var(--text-primary);
+}
+
+.composer-notice-text {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.composer-notice-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* With a detail after it, the title keeps its width and the detail is the part that is cut. */
+.composer-notice-title:has(+ .composer-notice-detail) {
+  flex: none;
+}
+
+/* A notice with a shorter title switches to it when the line is narrow. */
+.composer-notice-title-short {
+  display: none;
+}
+
+@container composer-notice (max-width: 420px) {
+  .composer-notice-title-full {
+    display: none;
+  }
+
+  .composer-notice-title-short {
+    display: inline;
+  }
+}
+
+.composer-notice-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.composer-notice-btn,
+.composer-notice-icon-btn {
+  display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  height: 28px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--ui-control-radius, 8px);
   background: transparent;
   color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.queued-messages-error-dismiss:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
-}
-
-.connection-failed-pill {
-  position: absolute;
-  right: 20px;
-  bottom: calc(100% + 6px);
-  z-index: 4;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 9px;
-  border: 1px solid rgba(224, 122, 138, 0.24);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.connection-failed-pill button {
-  flex: none;
-  white-space: nowrap;
-  border: 0;
-  border-radius: 6px;
-  padding: 5px 9px;
-  background: rgba(224, 122, 138, 0.16);
-  color: var(--accent-text, white);
-  cursor: pointer;
   font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer-notice-btn {
+  padding: 0 8px;
+  font-weight: 500;
+}
+
+.composer-notice-icon-btn {
+  width: 28px;
+}
+
+/* The action the notice asks for: accent text, mixed toward the text colour so it stays readable on a
+   light surface. */
+.composer-notice-btn-primary {
+  color: color-mix(in srgb, var(--accent) 65%, var(--text-primary));
+}
+
+.composer-notice-btn:not(.composer-notice-btn-primary):hover:not(:disabled),
+.composer-notice-icon-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.composer-notice-btn:hover:not(:disabled),
+.composer-notice-icon-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.composer-notice-btn:active:not(:disabled),
+.composer-notice-icon-btn:active:not(:disabled) {
+  background: var(--ui-pressed);
+}
+
+.composer-notice-btn:focus-visible,
+.composer-notice-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-notice-btn:disabled,
+.composer-notice-icon-btn:disabled,
+.composer-notice-btn[aria-disabled='true'],
+.composer-notice-icon-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Discard, confirmed from a notice: the destructive button says so in red text. */
+.composer-discard-dialog .btn-danger {
+  color: var(--danger);
 }
 
 .composer {
@@ -1589,6 +1614,19 @@ html.platform-darwin .titlebar-left {
   line-height: 1.4;
 }
 
+.composer-command-suggestion-empty-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-command-suggestion-empty-link:hover {
+  text-decoration: underline;
+}
+
 /* `@` mention rows: icon, name, dimmed parent folder. The selected row only gets the shared background. */
 .composer-mention-row {
   display: flex;
@@ -1676,7 +1714,7 @@ html.platform-darwin .titlebar-left {
   gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s, padding 0.15s, gap 0.15s;
+  transition: background 0.15s, color 0.15s, padding var(--ui-dur), gap var(--ui-dur);
   flex-shrink: 0;
 }
 
@@ -2346,7 +2384,8 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
-.composer-mode-menu-item:disabled {
+.composer-mode-menu-item:disabled,
+.composer-mode-menu-item[aria-disabled='true'] {
   opacity: 0.55;
   cursor: default;
 }
@@ -2394,20 +2433,8 @@ html.platform-darwin .titlebar-left {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
-  background: rgba(var(--accent-rgb), 0.35);
-  color: var(--text-primary);
   flex-shrink: 0;
   transition: background 0.15s, opacity 0.15s;
-}
-
-.composer-implement-btn:hover:not(:disabled) {
-  background: rgba(var(--accent-pale-rgb), 0.45);
-  color: white;
-}
-
-.composer-implement-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .composer-action-btn {
@@ -2817,7 +2844,7 @@ html.platform-darwin .titlebar-left {
   flex-shrink: 1;
   min-width: 3px;
   border-radius: 2px;
-  transition: width 0.2s;
+  transition: width var(--ui-dur-slow);
 }
 
 .context-usage-breakdown {
@@ -3245,33 +3272,6 @@ html.platform-darwin .titlebar-left {
   margin-bottom: 8px;
 }
 
-.pre-thinking-box {
-  min-width: min(220px, 80vw);
-}
-
-.pre-thinking-box .thinking-heading {
-  margin-bottom: 0;
-}
-
-.pre-thinking-phrase {
-  animation: pre-thinking-fade-in 0.35s ease;
-}
-
-@keyframes pre-thinking-fade-in {
-  from {
-    opacity: 0.35;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.message-pre-thinking {
-  align-self: flex-start;
-}
-
 .thinking-scroll {
   max-height: 160px;
   overflow-y: auto;
@@ -3329,10 +3329,6 @@ html.platform-darwin .titlebar-left {
 @media (prefers-reduced-motion: reduce) {
   .shimmer-text {
     animation: none !important;
-  }
-
-  .pre-thinking-phrase {
-    animation: none;
   }
 
   .response-work-status {
@@ -3450,9 +3446,12 @@ html[data-theme='high-contrast'] {
 }
 
 /* Dialogs are the surface (mousse-ui skill, section 4): lit, not boxed. No
-   dividers: the header, body and footer share one 16px inset and are told apart
-   by position alone. The close glyph sits on the right edge of the row controls. */
+   dividers: the header, body and footer share one inset (--modal-inset) and are
+   told apart by position alone. The close glyph sits on the right edge of the row controls. */
 .modal {
+  --modal-inset: 16px;
+  --modal-footer-gap: 12px;
+  --modal-fade: 18px;
   background: var(--ui-raised);
   border-radius: var(--ui-card-radius);
   width: 560px;
@@ -3474,7 +3473,7 @@ html[data-theme='high-contrast'] {
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
-  padding: 12px 12px 4px 16px;
+  padding: 12px 12px 4px var(--modal-inset, 16px);
 }
 
 /* Without a visible title the close button keeps its corner and the content leads. */
@@ -3498,19 +3497,56 @@ html[data-theme='high-contrast'] {
 :is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
-.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
-.modal-footer > button { min-height: 36px; }
-/* Settings buttons keep the one control size in a footer too. */
-.modal-footer > .settings-btn { height: var(--settings-control-h, 28px); min-height: 0; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small, 12.5px); }
+/* The footer is its own row under the scrolling body: the dialog inset on the
+   sides and bottom, and a fixed gap above the buttons that content never fills. */
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: var(--modal-footer-gap, 12px) var(--modal-inset, 16px) var(--modal-inset, 16px); flex-shrink: 0; }
+/* Footer buttons keep the one control size (28px). */
+.modal-footer > button { height: var(--settings-control-h, 28px); min-height: 0; padding-block: 0; border-radius: var(--ui-control-radius); }
+.modal-footer > .settings-btn { font-size: var(--settings-fs-small, 12.5px); }
+
+/* A scrolling body fades its edges over --modal-fade instead of cutting rows
+   at the header or the footer: the top edge once the body is scrolled away
+   from the top, the bottom edge while more content is below. One mask, driven
+   by the body's own scroll position: each fade grows over the first (or
+   shrinks over the last) --modal-fade of scrolling, and a body that fits has
+   no scroll timeline, so both stay at 0 and nothing is drawn (no divider either). */
+@property --modal-body-fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --modal-body-fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes modal-body-fade-top {
+  from { --modal-body-fade-top: 0px; }
+  to { --modal-body-fade-top: var(--modal-fade, 18px); }
+}
+
+@keyframes modal-body-fade-bottom {
+  from { --modal-body-fade-bottom: var(--modal-fade, 18px); }
+  to { --modal-body-fade-bottom: 0px; }
+}
 
 .modal-body {
   min-height: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding: 0 var(--modal-inset, 16px) var(--modal-inset, 16px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--modal-body-fade-top), #000 calc(100% - var(--modal-body-fade-bottom)), transparent);
+  animation: modal-body-fade-top linear both, modal-body-fade-bottom linear both;
+  animation-timeline: scroll(self);
+  animation-range: 0px var(--modal-fade, 18px), calc(100% - var(--modal-fade, 18px)) 100%;
 }
 
+/* Above a footer the body keeps only room for a focus ring: the footer's own
+   gap is the space. */
 .modal-body:has(+ .modal-footer) {
-  padding-bottom: 12px;
+  padding-bottom: 4px;
 }
 
 .modal-section {
@@ -3643,16 +3679,17 @@ html[data-theme='high-contrast'] {
   position: relative;
 }
 
+/* One muted line and Restart shell, centred over the closed terminal. */
 .terminal-exited-overlay {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
   background: rgba(var(--surface-base-rgb), 0.85);
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
   z-index: 2;
 }
 
@@ -3664,6 +3701,11 @@ html[data-theme='high-contrast'] {
   padding: 6px 12px;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+}
+
+.terminal-remote-holder-error {
+  margin-left: auto;
+  color: var(--danger);
 }
 
 .browser-panel,
@@ -3890,7 +3932,7 @@ html[data-theme='high-contrast'] {
 .browser-menu > button:hover, .browser-menu-actions > button:hover { background: rgba(var(--accent-rgb), 0.15); }
 .browser-menu-label { display: inline-flex; align-items: center; gap: 8px; }
 .browser-menu-label svg,
-.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 16px; height: 16px; flex-shrink: 0; }
+.browser-menu > button > svg, .browser-menu-actions > button > svg { width: 14px; height: 14px; flex-shrink: 0; }
 .browser-menu-zoom > span:first-child { margin-right: auto; }
 .browser-menu-zoom > button { display: inline-flex; padding: 4px; border-radius: 4px; }
 .browser-menu-zoom > button:hover { background: rgba(var(--accent-rgb), 0.16); }
@@ -3909,14 +3951,44 @@ html[data-theme='high-contrast'] {
   font-size: 11px;
 }
 
-.browser-device-toolbar select {
+.browser-device-toolbar .ui-select {
   min-width: 130px;
-  padding: 4px 7px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  border-radius: 5px;
-  color: var(--text-primary);
-  background: rgba(var(--surface-elevated-rgb), 0.8);
 }
+
+/* Agent access in the toolbar: who may drive the browser, and who drives this tab now. */
+.browser-access {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 4px 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.browser-access-icon { flex-shrink: 0; }
+.browser-access-off .browser-access-icon,
+.browser-access-off .browser-access-label { opacity: 0.6; }
+.browser-access-agent .browser-access-icon { color: var(--accent); }
+.browser-access-human .browser-access-icon { color: var(--text-primary); }
+
+/* The last browser action's result or error, directly under the toolbar. */
+.browser-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 6px 2px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(var(--surface-strong-rgb), 0.55);
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.08);
+}
+
+.browser-notice > svg { flex-shrink: 0; }
+.browser-notice-done > svg { color: var(--success); }
+.browser-notice-error > svg { color: var(--danger); }
+.browser-notice-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .browser-url-form {
   flex: 1;
@@ -3978,21 +4050,34 @@ html[data-theme='high-contrast'] {
 .browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
+/* The app-owned start page follows the app theme; visited sites keep the white default. */
+.browser-viewport-blank {
+  background: var(--bg-primary);
+}
+
 .browser-blank {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   z-index: 1;
   pointer-events: none;
+  color: var(--text-secondary);
 }
 
 .browser-blank-logo {
-  width: 96px;
-  height: 96px;
+  width: 72px;
+  height: 72px;
   color: var(--accent);
   opacity: 0.7;
+}
+
+.browser-blank-copy {
+  margin: 0;
+  font-size: 12px;
 }
 
 .browser-blank-logo svg {
@@ -4031,6 +4116,10 @@ html[data-theme='high-contrast'] {
     padding: 6px;
     gap: 2px;
   }
+
+  .browser-access-label {
+    display: none;
+  }
 }
 
 @container browser-panel (max-width: 320px) {
@@ -4055,6 +4144,13 @@ html[data-theme='high-contrast'] {
 
 .resizable-panel-sidebar {
   position: relative;
+}
+
+.resizable-panel-sidebar.resizable-panel-sidebar-fill {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  border-right: 0;
 }
 
 .panel-sidebar-resize-handle {
@@ -4145,26 +4241,36 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-row {
+/* A row is the entry button plus its "…" button; hover and selection fill the whole row. */
+.file-tree-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 4px 8px 4px 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: left;
   border-radius: 4px;
+  color: var(--text-secondary);
 }
 
-.file-tree-row:hover {
+.file-tree-item:hover,
+.file-tree-item.menu-open {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
-.file-tree-row.selected {
+.file-tree-item.selected {
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--text-primary);
+}
+
+.file-tree-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 8px 4px 0;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  border-radius: 4px;
 }
 
 .file-tree-chevron,
@@ -4184,11 +4290,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-loading {
-  padding: 4px 16px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 
 .git-panel {
   flex-direction: row;
@@ -4213,12 +4314,75 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
+.git-toolbar-info > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-branch,
+.git-toolbar-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder gives way before the branch when the toolbar is narrow. */
+.git-toolbar-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-shrink: 3;
+  margin-left: 4px;
+  color: var(--text-secondary);
+}
+
+.git-toolbar-folder > svg {
+  flex-shrink: 0;
+}
+
+.git-toolbar-computer {
+  flex: none;
+  min-width: 0;
+}
+
+/* The diff header: the open file, then the whitespace switch and Push, Commit and Create PR. */
+.git-diff-toolbar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.git-diff-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-diff-message {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.git-diff-message.git-diff-error {
+  color: var(--danger);
+}
+
+/* Sections size from these (see sectionStyle in gitPanelLogic.ts). If every section is at its
+   floor and the panel is shorter still, the whole list scrolls rather than hiding one. */
 .git-changes {
+  --git-section-head: 24px;
+  --git-row: 28px;
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 
@@ -4267,6 +4431,12 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .git-section-divider:hover,
 .git-section-divider:active {
   background: rgba(var(--accent-rgb), 0.35);
+}
+
+.git-section-divider:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .git-section-header {
@@ -4336,7 +4506,8 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-file-row:hover .git-row-actions,
-.git-file-row:focus-within .git-row-actions {
+.git-file-row:focus-within .git-row-actions,
+.git-file-row:has(.row-menu-btn[aria-expanded='true']) .git-row-actions {
   display: flex;
 }
 
@@ -4355,7 +4526,37 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   color: var(--text-primary);
 }
 
-.git-row-action[data-action='discard']:hover:not(:disabled) {
+.git-row-action.row-menu-btn[aria-expanded='true'] {
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--text-primary);
+}
+
+.git-row-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* The question before a discard: what goes, then which files and how long a copy is kept. */
+.git-discard-dialog .modal {
+  width: min(440px, calc(100vw - 32px));
+}
+
+.git-discard-lead {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-detail {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.git-discard-dialog .btn-danger {
   color: var(--danger);
 }
 
@@ -5007,100 +5208,169 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   opacity: 0.8;
 }
 
+/* The question dialog: the app's dialog surface, radius, insets and title (see .modal),
+   shown above the composer. One question at a time; the dots jump between them. */
 .composer-question-modal {
   position: absolute;
-  left: 16px;
-  right: 16px;
+  left: 12px;
+  right: 12px;
   bottom: calc(100% + 8px);
   z-index: 30;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-  border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: 0 16px 40px rgba(var(--surface-base-rgb), 0.45);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop);
   overflow: hidden;
+  animation: approval-in 0.22s ease;
 }
 
 .composer-question-modal-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 16px;
+  padding: 12px 16px 4px;
 }
 
 .composer-question-modal-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.composer-question-modal-close {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.composer-question-modal-title svg {
+  flex-shrink: 0;
   color: var(--text-secondary);
 }
 
-.composer-question-modal-close:hover {
-  background: rgba(var(--accent-rgb), 0.14);
-  color: var(--text-primary);
+/* Progress dots: hollow until answered, the current one is a short pill. */
+.composer-question-dots {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.composer-question-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-question-dot::after {
+  content: '';
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--text-primary) 38%, transparent);
+  transition: width 0.18s ease-out, background-color 0.15s, border-color 0.15s;
+}
+
+.composer-question-dot:hover::after {
+  border-color: color-mix(in srgb, var(--text-primary) 70%, transparent);
+}
+
+.composer-question-dot.is-current {
+  width: 24px;
+}
+
+.composer-question-dot.is-current::after {
+  width: 16px;
+  border-color: color-mix(in srgb, var(--text-primary) 70%, transparent);
+}
+
+.composer-question-dot.is-answered::after {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+.composer-question-dot:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .composer-question-modal-body {
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: 260px;
+  max-height: 320px;
+  padding: 4px 16px 12px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
+.composer-question-slide.from-next { animation: composer-question-from-next 180ms ease-out; }
+.composer-question-slide.from-previous { animation: composer-question-from-previous 180ms ease-out; }
+
+@keyframes composer-question-from-next {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes composer-question-from-previous {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: none; }
+}
+
 .composer-question-prompt {
-  margin: 0 0 8px;
-  font-size: 13px;
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
   color: var(--text-primary);
 }
 
+/* Choices: full-width rows, a radio or checkbox on the left, neutral hover,
+   filled background and indicator when selected. */
 .composer-question-options {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
   gap: 2px;
+  margin: 0 -8px;
 }
 
-/* Rows follow the menu language: neutral hover, filled background when selected. */
 .composer-question-option {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--ui-menu-row-x);
+  gap: 10px;
   width: 100%;
-  padding: 6px var(--ui-menu-row-x);
-  border-radius: var(--ui-menu-row-radius);
-  font-size: 12.5px;
-  text-align: left;
-  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
-  background: transparent;
+  min-height: 34px;
+  padding: 6px 8px;
   border: none;
-  transition: background 0.12s;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s;
 }
 
-.composer-question-option:hover,
-.composer-question-option:focus-visible {
+.composer-question-option:hover {
   background: var(--ui-hover);
-  color: var(--text-primary);
+}
+
+.composer-question-option:focus-visible {
   outline: none;
+  background: var(--ui-hover);
+  box-shadow: inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 .composer-question-option.selected {
   background: var(--ui-pressed);
   box-shadow: var(--ui-specular);
-  color: var(--text-primary);
+}
+
+.composer-question-option.selected:focus-visible {
+  box-shadow: var(--ui-specular), inset 0 0 0 1.5px rgba(var(--accent-rgb), 0.55);
 }
 
 html[data-theme='high-contrast'] .composer-question-option.selected {
@@ -5112,88 +5382,137 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   overflow-wrap: anywhere;
 }
 
-.composer-question-option-check {
+.composer-question-indicator {
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid color-mix(in srgb, var(--text-primary) 38%, transparent);
+  color: #fff;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.composer-question-indicator.is-radio { border-radius: 999px; }
+.composer-question-indicator.is-checkbox { border-radius: 4px; }
+
+.composer-question-option:hover .composer-question-indicator:not(.is-checked) {
+  border-color: color-mix(in srgb, var(--text-primary) 60%, transparent);
+}
+
+.composer-question-indicator.is-checked {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+.composer-question-indicator.is-radio.is-checked::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #fff;
+}
+
+/* "Other…" once chosen: the same row, holding a text field. */
+.composer-question-other {
+  cursor: text;
+}
+
+.composer-question-other-toggle {
+  display: grid;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.composer-question-other-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
   color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.composer-question-other-input::placeholder {
+  color: var(--text-secondary);
 }
 
 .composer-question-modal-footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 4px 16px 16px;
 }
 
-.composer-question-dismiss,
-.composer-question-submit {
-  height: 28px;
-  padding: 0 12px;
-  border-radius: var(--ui-control-radius);
-  font-size: 12.5px;
+.composer-question-footer-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
-.composer-question-dismiss {
+.composer-question-hint {
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
-.composer-question-submit {
+/* Flat buttons, no gradient: neutral by default, .is-quiet for Skip. Submit (.is-primary) uses the shared primary rule in polish.css. */
+.composer-question-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
   color: var(--text-primary);
-  background: rgba(var(--accent-deep-rgb), 0.28);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
 }
 
-.composer-question-submit:disabled {
+.composer-question-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.composer-question-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-question-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.composer-question-steps {
-  display: flex;
-  align-items: center;
-  flex: 1;
-  min-width: 0;
-  gap: 6px;
-  padding: 0;
-}
-
-.composer-question-step {
-  width: 8px;
-  height: 8px;
-  padding: 0;
-  border-radius: 999px;
-  background: rgba(var(--surface-soft-rgb), 0.9);
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-}
-
-.composer-question-step.active {
-  width: 22px;
-  background: rgba(var(--accent-deep-rgb), 0.55);
-  border-color: transparent;
-}
-
-.composer-question-step.answered:not(.active) {
-  background: rgba(var(--accent-deep-rgb), 0.45);
-  border-color: transparent;
-}
-
-.composer-question-custom {
-  margin-top: 8px;
-  width: 100%;
-  height: 28px;
-  border-radius: var(--ui-control-radius);
-  border: 1px solid var(--ui-line-strong);
-  background: transparent;
+.composer-question-btn.is-quiet {
+  margin-left: -8px;
   padding: 0 8px;
-  font-size: 12.5px;
-  color: var(--text-primary);
-}
-
-.composer-question-custom::placeholder {
+  border-color: transparent;
   color: var(--text-secondary);
 }
 
-/* Question-tool swap: the modal replaces the composer in-flow while active.
- * Both wrappers animate height (grid-rows) + fade/slide so hiding the input
- * bar and re-showing it after submit happens without a layout jump. */
+.composer-question-btn.is-quiet:hover {
+  color: var(--text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-question-modal,
+  .composer-question-slide.from-next,
+  .composer-question-slide.from-previous {
+    animation: none;
+  }
+}
+
+/* The question card sits in flow directly above the composer, which stays usable. The wrapper
+ * animates its height (grid-rows) + fade/slide, so the card opens and closes without a layout
+ * jump; being in flow, its height is part of the composer stack the transcript leaves room for. */
 .composer-question-swap {
   display: grid;
   grid-template-rows: 0fr;
@@ -5213,50 +5532,22 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   overflow: hidden;
   min-height: 0;
 }
-/* In swap mode the modal is an in-flow replacement, not a floating overlay. */
+/* Above the composer the card is in flow, not a floating overlay: it keeps
+   the lit edge but casts no drop shadow, which the swap's clipping would cut into a band. */
 .composer-question-swap .composer-question-modal {
   position: static;
   left: auto;
   right: auto;
   bottom: auto;
   margin-bottom: 8px;
-}
-
-.composer-collapse {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  transition:
-    grid-template-rows 300ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 220ms ease,
-    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.composer-collapse.is-collapsed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(8px) scale(0.99);
-  pointer-events: none;
-}
-.composer-collapse-inner {
-  overflow: visible;
-  min-height: 0;
-}
-.composer-collapse.is-collapsed .composer-collapse-inner {
-  overflow: hidden;
+  box-shadow: var(--ui-dialog-edge);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .composer-question-swap,
-  .composer-collapse {
+  .composer-question-swap {
     transition: none;
     transform: none;
   }
-}
-
-.composer-question-dismiss:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .document-panel {
@@ -5269,64 +5560,42 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .document-panel-empty {
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
 }
 
-.document-tabs {
+/* Tabs come from the shared strip (styles/tab-bar.css); Copy Markdown sits at its end. */
+.document-toolbar {
   display: flex;
-  gap: 4px;
-  padding: 8px 8px 0;
-  overflow-x: auto;
   flex-shrink: 0;
-}
-
-.document-tab {
-  display: inline-flex;
   align-items: center;
-  gap: 2px;
-  border-radius: 8px 8px 0 0;
-  background: rgba(var(--surface-soft-rgb), 0.55);
-  max-width: 220px;
-}
-
-.document-tab.active {
-  background: rgba(var(--surface-muted-rgb), 0.85);
-}
-
-.document-tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 8px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
   min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.document-tab.active .document-tab-label {
-  color: var(--text-primary);
+.document-toolbar .ui-tabs {
+  flex: 1;
+  border-bottom: 0;
 }
 
-.document-tab-label span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.document-tab-icon {
+  flex: none;
+  opacity: 0.75;
 }
 
-.document-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
+.document-copy {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
   margin-right: 4px;
-  border-radius: 6px;
+  border-radius: var(--ui-control-radius, 6px);
   color: var(--text-secondary);
 }
 
-.document-tab-close:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+.document-copy:hover:not(:disabled) {
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
@@ -5496,6 +5765,17 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   outline: 2px solid var(--accent-hover);
   outline-offset: 2px;
 }
+
+/* Copy, Details, Undo and Read aloud under a message: a keyboard ring, full strength while focused. */
+.chat-message-toolbar button:focus-visible,
+.chat-user-image:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
+}
+
+/* An attached image is a button; the global button reset would drop its tile fill. */
+button.chat-user-image { background: color-mix(in oklab, var(--color-an-foreground) 4%, transparent); }
 
 .assistant-response-metadata {
   position: absolute;
@@ -5701,7 +5981,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .streaming-text {
   white-space: pre-wrap;
   word-break: break-word;
-  animation: streaming-fade-in 0.28s ease;
+  animation: streaming-fade-in calc(280ms * var(--ui-motion-scale)) ease;
 }
 
 .streaming-text::after {
@@ -5719,12 +5999,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 @keyframes streaming-caret {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
-}
-
-.pre-thinking-flat {
-  background: transparent;
-  border: none;
-  box-shadow: none;
 }
 
 .message-streaming.streaming-text::after {
@@ -5774,14 +6048,6 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   background: transparent;
   font-size: 12px;
   color: var(--text-secondary);
-}
-
-.pre-thinking-box {
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 14px;
 }
 
 .pixel-grid {
@@ -5915,6 +6181,16 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 }
 
 .composer-input::placeholder { color: rgba(255,255,255,0.42); }
+/* White placeholder vanishes on the light composer; high contrast needs more than 42%. */
+html[data-theme='light'] .composer-input::placeholder,
+html[data-theme='high-contrast'] .composer-input::placeholder {
+  color: var(--text-secondary);
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .composer-input::placeholder {
+    color: var(--text-secondary);
+  }
+}
 
 .composer-footer {
   padding: 8px 10px 10px;
@@ -5938,7 +6214,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  transition: transform 0.12s ease, background 0.12s ease;
+  transition: transform var(--ui-dur-fast) ease, background 0.12s ease;
 }
 
 .composer-action-btn-active {
@@ -5971,38 +6247,14 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 
-.composer-question-modal {
-  left: 12px;
-  right: 12px;
-  border-radius: 16px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 20px 50px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.12);
-  animation: approval-in 0.22s ease;
-}
-
 @keyframes approval-in {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.composer-question-modal-header { padding: 14px 16px; }
-
-.composer-question-modal-title { font-size: 12px; letter-spacing: normal; }
-
-.composer-question-prompt { font-size: 13.5px; font-weight: 500; letter-spacing: -0.01em; }
 /* A command or file change the user is asked to allow: the whole text, wrapped; the body is the one scroller. */
 .composer-question-prompt--approval { white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-question-reason { margin: 0 0 8px; font-size: 12px; color: var(--text-secondary); }
-
-.composer-question-submit {
-  background: var(--gradient-accent);
-  color: white;
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.25);
-}
-
-.composer-question-submit:hover:not(:disabled) { filter: brightness(1.06); transform: translateY(-0.5px); }
 
 .queued-messages {
   border-radius: 16px 16px 0 0;
@@ -6104,30 +6356,10 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   resize: vertical;
   min-height: 80px;
 }
-.browser-access-toggle { width: 28px; height: 16px; border-radius: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; }
-.browser-access-toggle::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-secondary); transition: transform .15s; }
-.browser-access-toggle.enabled { background: rgba(var(--accent-rgb), .35); }
-.browser-access-toggle.enabled::after { transform: translateX(12px); background: var(--accent); }
 
-.subscription-usage-page { display: flex; flex-direction: column; flex: 1; min-height: 0; color: var(--text-primary); }
-.subscription-usage-page > .usage-heading { padding: 20px 24px; border-bottom: 1px solid var(--border); }
-.subscription-usage-page-body { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
 
 /* Rail destinations share the window chrome and navigation. */
 .scheduled-page[hidden] { display: none; }
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 
-/* Redo and progress after an Undo: the same pill as other composer notices, without the failure tint. */
-.connection-failed-pill.prompt-undo-notice {
-  border-color: var(--border);
-}
-
-.connection-failed-pill.prompt-undo-notice button {
-  background: var(--ui-raised, rgba(255, 255, 255, 0.06));
-}
-
-.connection-failed-pill.prompt-undo-notice button:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
