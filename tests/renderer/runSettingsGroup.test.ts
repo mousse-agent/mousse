@@ -48,7 +48,7 @@ function show(initial?: Partial<MousseSettings['runs']>) {
 }
 
 const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().runs
-const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new chats in a worktree"]')!
+const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new threads in a worktree"]')!
 const resume = () => host.querySelector<HTMLButtonElement>('[aria-label="Resume after usage limits reset"]')!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
 const optionLabels = () => {
@@ -98,7 +98,7 @@ describe('Settings > General > Runs', () => {
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
   })
 
-  it('starts new chats in a worktree by default, and turning it off saves it without touching the rest', () => {
+  it('starts new threads in a worktree by default, and turning it off saves it without touching the rest', () => {
     const { updates } = show()
     expect(worktreeToggle().getAttribute('aria-checked')).toBe('true')
     click(worktreeToggle())

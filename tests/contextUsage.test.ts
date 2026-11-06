@@ -13,6 +13,13 @@ const base = {
 }
 
 describe('context usage dynamic inputs', () => {
+  it('keeps an unknown window at 0 instead of guessing a capacity', () => {
+    const usage = computeContextUsage({ ...base, contextLimit: 0, lastMeasuredInput: 1_000, lastMeasuredCacheRead: 50_000 })
+    expect(usage.used).toBe(51_000)
+    expect(usage.limit).toBe(0)
+    expect(usage.percent).toBe(0)
+  })
+
   it('counts loaded skill instructions and MCP schemas in estimated context', () => {
     const systemPromptText = 'base prompt\n\n## Loaded Skill Instructions\n' + 'skill body '.repeat(80)
     const mcpToolsText = JSON.stringify([{ name: 'search', parameters: { query: 'string' } }])

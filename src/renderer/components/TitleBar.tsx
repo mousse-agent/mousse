@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen, Search } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
@@ -14,6 +15,8 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
+import { useNeedsMeThreads } from '../lib/needsMe'
+import { needsMeLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
 import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
@@ -50,9 +53,16 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
+  const needsMeCount = useNeedsMeThreads().length
+  // The sidebar shows who needs the person; while it is closed, its toggle carries the count.
+  const showBadge = !threadsSidebarOpen && needsMeCount > 0
+  // The dock or taskbar carries the same count while the window is in the background.
+  useEffect(() => {
+    void window.mousse?.app?.setAttentionCount?.(needsMeCount)?.catch(() => undefined)
+  }, [needsMeCount])
   // In the Chats tab, New and Search act on agent chats.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : 'Show sidebar'
+  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMeCount)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
   const searchTitle = useShortcutTitle('Search threads', 'threads.search')
@@ -95,10 +105,17 @@ export function TitleBar() {
               label={sidebarLabel}
               title={sidebarTitle}
               variant="titlebar"
-              className="titlebar-sidebar-toggle"
+              className={`titlebar-sidebar-toggle${showBadge ? ' titlebar-sidebar-toggle--badged' : ''}`}
               aria-expanded={threadsSidebarOpen}
               onClick={() => setThreadsSidebarOpen(!threadsSidebarOpen)}
-            />
+            >
+              {/* Inside the button, so the count lands on the toggle wherever the title bar puts it. */}
+              {showBadge && (
+                <span className="titlebar-attention-badge" aria-hidden="true">
+                  {needsMeCount > 99 ? '99+' : needsMeCount}
+                </span>
+              )}
+            </IconButton>
             <IconButton
               icon={Edit}
               label={chatsMode ? 'New chat' : 'New thread'}

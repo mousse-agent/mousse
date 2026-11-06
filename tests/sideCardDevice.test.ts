@@ -76,7 +76,7 @@ describe('composerWorkspaceFor', () => {
     expect(composerWorkspaceFor(undefined, undefined, false)).toEqual({ projectId: undefined, worktreeEnabled: false })
   })
 
-  it('takes the "Start new chats in a worktree" setting until the thread or draft chooses', () => {
+  it('takes the "Start new threads in a worktree" setting until the thread or draft chooses', () => {
     expect(composerWorkspaceFor(undefined, undefined, true)).toEqual({ projectId: undefined, worktreeEnabled: true })
     expect(composerWorkspaceFor(undefined, thread({ projectId: 'q' }), true)).toEqual({ projectId: 'q', worktreeEnabled: true })
     // A thread that chose its project's folder keeps it, whatever the setting says.
