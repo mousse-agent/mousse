@@ -86,11 +86,14 @@
   color: var(--danger, var(--warning, var(--text-secondary)));
 }
 
+/* The composer's icon buttons are a fixed 30px square; this one also shows the length, so it grows. */
+.app .chat-input-area .composer-icon-btn.composer-workspace-expiry,
 .composer-workspace-expiry {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   width: auto;
+  min-width: 30px;
   padding-inline: 6px;
 }
 
