@@ -1,4 +1,5 @@
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
+import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import type { ModelOverride } from './providerInstances'
@@ -340,6 +341,8 @@ export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
   worktreeByDefault: boolean
+  /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
+  privateThreadExpiry: ExpiryPreset | 'never'
 }
 
 export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
@@ -353,7 +356,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
-    worktreeByDefault: raw?.worktreeByDefault !== false
+    worktreeByDefault: raw?.worktreeByDefault !== false,
+    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
   }
 }
 

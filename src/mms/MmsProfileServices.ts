@@ -84,6 +84,8 @@ import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingSer
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
+import { ThreadExpiryService } from './lifecycle/ThreadExpiryService'
+import { threadFolderExpired } from './data/expiredThreads'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
@@ -178,6 +180,8 @@ export class MmsProfileServices {
   readonly storageCleanup: StorageCleanupService
   /** Disk usage for Settings > Storage, measured in the background and cached. */
   readonly storageUsage: StorageUsageService
+  /** Deletes threads whose expiry passed (`Thread.expiresAt`). */
+  readonly threadExpiry: ThreadExpiryService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly agents: AgentRegistry
@@ -811,9 +815,34 @@ export class MmsProfileServices {
       },
       configurationChanged: () => {
         this.config.reloadFromDisk()
-      }
+      },
+      expired: (record) => threadFolderExpired(record.location)
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    this.threadExpiry = new ThreadExpiryService({
+      listThreads: () => this.threads.listAllThreads(),
+      unfinished: (now) => this.threads.lifecycleStore.list()
+        .filter((record) => !record.parentTaskId && (record.state === 'trashed' || record.state === 'purge-started') && threadFolderExpired(record.location, now))
+        .map((record) => record.taskId),
+      runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
+      stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
+      quiesce: (threadId) => {
+        // A question waiting for an answer and an open terminal are not a run: they end at expiry.
+        for (const task of this.lifecycleOwnedTasks(threadId)) {
+          this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
+          this.ptyManager.killByThreadId(task.taskId)
+        }
+      },
+      deleteForGood: (threadId) => this.deleteExpiredThread(threadId),
+      onRunEnd: (listener) => {
+        const handler = (event: ThreadEvent): void => {
+          if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) listener(event.threadId)
+        }
+        this.orchestrator.on('run-event', handler)
+        return () => { this.orchestrator.off('run-event', handler) }
+      },
+      log: (message, details) => console.warn(message, details)
+    })
     this.pullRequestWatch = new PullRequestWatchService({
       threads: this.threads,
       codeHost: this.gitService.codeHost,
@@ -976,6 +1005,23 @@ export class MmsProfileServices {
       : randomUUID()
   }
 
+  /**
+   * Deletes a thread whose expiry passed, for good: the trash, then a purge with the expiry's authority
+   * (`ResourcePurgeService.purge`). Resumes a delete a crash or a refusal left in the trash or half purged.
+   */
+  private async deleteExpiredThread(taskId: string): Promise<void> {
+    let record = this.threads.lifecycleStore.get(taskId)
+    if (!record || record.state === 'active') record = await this.trashThread(taskId)
+    if (record.state === 'trashed') {
+      const preview = await this.lifecycle.cleanup.preview(taskId)
+      record = await this.lifecycle.purge({ taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, authorization: 'expiry' })
+    } else if (record.state === 'purge-started' && record.purge) {
+      record = await this.lifecycle.purge({ taskId, operationId: record.purge.operationId, authorization: 'expiry' })
+    }
+    if (record.state !== 'purged') throw new Error(record.blockedReason ?? `The delete stopped with the thread ${record.state}`)
+    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
   async trashThread(
     taskId: string,
     operationId?: string,
@@ -1110,6 +1156,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.threadExpiry.stop()
     void this.pullRequestWatch.stop()
     void this.storageCleanup.stop()
     void this.storageUsage.stop()
@@ -1329,6 +1376,9 @@ export class MmsProfileServices {
 
   async start(): Promise<void> {
     await this.requests.run('profile-start', () => this.startOwned())
+    // Threads that expired, also while the daemon was not running, are deleted once the start's own request
+    // ended (a delete waits for the profile to be idle). Until then no turn starts in them: the orchestrator refuses.
+    this.threadExpiry.start()
     // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
     void this.personalBots?.finishDeletions().catch(() => {})
   }

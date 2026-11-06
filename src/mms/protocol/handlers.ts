@@ -1,4 +1,5 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
 import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
 import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
@@ -92,6 +93,7 @@ import { ROUTED_MESSAGES_PAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
+import { threadFolderExpired } from '../data/expiredThreads'
 import { isLocalOnlyThread } from '../../shared/threadLineage'
 import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
@@ -1529,10 +1531,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const localOnly = asOptionalBoolean(p.localOnly, 'localOnly') === true
       if (localOnly && !connectionIsLocal(ctx.connection))
         throw new DomainRpcError('invalid_params', 'A private thread can only be started on its own computer')
+      const expiresAt = asOptionalString(p.expiresAt, 64)
+      const expiryStopsRun = asOptionalBoolean(p.expiryStopsRun, 'expiryStopsRun') === true
+      const expiryProblem = expiresAt === undefined ? undefined : expiryRefusal(expiresAt)
+      if (expiryProblem) throw new DomainRpcError('invalid_params', expiryProblem)
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly, expiresAt, expiryStopsRun })
+      if (expiresAt) ctx.mms.threadExpiry?.reschedule()
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
@@ -1798,6 +1805,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
+    }
+    case 'threads.setExpiry': {
+      // When the thread deletes itself for good (`Thread.expiresAt`), or null to keep it. A subagent follows its root.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'expiresAt', 'stopsRun'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const thread = ctx.mms.threads.getThread(threadId)
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (thread.lineage) throw new DomainRpcError('invalid_params', 'A subagent expires with the thread that started it')
+      const expiresAt = p.expiresAt === null ? null : asString(p.expiresAt, 'expiresAt', 64)
+      const problem = expiresAt === null ? undefined : expiryRefusal(expiresAt)
+      if (problem) throw new DomainRpcError('invalid_params', problem)
+      // An expired thread is already being deleted; it can no longer be kept.
+      if (isThreadExpired(thread)) throw new DomainRpcError('thread_expired', 'This thread has expired and is being deleted.', { threadId })
+      const updated = ctx.mms.threads.updateThreadMeta(threadId, {
+        expiresAt: expiresAt ?? undefined,
+        expiryStopsRun: expiresAt !== null && asOptionalBoolean(p.stopsRun, 'stopsRun') === true ? true : undefined
+      }, { touch: false })
+      ctx.mms.threadExpiry?.reschedule()
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread: updated, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.approvalRules': {
       // The thread's "Always for this thread" rules (SPEC §17.8). Not exposed on the Bridge.
@@ -4018,8 +4047,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
       if (p.threadId === undefined) {
-        // Another device is never told a private thread is in the trash.
-        const lifecycles = connectionIsLocal(ctx.connection) ? store.list() : store.list().filter((record) => !threadFolderIsLocalOnly(record.location, true))
+        // Another device is never told a private thread is in the trash. A thread its expiry deleted, or is
+        // deleting, is never in Recently deleted for anyone.
+        const lifecycles = store.list().filter((record) =>
+          !record.purge?.expired && !threadFolderExpired(record.location) &&
+          (connectionIsLocal(ctx.connection) || !threadFolderIsLocalOnly(record.location, true)))
         const taskNames: Record<string, string> = {}
         for (const record of lifecycles) {
           try {

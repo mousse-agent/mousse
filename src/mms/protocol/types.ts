@@ -237,6 +237,7 @@ export const PROTOCOL_METHODS = [
   'threads.setModel',
   'threads.setWorktreeEnabled',
   'threads.setPermissionMode',
+  'threads.setExpiry',
   'threads.approvalRules',
   'threads.clearApprovalRules',
   'threads.approvalRequests',
