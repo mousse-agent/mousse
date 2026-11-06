@@ -9,7 +9,6 @@ import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
   PlanCardMetadata,
-  PendingUserQuestions,
   QueuedMessage,
   SkillChatMode
 } from '../../shared/types'
@@ -49,7 +48,8 @@ import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
 import { usePermissionRequests } from '../hooks/usePermissionRequests'
-import { isWaitingPermissionRequest, permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
+import { usePendingQuestions } from '../hooks/usePendingQuestions'
+import { isWaitingPermissionRequest } from '../chat/components/agent-elements/tools/permission-request'
 import { usePendingRequestFocus } from '../stores/chatNavigationStore'
 import { ApprovalNotice, DENY_AND_SEND_LABEL } from './ApprovalNotice'
 import {
@@ -308,7 +308,8 @@ export function OrchestratorChat() {
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
-  const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
+  // The open thread's agent questions; a question from another thread never shows or takes a message here.
+  const [pendingQuestions, setPendingQuestions] = usePendingQuestions(activeThreadId)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   /** Discard for a send refused over a conflict in the thread worktree; shown only while `sendError` is that refusal’s line. */
@@ -333,6 +334,10 @@ export function OrchestratorChat() {
   const [questionsAnim, setQuestionsAnim] = useState<'enter' | 'open' | 'leave'>('open')
   const questionsSnapshotRef = useRef(pendingQuestions)
   if (pendingQuestions) questionsSnapshotRef.current = pendingQuestions
+  // The card closing on a thread switch belongs to the thread left behind: it does not play in the new one.
+  else if (questionsSnapshotRef.current && (questionsSnapshotRef.current.threadId || undefined) !== (activeThreadId || undefined)) {
+    questionsSnapshotRef.current = null
+  }
   const pendingRequestId = pendingQuestions?.requestId
   const inputAreaRef = useRef<HTMLDivElement>(null)
 
@@ -423,7 +428,7 @@ export function OrchestratorChat() {
         })
         .catch(() => {})
     },
-    []
+    [setPendingQuestions]
   )
   const quickActionApproval = useMemo<QuickActionApproval | null>(() => {
     const match = findQuickActionCardForApproval(shownMessages, pendingQuestions)
@@ -517,30 +522,10 @@ export function OrchestratorChat() {
   }, [])
 
   useEffect(() => {
-    const unsub = window.mousse.orchestrator.onQuestionsPending((payload) => {
-      // A permission request is answered inline in the transcript (usePermissionRequests), never in the dialog.
-      if (permissionRequestOptions(payload)) return
-      if (!payload.threadId || payload.threadId === activeThreadId) {
-        setPendingQuestions(payload)
-      }
-    })
-    const unsubCleared = window.mousse.orchestrator.onQuestionsCleared((payload) => {
-      if (!payload.threadId || payload.threadId === activeThreadId) {
-        // The daemon resolved this prompt without us (answered elsewhere,
-        // dismissed, timed out, or default-rejected by a preempting send).
-        // Drop the stale modal/inline approval so the fresh user prompt —
-        // now a visible message — is the only thing awaiting attention.
-        setPendingQuestions((current) =>
-          current?.requestId === payload.requestId ? null : current
-        )
-      }
-    })
     const unsubConnection = window.mousse.orchestrator.onConnectionFailed(() => {
       setConnectionFailed(true)
     })
     return () => {
-      unsub()
-      unsubCleared()
       unsubConnection()
     }
   }, [activeThreadId])
@@ -882,8 +867,9 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
-        // A message sent while a run is paused by a usage limit waits in the queue: it is shown there, not in the transcript.
-        if (result.heldByPause && optimisticMessageId) {
+        // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
+        // queue: it is shown there, not also in the transcript.
+        if (result.queued && optimisticMessageId) {
           const current = useAppStore.getState().messages
           useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
           if (result.queueItem) {
@@ -1308,13 +1294,24 @@ export function OrchestratorChat() {
   const composerHasContent = input.trim().length > 0 || attachedFiles.length > 0
 
   const retryConnection = () => {
+    const retryProfile = profileId
+    const retryThread = activeThreadId
+    // The busy state and the notice belong to the shown thread: an answer for another one changes neither.
+    const shown = () => useAppStore.getState().profileId === retryProfile && useAppStore.getState().activeThreadId === retryThread
     setConnectionFailed(false)
     setLoading(true)
     void window.mousse.orchestrator
-      .retryConnection(activeThreadId ?? undefined)
+      .retryConnection(retryThread ?? undefined)
       .then((started) => {
+        if (!shown()) return
         if (!started) setLoading(false)
         else void refreshTurnActive()
+      })
+      .catch(() => {
+        // The service could not be asked: still not reachable.
+        if (!shown()) return
+        setLoading(false)
+        setConnectionFailed(true)
       })
   }
 

@@ -523,6 +523,8 @@ export class ManagedSession {
   }
 
   takeControl(owner: 'human' | 'agent'): { controlLeaseId: string; generation: number; lifecycle: BrowserLifecycle } {
+    // A closing, closed or disconnected session keeps that state; control cannot move on it.
+    this.requireChrome()
     this.fenceInFlight('human_controlled')
     this.generation += 1
     this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
@@ -534,6 +536,7 @@ export class ManagedSession {
   }
 
   releaseControl(controlLeaseId: string): void {
+    this.requireChrome()
     if (controlLeaseId !== this.controlLeaseId) fail('stale_generation', 'Control lease does not match')
     this.controlOwner = 'agent'
     this.lifecycle = 'agent-controlled'

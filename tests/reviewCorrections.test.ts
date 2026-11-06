@@ -3,15 +3,22 @@
  * projects/threads fan-out, daemon.shutdown, activity map.
  */
 
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { createConnection } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
-import { requestDaemonShutdown } from '../src/cli/daemonShutdown'
-import { readStopRequest } from '../src/cli/mmsRuntime'
+import {
+  requestDaemonShutdown,
+  shutdownDaemonLifecycle,
+  type DaemonLifecycleState
+} from '../src/cli/daemonShutdown'
+import { getMmsRuntimePath, readStopRequest } from '../src/cli/mmsRuntime'
+import { resolveLocalEndpoint } from '../src/mms/protocol/endpoint'
+import type { MousseMainService as MmsInstance } from '../src/cli/contract'
 import { resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
 import { runDaemonForeground } from '../src/cli/commands/service'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
@@ -43,7 +50,52 @@ describe('Review: daemon.shutdown shared implementation', () => {
     const onDisk = readStopRequest(home)
     expect(onDisk?.token).toBe(token)
   })
+
+  it('a second shutdown waits until the first one has stopped the service', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let mmsStopped = false
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms: {
+        stop: async () => {
+          await gate
+          mmsStopped = true
+        }
+      } as unknown as MmsInstance,
+      protocolServer: null,
+      ownerToken: null,
+      runtimeWritten: false,
+      pollStop: null,
+      shuttingDown: false
+    }
+    const first = shutdownDaemonLifecycle(state)
+    let secondDone = false
+    const second = shutdownDaemonLifecycle(state).then(() => {
+      secondDone = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(secondDone).toBe(false)
+    release()
+    await Promise.all([first, second])
+    expect(mmsStopped).toBe(true)
+    expect(state.mms).toBeNull()
+  })
 })
+
+/** Resolves true when something accepts connections at the endpoint. */
+function endpointAccepts(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection(path)
+    socket.once('connect', () => {
+      socket.destroy()
+      resolve(true)
+    })
+    socket.once('error', () => resolve(false))
+  })
+}
 
 describe('Review: service startup fault cleanup', () => {
   let home: string
@@ -75,6 +127,34 @@ describe('Review: service startup fault cleanup', () => {
       expect(owner.owned).toBe(false)
     }, 60_000)
   }
+
+  it('a stop while the owner is still being created shuts the daemon down fully', async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-stop-early-'))
+    process.env.MOUSSE_HOME = home
+    const stop = new AbortController()
+    const running = runDaemonForeground({
+      homeDir: home,
+      skipSignals: true,
+      stopSignal: stop.signal,
+      onLog: () => undefined
+    })
+    // Owner creation is still pending here.
+    stop.abort()
+    const state = await running
+    try {
+      expect(state.shuttingDown).toBe(true)
+      expect(state.mms).toBeNull()
+      expect(state.protocolServer).toBeNull()
+      expect(state.pollStop).toBeNull()
+      expect(existsSync(getMmsRuntimePath(home))).toBe(false)
+      expect(resolveOwnerStatus(home).owned).toBe(false)
+      expect(await endpointAccepts(resolveLocalEndpoint(home).path)).toBe(false)
+    } finally {
+      if (state.pollStop) clearInterval(state.pollStop)
+      await state.protocolServer?.stop().catch(() => undefined)
+      await state.mms?.stop().catch(() => undefined)
+    }
+  }, 60_000)
 })
 
 describe('Review: protocol live events and fan-out', () => {

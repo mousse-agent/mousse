@@ -119,7 +119,8 @@ async function main() {
     held.afterBelow = await sentinelTop()
     held.belowScrollTopDelta = (await scrollTop()) - beforeBelow
     // Take the filler back out (shrinking above the reader is held just the same): later steps read plain rows.
-    for (const row of [hold.row - 1, hold.row, hold.row + 1]) await execute(`qa.growRow(${row}, 0)`)
+    // A row the window has since unmounted took its filler with it.
+    for (const row of [hold.row - 1, hold.row, hold.row + 1]) await execute(`qa.isMounted(${row}) && qa.growRow(${row}, 0)`)
     await execute('qa.frames(4)')
 
     // Scrolling by hand through rows whose estimates are far off: up, then down.
@@ -146,37 +147,38 @@ async function main() {
     codeGrowth.scrollTopMoved = (await scrollTop()) - codeGrowth.scrollTop!
 
     // 3b. A group of tool calls opens above the reading line, in the very turn being read: what is read holds still.
+    // The reading line is near the end of the long answer, so the next turn's group is just below it and mounted.
     const sentinelOf = (text: string) => execute<number | null>(`qa.targetTop(${JSON.stringify(text)})`)
     // A group opens and closes with a short height animation (ui/Collapse); the reading line is read once it has ended,
     // so a slow frame in the middle of the motion does not decide the result.
     const groupSettled = async () => {
-      await waitFrames(`!document.querySelector(${JSON.stringify('[data-turn-key="u-400"] .ui-collapse[data-motion]')})`, 120)
+      await waitFrames(`!document.querySelector(${JSON.stringify(':is([data-turn-key="u-400"], [data-turn-key="u-401"]) .ui-collapse[data-motion]')})`, 120)
       await execute('qa.frames(3)')
     }
     await execute('qa.goToRow(400, 0)')
     await execute('qa.frames(4)')
-    await execute("qa.placeSentinel('anchor-paragraph-3', 100)")
+    await execute("qa.placeSentinel('anchor-paragraph-10', 100)")
     await execute('qa.frames(5)')
-    const toolCards = { groups: await execute<number>('qa.groupCount(400)') } as Record<string, number | null>
+    const toolCards = { groups: await execute<number>('qa.groupCount(400)'), nextGroups: await execute<number>('qa.groupCount(401)') } as Record<string, number | null>
     toolCards.firstGroupTop = await execute<number | null>("qa.groupTop(400, 'first')")
-    toolCards.secondGroupTop = await execute<number | null>("qa.groupTop(400, 'second')")
-    toolCards.start = await sentinelOf('anchor-paragraph-3')
+    toolCards.secondGroupTop = await execute<number | null>("qa.groupTop(401, 'first')")
+    toolCards.start = await sentinelOf('anchor-paragraph-10')
     toolCards.startScrollTop = await scrollTop()
     toolCards.rowHeight = await execute<number>('qa.rowHeight(400)')
     await execute("qa.toggleGroup(400, 'first')")
     await groupSettled()
-    toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-10')
     toolCards.openGrowth = (await execute<number>('qa.rowHeight(400)')) - (toolCards.rowHeight as number)
     toolCards.openScrolled = (await scrollTop()) - (toolCards.startScrollTop as number)
-    // The second group is below the reading line: nothing moves.
+    // The next turn's group is below the reading line: nothing moves.
     const beforeSecond = await scrollTop()
-    await execute("qa.toggleGroup(400, 'second')")
+    await execute("qa.toggleGroup(401, 'first')")
     await groupSettled()
-    toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-10')
     toolCards.secondScrollTopDelta = (await scrollTop()) - beforeSecond
     await execute("qa.toggleGroup(400, 'first')")
     await groupSettled()
-    toolCards.afterCloseFirst = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterCloseFirst = await sentinelOf('anchor-paragraph-10')
 
     // 3c. Inside a block quote taller than the viewport: a fenced block above the reading line grows, the quote straddles the edge.
     await execute('qa.goToRow(450, 0)')
