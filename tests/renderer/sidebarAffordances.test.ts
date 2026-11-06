@@ -12,8 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-// Row titles measure themselves; jsdom has no layout.
-globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
 const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
@@ -360,10 +358,13 @@ describe('row marks', () => {
     const width = vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(300)
     const visible = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(120)
     show([thread('a', 'A very long thread title that does not fit')], { active: 'a' })
-    expect(row('a').querySelector('.threads-sidebar-thread-name')?.getAttribute('title')).toBe('A very long thread title that does not fit')
+    const title = () => row('a').querySelector('.threads-sidebar-thread-name')!
+    const hover = () => act(() => { title().dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    hover()
+    expect(title().getAttribute('title')).toBe('A very long thread title that does not fit')
     width.mockReturnValue(100)
-    act(() => { row('a').querySelector('.threads-sidebar-thread-name')!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
-    expect(row('a').querySelector('.threads-sidebar-thread-name')?.hasAttribute('title')).toBe(false)
+    hover()
+    expect(title().hasAttribute('title')).toBe(false)
     width.mockRestore()
     visible.mockRestore()
   })

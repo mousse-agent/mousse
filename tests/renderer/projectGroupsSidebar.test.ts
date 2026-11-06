@@ -145,7 +145,7 @@ describe('the menu of a project group', () => {
   it('says which computer a project of another computer is on', () => {
     const html = menu({ type: 'project', id: `${B}:b2`, name: 'Studio only', pinned: false, node: B, computerName: 'Studio' })
     expect(html).toContain('On Studio')
-    expect(html).not.toContain('Trust Git settings again')
+    expect(html).not.toContain('Git settings')
   })
 
   it('says that removing a project of this computer leaves the other computers’ projects', () => {

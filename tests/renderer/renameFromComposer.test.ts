@@ -27,7 +27,7 @@ let root: Root
 let onScreen: (element: HTMLElement) => boolean = () => true
 
 beforeEach(async () => {
-  ;(window as unknown as { mousse: object }).mousse = {}
+  ;(window as unknown as { mousse: object }).mousse = { editors: { list: async () => [], open: async () => undefined } }
   ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} }
   Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
     configurable: true,

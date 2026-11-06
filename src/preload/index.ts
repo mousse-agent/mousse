@@ -1,6 +1,7 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
@@ -171,6 +172,8 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
+  /** This computer's home folder, for showing paths as `~/…`. */
+  homeFolder: readHomeFolderArgument(process.argv),
   fonts: {
     /** A Google Fonts family's cached files; downloads them first only when `download` is true. */
     loadGoogle: (family: string, role: FontRole, download: boolean): Promise<LoadedGoogleFont | null> =>

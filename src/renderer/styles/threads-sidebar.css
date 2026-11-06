@@ -270,6 +270,7 @@
 }
 
 .threads-sidebar-project-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -303,9 +304,30 @@
 .threads-sidebar-project-row.expanded .threads-sidebar-project-toggle { color: var(--text-primary); }
 .threads-sidebar-project-row.expanded .threads-sidebar-project-icon { color: var(--accent); }
 
-.threads-sidebar-chevron {
-  flex-shrink: 0;
+/* A project row's disclosure chevron: in the tree's left gutter, so it moves nothing; shown on hover and focus,
+   turned down while the project is open. */
+.threads-sidebar-project-chevron {
+  position: absolute;
+  top: 50%;
+  left: -6px;
   color: var(--text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.threads-sidebar-project-row.expanded .threads-sidebar-project-chevron {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.threads-sidebar-project-row:hover .threads-sidebar-project-chevron,
+.threads-sidebar-project-toggle:focus-visible .threads-sidebar-project-chevron {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-project-chevron { transition: none; }
 }
 
 .threads-sidebar-project-icon,
@@ -321,27 +343,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.threads-sidebar-thread-name-text {
-  display: inline-block;
-  min-width: 100%;
-  will-change: transform;
-}
-
-.threads-sidebar-thread:hover
-  .threads-sidebar-thread-name[data-overflow='true']
-  .threads-sidebar-thread-name-text {
-  animation: threads-sidebar-title-scroll var(--thread-title-duration, 2s) linear 0.08s 1 normal forwards;
-}
-
-@keyframes threads-sidebar-title-scroll {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(calc(-1 * var(--thread-title-overflow, 0px)));
-  }
 }
 
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
@@ -378,6 +379,35 @@
 
 .threads-sidebar-thread-container {
   position: relative;
+  /* The width the hover actions cover at the row's end: three 23px buttons and their inset. */
+  --thread-actions-room: 76px;
+}
+
+/* A row keeps its hover actions' room at rest too, so a long title always ends in an ellipsis before them and
+   nothing moves when the pointer arrives. At rest the room holds the status, computer and worktree marks; the
+   actions take their place on hover. A card keeps its actions over the age line, clear of the title. */
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
+  position: relative;
+  padding-right: var(--thread-actions-room);
+}
+
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
+  position: absolute;
+  top: 50%;
+  right: var(--ui-row-x, 9px);
+  margin-left: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
+  opacity: 0;
+}
+
+.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  padding-left: 0;
+  background: none;
 }
 
 .threads-sidebar-thread-actions {
@@ -400,6 +430,12 @@
 .threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* While a menu is open, only the row it belongs to keeps its actions lit: the rows under the pointer stay quiet. */
+.threads-sidebar.menu-open .threads-sidebar-thread-actions:not(:has([aria-expanded='true'])) {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .threads-sidebar-thread-action {
@@ -606,9 +642,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   text-overflow: ellipsis;
 }
 
-.threads-sidebar-card-title svg {
-  margin-right: 4px;
-  vertical-align: -1px;
+/* Pinned: a glyph after the project name, so a pinned card is as tall as any other. */
+.threads-sidebar-card-pin {
+  flex-shrink: 0;
+  margin-left: -2px;
+  opacity: 0.85;
 }
 
 .threads-sidebar-thread-container:has(.threads-sidebar-card) .threads-sidebar-thread-actions {
@@ -725,6 +763,15 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   opacity: 1;
 }
 
+/* While a menu is open, project rows under the pointer go back to rest, except the one whose "…" opened it. */
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) .threads-sidebar-project-new-chat {
+  opacity: 0.55;
+}
+
+.threads-sidebar.menu-open .threads-sidebar-project-row:not(:has([aria-expanded="true"])) :is(.threads-sidebar-project-more, .threads-sidebar-project-chevron) {
+  opacity: 0;
+}
+
 .threads-sidebar-empty {
   padding: 6.5px 10.5px;
   font-size: 12.5px;
@@ -752,8 +799,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   text-decoration: underline;
 }
 
+/* A project with no threads: muted "No threads", then a small New thread button. */
 .threads-sidebar-empty-nested {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding-left: 11px;
+}
+
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) {
+  opacity: 1;
+}
+
+.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) > span {
+  opacity: 0.7;
+}
+
+/* Neutral, like the row's own New thread: no accent at rest or on hover. */
+.threads-sidebar-empty-new-thread {
+  flex-shrink: 0;
+}
+
+.threads-sidebar-empty-new-thread:hover {
+  background: var(--ui-hover);
+}
+
+.threads-sidebar-empty-new-thread:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: -2px;
 }
 
 .threads-sidebar-show-more {
@@ -818,6 +891,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-context-menu-item:focus-visible {
   outline: none;
   background: var(--ui-hover);
+}
+
+/* "Git ›": its menu opens beside the row, or on the left when the window has no room on the right. */
+.threads-context-submenu-anchor {
+  position: relative;
+}
+
+.threads-context-submenu-trigger[aria-expanded='true'] {
+  background: var(--ui-hover);
+}
+
+.threads-context-menu-item .threads-context-submenu-chevron {
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+
+.threads-context-menu.threads-context-submenu {
+  position: absolute;
+  top: calc(-1 * var(--ui-menu-pad, 4px) - 1px);
+  left: 100%;
+  white-space: nowrap;
+}
+
+.threads-context-menu.threads-context-submenu.flip {
+  right: 100%;
+  left: auto;
 }
 
 .threads-context-menu-item-danger {

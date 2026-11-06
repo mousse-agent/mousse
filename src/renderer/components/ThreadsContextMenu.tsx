@@ -1,11 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import {
   ArchiveArrowBackRegular,
   ArchiveRegular,
   ArrowSyncRegular,
+  ChevronRight,
+  Code2,
+  Copy,
   DeleteRegular,
   EditRegular,
+  FolderSearch,
+  GitBranch,
   GitPullRequest,
   MessageSquarePlus,
   PinOffRegular,
@@ -26,6 +31,14 @@ export interface ThreadsContextMenuTarget {
   computerName?: string
   /** On a project of this computer: the other computers that hold the same repository. Removing leaves their projects. */
   alsoOn?: readonly string[]
+  /** A project's folder, on the computer that holds it. */
+  path?: string
+}
+
+/** An app the project's folder opens in: its menu label ("Open in Cursor", "Show in Finder") and how to open it. */
+export interface ProjectOpener {
+  label: string
+  onSelect: () => void
 }
 
 interface ThreadsContextMenuProps {
@@ -39,7 +52,6 @@ interface ThreadsContextMenuProps {
   onArchive: () => void
   onRegenerateTitle: () => void
   onRename: () => void
-  /** Projects: remove the project. Archived threads: delete the thread, after a confirmation. */
   onRemove: () => void
   /** Projects only: record the repository's own Git filters as the user's again. */
   onTrustGitSettings?: () => void
@@ -47,6 +59,90 @@ interface ThreadsContextMenuProps {
   onNewThread?: () => void
   /** Projects only: start a thread from one of the project's pull requests. */
   onNewThreadFromPullRequest?: () => void
+  /** Projects of this computer only: the editor the folder opens in, and the file manager. */
+  openInEditor?: ProjectOpener
+  reveal?: ProjectOpener
+  /** Projects only: copy the folder's path. */
+  onCopyPath?: () => void
+}
+
+const Separator = () => <div className="threads-context-menu-separator" role="separator" />
+
+/**
+ * "Git ›": rarely needed project actions, one level down. Opens on hover, click, Enter, Space or the right arrow
+ * (focusing its first item); the left arrow or Escape closes it and returns to "Git".
+ */
+function GitSubmenu({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const [focusFirst, setFocusFirst] = useState(false)
+  const [flip, setFlip] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const submenuRef = useRef<HTMLDivElement>(null)
+  const close = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
+  const onSubmenuKeyDown = useMenuKeyboard(submenuRef, close)
+
+  useLayoutEffect(() => {
+    const submenu = submenuRef.current
+    if (!open || !submenu) return
+    setFlip(submenu.getBoundingClientRect().right > window.innerWidth - 8)
+    if (focusFirst) {
+      focusInitialMenuItem(submenu)
+      setFocusFirst(false)
+    }
+  }, [open, focusFirst])
+
+  const openWithKeyboard = () => {
+    setOpen(true)
+    setFocusFirst(true)
+  }
+
+  return (
+    <div className="threads-context-submenu-anchor" role="none" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="threads-context-menu-item threads-context-submenu-trigger"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={openWithKeyboard}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            event.stopPropagation()
+            openWithKeyboard()
+          } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') setOpen(false)
+        }}
+      >
+        <GitBranch />
+        <span>Git</span>
+        <ChevronRight className="threads-context-submenu-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          ref={submenuRef}
+          className={`threads-context-menu threads-context-submenu${flip ? ' flip' : ''}`}
+          role="menu"
+          aria-label="Git"
+          data-submenu=""
+          onKeyDown={(event) => {
+            event.stopPropagation()
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault()
+              close()
+              return
+            }
+            onSubmenuKeyDown(event)
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function ThreadsContextMenu({
@@ -61,7 +157,10 @@ export function ThreadsContextMenu({
   onRemove,
   onTrustGitSettings,
   onNewThread,
-  onNewThreadFromPullRequest
+  onNewThreadFromPullRequest,
+  openInEditor,
+  reveal,
+  onCopyPath
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
@@ -127,17 +226,45 @@ export function ThreadsContextMenu({
         {target.type === 'project' && target.computerName && (
           <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
         )}
-        {target.type === 'project' && onNewThread && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
-            <MessageSquarePlus />
-            <span>New thread</span>
-          </button>
+        {target.type === 'project' && (onNewThread || onNewThreadFromPullRequest) && (
+          <>
+            {onNewThread && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
+                <MessageSquarePlus />
+                <span>New thread</span>
+              </button>
+            )}
+            {onNewThreadFromPullRequest && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
+                <GitPullRequest />
+                <span>New thread from a pull request</span>
+              </button>
+            )}
+            <Separator />
+          </>
         )}
-        {target.type === 'project' && onNewThreadFromPullRequest && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
-            <GitPullRequest />
-            <span>New thread from a pull request</span>
-          </button>
+        {target.type === 'project' && (openInEditor || reveal || onCopyPath) && (
+          <>
+            {openInEditor && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={openInEditor.onSelect}>
+                <Code2 />
+                <span>{openInEditor.label}</span>
+              </button>
+            )}
+            {reveal && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={reveal.onSelect}>
+                <FolderSearch />
+                <span>{reveal.label}</span>
+              </button>
+            )}
+            {onCopyPath && (
+              <button type="button" className="threads-context-menu-item" role="menuitem" title={target.path} onClick={onCopyPath}>
+                <Copy />
+                <span>Copy path</span>
+              </button>
+            )}
+            <Separator />
+          </>
         )}
         {!target.settled && (
           <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
@@ -162,17 +289,20 @@ export function ThreadsContextMenu({
           <span>Rename</span>
         </button>
         {target.type === 'project' && onTrustGitSettings && !target.node && (
-          <button
-            type="button"
-            className="threads-context-menu-item"
-            role="menuitem"
-            title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
-            onClick={onTrustGitSettings}
-          >
-            <ShieldCheck />
-            <span>Trust Git settings again</span>
-          </button>
+          <GitSubmenu>
+            <button
+              type="button"
+              className="threads-context-menu-item"
+              role="menuitem"
+              title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
+              onClick={onTrustGitSettings}
+            >
+              <ShieldCheck />
+              <span>Trust this repository's Git settings</span>
+            </button>
+          </GitSubmenu>
         )}
+        {target.type === 'project' && <Separator />}
         {target.type === 'project' && (
           <button
             type="button"

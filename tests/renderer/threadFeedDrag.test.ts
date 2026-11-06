@@ -31,7 +31,7 @@ let root: Root
 
 beforeEach(async () => {
   // The sidebar's other parts ask the main process for things these tests do not need.
-  ;(window as unknown as { mousse: object }).mousse = {}
+  ;(window as unknown as { mousse: object }).mousse = { editors: { list: async () => [], open: async () => undefined } }
   ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class {
     observe() {}
     unobserve() {}
