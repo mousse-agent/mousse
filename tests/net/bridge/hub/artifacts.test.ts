@@ -300,3 +300,48 @@ it('rechecks current method capability after a large artifact resolves and prese
   expect(hub.status(id).state).toBe('completed')
   await expect(hub.query(id)).rejects.toMatchObject({ code: 'forbidden' })
 })
+
+it('keeps a dispatch input cancelled when the cancel comes while its bundle is being published', async () => {
+  const f = await fixture()
+  let effects = 0
+  f.targetRpc.register({
+    method: 'bridge.dispatch',
+    capability: 'write',
+    mutating: true,
+    uploadEnabled: true,
+    validate: (value) => validateHubParams('bridge.dispatch', value),
+    handle: async () => {
+      effects++
+      throw new Error('a cancelled dispatch must not run')
+    }
+  })
+  const { caller } = await f.connect()
+  let release!: () => void,
+    reached!: () => void
+  const gate = new Promise<void>((resolve) => (release = resolve)),
+    appending = new Promise<void>((resolve) => (reached = resolve))
+  const append = caller.append.bind(caller)
+  caller.append = async (...args: Parameters<typeof caller.append>) => {
+    reached()
+    await gate
+    return append(...args)
+  }
+  const hub = f.hub(),
+    id = hub.prepareDispatchWithBundle(f.targetNode, input, Buffer.from('bundle bytes'), {
+      idem: 'cancel-while-publishing'
+    })
+  const resumed = hub.resumeDispatchWithBundle(id)
+  await appending
+  await hub.cancel(id)
+  release()
+  await expect(resumed).rejects.toMatchObject({ code: 'cancelled' })
+  const plan = JSON.parse(
+    String(
+      f.callerDb().database.prepare('SELECT record FROM net_bridge_hub_inputs WHERE id=?').get(id)!
+        .record
+    )
+  )
+  expect(plan.phase).toBe('cancelled')
+  await expect(hub.resumeDispatchWithBundle(id)).rejects.toMatchObject({ code: 'cancelled' })
+  expect(effects).toBe(0)
+})

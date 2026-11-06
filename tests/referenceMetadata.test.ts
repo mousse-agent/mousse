@@ -37,9 +37,12 @@ describe('ChatReferenceMetadataResolver', () => {
 
   it('is exposed by the validated protocol handler with the bound profile home', async () => {
     const profileHome = join(tmpdir(), 'bound-profile')
+    const thread = { id: 't1', name: 'Thread', projectId: 'p1' }
     const threads = {
-      getThread: (id: string) => id === 't1' ? { id, name: 'Thread', projectId: 'p1' } : undefined,
-      getThreadDir: (id: string) => join(profileHome, 'threads', id)
+      getThread: (id: string) => id === 't1' ? thread : undefined,
+      getThreadDir: (id: string) => join(profileHome, 'threads', id),
+      // A caller that is not on this computer has private threads left out (#678).
+      listAllThreads: () => [thread]
     }
     const projects = {
       getProject: (id: string) => id === 'p1' ? { id, name: 'Project', path: 'D:\\project' } : undefined

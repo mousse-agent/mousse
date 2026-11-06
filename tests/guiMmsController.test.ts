@@ -279,6 +279,61 @@ describe('GuiMmsController lifecycle', () => {
     await gui.stop()
   })
 
+  /** Drops the GUI's base connection and holds its reconnect until `release` is called. */
+  async function holdReconnect(gui: GuiMmsController): Promise<{ connect: ReturnType<typeof vi.fn>; release: () => void }> {
+    const internals = gui as unknown as { client: { close(): Promise<void> }; connectOnce: () => Promise<unknown> }
+    const original = internals.connectOnce.bind(gui)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const connect = vi.spyOn(internals, 'connectOnce').mockImplementation(async () => {
+      await gate
+      return original()
+    })
+    await internals.client.close()
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1), { timeout: 5_000 })
+    return { connect: connect as unknown as ReturnType<typeof vi.fn>, release }
+  }
+
+  it('a request during a reconnect joins it and leaves one service connection', async () => {
+    const gui = new GuiMmsController({ homeDir: home, managedDaemon: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken, reconnectBaseMs: 10, requestTimeoutMs: 5_000 })
+    const clients = (server as unknown as { clients: Map<string, unknown> }).clients
+    await gui.start()
+    const baseline = clients.size
+    try {
+      const { connect, release } = await holdReconnect(gui)
+      const health = gui.request<{ ok: boolean }>('health')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(connect).toHaveBeenCalledTimes(1)
+      release()
+      await expect(health).resolves.toMatchObject({ ok: true })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(connect).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(clients.size).toBe(baseline))
+    } finally { await gui.stop() }
+  })
+
+  it('stop during a reconnect waits for it and never reports ready afterwards', async () => {
+    const gui = new GuiMmsController({ homeDir: home, managedDaemon: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken, reconnectBaseMs: 10, requestTimeoutMs: 5_000 })
+    const clients = (server as unknown as { clients: Map<string, unknown> }).clients
+    await gui.start()
+    const baseline = clients.size
+    try {
+      const { release } = await holdReconnect(gui)
+      const states: string[] = []
+      gui.on('state', (state: string) => states.push(state))
+      const stopping = gui.stop()
+      // The held reconnect finishes only after stop has had time to finish on its own.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      release()
+      await stopping
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(states.slice(states.indexOf('stopped') + 1)).toEqual([])
+      expect(states).toContain('stopped')
+      expect(gui.connected).toBe(false)
+      await vi.waitFor(() => expect(clients.size).toBe(baseline - 1))
+    } finally { await gui.stop() }
+  })
+
   it('same-client send/steer/abort via controller', async () => {
     let release: (() => void) | null = null
     let entered!: () => void

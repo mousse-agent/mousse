@@ -8,8 +8,34 @@ import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 import { chromeLaunchArgs } from '../src/browser-worker/cdp/launch'
+import { ManagedSession } from '../src/browser-worker/session/Session'
 
 const chrome = await ensureManagedChrome()
+
+describe('control changes on a session that is not available', () => {
+  const session = async (state: 'disconnected' | 'closed') => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-control-'))
+    const value = new ManagedSession({ profileId: 'profile_control', browserRoot: join(root, 'browser'), artifactRoot: join(root, 'artifacts'), executablePath: 'chrome', browserVersion: '1' }, { persistent: false })
+    // A started session whose Chromium went away (or that has closed) keeps its connection object.
+    Object.assign(value as unknown as { chrome: unknown }, { chrome: {} })
+    value.lifecycle = state
+    return value
+  }
+
+  it('a disconnected session refuses take and release and stays disconnected', async () => {
+    const value = await session('disconnected')
+    expect(() => value.handle('control.take', { owner: 'human' })).toThrow(expect.objectContaining({ code: 'worker_disconnected' }))
+    expect(() => value.handle('control.release', { controlLeaseId: value.controlLeaseId })).toThrow(expect.objectContaining({ code: 'worker_disconnected' }))
+    expect(value.lifecycle).toBe('disconnected')
+    expect(value.controlOwner).toBe('agent')
+  })
+
+  it('a closed session refuses take and stays closed', async () => {
+    const value = await session('closed')
+    expect(() => value.handle('control.take', { owner: 'human' })).toThrow(expect.objectContaining({ code: 'session_closed' }))
+    expect(value.lifecycle).toBe('closed')
+  })
+})
 
 describe('managed browser setup_required', () => {
   it('keeps fixture DNS and profile overrides out of default Chromium arguments', () => {

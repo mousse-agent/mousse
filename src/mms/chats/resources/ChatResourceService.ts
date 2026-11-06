@@ -51,6 +51,8 @@ interface GroupResources {
   files: Map<string, ChatSharedFile>
   presence: Map<string, ChatResourcePresence>
   browserControls: Map<string, ChatResourceControl>
+  /** The admitted binding of each browser control holder, used to hand the browser back to the agent when the lease ends. Never in snapshots. */
+  browserControlBindings: Map<string, TrustedChatResourceBinding>
   terminalControls: Map<string, ChatResourceControl>
   sequence: number
 }
@@ -228,8 +230,8 @@ export class ChatResourceService {
       this.assertControl(group.browserControls, sessionId, context, !acquire)
       const snapshot = await this.host.browser.control(binding, sessionId, acquire ? 'human' : 'agent')
       this.storeBrowser(group, snapshot)
-      if (acquire) group.browserControls.set(sessionId, this.control(context))
-      else group.browserControls.delete(sessionId)
+      if (acquire) { group.browserControls.set(sessionId, this.control(context)); group.browserControlBindings.set(sessionId, binding) }
+      else { group.browserControls.delete(sessionId); group.browserControlBindings.delete(sessionId) }
       this.emit(group, 'browser', sessionId)
       return snapshot
     })
@@ -244,6 +246,7 @@ export class ChatResourceService {
       const snapshot = await this.host.browser.action(binding, action)
       this.storeBrowser(group, snapshot)
       group.browserControls.set(action.sessionId, this.control(context))
+      group.browserControlBindings.set(action.sessionId, binding)
       this.emit(group, 'browser', action.sessionId)
       return snapshot
     })
@@ -256,7 +259,7 @@ export class ChatResourceService {
       this.pruneGroup(group)
       this.assertControl(group.browserControls, sessionId, context, false)
       await this.host.browser.close(binding, sessionId)
-      group.browsers.delete(sessionId); group.browserControls.delete(sessionId)
+      group.browsers.delete(sessionId); group.browserControls.delete(sessionId); group.browserControlBindings.delete(sessionId)
       this.removeResourcePresence(group, 'browser', sessionId)
       this.emit(group, 'browser', sessionId)
     })
@@ -374,7 +377,7 @@ export class ChatResourceService {
     if (!group) {
       if (this.groups.size >= 256) throw new ChatResourceError('resource_limit', 'Shared group limit reached')
       group = { profileId: this.profileId, groupId: context.groupId, threadId: binding.threadId, workspaceRoot: binding.workspaceRoot,
-        browsers: new Map(), terminals: new Map(), files: new Map(), presence: new Map(), browserControls: new Map(), terminalControls: new Map(), sequence: 0 }
+        browsers: new Map(), terminals: new Map(), files: new Map(), presence: new Map(), browserControls: new Map(), browserControlBindings: new Map(), terminalControls: new Map(), sequence: 0 }
       this.groups.set(context.groupId, group)
     }
     return { binding, group }
@@ -484,7 +487,10 @@ export class ChatResourceService {
   private leaveClient(group: GroupResources, clientId: string): void {
     let changed = false
     for (const [key, presence] of group.presence) if (presence.clientId === clientId) { group.presence.delete(key); changed = true }
-    for (const controls of [group.browserControls, group.terminalControls]) for (const [id, control] of controls) if (control.clientId === clientId) { controls.delete(id); changed = true }
+    for (const controls of [group.browserControls, group.terminalControls]) for (const [id, control] of controls) if (control.clientId === clientId) {
+      controls.delete(id); changed = true
+      if (controls === group.browserControls) this.returnBrowserToAgent(group, id)
+    }
     if (changed) this.emit(group, 'presence')
   }
   private pruneGroup(group: GroupResources): void {
@@ -499,8 +505,29 @@ export class ChatResourceService {
         delete presence.cursor; changed = true
       }
     }
-    for (const [controls, resources] of [[group.browserControls, group.browsers], [group.terminalControls, group.terminals]] as const) for (const [id, control] of controls) if (control.expiresAt <= now || !resources.has(id)) { controls.delete(id); changed = true }
+    for (const [controls, resources] of [[group.browserControls, group.browsers], [group.terminalControls, group.terminals]] as const) for (const [id, control] of controls) if (control.expiresAt <= now || !resources.has(id)) {
+      controls.delete(id); changed = true
+      if (controls === group.browserControls) this.returnBrowserToAgent(group, id)
+    }
     if (changed) this.emit(group, 'presence')
+  }
+  /**
+   * A person's browser control ended without a release (the lease expired or the client left): the browser
+   * goes back to the agent, so its actions are not fenced by a lease nobody holds. Runs after whatever holds
+   * the session's lock, and leaves the browser alone if someone took control meanwhile. Best effort.
+   */
+  private returnBrowserToAgent(group: GroupResources, sessionId: string): void {
+    const binding = group.browserControlBindings.get(sessionId)
+    group.browserControlBindings.delete(sessionId)
+    if (!binding || this.stopped || !group.browsers.has(sessionId)) return
+    try {
+      void this.lifecycle.run('chat-resource:browserReturn', () => this.withLock(`${group.groupId}:browser:${sessionId}`, async () => {
+        if (this.stopped || this.groups.get(group.groupId) !== group || group.browserControls.has(sessionId) || !group.browsers.has(sessionId)) return
+        const snapshot = await this.host.browser.control(binding, sessionId, 'agent')
+        this.storeBrowser(group, snapshot)
+        this.emit(group, 'browser', sessionId)
+      })).catch(() => { /* The session closed or the binding changed; the next control request or close settles it. */ })
+    } catch { /* The profile is shutting down. */ }
   }
   private emit(group: GroupResources, kind: ChatResourceEvent['kind'], resourceId?: string): void {
     const event: ChatResourceEvent = { profileId: this.profileId, groupId: group.groupId, sequence: ++group.sequence, kind, ...(resourceId ? { resourceId } : {}) }

@@ -741,6 +741,30 @@ describe('a computer that is out of reach', () => {
     await vi.waitFor(() => expect(h.lists.threads().map((row) => row.id)).toEqual([h.q('old1')]))
     expect(h.lists.state()[0]).toMatchObject({ mode: 'read', live: true })
   })
+
+  it('streams its lists again once it reconnects after an upgrade', async () => {
+    const h = harness()
+    h.hub.attach.mockRejectedValueOnce(new DomainRpcError('computer_outdated', 'Update Mousse'))
+    await h.lists.reconcile()
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+    // It goes away, is upgraded, and comes back: the stream opens now.
+    h.online.delete(h.node)
+    h.lists.nodeOffline(h.node)
+    h.online.add(h.node)
+    h.lists.nodeOnline(h.node)
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'stream' }))
+    expect(h.hub.attach).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays on reads when it reconnects still outdated', async () => {
+    const h = harness()
+    h.hub.attach.mockRejectedValue(new DomainRpcError('computer_outdated', 'Update Mousse'))
+    await h.lists.reconcile()
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+    h.lists.nodeOnline(h.node)
+    await vi.waitFor(() => expect(h.hub.attach).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+  })
 })
 
 describe('search across computers', () => {
