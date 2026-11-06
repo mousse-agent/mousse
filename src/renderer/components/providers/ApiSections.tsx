@@ -73,6 +73,7 @@ export function ApiSetupRow({
   return (
     <SettingsRow
       title="API key"
+      anchor="providers-api-key"
       description={errorLine ?? (editingKey ? 'Leave blank for guided setup' : statusLine)}
       control={
         editingKey ? (
