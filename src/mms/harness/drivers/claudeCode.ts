@@ -569,6 +569,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
         signOut: privateHome ? signOutOfHome : () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
+        compactConversation: (request) => service.compactConversation(request.threadId, request.history, request.instanceId, request.focus, request.signal),
         setLiveHost: (host) => service.setLiveHost(host),
         inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),

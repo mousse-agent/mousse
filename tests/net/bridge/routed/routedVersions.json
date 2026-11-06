@@ -644,6 +644,16 @@
     "digest": "e2af3a0680e25499",
     "security": "926c4af141d1208d"
   },
+  "threads.clearContext": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
+  },
+  "threads.compact": {
+    "version": 1,
+    "digest": "94dd6dadebc5f444",
+    "security": "926c4af141d1208d"
+  },
   "threads.create": {
     "version": 1,
     "digest": "8c29741dbc687abf",

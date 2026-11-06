@@ -16,6 +16,7 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
 import { removeInlineSkillToken } from '../../shared/composerCommands'
+import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -952,6 +953,23 @@ export function OrchestratorChat() {
     })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
+  // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
+  const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
+    threadId: newChat ? null : activeThreadId,
+    turnActive: turnActive || loading,
+    hasAttachments,
+    openUsage: () => window.dispatchEvent(new Event('mousse:open-usage')),
+    stop: handleStop,
+    steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
+    newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
+    clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
+    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
+    rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
+    // The sidebar cancels the event when it opened the thread's rename box.
+    openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true }))
+  })
+
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
@@ -986,31 +1004,22 @@ export function OrchestratorChat() {
     if (!stillVisible()) return
     const trimmed = text.trim()
 
-    // Desktop-local commands must be handled before they can become an ordinary
-    // agent prompt. The usage dialog intentionally contains every configured provider.
-    if (trimmed.toLowerCase() === '/usage' && images.length === 0) {
-      setInput('')
-      window.dispatchEvent(new Event('mousse:open-usage'))
-      return
-    }
-
-    // Immediate mid-run controls
-    if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
-      setInput('')
-      await handleStop()
-      return
-    }
-    if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
-      const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
-      if (!steerText) return
-      setInput('')
-      const steered = await window.mousse.orchestrator.steer(
-        steerText,
-        activeThreadId ?? undefined
-      )
-      if (steered) return
-      // No active turn: treat as a normal user message (next-turn guidance).
-      text = steerText
+    // Composer commands run here before they can become an ordinary agent prompt
+    // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
+    const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
+    const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    if (command) {
+      if (command.kind === 'done') {
+        setInput('')
+        return
+      }
+      if (command.kind === 'keep') return
+      if (command.kind === 'refused') {
+        if (stillVisible()) setSendError(command.message)
+        return
+      }
+      // A /steer no turn took: next-turn guidance, sent as an ordinary message.
+      text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Alt+Enter during a run: the text goes into the running turn instead of the queue.
       const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
@@ -1022,13 +1031,6 @@ export function OrchestratorChat() {
     }
 
     if (!text && images.length === 0) return
-
-    const newThreadMatch = trimmed.match(/^\/new(?:\s+(.+))?$/)
-    if (newThreadMatch && images.length === 0) {
-      setInput('')
-      await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
-      return
-    }
 
     // Questions open above the composer: the message answers the question the card shows, and the card
     // moves on to the next unanswered one. Answering the last one submits all the answers, once.

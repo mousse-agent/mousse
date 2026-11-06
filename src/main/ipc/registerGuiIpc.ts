@@ -1567,6 +1567,29 @@ export function registerGuiIpc(
     return res.thread
   })
 
+  // `/fork`: the same fork agents make with `thread_fork`, after the thread's latest finished turn.
+  registerHandler('threads:fork', async (_e, threadId: string) => {
+    const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
+      sourceThreadId: threadId,
+      atRunOrdinal: 'latest_stable',
+      // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now.
+      seedFrom: 'current_head',
+      clientRequestId: randomUUID()
+    })
+    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
+    broadcast('threads:updated', threads.threads)
+    await selectThread(forked.threadId)
+    return { threadId: forked.threadId }
+  })
+
+  registerHandler('threads:clearContext', async (_e, threadId: string) => {
+    await guiMms.request('threads.clearContext', { threadId })
+  })
+
+  registerHandler('threads:compact', async (_e, threadId: string, focus?: string) => {
+    await guiMms.request('threads.compact', { threadId, ...(focus ? { focus } : {}) })
+  })
+
   registerHandler('threads:regenerateTitle', async (_e, threadId: string) => {
     const res = await guiMms.request<{ thread: unknown }>('threads.regenerateTitle', {
       threadId

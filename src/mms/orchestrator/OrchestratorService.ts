@@ -166,7 +166,8 @@ import {
   type TurnStateSnapshot,
   type UserQuestion,
   type UserQuestionAnswers,
-  type AnsweredQuestion
+  type AnsweredQuestion,
+  DEFAULT_CHAT_MODE
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
@@ -297,6 +298,7 @@ import { userQuestionService as defaultUserQuestionService, UserQuestionService,
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
+  clearNativeContext,
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
   compactNativeContext,
@@ -762,6 +764,8 @@ interface ContinuationTurnPayload {
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
 const CONTINUATION_CALL_WAIT_MS = 10_000
+/** How long `/compact` waits for a runtime's own compaction before compacting Mousse's copy instead. */
+const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 
 function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
@@ -5125,6 +5129,11 @@ export class OrchestratorService extends EventEmitter {
       if (message.turnId) {
         const run = engine?.getRun(message.turnId)
         if (run && run.threadId === threadId) ordinal = run.ordinal
+      }
+      // `/clear` started the context again: what came before is not handed over either.
+      if (message.kind === 'context_cleared' && !message.hidden) {
+        items.length = 0
+        continue
       }
       if (message.hidden || message.kind || (message.role !== 'user' && message.role !== 'assistant')) continue
       const text = message.content.trim()
@@ -11575,6 +11584,76 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
     })
+  }
+
+  /**
+   * `/clear`: the thread's next turn starts a fresh provider session with no earlier context. The transcript
+   * stays, with a divider where the context starts again. Every runtime resumes its native session only while
+   * the history Mousse sends is the one it saved after the last turn; with no earlier message or summary
+   * left to send, each starts a new session instead.
+   */
+  clearConversationContext(threadId: string): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot clear the context while a turn is running.')
+    this.sessionAls.run(session, () => {
+      this.nativeContext = clearNativeContext(this.nativeContext)
+      this.clearLastTurnUsage()
+      const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_cleared', content: 'Context cleared', timestamp: new Date().toISOString() }
+      session.messages.push(marker)
+      this.emitMessageAdded(marker)
+      this.persist(true)
+    })
+  }
+
+  /**
+   * `/compact`: compacts the thread's context now. The runtime's own compaction of its native session comes
+   * first (Claude Code's `/compact`, Codex's `thread/compact/start`); Mousse compacts its own copy when the
+   * runtime has none, holds no session for this history, or fails. `focus` says what the summary keeps.
+   */
+  async compactConversationContext(threadId: string, focus?: string): Promise<'native' | 'compacted' | 'unchanged'> {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot compact the context while a turn is running.')
+    const note: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
+      content: 'Compacting context…', streaming: true, timestamp: new Date().toISOString() }
+    const finish = (content: string): void => this.sessionAls.run(session, () => {
+      note.content = content
+      note.streaming = false
+      this.emitMessageUpdated(note)
+      this.persist(true)
+    })
+    this.sessionAls.run(session, () => {
+      session.messages.push(note)
+      this.emitMessageAdded(note)
+      this.persist(true)
+    })
+    try {
+      let native = false
+      const instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
+      if (instanceId) {
+        try {
+          native = await this.harness.compactConversation({
+            threadId, instanceId, focus,
+            history: nativeAgentHistory(session.nativeContext),
+            signal: AbortSignal.timeout(NATIVE_COMPACT_TIMEOUT_MS)
+          })
+        } catch (error) {
+          console.warn('[orchestrator] native compaction failed; compacting Mousse\'s copy', { threadId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
+        const compacted = compactNativeContext(this.nativeContext, undefined, focus)
+        if (compacted === this.nativeContext) return 'unchanged' as const
+        this.nativeContext = compacted
+        return 'compacted' as const
+      })
+      // The measured size is the context before compaction.
+      if (outcome !== 'unchanged') this.sessionAls.run(session, () => this.clearLastTurnUsage())
+      finish(outcome === 'unchanged' ? 'Context checked — no older messages to compact' : 'Context compacted')
+      return outcome
+    } catch (error) {
+      finish('Context not compacted')
+      throw error
+    }
   }
 
   replaceConversationState(

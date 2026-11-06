@@ -293,6 +293,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
+  'threads.clearContext': chat('thread', ['threadId']),
+  'threads.compact': chat('thread', ['threadId', 'focus']),
   'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers'], {
     required: ['requestId', 'answers'],
     owned: { requestId: 'question' }

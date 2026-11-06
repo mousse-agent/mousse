@@ -600,9 +600,9 @@ export function ChatComposer({
           } else {
             const suggestion = suggestions[selectedSuggestion]
             if (suggestion) {
-              // An exact no-argument command is already complete: execute it instead of
+              // An exact command that needs no text is already complete: execute it instead of
               // making users press Enter twice (first to re-apply the same suggestion).
-              if (e.key === 'Enter' && !suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
+              if (e.key === 'Enter' && suggestion.argument !== 'required' && input.trim().toLowerCase() === `/${suggestion.name}`) {
                 submit()
               } else {
                 applySuggestion(suggestion)
