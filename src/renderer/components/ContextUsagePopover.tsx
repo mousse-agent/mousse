@@ -1,10 +1,10 @@
 import { forwardRef, useEffect, useRef } from 'react'
-import { Settings } from '../lib/icons'
-import { useAppStore } from '../stores/appStore'
 import { modelLabel } from '../../shared/modelChoice'
 import { resolveModelChoice } from '../lib/modelChoice'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../shared/types'
+import { settingCompactionPoint, type ContextSettings } from '../../shared/settings'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { openSettingsSection } from '../lib/settingsNavigation'
 
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -41,25 +41,55 @@ export function contextUsageSummary(usage: ContextUsageSnapshot): string {
   return `${percent} · ${approximate}${formatTokenCount(usage.used)} of ${formatTokenCount(usage.limit)}`
 }
 
+/** Where this context compacts: at a size, near the window's limit, or never. */
+export type ContextCompaction = { kind: 'at'; tokens: number } | { kind: 'near-limit' } | { kind: 'off' }
+
+/**
+ * The context's compaction under the Compact context setting, worked out as the daemon does. A
+ * runtime that compacts its own context (Pi) only takes the on/off: it compacts near its limit.
+ */
+export function contextCompaction(setting: ContextSettings, usage: ContextUsageSnapshot): ContextCompaction {
+  if (!setting.compactionEnabled) return { kind: 'off' }
+  if (usage.compactedByRuntime) return { kind: 'near-limit' }
+  const tokens = settingCompactionPoint(setting, usage.limit > 0 ? usage.limit : undefined)
+  return tokens === undefined ? { kind: 'near-limit' } : { kind: 'at', tokens }
+}
+
+/** "Compacts at 300K", "Compacts near the limit" or "Compaction off". */
+export function contextCompactionText(compaction: ContextCompaction): string {
+  if (compaction.kind === 'off') return 'Compaction off'
+  if (compaction.kind === 'near-limit') return 'Compacts near the limit'
+  return `Compacts at ${formatTokenCount(compaction.tokens)}`
+}
+
+/** Where the usage bar marks the compaction point, as a share of the window; none when it is not inside it. */
+export function compactionMarkFraction(compaction: ContextCompaction | undefined, usage: ContextUsageSnapshot): number | undefined {
+  if (compaction?.kind !== 'at' || !(usage.limit > 0) || compaction.tokens >= usage.limit) return undefined
+  return compaction.tokens / usage.limit
+}
+
 interface ContextUsagePopoverProps {
   open: boolean
   onClose: () => void
   usage: ContextUsageSnapshot
+  /** Where the context compacts; no line before the setting is read. */
+  compaction?: ContextCompaction
   /** The selected provider, to name the measured model as the picker does. */
   providerId: string
   anchorRef: React.RefObject<HTMLElement | null>
 }
 
 /**
- * What fills the model's context: the share and totals, a bar against capacity, the breakdown, and a
- * link to the compaction settings. Only opened for a snapshot where `contextUsageKnown` holds.
+ * What fills the model's context: the share and totals, a bar against capacity, the breakdown, and
+ * where it compacts with a way to change that. Only opened for a snapshot where `contextUsageKnown` holds.
  */
 export function ContextUsagePopover({
   open,
   onClose,
   usage,
   providerId,
-  anchorRef
+  anchorRef,
+  compaction
 }: ContextUsagePopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null)
   const floatingStyle = useFloatingPosition({
@@ -100,11 +130,11 @@ export function ContextUsagePopover({
 
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
   const barScale = Math.max(usage.limit, segmentTotal)
-  const openSettings = () => {
+  const compactionFraction = compactionMarkFraction(compaction, usage)
+  // Settings, Agents, focused on the Compact context row.
+  const changeCompaction = () => {
     onClose()
-    window.location.hash = 'settings-context-compaction'
-    useAppStore.getState().setSettingsOpen(true)
-    window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'context' }))
+    openSettingsSection('context')
   }
 
   return (
@@ -121,30 +151,30 @@ export function ContextUsagePopover({
           {usage.modelName && (
             <span className="context-usage-model" title={usage.modelName}>{modelLabel(resolveModelChoice({ provider: providerId, model: usage.modelName }))}</span>
           )}
-          <button
-            type="button"
-            className="context-usage-settings"
-            aria-label="Context compaction settings"
-            title="Compaction settings. Context compacts at your threshold, sometimes sooner to leave room for the reply."
-            onClick={openSettings}
-          >
-            <Settings size={14} />
-          </button>
         </div>
 
         <div className="context-usage-summary">{contextUsageSummary(usage)}</div>
 
-        <div className="context-usage-bar" aria-hidden="true">
-          {usage.categories.map((category) => (
+        <div className="context-usage-bar-track" aria-hidden="true">
+          <div className="context-usage-bar">
+            {usage.categories.map((category) => (
+              <div
+                key={category.label}
+                className="context-usage-bar-segment"
+                style={{
+                  width: barScale > 0 ? `${(category.tokens / barScale) * 100}%` : 0,
+                  backgroundColor: category.color
+                }}
+              />
+            ))}
+          </div>
+          {/* Outside the clipped bar, so the mark can stand a little proud of it. */}
+          {compactionFraction !== undefined && barScale > 0 && (
             <div
-              key={category.label}
-              className="context-usage-bar-segment"
-              style={{
-                width: barScale > 0 ? `${(category.tokens / barScale) * 100}%` : 0,
-                backgroundColor: category.color
-              }}
+              className="context-usage-bar-compaction"
+              style={{ left: `${(compactionFraction * usage.limit / barScale) * 100}%` }}
             />
-          ))}
+          )}
         </div>
 
         <ul className="context-usage-breakdown">
@@ -156,6 +186,21 @@ export function ContextUsagePopover({
             </li>
           ))}
         </ul>
+
+        {compaction && (
+          <div className="context-usage-compaction">
+            <span className="context-usage-compaction-text">{contextCompactionText(compaction)}</span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm context-usage-compaction-change"
+              title="Settings › Agents › Compact context"
+              aria-label="Change Compact context"
+              onClick={changeCompaction}
+            >
+              Change
+            </button>
+          </div>
+        )}
 
         {(usage.processedTokens !== undefined || usage.source === 'legacy-estimated') && (
           <div className="context-usage-notes">

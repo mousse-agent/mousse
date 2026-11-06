@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
-import type { LlmProviderOption } from '../../shared/settings'
+import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
@@ -303,6 +303,7 @@ export function OrchestratorChat() {
   )
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
+  const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -553,6 +554,12 @@ export function OrchestratorChat() {
     ])
     setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
+    const compaction = normalizeContextSettings(settings.context)
+    setContextCompactionSetting((current) =>
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+        ? current
+        : compaction
+    )
     // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
     const selectedModel = composerSelection({ threadModel: activeThreadModelOverride, profileDefault: settings.provider, providers: providersRef.current })
     setProfileDefault((current) =>
@@ -1451,6 +1458,7 @@ export function OrchestratorChat() {
               onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
               onOpenSettings={() => setSettingsOpen(true)}
               contextUsage={contextUsage}
+              contextCompactionSetting={contextCompactionSetting}
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
