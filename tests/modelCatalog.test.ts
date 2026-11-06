@@ -20,6 +20,17 @@ describe('model catalog reader', () => {
     expect(catalog.models).toEqual([{ ...ember, older: true, efforts: ['low', 'high'], routes: { claude: { id: 'ember-2' } } }])
   })
 
+  it('reads an optional tier, with or without it, and drops a tier it does not know (Bot Phase 1 §5.6)', () => {
+    const catalog = parseModelCatalog(file([
+      { ...ember, tier: 'frontier' },
+      { ...ember, id: 'ember-3', tier: 'gigantic', routes: { claude: { id: 'ember-3' } } },
+      { ...ember, id: 'ember-4', routes: { claude: { id: 'ember-4' } } }
+    ]))
+    expect(catalog.models.map((model) => model.tier)).toEqual(['frontier', undefined, undefined])
+    expect(catalog.models[1]).not.toHaveProperty('tier')
+    expect(catalog.models).toHaveLength(3)
+  })
+
   it('drops an invalid model and keeps the rest', () => {
     const catalog = parseModelCatalog(file([
       { ...ember, id: '' },

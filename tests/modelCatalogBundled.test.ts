@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { compareVersions } from '../src/mms/harness/driver'
 import { bundledModelCatalog, modelCatalog } from '../src/mms/models/modelCatalog'
-import { MODEL_CATALOG_FORMAT, MODEL_CATALOG_ROUTES, validCatalogDate } from '../src/shared/modelCatalog'
+import { MODEL_CATALOG_FORMAT, MODEL_CATALOG_ROUTES, MODEL_CATALOG_TIERS, validCatalogDate } from '../src/shared/modelCatalog'
 import { REASONING_LEVELS } from '../src/shared/modelVariants'
 
 // The one test that reads the real catalog. Every other test uses made-up models.
@@ -16,7 +16,7 @@ const raw = JSON.parse(readFileSync(join(root, 'src/mms/models/models.json'), 'u
 const packageVersion = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version
 /** The brand each maker's full names start with (#490: `short` is `name` without it). */
 const BRANDS: Record<string, string> = { anthropic: 'Claude' }
-const FIELDS = new Set(['id', 'name', 'short', 'maker', 'family', 'released', 'older', 'efforts', 'routes'])
+const FIELDS = new Set(['id', 'name', 'short', 'maker', 'family', 'tier', 'released', 'older', 'efforts', 'routes'])
 
 describe('bundled model catalog', () => {
   it('is format 1 with a whole-number revision, and every model reads as written', () => {
@@ -32,6 +32,7 @@ describe('bundled model catalog', () => {
       for (const field of Object.keys(model)) expect(FIELDS.has(field), `${model.id}: ${field}`).toBe(true)
       for (const field of ['id', 'name', 'short', 'maker', 'family', 'released']) expect(typeof model[field], `${model.id}: ${field}`).toBe('string')
       if ('older' in model) expect(model.older).toBe(true)
+      if ('tier' in model) expect(MODEL_CATALOG_TIERS as readonly unknown[], `${model.id}: tier`).toContain(model.tier)
       if ('efforts' in model) {
         expect(Array.isArray(model.efforts) && (model.efforts as unknown[]).length > 0).toBe(true)
         for (const level of model.efforts as string[]) expect(REASONING_LEVELS as readonly string[]).toContain(level)
@@ -49,6 +50,13 @@ describe('bundled model catalog', () => {
       })
       expect(new Set(routeIds).size, key).toBe(routeIds.length)
     }
+  })
+
+  it('gives every model a tier for bots: Fable and Opus frontier, Sonnet standard, Haiku small', () => {
+    // Revision 2 added the tiers (Bot Phase 1 §5.6).
+    expect(raw.revision as number).toBeGreaterThanOrEqual(2)
+    const byFamily: Record<string, string> = { fable: 'frontier', opus: 'frontier', sonnet: 'standard', haiku: 'small' }
+    for (const model of raw.models) expect(model.tier, String(model.id)).toBe(byFamily[model.family as string])
   })
 
   it('has valid release dates', () => {
