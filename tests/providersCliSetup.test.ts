@@ -71,9 +71,9 @@ describe('Setup row: the status and its one next step', () => {
   it('signs a managed ChatGPT entry in with Continue with ChatGPT, and shows no usage on its card', () => {
     const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
-    // Usage lives on the usage page, never in provider settings.
+    // Usage lives on the usage page, never in provider settings: the card only links there.
     const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    expect(editor).not.toMatch(/usage/i)
+    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>Usage<\/button>/, '')).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -324,6 +324,27 @@ describe('Sign-out', () => {
     const unlabelled = accountRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
     expect(unlabelled).not.toContain('h4sh')
     expect(unlabelled).toContain('Claude Code sign-in')
+  })
+})
+
+describe('Usage from the agent editor', () => {
+  const editor = (overrides: SnapshotOverrides) => {
+    const entry = snapshot(overrides)
+    return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+  }
+
+  it('links a signed-in agent that reports usage to the Usage page, and shows no meter', () => {
+    for (const driver of ['claude', 'codex'] as const) {
+      const html = editor({ driver, auth: { canSignOut: true } })
+      expect(html, driver).toContain('data-testid="prov-account-usage"')
+      expect(buttons(html), driver).toEqual(expect.arrayContaining(['Usage', 'Sign out']))
+      expect(html, driver).not.toMatch(/role="progressbar"|usage-ring|usage-bar|% left/)
+    }
+  })
+
+  it('offers no link where there is no usage to see', () => {
+    expect(editor({ driver: 'pi' })).not.toContain('data-testid="prov-account-usage"')
+    expect(editor({ auth: { state: 'expired' } })).not.toContain('data-testid="prov-account-usage"')
   })
 })
 
