@@ -410,6 +410,22 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(pinned(server)).toEqual([['openai', 'openai'], ['openai', 'openai'], ['openai', 'openai']])
   })
 
+  it('opens the thread with the compaction threshold, and reopens it when the threshold changes', async () => {
+    const server = turnServer()
+    const service = create(server)
+    await chat(service, { autoCompactTokens: 256000 })
+    service.commitConversation('t', 'h')
+    await chat(service, { history: 'h', autoCompactTokens: 256000 })
+    service.commitConversation('t', 'h2')
+    await chat(service, { history: 'h2', autoCompactTokens: 128000 })
+    service.commitConversation('t', 'h3')
+    await chat(service, { history: 'h3' })
+    const limit = (message: { params?: unknown }) => (message.params as { config: Record<string, unknown> }).config.model_auto_compact_token_limit
+    expect(server.requests('thread/start').map(limit)).toEqual([256000])
+    // The same threshold continues the loaded thread; a changed one, or none, forks it with the new config.
+    expect(server.requests('thread/fork').map(limit)).toEqual([128000, undefined])
+  })
+
   it('sends the level Codex lists for the model, and none for a level the model does not list', async () => {
     const server = turnServer()
     const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high', 'ultra'], defaultEffort: 'low' }] })

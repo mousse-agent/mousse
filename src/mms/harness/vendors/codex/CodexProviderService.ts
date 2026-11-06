@@ -357,6 +357,11 @@ export type CodexChatInput = {
    */
   developerInstructions?: string
   /**
+   * Codex compacts its thread once it holds this many tokens (`model_auto_compact_token_limit`): the
+   * user's compaction threshold. Absent keeps Codex's own limit.
+   */
+  autoCompactTokens?: number
+  /**
    * `never`: every command and file change that needs approval is declined, and every question to
    * the user refused, without asking (`RunPolicy.approvals`).
    */
@@ -2368,13 +2373,18 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
-    const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
+    const compactLimit = input.autoCompactTokens !== undefined && Number.isFinite(input.autoCompactTokens) && input.autoCompactTokens > 0
+      ? Math.round(input.autoCompactTokens) : undefined
+    const overrides = {
+      ...codexMcpConfigOverrides(input.mcp),
+      ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
+    } as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = normalizePermissionMode(input.permissionMode)
     const policy = codexTurnPolicy(input.mode ?? 'default', input.child, permissionMode)
-    // The policy a loaded thread was opened with: a change of child policy or permission mode reopens it
-    // (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}`
+    // The policy a loaded thread was opened with: a change of child policy, permission mode or compaction
+    // threshold reopens it (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
