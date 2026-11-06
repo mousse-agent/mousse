@@ -1134,10 +1134,10 @@ html.platform-darwin .titlebar-left {
   }
 }
 
-/* The dock on the composer's top edge: the notice line (ComposerNoticeSlot) or the queued-messages strip,
-   one at a time. It is the composer's width, surface, hairline and top light, with the composer's top
-   corners, and sits flush on it; the composer's top corners square off under it, so the two read as one
-   card. A dock that appears fades in; the queue fades out after a brief reveal (`is-leaving`). */
+/* Above the composer, one at a time: a notice line (ComposerNoticeSlot) or the queued-messages strip.
+   The notice is a bare line of text. The queue is the composer's width, surface, hairline and top light,
+   with the composer's top corners, and sits flush on it; the composer's top corners square off under it,
+   so the two read as one card. Either fades in; the queue fades out after a brief reveal (`is-leaving`). */
 .chat-input-area {
   --composer-dock-fade: 160ms;
   --composer-dock-glint: rgba(255, 255, 255, 0.11);
@@ -1152,6 +1152,10 @@ html[data-theme='high-contrast'] .chat-input-area {
 }
 
 .chat-input-area > :is(.composer-notice-slot, .queued-messages) {
+  animation: composer-dock-in var(--composer-dock-fade) ease-out;
+}
+
+.chat-input-area > .queued-messages {
   position: relative;
   /* Over the composer's drop shadow, which would otherwise darken the dock's lower edge. */
   z-index: 1;
@@ -1162,11 +1166,10 @@ html[data-theme='high-contrast'] .chat-input-area {
   background: var(--ui-raised);
   box-shadow: inset 0 1px 0 var(--composer-dock-glint);
   overflow: visible;
-  animation: composer-dock-in var(--composer-dock-fade) ease-out;
   transition: opacity var(--composer-dock-fade) ease, border-color 0.18s;
 }
 
-.chat-input-area:has(.composer:focus-within) > :is(.composer-notice-slot, .queued-messages) {
+.chat-input-area:has(.composer:focus-within) > .queued-messages {
   border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
 }
 
@@ -1174,9 +1177,9 @@ html[data-theme='high-contrast'] .chat-input-area {
   opacity: 0;
 }
 
-/* On a new thread the workspace row is the composer's own tab; the dock sits above it and the composer
+/* On a new thread the workspace row is the composer's own tab; the queue sits above it and the composer
    keeps its corners. */
-.app .chat-input-area:has(> .composer-notice-slot, > .queued-messages):not(:has(.composer-workspace-toolbar)) .composer {
+.app .chat-input-area:has(> .queued-messages):not(:has(.composer-workspace-toolbar)) .composer {
   border-top-left-radius: 0;
   border-top-right-radius: 0;
 }
@@ -1383,29 +1386,28 @@ html[data-theme='high-contrast'] .chat-input-area {
   cursor: not-allowed;
 }
 
-/* The notice in the dock on the composer's top edge (ComposerNoticeSlot). The dock's surface, shared with
-   the queued-messages strip, is with the queue's rules above. Colour is on the tone icon only. */
+/* The notice above the composer (ComposerNoticeSlot): one quiet line in the transcript's metadata type,
+   no surface of its own. Its text starts at the composer's text inset (1px border + 14px padding), and its
+   actions are text buttons on the right. Colour is on the tone icon and the asked-for action only. */
 .composer-notice-slot {
   display: flex;
   flex-direction: column;
+  margin-bottom: 2px;
   container: composer-notice / inline-size;
 }
 
 .composer-notice {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
+  gap: 6px;
+  min-height: 28px;
   box-sizing: border-box;
-  padding: 4px 6px 4px 14px;
-  color: var(--text-primary);
+  padding: 0 4px 0 15px;
+  color: var(--text-secondary);
   font-size: 12.5px;
-  line-height: 1.35;
-}
-
-/* Two notices (the lost service over an approval) are two rows of the one dock. */
-.composer-notice + .composer-notice {
-  border-top: 1px solid var(--ui-line);
+  font-weight: 450;
+  letter-spacing: -0.011em;
+  line-height: 1.3;
 }
 
 .composer-notice-icon {
@@ -1416,6 +1418,8 @@ html[data-theme='high-contrast'] .chat-input-area {
 
 .composer-notice[data-tone='warning'] .composer-notice-icon { color: var(--warning); }
 .composer-notice[data-tone='error'] .composer-notice-icon { color: var(--danger); }
+/* The lost service is about the link, not a failure of the user's work: a muted icon. */
+.composer-notice[data-priority='service'] .composer-notice-icon { color: var(--text-secondary); }
 
 .composer-notice-text {
   display: flex;
@@ -1466,45 +1470,40 @@ html[data-theme='high-contrast'] .chat-input-area {
   border: 0;
   border-radius: var(--ui-control-radius, 8px);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font: inherit;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .composer-notice-btn {
-  padding: 0 10px;
+  padding: 0 8px;
   font-weight: 500;
 }
 
 .composer-notice-icon-btn {
   width: 28px;
-  color: var(--text-secondary);
 }
 
-/* The action the notice asks for: a tinted fill, not the solid accent the send button owns. */
+/* The action the notice asks for: accent text, mixed toward the text colour so it stays readable on a
+   light surface. */
 .composer-notice-btn-primary {
-  background: var(--ui-selected);
+  color: color-mix(in srgb, var(--accent) 65%, var(--text-primary));
 }
 
-.composer-notice-btn-primary + .composer-notice-btn {
-  color: var(--text-secondary);
+.composer-notice-btn:not(.composer-notice-btn-primary):hover:not(:disabled),
+.composer-notice-icon-btn:hover:not(:disabled) {
+  color: var(--text-primary);
 }
 
 .composer-notice-btn:hover:not(:disabled),
 .composer-notice-icon-btn:hover:not(:disabled) {
   background: var(--ui-hover);
-  color: var(--text-primary);
 }
 
 .composer-notice-btn:active:not(:disabled),
 .composer-notice-icon-btn:active:not(:disabled) {
   background: var(--ui-pressed);
-}
-
-.composer-notice-btn-primary:hover:not(:disabled),
-.composer-notice-btn-primary:active:not(:disabled) {
-  background: rgba(var(--accent-rgb), 0.24);
 }
 
 .composer-notice-btn:focus-visible,
