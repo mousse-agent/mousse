@@ -35,6 +35,12 @@ describe('Skills & MCP settings', () => {
     for (const text of ['MCP registry', 'Skills registry', 'Config files', 'Expose to orchestrator', 'integration-status-dot', 'integration-card']) expect(html).not.toContain(text)
   })
 
+  it('describes web search in plain words, not by its tool name', () => {
+    const html = render(getDefaultSettings())
+    expect(html).toContain('Optional API keys that let agents search the web')
+    expect(html).not.toContain('for the web_search tool')
+  })
+
   it('never shows a built-in tool on while the hidden tools gate is off', () => {
     const settings = getDefaultSettings()
     settings.integrations.tools.enabled = false
@@ -116,8 +122,9 @@ describe('Skills & MCP settings', () => {
 
   it('shares the MCP servers with every other runtime by default', () => {
     const html = render(getDefaultSettings())
-    expect(html).toContain('Share with other agents')
-    expect(html).toContain('mousse-relay')
+    expect(html).toContain('Let other agents use your MCP servers')
+    // Where the tools come from, and why they can show twice, is one Details away.
+    expect(html).toMatch(/<button[^>]*class="settings-more-btn"[^>]*aria-expanded="false"[^>]*>Details<\/button><span[^>]*hidden=""[^>]*>[^<]*mousse-relay[^<]*appear twice/)
     for (const label of ['Claude Code', 'Codex', 'Cursor', 'ACP agents', 'Antigravity', 'Grok']) expect(html).toContain(`Share MCP servers with ${label}`)
     for (const runtime of MCP_RELAY_RUNTIMES) {
       expect(html).toMatch(new RegExp(`id="mcp-relay-${runtime}"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="mcp-relay-${runtime}"`))
@@ -138,6 +145,36 @@ describe('Skills & MCP settings', () => {
     expect(onUpdate).toHaveBeenCalledWith({ integrations: { mcp: { relay: { runtimes: { codex: false } } } } })
     await act(async () => { toggle('grok').click() })
     expect(onUpdate).toHaveBeenLastCalledWith({ integrations: { mcp: { relay: { runtimes: { grok: true } } } } })
+    act(() => root.unmount())
+  })
+
+  it('gives each agent a labelled switch for skills and one for MCP servers', async () => {
+    const settings = getDefaultSettings()
+    settings.integrations.skills.enableForAgents = { 'claude-code': true } as never
+    settings.integrations.mcp.enableForAgents = {} as never
+    const onUpdate = vi.fn(async () => {})
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      webTools: { getCredentialStatus: async () => ({ exa: false, parallel: false }) },
+      settings: { get: async () => settings }
+    }
+    const host = document.createElement('div')
+    const root = createRoot(host)
+    await act(async () => {
+      root.render(createElement(SkillsMcpSettings, {
+        client: new IsolatedIntegrationPlatformClient(), profileId: 'profile-a', projects: [], onProjectChange: () => {}, settings, options, onUpdate
+      }))
+    })
+    const skills = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Skills available to Claude Code"]')!
+    const mcp = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="MCP servers available to Claude Code"]')!
+    expect(skills.getAttribute('aria-checked')).toBe('true')
+    expect(mcp.getAttribute('aria-checked')).toBe('false')
+    expect(host.querySelector(`label[for="${skills.id}"]`)?.textContent).toBe('Skills')
+    expect(host.querySelector(`label[for="${mcp.id}"]`)?.textContent).toBe('MCP servers')
+    expect(host.querySelector('[aria-pressed]')).toBeNull()
+    await act(async () => { mcp.click() })
+    expect(onUpdate).toHaveBeenCalledWith({ integrations: { mcp: { enableForAgents: { 'claude-code': true } } } })
+    await act(async () => { skills.click() })
+    expect(onUpdate).toHaveBeenLastCalledWith({ integrations: { skills: { enableForAgents: { 'claude-code': false } } } })
     act(() => root.unmount())
   })
 
