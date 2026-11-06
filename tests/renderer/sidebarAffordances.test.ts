@@ -19,11 +19,7 @@ const actions = vi.hoisted(() => ({
   createAndSelectProjectThread: vi.fn(async () => undefined)
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
-// Neighbours that read the daemon. Recently deleted and the pull request dialog leave a mark to find.
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', async () => {
-  const { createElement: h } = await import('react')
-  return { RecentlyDeletedSection: ({ nested }: { nested?: boolean }) => h('div', { 'data-testid': 'trash', 'data-nested': String(Boolean(nested)) }) }
-})
+// Neighbours that read the daemon. The pull request dialog leaves a mark to find.
 vi.mock('../../src/renderer/components/StartFromPullRequestDialog', async () => {
   const { createElement: h } = await import('react')
   return { StartFromPullRequestDialog: ({ projectName }: { projectName: string }) => h('div', { 'data-testid': 'pr-dialog' }, projectName) }
@@ -204,13 +200,13 @@ describe('the footer', () => {
     expect(headings()).toEqual(['Archived · 1'])
   })
 
-  it('holds archived threads and Recently deleted inside Archived', () => {
+  it('holds archived threads inside Archived, with Clear all and no Recently deleted', () => {
     show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
-    expect(host.querySelector('[data-testid="trash"]')).toBeNull()
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     const archived = host.querySelector('.threads-sidebar-section-settled')!
     expect(archived.querySelector('[data-thread-id="c"]')).not.toBeNull()
-    expect(archived.querySelector('[data-testid="trash"]')?.getAttribute('data-nested')).toBe('true')
+    expect(archived.querySelector('[data-testid="archived-clear-all"]')?.textContent).toBe('Clear all')
+    expect(host.textContent).not.toContain('Recently deleted')
   })
 
   it('follows the lists, and sticks to the bottom only when they are taller than the sidebar', () => {
@@ -236,7 +232,7 @@ describe('the footer', () => {
     expect(footer).toMatch(/min-height:\s*0/)
     expect(footer).toMatch(/overflow-y:\s*auto/)
     expect(footer).toMatch(/max-height:\s*45vh/)
-    const inside = /\.threads-sidebar-(bottom-recent|section-settled|settled-list|trash-nested|trash-list)\b[^{]*\{([^}]*)\}/g
+    const inside = /\.threads-sidebar-(bottom-recent|section-settled|settled-list|trash-list)\b[^{]*\{([^}]*)\}/g
     for (const css of [sidebarCss, compactCss, polishCss]) {
       for (const [, , body] of css.matchAll(inside)) expect(body).not.toMatch(/max-height|overflow-y/)
     }
@@ -421,15 +417,30 @@ describe('the Projects tree', () => {
     expect(document.activeElement).toBe(row('t6'))
   })
 
-  it('opens a thread with Enter and deletes it with Delete, with Undo', async () => {
+  it('opens a thread with Enter; Delete does nothing to a thread in use, which is archived first', async () => {
     show([thread('a', 'Fix tests')], { active: 'a' })
     row('a').focus()
     click(row('a'))
     expect(actions.selectThread).toHaveBeenCalledWith('a')
     key(row('a'), { key: 'Delete' })
     await flush()
-    expect(threadsApi.delete).toHaveBeenCalledWith('a')
-    expect(document.querySelector('.ui-toast [data-action="undo"]')).not.toBeNull()
+    expect(threadsApi.delete).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.querySelector('.ui-toast [data-action="undo"]')).toBeNull()
+  })
+
+  it('asks before deleting an archived thread on Delete, and deletes it for good only on confirm', async () => {
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
+    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    row('c').focus()
+    key(row('c'), { key: 'Delete' })
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.textContent).toContain('Delete “Old”?')
+    expect(threadsApi.delete).not.toHaveBeenCalled()
+    click(dialog.querySelector('[data-testid="archived-delete-confirm"]')!)
+    await flush()
+    expect(threadsApi.delete).toHaveBeenCalledWith('c')
+    expect(document.querySelector('.ui-toast [data-action="undo"]')).toBeNull()
   })
 
   it('asks before removing a project on Delete', () => {

@@ -1,8 +1,7 @@
 import { useState, type ReactNode } from 'react'
-import type { TrashRetentionPolicy } from '../../../shared/resourceLifecycle'
 import { STORAGE_POLICY_MAX_DAYS, type StoragePolicy } from '../../../shared/storage'
-import { GitBranch, Globe, Trash2 } from '../../lib/icons'
-import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleTooltip, trashCountSentence, type StorageRuleId } from '../../lib/storageCopy'
+import { GitBranch, Globe } from '../../lib/icons'
+import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleTooltip, type StorageRuleId } from '../../lib/storageCopy'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Select } from '../ui/Select'
 
@@ -110,52 +109,21 @@ export function DaysSelect({ id, testId, value, offLabel, offValue, disabled, la
 }
 
 export interface StoragePolicyRowsProps {
-  trash: TrashRetentionPolicy | undefined
   policy: StoragePolicy | undefined
-  /** Automatic trash emptying paused after a clock change. */
-  trashPaused: boolean
   /** Time-based worktree and capture rules paused after a clock change. */
   storagePaused: boolean
   busy: boolean
-  onTrash: (next: TrashRetentionPolicy) => void
   onPolicy: (next: StoragePolicy) => void
-  onResumeTrash: () => void
   onResumeStorage: () => void
-  /** Threads in the trash; they are reviewed from the sidebar. */
-  trashCount: number
   /** The Worktree folder row, first in the Worktrees group. */
   worktreeFolder?: ReactNode
 }
 
-/** The Trash, Worktrees and Browser data groups. Every change saves at once. */
+/** The Worktrees and Browser data groups. Every change saves at once. */
 export function StoragePolicyRows(props: StoragePolicyRowsProps) {
-  const { trash, policy, busy } = props
-  const trashDays = !trash ? undefined : trash.automaticPurge ? trash.graceDays : null
+  const { policy, busy } = props
   const setWorktrees = (change: Partial<StoragePolicy['worktrees']>) => { if (policy) props.onPolicy({ ...policy, worktrees: { ...policy.worktrees, ...change } }) }
   return <>
-    <SettingsGroup title="Trash" icon={Trash2} id="storage-trash">
-      <SettingsRow
-        data-testid="storage-auto-empty"
-        title={STORAGE_RULE_COPY.trash.title}
-        anchor="storage-trash"
-        htmlFor="storage-auto-empty-select"
-        description={props.trashPaused ? 'Paused after a system clock change.' : <RuleLine rule="trash" text={trashCountSentence(props.trashCount)} />}
-        control={<>
-          {props.trashPaused && trash && <button type="button" className="settings-btn" disabled={busy} onClick={props.onResumeTrash}>Resume</button>}
-          <DaysSelect
-            id="storage-auto-empty-select"
-            testId="storage-auto-empty-select"
-            value={trashDays}
-            offLabel="Never"
-            offValue="never"
-            label={STORAGE_RULE_COPY.trash.title}
-            disabled={busy}
-            onChange={(days) => { if (trash) props.onTrash(days === null ? { ...trash, automaticPurge: false } : { ...trash, automaticPurge: true, graceDays: days }) }}
-          />
-        </>}
-      />
-    </SettingsGroup>
-
     <SettingsGroup title="Worktrees" icon={GitBranch} id="storage-worktrees" description={<span title={WORKTREE_GROUP_TOOLTIP}>{WORKTREE_GROUP_DESCRIPTION}</span>}>
       {props.worktreeFolder}
       {props.storagePaused && <SettingsRow
@@ -164,14 +132,6 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         description="Paused after the system clock moved backwards."
         control={<button type="button" className="settings-btn" disabled={busy} onClick={props.onResumeStorage}>Resume</button>}
       />}
-      <SettingsRow
-        data-testid="storage-remove-deleted"
-        title={STORAGE_RULE_COPY.deletedThreads.title}
-        anchor="storage-deleted-threads"
-        htmlFor="storage-remove-deleted-switch"
-        description={<RuleLine rule="deletedThreads" />}
-        control={<Switch id="storage-remove-deleted-switch" checked={policy?.worktrees.removeWithDeletedThreads ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeWithDeletedThreads: next })} />}
-      />
       <SettingsRow
         data-testid="storage-inactive"
         title={STORAGE_RULE_COPY.inactive.title}

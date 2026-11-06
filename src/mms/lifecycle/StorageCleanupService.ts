@@ -415,7 +415,7 @@ export class StorageCleanupService {
     try {
       if (!purge.policy().automaticPurge) {
         const waiting = purge.overdueTaskIds(now, true).length
-        return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, action: 'keep', reason: 'Automatic trash emptying is off', bytes: 0 }] : []
+        return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, action: 'keep', reason: 'A delete that did not finish; it finishes at the next start', bytes: 0 }] : []
       }
       const ids = purge.overdueTaskIds(now)
       if (!ids.length) return []
@@ -1375,7 +1375,7 @@ export class StorageCleanupService {
     if (!purge.policy().automaticPurge) {
       // Only worth a line when something in the trash is already past its retention.
       const waiting = purge.overdueTaskIds(now, true).length
-      return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, bytes: 0, outcome: 'kept', reason: 'Automatic trash emptying is off' }] : []
+      return waiting ? [{ rule: 'trash', label: `${plural(waiting, 'thread')} in the trash`, bytes: 0, outcome: 'kept', reason: 'A delete that did not finish; it finishes at the next start' }] : []
     }
     const remaining = new Set(snapshot)
     const outcomes: TrashSweepOutcome[] = []

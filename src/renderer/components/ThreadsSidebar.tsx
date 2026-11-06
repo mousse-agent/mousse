@@ -3,7 +3,8 @@ import { flushSync } from 'react-dom'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
@@ -24,7 +25,8 @@ import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
-import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
+import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
+import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { Collapse } from './ui/Collapse'
 
 import {
@@ -255,7 +257,7 @@ function ThreadCardBody({
   onCancelRename,
   onStartRename
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly'>
   projectName?: string
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
@@ -333,6 +335,7 @@ function ThreadCardBody({
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
         ) : (
           <span className="threads-sidebar-card-title" onDoubleClick={onStartRename} onMouseEnter={tooltipIfTruncated(fullTitle)}>
+            {thread.localOnly && <Lock size={11} strokeWidth={2} className="thread-private-icon" aria-label="Private" />}
             {thread.name}
           </span>
         )}
@@ -379,6 +382,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
   const [archivedExpanded, setArchivedExpanded] = useState(false)
+  // The archived threads waiting on a delete confirmation, and how that delete is going.
+  const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
+  const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })
+  const archivedHeadingRef = useRef<HTMLButtonElement>(null)
   const [noProjectExpanded, setNoProjectExpanded] = useState(false)
   // The row of the Projects or "No project" tree that last had focus (`project:<id>` or `thread:<id>`): its tree's Tab stop.
   const [treeFocus, setTreeFocus] = useState<string | null>(null)
@@ -475,7 +482,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     [projectGroups]
   )
   const hasRemoteProjects = projects.some((project) => project.node)
-  const { byNode: computers, devices } = useComputers(hasRemoteProjects)
+  const { byNode: computers, devices } = useComputers(hasRemoteProjects || archivedThreads.some((thread) => thread.node))
+  const nameOfComputer = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
+  const localArchivedCount = archivedThreads.filter((thread) => !thread.node).length
   // With projects of several computers, a project's tooltip names this one too.
   const selfName = hasRemoteProjects ? devices.find((device) => device.self)?.name : undefined
   // This computer's home folder: its projects' paths read `~/…` in their tooltip.
@@ -803,11 +812,37 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (done && archived) showUndoToast('Archived', 'unarchive', () => window.mousse.threads.settle(threadId, false))
   }
 
-  // A deleted thread goes to Recently deleted, so Undo restores it where it was.
-  const deleteThread = async (threadId: string) => {
-    if (await runWithToast('delete', () => window.mousse.threads.delete(threadId))) {
-      showUndoToast('Deleted', 'restore', () => window.mousse.threads.restore(threadId))
+  // A thread is archived first; deleting an archived thread is permanent, so it asks first and has no Undo.
+  const askDelete = (request: DeleteRequest) => {
+    setDeleteState({ busy: false })
+    setDeleteRequest(request)
+  }
+
+  const cancelDelete = () => {
+    if (deleteState.busy) return
+    setDeleteRequest(null)
+    setDeleteState({ busy: false })
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteRequest || deleteState.busy) return
+    const targets = deleteRequest.kind === 'one' ? [deleteRequest.thread] : deleteRequest.threads
+    setDeleteState({ busy: true })
+    const { deleted, error } = await deleteThreads(targets, (threadId) => window.mousse.threads.delete(threadId))
+    if (error) {
+      // What is still there stays in the dialog; what went is gone from it.
+      const left = targets.filter((thread) => !deleted.includes(thread.id))
+      setDeleteRequest(deleteRequest.kind === 'one' ? deleteRequest : { ...deleteRequest, threads: left })
+      setDeleteState({ busy: false, error })
+      return
     }
+    setDeleteRequest(null)
+    setDeleteState({ busy: false })
+    // The row the delete started from is gone; keyboard focus goes to the Archived heading, not the page.
+    requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (!active || active === document.body || !active.isConnected) archivedHeadingRef.current?.focus()
+    })
   }
 
   const handlePin = () => {
@@ -889,13 +924,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     startRename({ type: target.type, id: target.id, name: target.name, inNeedsMe, returnFocus })
   }
 
-  // A thread is deleted at once, with Undo; a project asks first.
+  // Only an archived thread of this computer is deleted, after its confirmation; a project asks first too.
   const handleRemove = () => {
     if (!contextMenu) return
     const { target } = contextMenu
     closeContextMenu()
-    if (target.type === 'thread') void deleteThread(target.id)
-    else setRemovingProject(target)
+    if (target.type === 'thread') {
+      if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
+    } else setRemovingProject(target)
   }
 
   const confirmRemoveProject = () => {
@@ -1076,7 +1112,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
     // project has none.
     const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
-    const menuTarget: ThreadsContextMenuTarget = { type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived }
+    const menuTarget: ThreadsContextMenuTarget = {
+      type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
+      ...(thread.node ? { node: thread.node, computerName: nameOfComputer(thread.node) } : {})
+    }
     const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`
     // The tooltip of a title that does not fit. The project is the row's parent or on the card; a row names its
     // computer only by icon, so the tooltip adds the name.
@@ -1173,9 +1212,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           } else if (isMenuKey(event)) {
             event.preventDefault()
             openMenuBelow(event.currentTarget, menuTarget, inNeedsMe)
-          } else if (inTree && event.key === 'Delete') {
+          } else if (event.key === 'Delete' && isArchived && !thread.node) {
+            // Delete on an archived row asks first, like its Delete…; a thread in use is archived first.
             event.preventDefault()
-            void deleteThread(thread.id)
+            askDelete({ kind: 'one', thread: { id: thread.id, name: thread.name } })
           }
         }}
 
@@ -1207,6 +1247,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />
 
+        )}
+
+        {thread.localOnly && (
+          <span className="thread-private-icon" title="Private: stays on this computer">
+            <Lock size={12} strokeWidth={2} aria-label="Private" />
+          </span>
         )}
 
         {isRenaming ? (
@@ -1277,6 +1323,23 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           >
             <Archive size={13} strokeWidth={2} aria-hidden="true" />
           </button>
+          {isArchived && (
+            <button
+              type="button"
+              className="threads-sidebar-thread-action danger"
+              data-action="delete"
+              aria-label={thread.node ? `Delete ${thread.name} on ${nameOfComputer(thread.node)}` : `Delete ${thread.name}…`}
+              title={thread.node ? `Delete on ${nameOfComputer(thread.node)}` : 'Delete…'}
+              disabled={Boolean(thread.node)}
+              tabIndex={actionTabIndex}
+              onClick={(event) => {
+                event.stopPropagation()
+                askDelete({ kind: 'one', thread: { id: thread.id, name: thread.name } })
+              }}
+            >
+              <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             className="threads-sidebar-thread-action"
@@ -1705,7 +1768,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       </div>
 
       {/* The same footer under Projects and Threads: "No project" (the Threads list already holds those threads,
-          so only Projects shows it), then one "Archived" disclosure that also holds Recently deleted. */}
+          so only Projects shows it), then one "Archived" disclosure, with Clear all. */}
       <div className="threads-sidebar-footer" hidden={sidebarView === 'chats'}>
 
         <section className="threads-sidebar-section threads-sidebar-bottom-recent" aria-label="No project" hidden={sidebarView !== 'projects'}>
@@ -1738,6 +1801,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           <div className="threads-sidebar-heading">
             <button
+              ref={archivedHeadingRef}
               type="button"
               className="threads-sidebar-heading-toggle"
               onClick={() => setArchivedExpanded((expanded) => !expanded)}
@@ -1746,6 +1810,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
               <span>Archived · {archivedThreads.length}</span>
             </button>
+            {localArchivedCount > 0 && (
+              <button
+                type="button"
+                className="threads-sidebar-heading-action"
+                data-testid="archived-clear-all"
+                aria-label="Delete all archived threads…"
+                title="Delete all archived threads"
+                onClick={() => askDelete(clearAllRequest(archivedThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))}
+              >
+                Clear all
+              </button>
+            )}
           </div>
 
           <Collapse open={archivedExpanded} itemCount={archivedThreads.length}>
@@ -1756,12 +1832,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                   archivedThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))
                 )}
               </div>
-              <RecentlyDeletedSection nested />
           </Collapse>
 
         </section>
 
       </div>
+
+      {deleteRequest && (
+        <DeleteArchivedDialog
+          request={deleteRequest}
+          busy={deleteState.busy}
+          error={deleteState.error}
+          onConfirm={() => void confirmDelete()}
+          onCancel={cancelDelete}
+        />
+      )}
 
       <ProfileSwitcher onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
 

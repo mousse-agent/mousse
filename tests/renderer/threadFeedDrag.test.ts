@@ -10,7 +10,6 @@ import { ThreadsSidebar } from '../../src/renderer/components/ThreadsSidebar'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Thread } from '../../src/shared/types'
 
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 

@@ -43,7 +43,7 @@ const isRecord = (value: unknown): value is Json =>
 
 /** How often the computers to read the lists of are looked at again. */
 const RECONCILE_MS = 5_000
-/** A search or the Recently deleted list waits this long for a computer before it names it as not searched. */
+/** A search waits this long for a computer before it names it as not searched. */
 const FAN_OUT_DEADLINE_MS = 2_000
 /** Rows kept for one computer, whatever it sends. */
 const MAX_THREAD_ROWS = 5_000
@@ -180,7 +180,6 @@ export class MergedLists implements RemoteListsPort {
   private readonly opened = new Map<string, number>()
   /** The calls of each kind a window has running, by `<kind>:<connection>`: a newer search ends the older search, nothing else. */
   private readonly running = new Map<string, AbortController>()
-  private readonly inventories = new Map<string, Promise<InventoryAnswer>>()
   private cleared = false
   private presentKey = ''
   private timer?: ReturnType<typeof setInterval>
@@ -1005,11 +1004,10 @@ export class MergedLists implements RemoteListsPort {
 
   /**
    * Calls `work` on every computer that is listed, each with its own short deadline. A call of a kind
-   * (`search` or `inventory`) from a window ends the call of the same kind the window still has running,
-   * and nothing else: a newer search never cancels a Recently deleted read.
+   * (`search`) from a window ends the call of the same kind the window still has running, and nothing else.
    */
   private async fanOut<T>(
-    kind: 'search' | 'inventory',
+    kind: 'search',
     connection: string | undefined,
     work: (c: Computer, signal: AbortSignal) => Promise<T>
   ): Promise<{
@@ -1107,60 +1105,6 @@ export class MergedLists implements RemoteListsPort {
     // A search that a newer one replaced did not cover the other computers, and says so.
     if (superseded) return { results: [], skipped: this.notCovered() }
     return { results: answers.flatMap((answer) => answer.value), skipped: sortSkipped(skipped) }
-  }
-
-  /**
-   * Recently deleted of the other computers. Calls from one window share the read that is running, so an
-   * overlapping refresh never cancels it; the answer always names the computers it could not ask.
-   */
-  inventory(connection: string | undefined): Promise<InventoryAnswer> {
-    if (!this.options.enabled())
-      return Promise.resolve({ lifecycles: [], taskNames: {}, skipped: [] })
-    const key = connection ?? ''
-    const held = this.inventories.get(key)
-    if (held) return held
-    const run = this.readInventories(connection).finally(() => {
-      if (this.inventories.get(key) === run) this.inventories.delete(key)
-    })
-    this.inventories.set(key, run)
-    return run
-  }
-
-  private async readInventories(connection: string | undefined): Promise<InventoryAnswer> {
-    const { answers, skipped, superseded } = await this.fanOut(
-      'inventory',
-      connection,
-      async (c, signal) => {
-        const raw = await this.options.client.call(c.node, 'threads.inventory', {}, { signal })
-        return qualifyRoutedResult('threads.inventory', raw, {
-          node: c.node,
-          self: this.options.self()
-        })
-      }
-    )
-    const lifecycles: Array<Record<string, unknown>> = []
-    const taskNames: Record<string, string> = {}
-    if (superseded) return { lifecycles, taskNames, skipped: this.notCovered() }
-    for (const { c, value } of answers) {
-      if (!isRecord(value)) continue
-      for (const record of Array.isArray(value.lifecycles) ? value.lifecycles : []) {
-        if (!isRecord(record)) continue
-        // The computer's own folders are not for this one to read with its path rules.
-        const { cleanupOwner: _owner, ...rest } = record
-        lifecycles.push({
-          ...rest,
-          originalLocation: '',
-          location: '',
-          locations: [],
-          node: c.node,
-          computerName: c.name
-        })
-      }
-      if (isRecord(value.taskNames))
-        for (const [id, name] of Object.entries(value.taskNames))
-          if (typeof name === 'string') taskNames[id] = name
-    }
-    return { lifecycles, taskNames, skipped: sortSkipped(skipped) }
   }
 
   // ------------------------------------------------------------------ projects that are the same repository
@@ -1285,12 +1229,6 @@ export class MergedLists implements RemoteListsPort {
     const placed = this.placeGroups(c, fresh, fixed)
     if (placed.length) this.setOrders(c, placed, true, false)
   }
-}
-
-interface InventoryAnswer {
-  lifecycles: Array<Record<string, unknown>>
-  taskNames: Record<string, string>
-  skipped: ThreadSearchSkipped[]
 }
 
 function sortSkipped(skipped: ThreadSearchSkipped[]): ThreadSearchSkipped[] {

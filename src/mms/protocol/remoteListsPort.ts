@@ -33,15 +33,6 @@ export interface RemoteListsPort {
     limit: number
   ): Promise<{ results: ThreadSearchResult[]; skipped: ThreadSearchSkipped[] }>
   /**
-   * The Recently deleted lists of other computers, with the ids and names of their threads qualified and
-   * each record marked with its computer. A computer that cannot be asked is named in `skipped`.
-   */
-  inventory(connection: string | undefined): Promise<{
-    lifecycles: Array<Record<string, unknown>>
-    taskNames: Record<string, string>
-    skipped: ThreadSearchSkipped[]
-  }>
-  /**
    * A drag in the sidebar: the rows of other computers among `orderedIds` (qualified ids of the group, in the
    * order the person left them) take the places that keep the group in that order. The rows of this
    * computer must already have their new order.

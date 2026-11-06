@@ -1,4 +1,5 @@
 import { realpathSync, statSync } from 'node:fs'
+import { isLocalOnlyThread } from '../../../shared/threadLineage'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { isInsidePath } from '../../files/pathGuard'
 import {
@@ -21,7 +22,7 @@ import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
-import type { OrchestratorSendRequest, QueuedMessage } from '../../../shared/types'
+import type { OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
@@ -131,11 +132,17 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     /** The highest permission mode this computer lets a device run a turn in (`net_node_policy`); absent for a build without limits. */
     private readonly deviceLimit?: (node: NodeId) => PermissionMode
   ) {}
+  /**
+   * The thread a caller on another device may reach: one of this profile's, and never a private one
+   * (`Thread.localOnly`), which answers as if it did not exist. Every call that names a thread checks here.
+   */
+  private remoteThread(threadId: string): Thread | undefined {
+    const inventory = this.services.threads.listAllThreads()
+    const thread = inventory.find((candidate) => candidate.id === threadId)
+    return thread && !isLocalOnlyThread(thread, inventory) ? thread : undefined
+  }
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
-    if (
-      typeof params.threadId === 'string' &&
-      !this.services.threads.listAllThreads().some((thread) => thread.id === params.threadId)
-    )
+    if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
       typeof params.projectId === 'string' &&
@@ -448,7 +455,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     options: { newestOnly?: boolean; deviceLimit?: PermissionMode } = {}
   ): unknown {
     const s = this.services,
-      thread = s.threads.listAllThreads().find((thread) => thread.id === threadId)
+      thread = this.remoteThread(threadId)
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
     const shown = withImageBudget(s.orchestrator.getMessages(threadId))
@@ -490,7 +497,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   }
   async stop(threadId: string): Promise<unknown> {
     // The same inventory check as `execute`: a remote caller reaches only this profile's threads.
-    if (!this.services.threads.listAllThreads().some((thread) => thread.id === threadId))
+    if (!this.remoteThread(threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     try {
       return await this.services.orchestrator.stopThread(threadId, 'remote')
@@ -506,7 +513,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     control: Parameters<RemoteBackendPort['run']>[2],
     extras: RemoteChatExtras = {}
   ): Promise<unknown> {
-    if (!this.services.threads.listAllThreads().find((thread) => thread.id === threadId))
+    if (!this.remoteThread(threadId))
       throw new NetError('stream_unknown', 'Thread not found.')
     try {
       await this.assertSkillMode(threadId, extras.mode)

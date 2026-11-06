@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * What a person can do to a sidebar row: open an archived thread, rename by F2 or double-click, open the
- * row menu from a "…" button or the keyboard and move through it, archive or delete with Undo, confirm a
- * project's removal, and see every failure as a toast.
+ * row menu from a "…" button or the keyboard and move through it, archive with Undo, delete an archived thread after
+ * its confirmation (a thread in use has no Delete), confirm a project's removal, and see every failure.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -19,7 +19,6 @@ const actions = vi.hoisted(() => ({
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
 // Neighbours that read the daemon and are not what these tests are about.
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 vi.mock('../../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
 vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))
 
@@ -38,7 +37,6 @@ const threadsApi = {
   settle: vi.fn(async () => undefined),
   rename: vi.fn(async () => undefined),
   delete: vi.fn(async () => undefined),
-  restore: vi.fn(async () => undefined),
   regenerateTitle: vi.fn(async () => undefined)
 }
 const projectsApi = {
@@ -180,7 +178,8 @@ describe('the row menu', () => {
     const more = host.querySelector<HTMLButtonElement>('[aria-label="More actions for Fix tests"]')!
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Delete'])
+    // A thread in use is archived first: no Delete.
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -195,7 +194,7 @@ describe('the row menu', () => {
     key(document.activeElement!, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(menuItem('Regenerate title'))
     key(document.activeElement!, { key: 'End' })
-    expect(document.activeElement).toBe(menuItem('Delete'))
+    expect(document.activeElement).toBe(menuItem('Rename'))
     key(document.activeElement!, { key: 'Home' })
     expect(document.activeElement).toBe(menuItem('Pin'))
     key(document.activeElement!, { key: 'Escape' })
@@ -225,20 +224,20 @@ describe('archive and delete', () => {
     expect(toast()).toBeNull()
   })
 
-  it('deletes with a "Deleted · Undo" toast that stays 8 seconds; Undo restores', async () => {
-    vi.useFakeTimers()
-    show([thread('a', 'Fix tests')])
-    openProject()
-    click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
-    click(menuItem('Delete'))
+  it('deletes an archived thread from its "…" menu only after the confirmation, with no Undo toast', async () => {
+    show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
+    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    click(host.querySelector('[aria-label="More actions for Old work"]')!)
+    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete…'])
+    click(menuItem('Delete…'))
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.textContent).toContain('Delete “Old work”?')
+    expect(threadsApi.delete).not.toHaveBeenCalled()
+    click(dialog.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()
     expect(threadsApi.delete).toHaveBeenCalledWith('a')
-    expect(toast()?.textContent).toContain('Deleted')
-    act(() => { vi.advanceTimersByTime(TOAST_MS - 100) })
-    expect(toast()).not.toBeNull()
-    click(toastButton('undo'))
-    await flush()
-    expect(threadsApi.restore).toHaveBeenCalledWith('a')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(toast()).toBeNull()
   })
 
   it('asks before removing a project, and removes it only on Remove', async () => {
@@ -270,14 +269,14 @@ describe('failures', () => {
     expect(toast()).toBeNull()
   })
 
-  it('shows a failed delete without Undo or Retry', async () => {
+  it('shows a failed delete in its dialog, without Undo or Retry', async () => {
     threadsApi.delete.mockRejectedValueOnce(new Error('offline'))
-    show([thread('a', 'Fix tests')])
-    openProject()
-    click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
-    click(menuItem('Delete'))
+    show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
+    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    click(host.querySelector('[aria-label="Delete Old work…"]')!)
+    click(document.querySelector('[data-testid="archived-delete-confirm"]')!)
     await flush()
-    expect(toast()?.textContent).toContain('Could not delete · offline')
+    expect(document.querySelector('[data-testid="archived-delete-error"]')?.textContent).toBe('offline')
     expect(document.querySelector('.ui-toast [data-action="undo"], .ui-toast [data-action="retry"]')).toBeNull()
   })
 })

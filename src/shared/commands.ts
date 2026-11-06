@@ -10,6 +10,7 @@
 export type CommandId =
   | 'palette.open'
   | 'thread.new'
+  | 'thread.newPrivate'
   | 'thread.next'
   | 'thread.previous'
   | 'threads.search'
@@ -161,6 +162,17 @@ export const COMMANDS: readonly CommandDefinition[] = [
     category: 'Thread',
     searchTerms: ['chat', 'create', 'start'],
     defaultBinding: `${MOD}+N`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'allow'
+  },
+  {
+    id: 'thread.newPrivate',
+    title: 'New private thread',
+    category: 'Thread',
+    searchTerms: ['chat', 'create', 'start', 'private', 'local', 'incognito', 'this computer'],
+    defaultBinding: `${MOD}+Shift+N`,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',

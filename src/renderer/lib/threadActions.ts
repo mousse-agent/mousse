@@ -1,4 +1,5 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
+import { workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
 import type { Thread } from '../../shared/types'
@@ -22,18 +23,31 @@ export async function selectThread(threadId: string): Promise<void> {
   await window.mousse.threads.select(threadId)
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. */
+/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
+  await selectThread(thread.id)
+}
+
+/** Opens the newest empty private draft (`Thread.localOnly`), or creates one on this computer, and selects it. */
+export async function createAndSelectPrivateThread(): Promise<void> {
+  const store = useAppStore.getState()
+  const thread =
+    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    await window.mousse.threads.create(undefined, undefined, { localOnly: true })
+  store.upsertThread(thread)
+  // A reused draft may have had Private turned off in its composer; the command means private.
+  const draft = store.composerWorkspaceDrafts[thread.id]
+  if (draft && !draft.localOnly) store.setComposerWorkspaceDraft(thread.id, workspaceWithPrivate(draft, true, store.projects.filter((entry) => !entry.node)))
   await selectThread(thread.id)
 }
 
 /** Opens the newest empty draft thread of a project, or creates one there, and selects it. */
 export async function createAndSelectProjectThread(projectId: string): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads), projectId) ?? await window.mousse.threads.create(undefined, projectId)
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId) ?? await window.mousse.threads.create(undefined, projectId)
   // The daemon's threads:updated broadcast can arrive after the first message is sent.
   store.upsertThread(thread)
   await selectThread(thread.id)

@@ -791,12 +791,12 @@ describe('trash through the storage run', () => {
     expect(second.items.filter((entry) => entry.rule === 'trash' && entry.outcome === 'removed')).toHaveLength(2)
   }, 180_000)
 
-  it('says automatic emptying is off once, only when records are past retention', async () => {
+  it('says once that a delete did not finish, only when records are past retention', async () => {
     const f = fixture(); rmSync(join(f.location, 'workspace.json')); setPolicy(f)
     expect((await f.service.run('manual')).items.filter((entry) => entry.rule === 'trash')).toEqual([])
     await trashed(f, 'old-1'); await trashed(f, 'old-2')
     const report = await f.service.run('manual')
-    expect(report.items.filter((entry) => entry.rule === 'trash')).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'Automatic trash emptying is off', label: '2 threads in the trash' })])
+    expect(report.items.filter((entry) => entry.rule === 'trash')).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'A delete that did not finish; it finishes at the next start', label: '2 threads in the trash' })])
   }, 90_000)
 
   it('stops a manual drain when the trash clock is suspended', async () => {
@@ -1021,7 +1021,7 @@ describe('plan writes nothing', () => {
     expect(writtenState(f)).toBe(before); expect(existsSync(join(f.store.root, 'storage-clock.json'))).toBe(false) // peeking does not persist the suspension
     expect(plan).toEqual(expect.arrayContaining([
       expect.objectContaining({ rule: 'worktree-orphan', label: 'threads/ghost', action: 'keep', reason: 'No thread uses this worktree' }),
-      expect.objectContaining({ rule: 'trash', action: 'keep', reason: 'Automatic trash emptying is off' }),
+      expect.objectContaining({ rule: 'trash', action: 'keep', reason: 'A delete that did not finish; it finishes at the next start' }),
       expect.objectContaining({ label: 'Time-based rules', action: 'keep', reason: expect.stringContaining('clock moved backwards') })
     ]))
   }, 90_000)

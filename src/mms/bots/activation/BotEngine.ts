@@ -76,7 +76,7 @@ export interface BotEngineHost {
     /** Whether a thread is in use, in the trash, or gone; absent: always `active`. */
     threadState?(threadId: string): 'active' | 'trashed' | 'missing'
   }
-  /** Moves a thread to the trash (a deleted bot's home thread; its owned threads follow). */
+  /** Deletes a thread for good (a deleted bot's home thread; its owned threads go with it). */
   trashThread?(threadId: string): Promise<unknown>
   /** How long stopping a bot's runs may take before a trash or delete gives up (default 15 s). */
   quiesceTimeoutMs?: number
@@ -257,10 +257,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         await this.host.trashThread(home)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        throw new BotEngineError('bot_cleanup_failed', `The bot was deleted, but its thread could not be moved to the trash (${message}). Mousse tries again when the profile next starts.`)
+        throw new BotEngineError('bot_cleanup_failed', `The bot was deleted, but its thread could not be deleted (${message}). Mousse tries again when the profile next starts.`)
       }
     }
-    // Done once: a home thread the owner restores afterwards is never trashed again.
+    // Done once: a home thread kept in Archived (it had unpublished work) is not deleted again.
     this.store.markCleaned(botId)
   }
 

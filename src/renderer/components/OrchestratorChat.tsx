@@ -67,6 +67,7 @@ import { localProjectsOf } from '../hooks/useLocalProjects'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { ComputerNotice } from './ComputerNotice'
 import { ThreadComputerBar } from './ThreadComputerBar'
+import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
@@ -80,7 +81,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -1320,6 +1321,7 @@ export function OrchestratorChat() {
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <SubagentParentBar />
       <ThreadComputerBar />
+      <ThreadModeBar />
       <EarlierMessagesBar />
       <ThreadMoveBanner instanceId={selectedInstanceId ?? providers.find((entry) => entry.id === selectedProviderId)?.instanceId} snapshots={providerSnapshots} />
       <MousseAgentChatShell
@@ -1472,6 +1474,7 @@ export function OrchestratorChat() {
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
+              privateChat={newChat ? Boolean(workspace.localOnly) : activeThread?.localOnly === true}
               // The new-thread row is the card's top row: one surface with the input.
               banner={<>
                 {newChat && (
@@ -1489,13 +1492,9 @@ export function OrchestratorChat() {
                       onOpenRemoteProject: openProjectOnRunOnDevice
                     }}
                     onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                    onOpenProject={async () => {
-                      const project = await window.mousse.projects.open()
-                      const state = useAppStore.getState()
-                      if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
-                      if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
-                      setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
-                    }}
+                    onPrivateChange={(localOnly) =>
+                      setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node)))}
+                    onOpenProject={openProjectForDraft}
                     onError={setSendError}
                   />
                 )}

@@ -219,7 +219,6 @@ describe('the search results list', () => {
     expect(rule).not.toMatch(/nowrap|ellipsis/)
     const removal = searchSettings('remove worktrees', PAGES).map((result) => result.title)
     expect(removal).toEqual([
-      'Remove worktrees of deleted threads',
       'Remove worktrees inactive for',
       'Remove worktrees whose work is merged into the default branch'
     ])

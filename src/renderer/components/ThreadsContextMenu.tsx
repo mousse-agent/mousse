@@ -25,9 +25,9 @@ export interface ThreadsContextMenuTarget {
   name: string
   pinned: boolean
   settled?: boolean
-  /** The computer a project is on, when it is not this one. */
+  /** The computer a project or thread is on, when it is not this one. */
   node?: string
-  /** That computer's name: the menu acts on the project there, and says so. */
+  /** That computer's name: the menu acts on the project there, and says so. An archived thread there is deleted there. */
   computerName?: string
   /** On a project of this computer: the other computers that hold the same repository. Removing leaves their projects. */
   alsoOn?: readonly string[]
@@ -303,20 +303,36 @@ export function ThreadsContextMenu({
           </GitSubmenu>
         )}
         {target.type === 'project' && <Separator />}
-        <button
-          type="button"
-          className="threads-context-menu-item threads-context-menu-item-danger"
-          role="menuitem"
-          title={
-            target.type === 'project' && target.alsoOn?.length
-              ? `Removes the project from this computer only. ${target.alsoOn.join(' and ')} keep${target.alsoOn.length === 1 ? 's' : ''} theirs.`
-              : undefined
-          }
-          onClick={onRemove}
-        >
-          <DeleteRegular />
-          <span>{target.type === 'project' ? 'Remove project…' : 'Delete'}</span>
-        </button>
+        {target.type === 'project' && (
+          <button
+            type="button"
+            className="threads-context-menu-item threads-context-menu-item-danger"
+            role="menuitem"
+            title={
+              target.alsoOn?.length
+                ? `Removes the project from this computer only. ${target.alsoOn.join(' and ')} keep${target.alsoOn.length === 1 ? 's' : ''} theirs.`
+                : undefined
+            }
+            onClick={onRemove}
+          >
+            <DeleteRegular />
+            <span>Remove project…</span>
+          </button>
+        )}
+        {/* A thread is archived before it can be deleted; deleting is permanent and stays on the thread's computer. */}
+        {target.type === 'thread' && target.settled && (
+          <button
+            type="button"
+            className="threads-context-menu-item threads-context-menu-item-danger"
+            role="menuitem"
+            disabled={Boolean(target.node)}
+            title={target.node ? `Delete on ${target.computerName ?? 'its computer'}` : undefined}
+            onClick={onRemove}
+          >
+            <DeleteRegular />
+            <span>Delete…</span>
+          </button>
+        )}
       </div>
     </FloatingPortal>
   )

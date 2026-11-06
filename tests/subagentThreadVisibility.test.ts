@@ -104,7 +104,10 @@ describe('subagent threads in protocol thread lists', () => {
     const reordered = await cli.request<{ threads: Thread[]; all: Thread[] }>('threads.reorder', { threadIds: mms.threads.listThreads().map((thread) => thread.id) })
     expect(names(reordered.threads)).toEqual([...shown, 'Beta'].sort())
     expect(names(reordered.all)).toEqual([...shown, 'Beta'].sort())
-    const deleted = await gui.request<{ threads: Thread[] }>('threads.delete', { threadId: created.threads.find((thread) => thread.name === 'Beta')!.id })
+    // A thread is archived before it is deleted.
+    const beta = created.threads.find((thread) => thread.name === 'Beta')!.id
+    await gui.request('threads.settle', { threadId: beta, settled: true })
+    const deleted = await gui.request<{ threads: Thread[] }>('threads.delete', { threadId: beta })
     expect(names(deleted.threads)).toEqual(all)
   })
 

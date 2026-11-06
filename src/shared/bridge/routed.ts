@@ -401,8 +401,6 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.pin': write('thread', ['threadId', 'pinned']),
   'threads.settle': write('thread', ['threadId', 'settled']),
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.trash': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.restore': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
   'threads.setWorktreeEnabled': write('thread', ['threadId', 'enabled']),
   'thread.fork': write(
@@ -802,11 +800,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
   },
   {
-    methods: ['threads.purge'],
-    reason:
-      'Permanent delete cannot be undone, so it stays on the computer that runs the thread; Restore is routed.'
-  },
-  {
     methods: ['threads.focus'],
     reason:
       'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'
@@ -814,10 +807,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['threads.reorder', 'projects.reorder'],
     reason: 'Sidebar order is an overlay each computer keeps for itself.'
-  },
-  {
-    methods: ['threads.configureTrash'],
-    reason: 'The trash policy is a setting of the computer it is set on.'
   },
   {
     methods: ['projects.identity', 'projects.trustGitSettings'],

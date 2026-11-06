@@ -11,7 +11,7 @@ import { StorageSettings } from '../../src/renderer/components/StorageSettings'
 import { sliceArcs } from '../../src/renderer/components/storage/StorageDonut'
 import { DaysSelect, StoragePolicyRows, parseCustomDays } from '../../src/renderer/components/storage/StoragePolicyRows'
 import { StorageUsageView } from '../../src/renderer/components/storage/StorageUsageSection'
-import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, trashCountSentence, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
+import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
 import { SELF_MACHINE, offlineUsage, type MachineUsage } from '../../src/renderer/lib/storageUsage'
 
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim()
@@ -22,27 +22,24 @@ const idTag = (html: string, id: string) => html.match(new RegExp(`<[^>]* id="${
 
 const trash = { schemaVersion: 1 as const, graceDays: 30, automaticPurge: true }
 const rows = (patch: Partial<ComponentProps<typeof StoragePolicyRows>> = {}) => renderToStaticMarkup(createElement(StoragePolicyRows, {
-  trash, policy: STORAGE_POLICY_DEFAULTS, trashPaused: false, storagePaused: false, busy: false,
-  onTrash: noop, onPolicy: noop, onResumeTrash: noop, onResumeStorage: noop, trashCount: 2, ...patch
+  policy: STORAGE_POLICY_DEFAULTS, storagePaused: false, busy: false, onPolicy: noop, onResumeStorage: noop, ...patch
 }))
 const policy = (patch: Partial<StoragePolicy['worktrees']> = {}, captureDays: number | null = 30): StoragePolicy => ({ schemaVersion: 1, worktrees: { ...STORAGE_POLICY_DEFAULTS.worktrees, ...patch }, browser: { captureDays } })
 
 describe('policy rows', () => {
   it('shows one control per rule with the saved values', () => {
     const html = rows()
-    expect(html).toContain('data-testid="storage-auto-empty-select"')
-    for (const id of ['storage-auto-empty-select', 'storage-inactive-select', 'storage-captures-select']) expect(tagOf(html, id), id).toContain('data-value="30"')
-    expect(idTag(html, 'storage-remove-deleted-switch')).toContain('aria-checked="true"')
+    for (const id of ['storage-inactive-select', 'storage-captures-select']) expect(tagOf(html, id), id).toContain('data-value="30"')
     expect(idTag(html, 'storage-merged-switch')).toContain('aria-checked="true"')
-    for (const id of ['storage-trash', 'storage-worktrees', 'storage-browser']) expect(html).toContain(`id="${id}"`)
+    for (const id of ['storage-worktrees', 'storage-browser']) expect(html).toContain(`id="${id}"`)
+    // Threads no longer wait in a trash, and a deleted thread's worktree always goes with it: neither has a rule.
+    for (const id of ['storage-trash', 'storage-auto-empty-select', 'storage-remove-deleted-switch']) expect(html).not.toContain(id)
   })
 
   it('shows rules that are off as off', () => {
-    const html = rows({ trash: { ...trash, automaticPurge: false }, policy: policy({ removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, null) })
-    expect(tagOf(html, 'storage-auto-empty-select')).toContain('data-value="never"')
+    const html = rows({ policy: policy({ removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, null) })
     expect(tagOf(html, 'storage-inactive-select')).toContain('data-value="off"')
     expect(tagOf(html, 'storage-captures-select')).toContain('data-value="off"')
-    expect(idTag(html, 'storage-remove-deleted-switch')).toContain('aria-checked="false"')
     expect(idTag(html, 'storage-merged-switch')).toContain('aria-checked="false"')
   })
 
@@ -52,15 +49,13 @@ describe('policy rows', () => {
   })
 
   it('waits for the saved values before offering a choice', () => {
-    const html = rows({ trash: undefined, policy: undefined })
+    const html = rows({ policy: undefined })
     expect(text(html)).toContain('Loading…')
     expect(idTag(html, 'storage-merged-switch')).toContain('disabled')
   })
 
   it('offers Resume only while a clock pause is in effect', () => {
     expect(text(rows())).not.toContain('Resume')
-    expect(text(rows({ trashPaused: true }))).toContain('Paused after a system clock change.')
-    expect(text(rows({ trashPaused: true }))).toContain('Resume')
     const stopped = rows({ storagePaused: true })
     expect(stopped).toContain('data-testid="storage-clock-paused"')
     expect(text(stopped)).toContain('Time-based cleanup is paused')
@@ -102,7 +97,7 @@ describe('plain-words copy', () => {
   })
 
   it('says once, for the Worktrees group, what no worktree rule removes', () => {
-    for (const id of ['deletedThreads', 'inactive', 'merged'] as const) expect(STORAGE_RULE_COPY[id].never, id).toBeUndefined()
+    for (const id of ['inactive', 'merged'] as const) expect(STORAGE_RULE_COPY[id].never, id).toBeUndefined()
     expect(WORKTREE_GROUP_TOOLTIP).toContain('Uncommitted')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('untracked')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('Ignored files')
@@ -119,7 +114,6 @@ describe('plain-words copy', () => {
     expect(STORAGE_RULE_COPY.captures.deletes).toContain('Older capture links will no longer open.')
     expect(STORAGE_RULE_COPY.captures.never).toContain('download')
     expect(STORAGE_RULE_COPY.captures.note).toContain('.png')
-    expect(STORAGE_RULE_COPY.trash.never).toContain('not been published')
   })
 
   it('folds "keep a worktree when it has any local files" into the group note, with no row of its own', () => {
@@ -522,22 +516,12 @@ describe('the order of the Storage page', () => {
   it('shows disk usage, then cleanup, then the rule groups', () => {
     const html = renderToStaticMarkup(createElement(StorageSettings))
     const at = (id: string) => html.indexOf(`id="${id}"`)
-    const order = ['storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'].map(at)
+    const order = ['storage-usage', 'storage-cleanup', 'storage-worktrees', 'storage-browser'].map(at)
     expect(order.every((index) => index >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
 
   it('points cleanup at the rules below it', () => {
     expect(text(cleanup())).toContain('Runs the rules below now.')
-  })
-})
-
-describe('trash is reviewed from the sidebar', () => {
-  it('says how many threads wait there, and where to find them', () => {
-    expect(trashCountSentence(0)).toBe('No threads in trash.')
-    expect(trashCountSentence(1)).toBe('1 thread in trash, listed under Recently deleted.')
-    expect(trashCountSentence(3)).toContain('3 threads in trash')
-    expect(text(rows({ trashCount: 3 }))).toContain('3 threads in trash, listed under Recently deleted.')
-    expect(rows()).not.toContain('data-testid="storage-review-trash-button"')
   })
 })

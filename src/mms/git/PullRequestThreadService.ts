@@ -66,6 +66,8 @@ export interface PullRequestThreadDeps {
   threads: Pick<ThreadDataStore, 'createThread' | 'updateThreadMeta' | 'listAllThreads' | 'getThreadDir' | 'discardUnusedThread' | 'lifecycleStore'>
   /** Test seam: runs right before each entry of a failed start's worktree is removed, after its last check. */
   cleanupBeforeRemove?: (path: string) => void
+  /** Threads the caller may not be told about (a private thread, for another of the user's devices); absent: none. */
+  hidden?: (thread: Thread) => boolean
   /** Moves a thread to the trash through the lifecycle coordinator; used when a failed start cannot simply discard it. */
   trashThread(threadId: string): Promise<unknown>
   /** Finishes a new thread the way every new thread is finished (its model selection). */
@@ -191,7 +193,7 @@ export class PullRequestThreadService {
 
   private threadsOf(identity: PullRequestIdentity): Array<{ id: string; name: string }> {
     return this.deps.threads.listAllThreads()
-      .filter((thread) => thread.pullRequest && !thread.settledAt && sameRepository(thread.pullRequest, identity))
+      .filter((thread) => thread.pullRequest && !thread.settledAt && sameRepository(thread.pullRequest, identity) && !this.deps.hidden?.(thread))
       .map((thread) => ({ id: thread.id, name: thread.name }))
   }
 
