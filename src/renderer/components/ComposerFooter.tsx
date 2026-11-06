@@ -68,7 +68,7 @@ export interface ComposerFooterProps {
   /** A recording is being turned into text; the microphone and send buttons wait. */
   transcribing?: boolean
   onSend?: () => void
-  /** What the send button says it does, when not "Send message" / "Queue message" (such as answering open questions). */
+  /** What the send button says it does, when not "Send message" / "Queue message": answering open questions, or "Deny and send" while an approval waits. */
   sendLabel?: string
   onStop?: () => void
   onStartRecording?: () => void
