@@ -42,7 +42,8 @@ function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: 
 function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }) {
   const store = useBotsStore.getState
   return <article className="chat-participant-message from-agent" data-message-id={message.id}>
-    <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" />
+    {/* Transcript faces are still: one baked pose per look, shared by every message. */}
+    <BotFace look={bot.look} state="idle" size={40} view="head" className="bot-message-face" still />
     <div className="chat-participant-message-body">
       <div className="chat-message-meta"><strong>{bot.name}</strong><time dateTime={message.at}>{botMessageTime(message.at)}</time></div>
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}

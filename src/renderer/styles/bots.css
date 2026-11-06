@@ -65,15 +65,7 @@
 .chat-send-button.bot-send-ready { opacity: 1; }
 
 /* New bot and the look dialogs. */
-.bot-new-face { display: grid; grid-template-columns: 120px 1fr; gap: 18px; align-items: start; margin-bottom: 18px; }
-.bot-new-preview { display: flex; flex-direction: column; align-items: center; gap: 10px; padding-top: 4px; }
-.bot-shuffle { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 8px; font-size: 12px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
-.bot-shape-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-bottom: 14px; }
-.bot-shape-grid button { display: grid; place-items: center; aspect-ratio: 1; border-radius: 11px; background: color-mix(in srgb, var(--text-secondary) 6%, transparent); }
-.bot-shape-grid button.is-picked { background: rgba(var(--accent-rgb), .16); box-shadow: inset 0 0 0 2px var(--accent); }
-.bot-tones { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0 2px; }
-.bot-tones .bot-tone { width: 19px; height: 19px; border-radius: 50%; }
-.bot-tones .bot-tone.is-picked { box-shadow: 0 0 0 2px var(--bg-secondary, #201d23), 0 0 0 4px var(--text-primary); }
+.bot-look-picker { margin-bottom: 18px; }
 .bot-new-label { display: block; font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
 .bot-new-label-gap { margin-top: 12px; }
 .chat-dialog .bot-new-name, .chat-dialog .bot-new-text { display: block; width: 100%; padding: 9px 12px; margin-bottom: 16px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.5; }

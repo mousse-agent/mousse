@@ -32,7 +32,9 @@ const chatsInitial = useChatsStore.getInitialState()
 const botsInitial = useBotsStore.getInitialState()
 
 const dialog = () => host.querySelector<HTMLElement>('[role="dialog"]')
-const picked = (group: string) => dialog()?.querySelector(`[aria-labelledby="${group}"] [aria-checked="true"]`)?.getAttribute('aria-label')
+// The look picker's two radio groups (WP5's `BotLookPicker`).
+const GROUPS = { 'bot-look-colour': '.bot-look-picker__colours', 'bot-look-accessory': '.bot-look-picker__accessories' } as const
+const picked = (group: keyof typeof GROUPS) => dialog()?.querySelector(`${GROUPS[group]} [aria-checked="true"]`)?.getAttribute('aria-label')
 const createButton = () => [...(dialog()?.querySelectorAll('button') ?? [])].find((element) => element.textContent === 'Create bot') as HTMLButtonElement | undefined
 async function type(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')!.set!
@@ -67,8 +69,8 @@ describe('New bot', () => {
     await open([])
     const box = dialog()!
     expect(box.querySelector('h2')?.textContent).toBe('New bot')
-    expect([...box.querySelectorAll('[aria-labelledby="bot-look-colour"] button')]).toHaveLength(8)
-    expect([...box.querySelectorAll('[aria-labelledby="bot-look-accessory"] button')]).toHaveLength(12)
+    expect([...box.querySelectorAll('.bot-look-picker__colours [role="radio"]')]).toHaveLength(8)
+    expect([...box.querySelectorAll('.bot-look-picker__accessories [role="radio"]')]).toHaveLength(12)
     expect(box.querySelector<HTMLInputElement>('#bot-new-name')?.placeholder).toBe('Optional. Leave it empty and the bot names itself.')
     expect(box.querySelector<HTMLTextAreaElement>('#bot-new-text')?.placeholder).toBe('For example: every morning, tell me which emails need a reply.')
     expect([...box.querySelectorAll('input, textarea, select')]).toHaveLength(2)
@@ -87,8 +89,8 @@ describe('New bot', () => {
     await act(async () => box.querySelector<HTMLElement>('[aria-label="Purple"]')!.click())
     await act(async () => box.querySelector<HTMLElement>('[aria-label="Crown"]')!.click())
     expect([picked('bot-look-colour'), picked('bot-look-accessory')]).toEqual(['Purple', 'Crown'])
-    expect(box.querySelector('.bot-new-preview .bot-face')?.getAttribute('data-colour')).toBe('purple')
-    await act(async () => [...box.querySelectorAll<HTMLElement>('button')].find((element) => element.textContent === 'Shuffle')!.click())
+    expect(box.querySelector('.bot-look-picker__preview .bot-face')?.getAttribute('data-colour')).toBe('purple')
+    await act(async () => [...box.querySelectorAll<HTMLElement>('button')].find((element) => element.textContent?.trim() === 'Shuffle')!.click())
     expect([picked('bot-look-colour'), picked('bot-look-accessory')]).not.toEqual(['Purple', 'Crown'])
   })
 
