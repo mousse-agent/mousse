@@ -64,7 +64,7 @@ describe('Add provider: connecting a model API', () => {
     await settle()
   }
   const openAndPick = async (label: string) => {
-    await click(document.body.querySelector('.prov-add-row'))
+    await click(button('Add provider'))
     await click(choice(label))
     await click(button('Next'))
   }
@@ -123,21 +123,45 @@ describe('Add provider: connecting a model API', () => {
     host.remove()
   })
 
-  it('a failed sign-in keeps the provider and its error, and Sign in again retries on the same entry', async () => {
+  const signInDialog = () => [...document.body.querySelectorAll('[role="dialog"]')].find((dialog) => dialog.textContent?.includes('Sign in to'))
+
+  it('a failed sign-in waits in its dialog, where Try again starts a fresh sign-in on the same entry', async () => {
     await openAndPick('GitHub Copilot')
     await click(button('Sign in'))
     expect(instances.add).toHaveBeenCalledWith({ driver: 'pi', config: { provider: 'github-copilot' } })
     expect(instances.signIn).toHaveBeenCalledWith('pi:github-copilot', 'oauth')
-    // The entry exists now: the options reload with it added, and the dialog stays on it.
     await publishAdded('github-copilot')
     await emitOperation({ phase: 'failed', error: { code: 'signed_out', message: 'The device code expired.' } })
+    expect(signInDialog()?.textContent).toContain('The device code expired.')
+    expect(signInDialog()?.querySelector('[role="alert"]')?.textContent).toBe('The device code expired.')
+    expect(text()).toContain('Provider: GitHub Copilot')
+    await click(button('Try again'))
+    // The same sign-in again, on the entry already added.
+    expect(instances.add).toHaveBeenCalledTimes(1)
+    expect(instances.signIn).toHaveBeenCalledTimes(2)
+    expect(instances.signIn).toHaveBeenLastCalledWith('pi:github-copilot', 'oauth')
+    expect(signInDialog()?.textContent).not.toContain('The device code expired.')
+    await emitOperation({ phase: 'completed' })
+    // Done: both dialogs close, and the new provider opens with its Models in view.
+    expect(signInDialog()).toBeUndefined()
+    expect(text()).not.toContain('Provider: GitHub Copilot')
+    const models = document.body.querySelector<HTMLDetailsElement>('details.prov-models-section')
+    expect(models?.open).toBe(true)
+  })
+
+  it('closing a failed sign-in keeps the provider and its error, and Sign in again retries on the same entry', async () => {
+    await openAndPick('GitHub Copilot')
+    await click(button('Sign in'))
+    await publishAdded('github-copilot')
+    await emitOperation({ phase: 'failed', error: { code: 'signed_out', message: 'The device code expired.' } })
+    await click(signInDialog()?.querySelector('[aria-label="Close"]'))
+    expect(signInDialog()).toBeUndefined()
     expect(text()).toContain('Provider: GitHub Copilot')
     expect(text()).toContain('The device code expired.')
     await click(button('Sign in'))
     expect(instances.add).toHaveBeenCalledTimes(2)
     expect(instances.signIn).toHaveBeenCalledTimes(2)
     await emitOperation({ phase: 'completed' })
-    // Done: the dialog closes.
     expect(text()).not.toContain('Provider: GitHub Copilot')
   })
 
