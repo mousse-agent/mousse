@@ -1,0 +1,80 @@
+/* The shared toast (components/ui/Toast.tsx): one line and a text action, centred at the bottom of the window. */
+.ui-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  z-index: var(--z-floating, 50000);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  min-height: 36px;
+  padding: 6px 8px 6px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, 0.12));
+  border-radius: var(--ui-menu-radius, 10px);
+  background: var(--ui-raised, var(--surface-elevated, #1c1c1f));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  box-shadow: var(--ui-specular, none), var(--ui-menu-drop, 0 6px 24px rgba(0, 0, 0, 0.35));
+}
+
+.ui-toast-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-toast-action {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.ui-toast-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.ui-toast-action:focus-visible,
+.ui-toast-close:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-toast-close {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.ui-toast-close:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* A failure: the message keeps the text colour; a small danger mark says what kind of line it is. */
+.ui-toast-error::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-right: -4px;
+  border-radius: 50%;
+  background: var(--danger);
+}

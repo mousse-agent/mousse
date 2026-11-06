@@ -7,6 +7,7 @@ import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import { createOrchestrator } from './run/phase6Fixture'
 import {
+  describeQuestionAnswers,
   formatQuestionAnswersMessage,
   formatQuestionDismissMessage
 } from '../src/mms/orchestrator/OrchestratorService'
@@ -260,6 +261,44 @@ describe('question answers as visible user messages', () => {
       // ...but never injected into the model's native context mid-turn.
       const session = localOrch.getOrCreateSession(thread.id)
       expect(session.nativeContext.messages).toHaveLength(0)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      delete process.env.MOUSSE_HOME
+    }
+  })
+
+  it('describes answers for the transcript: chosen option labels apart from typed replies', () => {
+    expect(
+      describeQuestionAnswers(
+        [
+          { id: 'scope', prompt: 'Which scope?', options: [{ id: 'frontend', label: 'Frontend only' }, { id: 'backend', label: 'Backend only' }] },
+          { id: 'areas', prompt: 'Which areas?', allowMultiple: true, options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] },
+          { id: 'note', prompt: 'Anything else?', options: [] },
+          { id: 'skipped', prompt: 'Skipped?', options: [{ id: 'x', label: 'X' }] }
+        ],
+        { scope: 'backend', areas: ['a', 'b', 'and docs'], note: 'ship it friday' }
+      )
+    ).toEqual([
+      { prompt: 'Which scope?', chosen: ['Backend only'] },
+      { prompt: 'Which areas?', chosen: ['A', 'B'], reply: 'and docs' },
+      { prompt: 'Anything else?', chosen: [], reply: 'ship it friday' },
+      { prompt: 'Skipped?', chosen: [] }
+    ])
+  })
+
+  it('records answers with their questions so the transcript can show them as a step of the turn', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-qrecord-'))
+    process.env.MOUSSE_HOME = home
+    try {
+      const localStore = new ThreadDataStore(new ProjectManager())
+      const localOrch = createOrchestrator(home, localStore)
+      const thread = localStore.createThread('Answers')
+      const answered = [{ prompt: 'Which scope?', chosen: ['Backend only'] }]
+      const msg = localOrch.recordQuestionResponseMessage(thread.id, 'Q: Which scope?\nA: Backend only', answered)
+      expect(msg?.questionAnswers).toEqual(answered)
+      expect(localOrch.getMessages(thread.id).at(-1)?.questionAnswers).toEqual(answered)
+      // A dismissal carries no answers.
+      expect(localOrch.recordQuestionResponseMessage(thread.id, 'Dismissed question: Which scope?')?.questionAnswers).toBeUndefined()
     } finally {
       rmSync(home, { recursive: true, force: true })
       delete process.env.MOUSSE_HOME

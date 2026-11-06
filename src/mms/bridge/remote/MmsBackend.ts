@@ -406,7 +406,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ...(caller && this.deviceLimit ? { limit: this.deviceLimit(caller.node) } : {})
       },
       skills,
-      commands: COMPOSER_COMMANDS.map((command) => ({
+      commands: COMPOSER_COMMANDS.filter((command) => !command.desktopOnly).map((command) => ({
         name: command.name,
         description: command.description,
         ...(command.aliases ? { aliases: command.aliases } : {}),

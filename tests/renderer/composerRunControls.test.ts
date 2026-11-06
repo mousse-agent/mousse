@@ -548,3 +548,17 @@ describe('composer send slot', () => {
     expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  box-shadow: var(--ui-focus-ring);\n}`)
   })
 })
+
+describe('composer send button', () => {
+  const sendButton = () => host.querySelector<HTMLButtonElement>('.composer-action-btn-active')!
+
+  it('says what sending does: send, queue, or what the parent names (answering open questions)', () => {
+    render({ open: false, footer: { canSend: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Send message')
+    render({ open: false, footer: { canSend: true, loading: true } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Queue message')
+    render({ open: false, footer: { canSend: true, loading: true, sendLabel: 'Answer this question' } })
+    expect(sendButton().getAttribute('aria-label')).toBe('Answer this question')
+    expect(sendButton().title).toBe('Answer this question')
+  })
+})

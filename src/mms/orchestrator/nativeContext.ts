@@ -12,10 +12,11 @@ import type {
   NativeLastTurnUsage,
   NativeLlmContext
 } from '../../shared/types'
-import { compactionThreshold, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/contextCompaction'
+import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
 
-export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/contextCompaction'
+// Shared with Settings, which shows where a thread compacts.
+export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/settings'
 export const NATIVE_CONTEXT_VERSION = 2 as const
 export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
 const MESSAGE_OVERHEAD = 4
@@ -94,7 +95,7 @@ export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext 
         ? ([{ type: 'text', text: message.content || '(image attachment)' }, ...images] satisfies Array<TextContent | ImageContent>)
         : message.content
       transcript.push({ role: 'user', content, timestamp: Date.parse(message.timestamp) || Date.now() })
-    } else if (message.role === 'assistant' && message.kind !== 'thinking' && message.kind !== 'context_handoff') {
+    } else if (message.role === 'assistant' && message.kind !== 'thinking' && message.kind !== 'context_handoff' && message.kind !== 'context_cleared' && message.kind !== 'context_compaction') {
       transcript.push(legacyAssistant(message.content, Date.parse(message.timestamp) || Date.now()))
     }
   }
@@ -246,13 +247,37 @@ export function shouldCompactNativeContext(
   configuredThreshold?: number
 ): boolean {
   if (!Number.isFinite(activeTokens)) return false
-  const threshold = compactionThreshold(contextWindow, configuredThreshold, reserveTokens)
-  return threshold !== undefined && activeTokens >= threshold
+  return activeTokens >= contextCompactionPoint(contextWindow, configuredThreshold, reserveTokens)
 }
 
+/**
+ * `/clear`: no earlier message or summary is provider-visible any more, so the next turn starts a fresh
+ * provider session. The archive stays for the record and Undo; the compaction generation stays too, so
+ * Undo's boundary check still matches.
+ */
+export function clearNativeContext(context: NativeLlmContext): NativeLlmContext {
+  const normalized = normalizeNativeContext(context)
+  const end = normalized.messages.length
+  return {
+    ...normalized,
+    activeStartIndex: end,
+    clearedAtIndex: end,
+    revision: (normalized.revision ?? 0) + 1,
+    compaction: normalized.compaction
+      ? { ...normalized.compaction, summary: '', directives: [], coveredThroughIndex: end - 1 }
+      : undefined,
+    lastTurnUsage: undefined
+  }
+}
+
+/**
+ * Compacts the active context: older messages become generated memory and a recent suffix stays.
+ * `focus` (`/compact <focus>`) is the user's note on what the summary should keep; it is added to the memory.
+ */
 export function compactNativeContext(
   context: NativeLlmContext,
-  keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS
+  keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+  focus?: string
 ): NativeLlmContext {
   const normalized = normalizeNativeContext(context)
   const start = normalized.activeStartIndex
@@ -263,8 +288,11 @@ export function compactNativeContext(
     normalized.compaction?.summary
   )
   // Re-read the covered archive so a legacy/corrupt prior summary cannot permanently
-  // erase an older user directive that is still durably available.
-  const memory = buildStructuredMemory(normalized.messages.slice(0, cut), normalized.compaction)
+  // erase an older user directive that is still durably available. Messages before a `/clear` stay out.
+  const floor = Math.min(normalized.clearedAtIndex ?? 0, start)
+  const memory = buildStructuredMemory(normalized.messages.slice(floor, cut), normalized.compaction)
+  const note = focus?.trim()
+  if (note) memory.summary = `${memory.summary}\n\n## Focus the user asked this summary to keep\n${note}`
   const tokensAfter = estimateActiveContextTokens(normalized.messages.slice(cut), memory.summary)
   if (tokensAfter >= tokensBefore) return context
   return {

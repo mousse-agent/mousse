@@ -92,7 +92,11 @@ describe('ThreadsSidebar with subagents', () => {
     expect(running.match(/card-status-working/g)).toHaveLength(1)
     setStore({ threads, activeThreadId: 'lone', threadActivity: { child: 'awaiting_input' } })
     const asking = render()
-    expect(asking.match(/card-status-input/g)).toHaveLength(1)
+    // The waiting parent also heads the "Needs me" group, once; in the list it shows once more.
+    const needsMe = asking.match(/<section class="threads-sidebar-needs-me"[\s\S]*?<\/section>/)?.[0] ?? ''
+    expect(needsMe).toContain('Fix the build')
+    expect(needsMe.match(/card-status-input/g)).toHaveLength(1)
+    expect(asking.replace(needsMe, '').match(/card-status-input/g)).toHaveLength(1)
   })
 
   it('highlights the parent row while a subagent is open, with a background class and no selection dot', () => {

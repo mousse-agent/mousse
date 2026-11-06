@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useRef } from 'react'
 import { modelLabel } from '../../shared/modelChoice'
 import { resolveModelChoice } from '../lib/modelChoice'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../shared/types'
-import { contextCompactionPoint, type CompactionSetting } from '../../shared/contextCompaction'
+import { settingCompactionPoint, type ContextSettings } from '../../shared/settings'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { openSettingsSection } from '../lib/settingsNavigation'
 
@@ -48,10 +48,10 @@ export type ContextCompaction = { kind: 'at'; tokens: number } | { kind: 'near-l
  * The context's compaction under the Compact context setting, worked out as the daemon does. A
  * runtime that compacts its own context (Pi) only takes the on/off: it compacts near its limit.
  */
-export function contextCompaction(setting: CompactionSetting, usage: ContextUsageSnapshot): ContextCompaction {
+export function contextCompaction(setting: ContextSettings, usage: ContextUsageSnapshot): ContextCompaction {
   if (!setting.compactionEnabled) return { kind: 'off' }
   if (usage.compactedByRuntime) return { kind: 'near-limit' }
-  const tokens = contextCompactionPoint(setting, usage.limit > 0 ? usage.limit : undefined)
+  const tokens = settingCompactionPoint(setting, usage.limit > 0 ? usage.limit : undefined)
   return tokens === undefined ? { kind: 'near-limit' } : { kind: 'at', tokens }
 }
 

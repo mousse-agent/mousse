@@ -24,6 +24,9 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
 import type { ShortcutOverrides } from '../../shared/commands'
 
+/** What the command palette leads with when it opens. */
+export type PaletteMode = 'all' | 'messages'
+
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
 // Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
 // pins large tool payloads and markdown strings in the renderer heap.
@@ -139,14 +142,16 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
-  /** The Search threads dialog, opened from the threads sidebar, the command palette and its shortcut. */
-  threadSearchOpen: boolean
-  setThreadSearchOpen: (open: boolean) => void
-  /** The command palette. Not persisted. */
+  /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  setPaletteOpen: (open: boolean) => void
+  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). */
+  paletteMode: PaletteMode
+  setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
+  /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
+  threadFeedOrder: string[]
+  setThreadFeedOrder: (ids: string[]) => void
   sidebarMode: 'projects' | 'chats'
   setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
@@ -187,7 +192,7 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** The profile's "Start new chats in a worktree" setting: the worktree choice of a draft that has not made one. */
+  /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
   worktreeByDefault: boolean
   setWorktreeByDefault: (worktreeByDefault: boolean) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
@@ -264,21 +269,19 @@ interface AppState {
   clearComposerReferences: (threadId: string | null) => void
 }
 
-/** Stable timestamp ordering â€” prevents out-of-order delivery when IPC channels race. */
+/**
+ * Timestamp ordering that prevents out-of-order delivery when IPC channels race. Messages with the same
+ * timestamp keep the order they arrived in (the sort is stable): a reply's text and the tool call after it
+ * often share a millisecond, and ordering them by id would put the tool call above the text it followed.
+ */
 export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[] {
   // Already sorted fast path.
   let sorted = true
   for (let i = 1; i < messages.length; i += 1) {
     if (messages[i - 1].timestamp > messages[i].timestamp) { sorted = false; break }
-    if (messages[i - 1].timestamp === messages[i].timestamp && messages[i - 1].id > messages[i].id) { sorted = false; break }
   }
   if (sorted) return messages
-  return [...messages].sort((a, b) => {
-    if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? -1 : 1
-    // Stable tie-break: turnId preserves causality, then lexicographic id.
-    if ((a.turnId ?? '') !== (b.turnId ?? '')) return (a.turnId ?? '') < (b.turnId ?? '') ? -1 : 1
-    return a.id < b.id ? -1 : 1
-  })
+  return [...messages].sort((a, b) => (a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1))
 }
 
 /**
@@ -363,7 +366,7 @@ const personalWorkspaceKeys = [
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
-  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView',
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
   'reviewIgnoreWhitespace'
 ] as const
 let profileActivated = false
@@ -410,10 +413,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
-  threadSearchOpen: false,
-  setThreadSearchOpen: (threadSearchOpen) => set({ threadSearchOpen }),
   paletteOpen: false,
-  setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  paletteMode: 'all',
+  setPaletteOpen: (paletteOpen, mode = 'all') => set({ paletteOpen, paletteMode: mode }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
@@ -458,6 +460,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
+  threadFeedOrder: [],
+  setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
   worktreeByDefault: true,
   setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
@@ -683,6 +687,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
       threadsSidebarView: 'projects' as 'projects' | 'threads' | 'chats',
+      threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
@@ -701,6 +706,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       try {
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
+        if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
       } catch { /* malformed profile-local state is discarded */ }
     }
     messageCache.clear()
@@ -713,7 +719,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       workspaceReady: false,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
-      threadSearchOpen: false,
       paletteOpen: false,
       ...next,
       messages: [],

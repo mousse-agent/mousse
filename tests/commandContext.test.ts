@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commandContextFromDom, type ClosestTarget, type CommandStateSlice, type OverlayState } from '../src/renderer/commands/commandContext'
+import { COMPOSER_SELECTOR, commandContextFromDom, type ClosestTarget, type CommandStateSlice, type OverlayState } from '../src/renderer/commands/commandContext'
 
 /** An element that matches the given selectors, answering `closest` for any query that names one of them. */
 const element = (...matching: string[]): ClosestTarget => ({
@@ -47,7 +47,7 @@ describe('commandContextFromDom overlay', () => {
 
   it('is the top of the stack', () => {
     expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['model-picker'] }).overlay).toBe('model-picker')
-    expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['thread-search', 'palette'] }).overlay).toBe('palette')
+    expect(commandContextFromDom(null, state(), { modalOpen: false, stack: ['model-picker', 'palette'] }).overlay).toBe('palette')
   })
 
   it('lets an open dialog win over a picker beneath it', () => {
@@ -75,8 +75,14 @@ describe('commandContextFromDom app state', () => {
       runActive: true,
       mainAreaOpen: true,
       projectsMode: true,
-      inFilesPanel: false
+      inFilesPanel: false,
+      inComposer: false
     })
+  })
+
+  it("knows a key typed in the thread's composer", () => {
+    expect(commandContextFromDom(element('textarea', COMPOSER_SELECTOR), state(), noOverlay)).toMatchObject({ inComposer: true, inTextInput: true })
+    expect(commandContextFromDom(element('textarea'), state(), noOverlay).inComposer).toBe(false)
   })
 
   it('knows a key typed inside the Files panel, including in its text fields', () => {

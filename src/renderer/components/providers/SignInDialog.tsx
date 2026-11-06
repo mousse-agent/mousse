@@ -20,9 +20,21 @@ export function refusedText(response: SignInResponse): string {
 /**
  * A provider sign-in started with `providers.instances.signIn`: shows the step the operation asks
  * for (a browser link, a device code, a field, a choice) and answers it with `respondSignIn`.
- * Closing cancels the sign-in. It closes itself when the operation completes.
+ * Closing cancels the sign-in. It closes itself when the operation completes. A failed sign-in stays
+ * open with its reason and, given `onRetry`, Try again, which starts a fresh sign-in the same way the
+ * first one was started (the dialog follows it through its new `operationId`).
  */
-export function SignInDialog({ operationId, name, onClose }: { operationId: string | null; name: string; onClose: () => void }) {
+export function SignInDialog({
+  operationId,
+  name,
+  onClose,
+  onRetry
+}: {
+  operationId: string | null
+  name: string
+  onClose: () => void
+  onRetry?: () => Promise<void>
+}) {
   const event = useProviderSnapshotsStore((state) => (operationId ? state.operations[operationId] : undefined))
   const latestPrompt = useProviderSnapshotsStore((state) => (operationId ? state.prompts[operationId] : undefined))
   /** An answered field or choice gives way to progress until the next step arrives. */
@@ -35,6 +47,7 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
   const [showPaste, setShowPaste] = useState(false)
   const [copied, setCopied] = useState<'link' | 'code' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState(false)
   const openedRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -84,14 +97,22 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
     onClose()
   }
   const copy = (text: string, which: 'link' | 'code') => void navigator.clipboard.writeText(text).then(() => setCopied(which))
-  const failure = error ?? (event?.phase === 'failed' ? event.error.message : null)
+  const failure = error ?? (event?.phase === 'failed' ? event.error.message || 'Sign-in failed.' : null)
+  const retry = () => {
+    if (!onRetry) return
+    setRetrying(true)
+    setError(null)
+    void onRetry()
+      .catch((cause) => setError(errorText(cause)))
+      .finally(() => setRetrying(false))
+  }
 
   return (
     <Modal open title={`Sign in to ${name}`} onClose={cancel}>
       <div className="provider-login-body">
         {!prompt && !failed && (
-          <div className="provider-login-loading">
-            <Loader2 size={16} className="icon-spin" />
+          <div className="provider-login-loading" role="status">
+            <Loader2 size={16} className="icon-spin" aria-hidden="true" />
             <span>{progress ?? 'Starting sign-in…'}</span>
           </div>
         )}
@@ -111,8 +132,8 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
                 {copied === 'link' ? 'Copied' : 'Copy link'}
               </button>
             </div>
-            <div className="provider-login-loading">
-              <Loader2 size={16} className="icon-spin" />
+            <div className="provider-login-loading" role="status">
+              <Loader2 size={16} className="icon-spin" aria-hidden="true" />
               <span>Waiting for you to finish in the browser…</span>
             </div>
             {offersRedirectPaste(prompt) && (
@@ -220,7 +241,18 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
           </>
         )}
 
-        {failure && <p className="prov-error">{failure}</p>}
+        {failure && (
+          <p className="prov-error" role="alert">
+            {failure}
+          </p>
+        )}
+        {failed && onRetry && (
+          <div className="provider-login-actions">
+            <button type="button" className="settings-btn" disabled={retrying} onClick={retry}>
+              Try again
+            </button>
+          </div>
+        )}
       </div>
     </Modal>
   )

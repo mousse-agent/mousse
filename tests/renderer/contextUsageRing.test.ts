@@ -7,7 +7,7 @@ const navigation = vi.hoisted(() => ({ openSettingsSection: vi.fn() }))
 vi.mock('../../src/renderer/lib/settingsNavigation', () => ({ openSettingsSection: navigation.openSettingsSection }))
 import { ComposerFooter, type ComposerFooterProps } from '../../src/renderer/components/ComposerFooter'
 import { contextUsageKnown, contextUsageLevel, contextUsageSummary } from '../../src/renderer/components/ContextUsagePopover'
-import type { CompactionSetting } from '../../src/shared/contextCompaction'
+import type { ContextSettings } from '../../src/shared/settings'
 import type { ProviderWithStatus } from '../../src/renderer/lib/providerSnapshots'
 import { computeContextUsage } from '../../src/mms/orchestrator/contextUsage'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../src/shared/types'
@@ -50,7 +50,7 @@ function usage(used: number, limit = 200_000, extra: Partial<ContextUsageSnapsho
   }
 }
 
-function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; reports?: 'reported' | 'none'; compaction?: CompactionSetting } = {}) {
+function render(contextUsage: ContextUsageSnapshot, options: { open?: boolean; reports?: 'reported' | 'none'; compaction?: ContextSettings } = {}) {
   const onContextOpenChange = vi.fn()
   const props: ComposerFooterProps = {
     providers: [provider(options.reports)],
@@ -133,7 +133,7 @@ describe('context ring', () => {
 })
 
 describe('compaction in the popover', () => {
-  const at = (compactionTokens: number | 'model-max'): CompactionSetting => ({ compactionEnabled: true, compactionTokens })
+  const at = (compactionTokens: number | 'model-max'): ContextSettings => ({ compactionEnabled: true, compactionTokens })
   const barMark = () => document.querySelector<HTMLElement>('.context-usage-bar-compaction')
   const compactionLine = () => document.querySelector('.context-usage-compaction-text')?.textContent
 

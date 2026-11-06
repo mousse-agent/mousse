@@ -176,7 +176,10 @@ describe('library static rendering', () => {
       })
     )
     expect(loading).toContain('New agent')
-    expect(loading).toContain('Loading agents')
+    // The shared loader: an empty slot on first paint, the indicator only after a short delay, never text.
+    expect(loading).toContain('agent-defs--loading')
+    expect(loading).toContain('ui-loader-slot')
+    expect(loading).not.toContain('Loading agents')
     expect(loading).not.toContain('data-agent-card')
   })
 })

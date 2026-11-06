@@ -6,7 +6,6 @@ const home = {
   scheduledOpen: false,
   usageOpen: false,
   settingsOpen: false,
-  threadSearchOpen: false,
   mainAreaOpen: false,
   sidebarMode: 'projects' as const
 }
@@ -17,7 +16,6 @@ describe('navigation rail active page', () => {
     expect(activeRailPage({ ...home, usageOpen: true })).toBe('usage')
     expect(activeRailPage({ ...home, settingsOpen: true })).toBe('settings')
     expect(activeRailPage({ ...home, scheduledOpen: true })).toBe('automations')
-    expect(activeRailPage({ ...home, threadSearchOpen: true })).toBeNull()
     expect(activeRailPage({ ...home, mainAreaOpen: true })).toBeNull()
   })
 })

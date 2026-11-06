@@ -154,7 +154,7 @@ describe('sign-in errors', () => {
   it('points to the setup step when the keystore is locked', () => {
     const net = { enabled: true, self: {}, keystore: 'locked', protected: true } as never
     expect(signInErrorMessage({ code: 'keystore_locked' }, origin, net)).toBe(mousseIdSetupStep(net))
-    expect(mousseIdSetupStep(undefined)).toBe('Create a network identity under Devices first.')
+    expect(mousseIdSetupStep(undefined)).toBe('Create a network identity for this device first.')
   })
 
   it('keeps other messages as they are', () => {

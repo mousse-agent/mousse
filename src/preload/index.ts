@@ -1,6 +1,7 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
@@ -169,6 +170,11 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
+  fonts: {
+    /** A Google Fonts family's cached files; downloads them first only when `download` is true. */
+    loadGoogle: (family: string, role: FontRole, download: boolean): Promise<LoadedGoogleFont | null> =>
+      ipcRenderer.invoke('fonts:loadGoogle', family, role, download)
+  },
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
@@ -788,6 +794,12 @@ const api = {
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
+    /** `/clear`: the thread's next turn starts a fresh provider session with no earlier context. */
+    clearContext: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:clearContext', threadId),
+    /** `/compact`: summarizes the thread's context now; `focus` says what the summary keeps. */
+    compact: (threadId: string, focus?: string): Promise<void> => ipcRenderer.invoke('threads:compact', threadId, focus),
+    /** `/fork`: a new thread from the thread's latest finished turn, selected. */
+    fork: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
@@ -1054,6 +1066,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    },
+    /** How many threads need the person in this window, shown on the dock or taskbar icon. 0 clears it. */
+    setAttentionCount: (count: number): Promise<void> =>
+      ipcRenderer.invoke('app:attentionCount', count),
+    /** A thread the person asked to open from outside the window, such as by clicking its notification. */
+    onOpenThread: (cb: (threadId: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, threadId: string) => cb(threadId)
+      ipcRenderer.on('app:openThread', handler)
+      return () => ipcRenderer.removeListener('app:openThread', handler)
     }
   },
   /** Registry commands started outside the renderer: the application menu and keys typed in the browser surface. */
