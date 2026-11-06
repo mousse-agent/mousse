@@ -164,43 +164,159 @@ describe('Settings > Agents > Compact context', () => {
   })
   afterEach(() => rmSync(home, { recursive: true, force: true }))
 
-  const show = () => {
+  const show = (options: SettingsOptions = OPTIONS) => {
     const updates = vi.fn()
     const draw = () => act(() => root.render(createElement(AgentsSettings, {
       settings: store.get(),
-      options: OPTIONS,
+      options,
       projects: [],
       updateSettings: async (partial) => { updates(partial); store.set(partial); draw() }
     })))
     draw()
     return { updates }
   }
-  const trigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Compact context"]')!
+  const field = () => host.querySelector<HTMLInputElement>('#agents-context-compaction')!
   const pick = (label: string) => {
-    act(() => trigger().click())
+    act(() => field().click())
     const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent === label)!
     act(() => option.click())
   }
+  // Typing as React sees it: the native value setter, then an input event.
+  const type = (text: string) => act(() => {
+    const input = field()
+    input.focus()
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  const note = () => host.querySelector('.settings-compaction-note')
   const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().context
 
-  it('is one select, Off or a size; Off keeps the size, so turning it back on offers the same one', () => {
+  it('is one field, Off, Auto or a size; Off keeps the size, so turning it back on offers the same one', () => {
     store.set({ context: { compactionEnabled: true, compactionTokens: 512000 } })
     show()
     expect(host.querySelectorAll('[role="switch"][aria-label="Compact context"]')).toHaveLength(0)
-    expect(trigger().textContent).toContain('At 512k tokens')
-    pick('Off')
+    expect(field().getAttribute('role')).toBe('combobox')
+    expect(field().value).toBe('512k tokens')
+    act(() => field().click())
+    expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent))
+      .toEqual(['Off', 'Auto', '128k tokens', '256k tokens', '512k tokens', '1M tokens'])
+    act(() => document.querySelector<HTMLElement>('[role="option"]')!.click())
     expect(saved()).toEqual({ compactionEnabled: false, compactionTokens: 512000 })
-    expect(trigger().textContent).toContain('Off')
-    pick('At 512k tokens')
+    expect(field().value).toBe('Off')
+    pick('512k tokens')
     expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 512000 })
     pick('Auto')
     expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max' })
+    expect(field().value).toBe('Auto')
   })
 
-  it('choosing what is already saved writes nothing', () => {
+  it('typing 300k and Enter saves 300000 tokens', () => {
+    show()
+    type('300k')
+    press(field(), 'Enter')
+    expect(saved()).toEqual({ compactionEnabled: true, compactionTokens: 300_000 })
+    expect(field().value).toBe('300k tokens')
+    expect(field().getAttribute('aria-invalid')).toBeNull()
+  })
+
+  it('a saved size of your own is its own checked entry, and the highlight starts on it', () => {
+    store.set({ context: { compactionEnabled: true, compactionTokens: 300_000 } })
+    show()
+    act(() => field().click())
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    expect(options.map((option) => option.textContent))
+      .toEqual(['Off', 'Auto', '128k tokens', '256k tokens', '300k tokens', '512k tokens', '1M tokens'])
+    const checked = options.filter((option) => option.getAttribute('aria-selected') === 'true')
+    expect(checked.map((option) => option.textContent)).toEqual(['300k tokens'])
+    expect(checked[0]!.querySelector('.ui-select-check svg')).not.toBeNull()
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('300k tokens')
+    expect(field().getAttribute('aria-activedescendant')).toBe(checked[0]!.id)
+  })
+
+  it('the highlight starts on the saved preset, and on Off only when Off is saved', () => {
+    store.set({ context: { compactionEnabled: true, compactionTokens: 256_000 } })
+    show()
+    press(field(), 'ArrowDown')
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('256k tokens')
+    press(field(), 'Escape')
+    pick('Off')
+    press(field(), 'ArrowDown')
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('Off')
+  })
+
+  it('says it takes typing: a placeholder while the field is empty, and a tooltip', () => {
+    show()
+    expect(field().title).toBe('Pick a size or type one, like 300k')
+    type('')
+    expect(field().value).toBe('')
+    expect(field().placeholder).toBe('Type a size, like 300k')
+  })
+
+  it('a typed size is saved when the field loses focus too', () => {
+    show()
+    type('0.75m')
+    act(() => field().blur())
+    expect(saved().compactionTokens).toBe(750_000)
+  })
+
+  it('an invalid size saves nothing and says what fits; Escape puts back the saved choice', () => {
+    const { updates } = show()
+    type('10k')
+    press(field(), 'Enter')
+    expect(updates).not.toHaveBeenCalled()
+    expect(field().getAttribute('aria-invalid')).toBe('true')
+    expect(note()!.textContent).toBe('Enter 32k to 2M tokens, like 300k.')
+    expect(note()!.getAttribute('role')).toBe('alert')
+    expect(field().getAttribute('aria-describedby')).toBe(note()!.id)
+    press(field(), 'Escape')
+    expect(field().value).toBe('Auto')
+    expect(field().getAttribute('aria-invalid')).toBeNull()
+    expect(note()).toBeNull()
+    expect(saved().compactionTokens).toBe('model-max')
+  })
+
+  it('the arrows open the list and Enter picks the highlighted size', () => {
+    show()
+    press(field(), 'ArrowDown')
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(6)
+    press(field(), 'ArrowDown')
+    press(field(), 'Enter')
+    expect(saved().compactionTokens).toBe(128_000)
+  })
+
+  it('choosing or typing what is already saved writes nothing', () => {
     const { updates } = show()
     pick('Auto')
+    type('auto')
+    press(field(), 'Enter')
+    act(() => field().blur())
     expect(updates).not.toHaveBeenCalled()
+  })
+
+  it('says where the default model compacts when its window is known', () => {
+    const provider = {
+      id: 'anthropic',
+      label: 'Anthropic',
+      models: [{ id: 'opus', label: 'Opus 5.5', contextWindow: 1_000_000 }, { id: 'small', label: 'Small', contextWindow: 200_000 }]
+    } as unknown as LlmProviderOption
+    const options = { ...OPTIONS, llmProviders: [provider] }
+    store.set({ provider: { llmProvider: 'anthropic', model: 'opus' } })
+    show(options)
+    expect(note()!.textContent).toBe('Opus 5.5: compacts near its 1M limit')
+    type('300k')
+    press(field(), 'Enter')
+    expect(note()!.textContent).toBe('Opus 5.5: compacts at 300k of 1M')
+    store.set({ provider: { llmProvider: 'anthropic', model: 'small' } })
+    show(options)
+    expect(note()!.textContent).toBe("Above Small's 200k window: compacts at 184k")
+    pick('Off')
+    expect(note()).toBeNull()
+  })
+
+  it('shows no line when the default model does not state its window', () => {
+    store.set({ provider: { llmProvider: 'anthropic', model: 'opus' } })
+    show({ ...OPTIONS, llmProviders: [{ id: 'anthropic', label: 'Anthropic', models: [{ id: 'opus', label: 'Opus 5.5' }] } as unknown as LlmProviderOption] })
+    expect(note()).toBeNull()
   })
 })
 
