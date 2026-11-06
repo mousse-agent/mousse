@@ -20,7 +20,9 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
       plugins: [{ name: 'unrelated-displays', setup(builder) {
         // The layout assertions use real app CSS; Tailwind's build directives
         // are unrelated to these authored shell rules and need its Vite plugin.
-        builder.onLoad({ filter: /[/\\]styles[/\\]global\.css$/ }, args => ({ contents: readFileSync(args.path, 'utf8').replace('@import "tailwindcss";', '').replace(/^@source .*;\r?\n/gm, ''), loader: 'css' }))
+        // Left in, the @custom-variant block sits before the theme @imports and
+        // esbuild drops those imports, so no theme or acrylic rule would load.
+        builder.onLoad({ filter: /[/\\]styles[/\\]global\.css$/ }, args => ({ contents: readFileSync(args.path, 'utf8').replace('@import "tailwindcss";', '').replace(/^@source .*;\r?\n/gm, '').replace(/^@custom-variant [\s\S]*?^\}\r?\n/gm, ''), loader: 'css' }))
         // Vite's `?url` imports (dictation's noise-suppressor assets) only need a URL string here.
         builder.onResolve({ filter: /\?url$/ }, args => ({ path: args.path, namespace: 'asset-url' }))
         builder.onLoad({ filter: /.*/, namespace: 'asset-url' }, args => ({ contents: `export default ${JSON.stringify(args.path)}`, loader: 'js' }))

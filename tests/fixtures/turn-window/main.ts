@@ -147,6 +147,12 @@ async function main() {
 
     // 3b. A group of tool calls opens above the reading line, in the very turn being read: what is read holds still.
     const sentinelOf = (text: string) => execute<number | null>(`qa.targetTop(${JSON.stringify(text)})`)
+    // A group opens and closes with a short height animation (ui/Collapse); the reading line is read once it has ended,
+    // so a slow frame in the middle of the motion does not decide the result.
+    const groupSettled = async () => {
+      await waitFrames(`!document.querySelector(${JSON.stringify('[data-turn-key="u-400"] .ui-collapse[data-motion]')})`, 120)
+      await execute('qa.frames(3)')
+    }
     await execute('qa.goToRow(400, 0)')
     await execute('qa.frames(4)')
     await execute("qa.placeSentinel('anchor-paragraph-3', 100)")
@@ -158,18 +164,18 @@ async function main() {
     toolCards.startScrollTop = await scrollTop()
     toolCards.rowHeight = await execute<number>('qa.rowHeight(400)')
     await execute("qa.toggleGroup(400, 'first')")
-    await execute('qa.frames(5)')
+    await groupSettled()
     toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-3')
     toolCards.openGrowth = (await execute<number>('qa.rowHeight(400)')) - (toolCards.rowHeight as number)
     toolCards.openScrolled = (await scrollTop()) - (toolCards.startScrollTop as number)
     // The second group is below the reading line: nothing moves.
     const beforeSecond = await scrollTop()
     await execute("qa.toggleGroup(400, 'second')")
-    await execute('qa.frames(5)')
+    await groupSettled()
     toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-3')
     toolCards.secondScrollTopDelta = (await scrollTop()) - beforeSecond
     await execute("qa.toggleGroup(400, 'first')")
-    await execute('qa.frames(5)')
+    await groupSettled()
     toolCards.afterCloseFirst = await sentinelOf('anchor-paragraph-3')
 
     // 3c. Inside a block quote taller than the viewport: a fenced block above the reading line grows, the quote straddles the edge.

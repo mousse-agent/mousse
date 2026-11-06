@@ -15,7 +15,8 @@ import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdm
  * - `afterUnlink`, `afterRmdir`, `afterReadLink`: run right after a path is unlinked, a folder removed, or a `.git` read;
  * - `rmdirFails`: `rmdir` of that folder fails with ENOTEMPTY and removes nothing (Windows, with a delete still pending);
  * - `noBirthtime`: that folder's creation time is what Node gives where the file system keeps none (its change time, or 0);
- * - `nativeRealpath`: how `realpathSync.native` spells a path (as Windows does for a subst or mapped drive).
+ * - `nativeRealpath`: how `realpathSync.native` spells a path (as Windows does for a subst or mapped drive);
+ * - `reusedIno`: a folder made at that path gets the inode number the removed one had, as ext4 often gives it.
  */
 const late = vi.hoisted(() => ({
   afterUnlink: undefined as undefined | ((path: string) => void),
@@ -23,9 +24,11 @@ const late = vi.hoisted(() => ({
   afterReadLink: undefined as undefined | ((path: string) => void),
   rmdirFails: undefined as undefined | string,
   noBirthtime: undefined as undefined | { folder: string; as: 'ctime' | 'zero' },
-  nativeRealpath: undefined as undefined | ((path: string) => string)
+  nativeRealpath: undefined as undefined | ((path: string) => string),
+  reusedIno: undefined as undefined | { folder: string; ino: number }
 }))
-const withoutBirthtime = <T extends { birthtimeMs: number; ctimeMs: number; isDirectory(): boolean }>(path: unknown, stat: T): T => {
+const withoutBirthtime = <T extends { ino: number; birthtimeMs: number; ctimeMs: number; isDirectory(): boolean }>(path: unknown, stat: T): T => {
+  if (late.reusedIno && String(path) === late.reusedIno.folder && stat.isDirectory()) stat.ino = late.reusedIno.ino
   if (late.noBirthtime && String(path) === late.noBirthtime.folder && stat.isDirectory()) stat.birthtimeMs = late.noBirthtime.as === 'zero' ? 0 : stat.ctimeMs
   return stat
 }
@@ -53,7 +56,7 @@ const roots: string[] = []
 const undo: Array<() => void> = []
 const realPath = process.env.PATH
 afterEach(() => {
-  vi.restoreAllMocks(); Object.assign(late, { afterUnlink: undefined, afterRmdir: undefined, afterReadLink: undefined, rmdirFails: undefined, noBirthtime: undefined, nativeRealpath: undefined }); process.env.PATH = realPath
+  vi.restoreAllMocks(); Object.assign(late, { afterUnlink: undefined, afterRmdir: undefined, afterReadLink: undefined, rmdirFails: undefined, noBirthtime: undefined, nativeRealpath: undefined, reusedIno: undefined }); process.env.PATH = realPath
   for (const step of undo.splice(0)) step()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -269,7 +272,16 @@ test('a lock taken right after .git is removed puts .git back and keeps the fold
 test('a folder made again before Git unregisters the old one is named on every run, and goes once it is empty', async () => {
   const f = await trashedWithStagedWork()
   const value = Buffer.from('made after the checkout went\n')
-  late.afterRmdir = (path) => { if (path === f.worktree) { late.afterRmdir = undefined; mkdirSync(f.worktree); writeFileSync(join(f.worktree, 'new.txt'), value) } }
+  // The new folder keeps the old one's inode number, as ext4 often gives it, so only its creation time tells them apart.
+  late.reusedIno = { folder: f.worktree, ino: statSync(f.worktree).ino }
+  late.afterRmdir = (path) => {
+    if (path !== f.worktree) return
+    late.afterRmdir = undefined; mkdirSync(f.worktree)
+    // Written a moment after the folder was made, as by a person or tool: written in the same clock tick, the folder's change
+    // time would equal its creation time, which is how Node says a file system keeps no creation time.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    writeFileSync(join(f.worktree, 'new.txt'), value)
+  }
   const message = `Permanent delete stopped: files were written at ${f.worktree} after its worktree was deleted. They were kept.`
   await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message })
   await expect(f.coordinator().recover('task')).rejects.toMatchObject({ code: 'resource_purge_kept', message })
