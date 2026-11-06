@@ -430,6 +430,24 @@ describe('scheduled job webhook trigger', () => {
       expect(res.body).not.toMatch(/secret|ENOENT|whsec/)
     })
 
+    it('a stop while the listener is binding leaves no listener behind', async () => {
+      const probe = createHttpServer()
+      const port = await new Promise<number>((resolve) => probe.listen(0, '127.0.0.1', () => resolve((probe.address() as { port: number }).port)))
+      await new Promise<void>((resolve) => probe.close(() => resolve()))
+      const server = new ScheduledWebhookServer({ resolveSecret: () => undefined, trigger: () => { throw new Error('unused') }, recordRejection: () => undefined, accepted: () => undefined })
+      running.push(() => server.stop())
+      const starting = server.start(port)
+      await server.stop()
+      await starting
+      expect(server.getPort()).toBeNull()
+      const refused = await new Promise<boolean>((resolve) => {
+        const socket = netConnect({ host: '127.0.0.1', port })
+        socket.on('connect', () => { socket.destroy(); resolve(false) })
+        socket.on('error', () => resolve(true))
+      })
+      expect(refused).toBe(true)
+    })
+
     it('keeps accepted rows when refusals flood the log', () => {
       mkdirSync(join(home, 'scheduled'), { recursive: true })
       for (let i = 0; i < 3; i += 1) appendDelivery(home, 'job-a', { occurrenceId: `o${i}`, receivedAt: new Date(1000 + i).toISOString(), outcome: 'completed', bodyBytes: 1 })

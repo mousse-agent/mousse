@@ -1168,6 +1168,42 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     expect(calls).toBe(1)
   })
 
+  it('an edit that turns a job off or on pauses or resumes it', () => {
+    const job = due('toggled')
+    const off = store.updateJob(job.id, { enabled: false })
+    expect(off).toMatchObject({ enabled: false, state: 'paused' })
+    expect(off?.pausedAt).toBeTruthy()
+    expect(store.claimDueJobs()).toEqual([])
+
+    const on = store.updateJob(job.id, { enabled: true })
+    expect(on).toMatchObject({ enabled: true, state: 'scheduled' })
+    expect(on?.pausedAt).toBeUndefined()
+    expect(Date.parse(on!.nextRunAt!)).toBeGreaterThan(Date.now())
+    store.updateJob(job.id, { nextRunAt: PAST })
+    expect(store.claimDueJobs().map((claimed) => claimed.id)).toEqual([job.id])
+
+    // A job a pause already turned off resumes through the same edit.
+    const paused = due('paused-then-enabled')
+    store.pauseJob(paused.id)
+    expect(store.updateJob(paused.id, { enabled: true })).toMatchObject({ enabled: true, state: 'scheduled', pausedAt: undefined })
+  })
+
+  it('an edit that turns a running job off lets the run finish, then holds it paused', async () => {
+    const job = due('running-toggle')
+    const release = deferred<void>()
+    const service = serviceOf({ runIsolated: async () => { await release.promise; return { text: 'done', silent: false, transcriptWritten: true } } })
+    service.start()
+    await vi.waitFor(() => expect(store.getJob(job.id)?.state).toBe('running'))
+    const token = store.getJob(job.id)!.runClaim!.token
+    const off = store.updateJob(job.id, { enabled: false })
+    expect(off).toMatchObject({ state: 'running', enabled: false })
+    expect(off?.pausedAt).toBeTruthy()
+    expect(off?.runClaim?.token).toBe(token)
+    release.resolve()
+    await vi.waitFor(() => expect(store.getJob(job.id)?.lastStatus).toBe('ok'))
+    expect(store.getJob(job.id)).toMatchObject({ state: 'paused', enabled: false, runClaim: undefined })
+  })
+
   it('keeps a running job running when it is resumed, so its claim can still be finalized', async () => {
     const job = due('resumable')
     const release = deferred<void>()
