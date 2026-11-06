@@ -172,7 +172,7 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(cards.groups).toBe(1)
     expect(cards.nextGroups).toBe(1)
     expect(cards.firstGroupTop).toBeLessThan(0)
-    expect(cards.secondGroupTop).toBeGreaterThan(800)
+    expect(cards.secondGroupTop).toBeGreaterThan(cards.start + 40)
     expect(within(cards.start, 100)).toBe(true)
     expect(cards.openGrowth).toBeGreaterThan(100)
     expect(within(cards.afterOpenFirst, cards.start)).toBe(true)

@@ -147,6 +147,7 @@ async function main() {
     codeGrowth.scrollTopMoved = (await scrollTop()) - codeGrowth.scrollTop!
 
     // 3b. A group of tool calls opens above the reading line, in the very turn being read: what is read holds still.
+    // The reading line is near the end of the long answer, so the next turn's group is just below it and mounted.
     const sentinelOf = (text: string) => execute<number | null>(`qa.targetTop(${JSON.stringify(text)})`)
     // A group opens and closes with a short height animation (ui/Collapse); the reading line is read once it has ended,
     // so a slow frame in the middle of the motion does not decide the result.
@@ -156,28 +157,28 @@ async function main() {
     }
     await execute('qa.goToRow(400, 0)')
     await execute('qa.frames(4)')
-    await execute("qa.placeSentinel('anchor-paragraph-3', 100)")
+    await execute("qa.placeSentinel('anchor-paragraph-10', 100)")
     await execute('qa.frames(5)')
     const toolCards = { groups: await execute<number>('qa.groupCount(400)'), nextGroups: await execute<number>('qa.groupCount(401)') } as Record<string, number | null>
     toolCards.firstGroupTop = await execute<number | null>("qa.groupTop(400, 'first')")
     toolCards.secondGroupTop = await execute<number | null>("qa.groupTop(401, 'first')")
-    toolCards.start = await sentinelOf('anchor-paragraph-3')
+    toolCards.start = await sentinelOf('anchor-paragraph-10')
     toolCards.startScrollTop = await scrollTop()
     toolCards.rowHeight = await execute<number>('qa.rowHeight(400)')
     await execute("qa.toggleGroup(400, 'first')")
     await groupSettled()
-    toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterOpenFirst = await sentinelOf('anchor-paragraph-10')
     toolCards.openGrowth = (await execute<number>('qa.rowHeight(400)')) - (toolCards.rowHeight as number)
     toolCards.openScrolled = (await scrollTop()) - (toolCards.startScrollTop as number)
     // The next turn's group is below the reading line: nothing moves.
     const beforeSecond = await scrollTop()
     await execute("qa.toggleGroup(401, 'first')")
     await groupSettled()
-    toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterOpenSecond = await sentinelOf('anchor-paragraph-10')
     toolCards.secondScrollTopDelta = (await scrollTop()) - beforeSecond
     await execute("qa.toggleGroup(400, 'first')")
     await groupSettled()
-    toolCards.afterCloseFirst = await sentinelOf('anchor-paragraph-3')
+    toolCards.afterCloseFirst = await sentinelOf('anchor-paragraph-10')
 
     // 3c. Inside a block quote taller than the viewport: a fenced block above the reading line grows, the quote straddles the edge.
     await execute('qa.goToRow(450, 0)')
