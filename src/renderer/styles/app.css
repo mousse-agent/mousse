@@ -2807,30 +2807,30 @@ html[data-theme='high-contrast'] .chat-input-area {
   color: var(--ui-faint);
 }
 
-.context-usage-settings {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: -3px -4px -3px 0;
-  border-radius: var(--ui-menu-row-radius);
-  color: var(--ui-faint);
-  transition: background 0.12s, color 0.12s;
-}
-
-.context-usage-settings:hover {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
 /* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
 .context-usage-summary {
   margin-bottom: -4px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--ui-faint);
+}
+
+/* Holds the bar and the compaction mark, which stands 2px proud of the clipped bar. */
+.context-usage-bar-track {
+  position: relative;
+}
+
+/* Where the context compacts, in the text colour so it never reads as usage (accent) or as a fill
+   warning (amber, red). */
+.context-usage-bar-compaction {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-primary);
+  opacity: 0.7;
 }
 
 /* Filled against the model's capacity; the empty track is the room left. */
@@ -2886,6 +2886,34 @@ html[data-theme='high-contrast'] .chat-input-area {
 .context-usage-item-value {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+/* "Compacts at 300K" and its Change action, on one line. */
+.context-usage-compaction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-compaction-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The shared small ghost button (btn btn-ghost btn-sm), a little tighter to fit the line. */
+.context-usage-compaction-change {
+  flex-shrink: 0;
+  margin: -3px 0;
+  padding: 3px 10px;
+  color: var(--text-primary);
+}
+
+.context-usage-compaction-change:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .context-usage-notes {

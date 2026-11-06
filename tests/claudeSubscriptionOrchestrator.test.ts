@@ -117,6 +117,11 @@ it('persists Claude measurements, populates response metadata and counts usage a
     main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
     const differentModel = await main.orchestrator.getContextUsage({ draftInput: '', mode: 'agent' }, thread.id)
     expect(differentModel).toMatchObject({ source: 'estimated', limit: 0, modelName: 'sonnet' })
+    // Claude's context compacts at the Compact context size; Pi compacts its own near the window.
+    expect(differentModel.compactedByRuntime).toBeUndefined()
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'openai', model: 'gpt-5' })
+    const onPi = await main.orchestrator.getContextUsage({ draftInput: '', mode: 'agent' }, thread.id)
+    expect(onPi.compactedByRuntime).toBe(true)
   } finally {
     await main.stop()
     vi.restoreAllMocks()

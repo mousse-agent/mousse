@@ -8,7 +8,8 @@ import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
-import { ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
+import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
+import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
 import { useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
@@ -55,6 +56,8 @@ export interface ComposerFooterProps {
   modelReadOnly?: boolean
   onOpenSettings: () => void
   contextUsage: ContextUsageSnapshot
+  /** The Compact context setting; the ring marks where it compacts once it is read. */
+  contextCompactionSetting?: ContextSettings
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
   onAttachClick: () => void
@@ -100,6 +103,7 @@ export function ComposerFooter({
   modelReadOnly = false,
   onOpenSettings,
   contextUsage,
+  contextCompactionSetting,
   contextOpen,
   onContextOpenChange,
   onAttachClick,
@@ -131,6 +135,7 @@ export function ComposerFooter({
   const providerModels = selectedProvider?.models ?? []
   // No ring while the context's fill is unknown: a new chat, a provider that reports none, no capacity.
   const contextShown = showsContextGauge(selectedProvider) && contextUsageKnown(contextUsage)
+  const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
   // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
   useEffect(() => {
     if (!contextShown && contextOpen) onContextOpenChange(false)
@@ -307,6 +312,7 @@ export function ComposerFooter({
             open={contextOpen}
             onClose={() => onContextOpenChange(false)}
             usage={contextUsage}
+            compaction={compaction}
             providerId={selectedProviderId}
             anchorRef={contextBtnRef}
           />
