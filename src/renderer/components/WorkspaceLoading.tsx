@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
 import { RefreshCw } from '../lib/icons'
+import { LOADER_DELAY_MS, useShownAfter } from './ui/DelayedLoader'
 import './workspace-loading.css'
 
 /** A load that finishes sooner than this shows nothing, so a fast start does not flash a skeleton. */
-export const WORKSPACE_SKELETON_DELAY_MS = 160
+export const WORKSPACE_SKELETON_DELAY_MS = LOADER_DELAY_MS
 
 interface WorkspaceLoadingProps {
   error?: string | null
@@ -18,11 +18,7 @@ interface WorkspaceLoadingProps {
  * A failure shows one error block with Retry in the same place.
  */
 export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false }: WorkspaceLoadingProps) {
-  const [skeleton, setSkeleton] = useState(false)
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSkeleton(true), WORKSPACE_SKELETON_DELAY_MS)
-    return () => window.clearTimeout(timer)
-  }, [])
+  const skeleton = useShownAfter(WORKSPACE_SKELETON_DELAY_MS)
 
   return (
     <div className={`workspace-loading${conversationOnly ? ' workspace-loading-conversation-only' : ''}`}
