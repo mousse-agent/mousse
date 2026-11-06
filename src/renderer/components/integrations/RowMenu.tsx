@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { MoreHorizontal } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
+import './rowMenu.css'
 
 export interface RowMenuItem {
   label: string
@@ -11,10 +12,21 @@ export interface RowMenuItem {
   title?: string
   /** `data-action` on the item, for tests and scripted checks. */
   action?: string
+  /** A fuller name for assistive tech, when the label leaves out what the item acts on. */
+  ariaLabel?: string
 }
 
-/** Overflow menu for a settings row's secondary actions. */
-export function RowMenu({ label, items, disabled }: { label: string; items: RowMenuItem[]; disabled?: boolean }) {
+/**
+ * Overflow menu for a row's secondary actions. Choosing an item puts focus back on the button first, so a dialog the
+ * item opens returns focus there when it closes. `buttonClassName` replaces the settings icon button's look.
+ */
+export function RowMenu({ label, items, disabled, buttonClassName = 'settings-icon-btn', iconSize = 14 }: {
+  label: string
+  items: RowMenuItem[]
+  disabled?: boolean
+  buttonClassName?: string
+  iconSize?: number
+}) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -54,7 +66,7 @@ export function RowMenu({ label, items, disabled }: { label: string; items: RowM
     <button
       ref={buttonRef}
       type="button"
-      className="settings-icon-btn row-menu-btn"
+      className={`${buttonClassName} row-menu-btn`}
       aria-label={label}
       title="More actions"
       aria-haspopup="menu"
@@ -62,7 +74,7 @@ export function RowMenu({ label, items, disabled }: { label: string; items: RowM
       disabled={disabled}
       onClick={() => setOpen((value) => !value)}
     >
-      <MoreHorizontal size={14} aria-hidden="true" />
+      <MoreHorizontal size={iconSize} aria-hidden="true" />
     </button>
     {open && <FloatingPortal>
       <div ref={panelRef} className="row-menu" role="menu" aria-label={label} style={style}>
@@ -74,12 +86,8 @@ export function RowMenu({ label, items, disabled }: { label: string; items: RowM
           disabled={item.disabled}
           title={item.title}
           data-action={item.action}
-          onClick={() => {
-            // Focus goes back to "…" first, so a dialog the item opens returns there when it closes.
-            buttonRef.current?.focus()
-            setOpen(false)
-            item.onSelect()
-          }}
+          aria-label={item.ariaLabel}
+          onClick={() => { setOpen(false); buttonRef.current?.focus(); item.onSelect() }}
         >{item.label}</button>)}
       </div>
     </FloatingPortal>}
