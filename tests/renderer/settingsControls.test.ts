@@ -219,6 +219,39 @@ describe('Settings > Agents > Compact context', () => {
     expect(field().getAttribute('aria-invalid')).toBeNull()
   })
 
+  it('a saved size of your own is its own checked entry, and the highlight starts on it', () => {
+    store.set({ context: { compactionEnabled: true, compactionTokens: 300_000 } })
+    show()
+    act(() => field().click())
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    expect(options.map((option) => option.textContent))
+      .toEqual(['Off', 'Auto', '128k tokens', '256k tokens', '300k tokens', '512k tokens', '1M tokens'])
+    const checked = options.filter((option) => option.getAttribute('aria-selected') === 'true')
+    expect(checked.map((option) => option.textContent)).toEqual(['300k tokens'])
+    expect(checked[0]!.querySelector('.ui-select-check svg')).not.toBeNull()
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('300k tokens')
+    expect(field().getAttribute('aria-activedescendant')).toBe(checked[0]!.id)
+  })
+
+  it('the highlight starts on the saved preset, and on Off only when Off is saved', () => {
+    store.set({ context: { compactionEnabled: true, compactionTokens: 256_000 } })
+    show()
+    press(field(), 'ArrowDown')
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('256k tokens')
+    press(field(), 'Escape')
+    pick('Off')
+    press(field(), 'ArrowDown')
+    expect(document.querySelector('.ui-select-option.active')!.textContent).toBe('Off')
+  })
+
+  it('says it takes typing: a placeholder while the field is empty, and a tooltip', () => {
+    show()
+    expect(field().title).toBe('Pick a size or type one, like 300k')
+    type('')
+    expect(field().value).toBe('')
+    expect(field().placeholder).toBe('Type a size, like 300k')
+  })
+
   it('a typed size is saved when the field loses focus too', () => {
     show()
     type('0.75m')

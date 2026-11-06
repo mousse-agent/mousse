@@ -78,6 +78,11 @@
   outline: none;
 }
 
+.ui-combobox-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
 .ui-select-chevron-hit {
   display: inline-flex;
   flex-shrink: 0;

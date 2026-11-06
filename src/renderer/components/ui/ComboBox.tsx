@@ -20,6 +20,10 @@ export interface ComboBoxProps<T extends string = string> {
   ariaLabel?: string
   /** The line that describes the field, or its problem. */
   ariaDescribedBy?: string
+  /** Shown while the field is empty, to say it takes typing. */
+  placeholder?: string
+  /** Tooltip on the field. */
+  title?: string
   disabled?: boolean
 }
 
@@ -42,6 +46,8 @@ export function ComboBox<T extends string = string>({
   id,
   ariaLabel,
   ariaDescribedBy,
+  placeholder,
+  title,
   disabled
 }: ComboBoxProps<T>) {
   const [open, setOpen] = useState(false)
@@ -70,9 +76,10 @@ export function ComboBox<T extends string = string>({
   const openList = useCallback(() => {
     if (disabled || options.length === 0) return
     setMinWidth(boxRef.current?.offsetWidth ?? 0)
-    setActive(selectedIndex >= 0 ? selectedIndex : 0)
+    // Start on the checked entry; with none checked, nothing is highlighted until an arrow key.
+    setActive(selectedIndex >= 0 && !options[selectedIndex].disabled ? selectedIndex : -1)
     setOpen(true)
-  }, [disabled, options.length, selectedIndex])
+  }, [disabled, options, selectedIndex])
 
   const close = useCallback(() => {
     setOpen(false)
@@ -204,6 +211,8 @@ export function ComboBox<T extends string = string>({
           aria-activedescendant={open && active >= 0 ? optionId(active) : undefined}
           aria-describedby={ariaDescribedBy}
           aria-invalid={invalid || undefined}
+          placeholder={placeholder}
+          title={title}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}

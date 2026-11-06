@@ -73,6 +73,11 @@ export function ContextCompactionControl({ context, model, onSave }: {
   const value = context.compactionEnabled ? String(context.compactionTokens) : OFF
   const text = !context.compactionEnabled ? 'Off' : context.compactionTokens === AUTO ? 'Auto' : sizeText(context.compactionTokens)
   const note = invalid ? COMPACTION_SIZE_ERROR : compactionNote(context, model)
+  // A saved size of the person's own is listed among the presets, so the list marks what is saved.
+  const saved = context.compactionTokens
+  const sizes = typeof saved === 'number' && !CONTEXT_COMPACTION_PRESETS.includes(saved)
+    ? [...CONTEXT_COMPACTION_PRESETS, saved].sort((a, b) => a - b)
+    : CONTEXT_COMPACTION_PRESETS
   const save = (compactionTokens: ContextSettings['compactionTokens']) => {
     if (context.compactionEnabled && compactionTokens === context.compactionTokens) return
     onSave({ compactionEnabled: true, compactionTokens })
@@ -88,8 +93,10 @@ export function ContextCompactionControl({ context, model, onSave }: {
         options={[
           { value: OFF, label: 'Off' },
           { value: AUTO, label: 'Auto' },
-          ...CONTEXT_COMPACTION_PRESETS.map((tokens) => ({ value: String(tokens), label: sizeText(tokens) }))
+          ...sizes.map((tokens) => ({ value: String(tokens), label: sizeText(tokens) }))
         ]}
+        placeholder="Type a size, like 300k"
+        title="Pick a size or type one, like 300k"
         onChange={(next) => {
           if (next === OFF) onSave({ ...context, compactionEnabled: false })
           else save(next === AUTO ? AUTO : Number(next))
