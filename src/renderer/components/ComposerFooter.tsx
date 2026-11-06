@@ -3,13 +3,10 @@ import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
-import { listingServes } from '../../shared/providerInstances'
-import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import { shortModelName } from '../../shared/modelNames'
-import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
+import { ComposerRunMenu, modelPickerRunSettings, PermissionMenuButton, runFasterSpeed, runLevelText } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
+import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
 
@@ -147,38 +144,14 @@ export function ComposerFooter({
     modelButtonRef.current?.focus()
   }
 
-  // The picker's run settings column: the highlighted model's, with the chosen level carried over.
-  // With no level chosen (or one this model does not offer) none is carried: the next model runs at its own default.
-  const chosen = parseThinkingSuffixFromModelId(selectedModelId).effort
-  const carried = chosen && chosen === shownReasoningLevel(selection) ? chosen : undefined
-  const listingOf = (target: ModelPickTarget) => providers.find((entry) => listingServes(entry, { instanceId: target.instanceId, llmProvider: target.providerId }))
-  const resolveTarget = (target: ModelPickTarget): RunSettingsTarget => {
-    const pick = { providerId: target.providerId, modelId: target.modelId, models: listingOf(target)?.models ?? [] }
-    if (target.selected) return { ...pick, instanceId: target.instanceId, selected: true }
-    const { modelId, dropped } = carryReasoningLevel(pick, carried)
-    return { ...pick, modelId, instanceId: target.instanceId, selected: false, ...(dropped ? { dropped } : {}) }
-  }
-  const runSettings = {
-    pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
-    // Beside the list: the highlighted model's reasoning levels, whenever any model the picker lists has
-    // levels, so the column stays in place while you search or switch providers.
-    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
-      if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
-      return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
-    },
-    // Under the picker: the highlighted model's speed on the left, the thread's permission mode on the right.
-    footer: (target: ModelPickTarget | undefined) => {
-      const resolved = target ? resolveTarget(target) : undefined
-      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
-      if (!speeds && !permissionControl) return null
-      return <>
-        <div className="model-picker-footer-start">
-          {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onModelSelect} onClose={closePicker} /> : null}
-        </div>
-        {permissionControl ? <PermissionMenuButton control={permissionControl} onClose={closePicker} /> : null}
-      </>
-    }
-  }
+  // The picker's run settings: the highlighted model's level and speed, with the chosen level carried over.
+  const runSettings = modelPickerRunSettings({
+    providers,
+    selection,
+    onSelect: onModelSelect,
+    onClose: closePicker,
+    footerEnd: permissionControl ? <PermissionMenuButton control={permissionControl} onClose={closePicker} /> : undefined
+  })
   const emptyModelMenuStyle = useFloatingPosition({
     open: modelMenuOpen && providers.length === 0,
     anchorRef: modelButtonRef,

@@ -27,6 +27,7 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"
+          anchor="general-permission-mode"
           description={<span title="What an agent may do in a new chat without asking. Each chat can change it from the composer.">What an agent may do without asking in new chats.</span>}
           control={
             <Select
@@ -44,7 +45,8 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
       <SettingsGroup title="Notifications" icon={Bell}>
         <SettingsRow
           title="Completion sound"
-          description="Play the system sound when an agent finishes."
+          anchor="general-completion-sound"
+          description="Play a sound when an agent finishes or needs you."
           control={
             <Switch
               label="Completion sound"
@@ -55,6 +57,7 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
         />
         <SettingsRow
           title="All threads on my other computers"
+          anchor="general-remote-notifications"
           description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Notify when any thread on another computer needs you or finishes.</span>}
           control={
             <Switch
@@ -128,8 +131,12 @@ function AboutRow() {
     case 'installing':
       control = <button type="button" className="settings-btn" disabled><Loader2 size={14} className="spin" />Installing…</button>
       break
+    case 'disabled':
+      // Updates are off in this build: the version and the reason, no button that cannot work.
+      control = undefined
+      break
     default:
-      control = <button type="button" className="settings-btn" disabled={state.phase === 'disabled' || state.phase === 'checking'}
+      control = <button type="button" className="settings-btn" disabled={state.phase === 'checking'}
         onClick={() => void updateActions.check()}>
         <RefreshCw size={14} className={state.phase === 'checking' ? 'spin' : undefined} />
         {state.phase === 'checking' ? 'Checking…' : 'Check for updates'}
@@ -140,6 +147,7 @@ function AboutRow() {
     <>
       <SettingsRow
         title={version ? `Mousse ${version}` : 'Mousse'}
+        anchor="general-updates"
         description={status && <span role="status" className={updateStatusClass(state)}>{status}</span>}
         control={control}
       >
