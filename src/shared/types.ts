@@ -927,6 +927,11 @@ export interface ContextUsageSnapshot {
   modelName: string | null
   source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
+  /**
+   * The agent runtime compacts this context itself, near its window (Pi), so the Compact context
+   * size does not apply. Absent: Mousse compacts it at that size.
+   */
+  compactedByRuntime?: boolean
 }
 
 export interface PtyCreateRequest {

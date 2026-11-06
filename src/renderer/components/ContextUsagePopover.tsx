@@ -1,10 +1,10 @@
 import { forwardRef, useEffect, useRef } from 'react'
-import { Settings } from '../lib/icons'
-import { useAppStore } from '../stores/appStore'
 import { modelLabel } from '../../shared/modelChoice'
 import { resolveModelChoice } from '../lib/modelChoice'
 import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../shared/types'
+import { contextCompactionPoint, type CompactionSetting } from '../../shared/contextCompaction'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { openSettingsSection } from '../lib/settingsNavigation'
 
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -41,25 +41,55 @@ export function contextUsageSummary(usage: ContextUsageSnapshot): string {
   return `${percent} · ${approximate}${formatTokenCount(usage.used)} of ${formatTokenCount(usage.limit)}`
 }
 
+/** Where this context compacts: at a size, near the window's limit, or never. */
+export type ContextCompaction = { kind: 'at'; tokens: number } | { kind: 'near-limit' } | { kind: 'off' }
+
+/**
+ * The context's compaction under the Compact context setting, worked out as the daemon does. A
+ * runtime that compacts its own context (Pi) only takes the on/off: it compacts near its limit.
+ */
+export function contextCompaction(setting: CompactionSetting, usage: ContextUsageSnapshot): ContextCompaction {
+  if (!setting.compactionEnabled) return { kind: 'off' }
+  if (usage.compactedByRuntime) return { kind: 'near-limit' }
+  const tokens = contextCompactionPoint(setting, usage.limit > 0 ? usage.limit : undefined)
+  return tokens === undefined ? { kind: 'near-limit' } : { kind: 'at', tokens }
+}
+
+/** "Compacts at 300K", "Compacts near the limit" or "Compaction off". */
+export function contextCompactionText(compaction: ContextCompaction): string {
+  if (compaction.kind === 'off') return 'Compaction off'
+  if (compaction.kind === 'near-limit') return 'Compacts near the limit'
+  return `Compacts at ${formatTokenCount(compaction.tokens)}`
+}
+
+/** Where the ring marks the compaction point, as a share of the window; none when it is not inside it. */
+export function compactionTickFraction(compaction: ContextCompaction | undefined, usage: ContextUsageSnapshot): number | undefined {
+  if (compaction?.kind !== 'at' || !(usage.limit > 0) || compaction.tokens >= usage.limit) return undefined
+  return compaction.tokens / usage.limit
+}
+
 interface ContextUsagePopoverProps {
   open: boolean
   onClose: () => void
   usage: ContextUsageSnapshot
+  /** Where the context compacts; no line before the setting is read. */
+  compaction?: ContextCompaction
   /** The selected provider, to name the measured model as the picker does. */
   providerId: string
   anchorRef: React.RefObject<HTMLElement | null>
 }
 
 /**
- * What fills the model's context: the share and totals, a bar against capacity, the breakdown, and a
- * link to the compaction settings. Only opened for a snapshot where `contextUsageKnown` holds.
+ * What fills the model's context: the share and totals, a bar against capacity, the breakdown, and
+ * where it compacts with a way to change that. Only opened for a snapshot where `contextUsageKnown` holds.
  */
 export function ContextUsagePopover({
   open,
   onClose,
   usage,
   providerId,
-  anchorRef
+  anchorRef,
+  compaction
 }: ContextUsagePopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null)
   const floatingStyle = useFloatingPosition({
@@ -100,11 +130,10 @@ export function ContextUsagePopover({
 
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
   const barScale = Math.max(usage.limit, segmentTotal)
-  const openSettings = () => {
+  // Settings, Agents, focused on the Compact context row.
+  const changeCompaction = () => {
     onClose()
-    window.location.hash = 'settings-context-compaction'
-    useAppStore.getState().setSettingsOpen(true)
-    window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'context' }))
+    openSettingsSection('context')
   }
 
   return (
@@ -121,15 +150,6 @@ export function ContextUsagePopover({
           {usage.modelName && (
             <span className="context-usage-model" title={usage.modelName}>{modelLabel(resolveModelChoice({ provider: providerId, model: usage.modelName }))}</span>
           )}
-          <button
-            type="button"
-            className="context-usage-settings"
-            aria-label="Context compaction settings"
-            title="Compaction settings. Context compacts at your threshold, sometimes sooner to leave room for the reply."
-            onClick={openSettings}
-          >
-            <Settings size={14} />
-          </button>
         </div>
 
         <div className="context-usage-summary">{contextUsageSummary(usage)}</div>
@@ -157,6 +177,21 @@ export function ContextUsagePopover({
           ))}
         </ul>
 
+        {compaction && (
+          <div className="context-usage-compaction">
+            <span className="context-usage-compaction-text">{contextCompactionText(compaction)}</span>
+            <button
+              type="button"
+              className="context-usage-compaction-change"
+              title="Settings › Agents › Compact context"
+              aria-label="Change Compact context"
+              onClick={changeCompaction}
+            >
+              Change
+            </button>
+          </div>
+        )}
+
         {(usage.processedTokens !== undefined || usage.source === 'legacy-estimated') && (
           <div className="context-usage-notes">
             {usage.processedTokens !== undefined && (
@@ -175,17 +210,25 @@ export function ContextUsagePopover({
 interface ContextUsageRingProps {
   /** A snapshot where `contextUsageKnown` holds; the caller renders no ring otherwise. */
   usage: ContextUsageSnapshot
+  /** Where the context compacts: a point inside the window gets a tick on the ring. */
+  compaction?: ContextCompaction
   onClick: () => void
   active: boolean
 }
 
 export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingProps>(
-  function ContextUsageRing({ usage, onClick, active }, ref) {
+  function ContextUsageRing({ usage, compaction, onClick, active }, ref) {
     const radius = 9
     const circumference = 2 * Math.PI * radius
     const percent = Math.min(100, Math.max(0, usage.percent))
     const strokeOffset = circumference - (percent / 100) * circumference
-    const summary = contextUsageSummary(usage)
+    const tickFraction = compactionTickFraction(compaction, usage)
+    // The tick crosses the ring's stroke, clockwise from the top like the arc.
+    const tickAngle = tickFraction === undefined ? 0 : tickFraction * 2 * Math.PI - Math.PI / 2
+    const tickAt = (r: number) => ({ x: 10 + r * Math.cos(tickAngle), y: 10 + r * Math.sin(tickAngle) })
+    const summary = tickFraction === undefined || compaction?.kind !== 'at'
+      ? contextUsageSummary(usage)
+      : `${contextUsageSummary(usage)} · compacts at ${formatTokenCount(compaction.tokens)}`
 
     return (
       <button
@@ -217,6 +260,17 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
             strokeDashoffset={strokeOffset}
             transform="rotate(-90 10 10)"
           />
+          {tickFraction !== undefined && (
+            <line
+              className="context-usage-ring-tick"
+              x1={tickAt(6.5).x}
+              y1={tickAt(6.5).y}
+              x2={tickAt(10.5).x}
+              y2={tickAt(10.5).y}
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          )}
         </svg>
       </button>
     )

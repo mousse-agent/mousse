@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from '../lib/icons'
-import type { LlmProviderOption } from '../../shared/settings'
+import { normalizeContextSettings, type LlmProviderOption } from '../../shared/settings'
+import type { CompactionSetting } from '../../shared/contextCompaction'
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
@@ -274,6 +275,7 @@ export function OrchestratorChat() {
   )
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
+  const [contextCompactionSetting, setContextCompactionSetting] = useState<CompactionSetting>()
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -509,6 +511,12 @@ export function OrchestratorChat() {
     ])
     setCatalog(options.llmProviders)
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
+    const compaction = normalizeContextSettings(settings.context)
+    setContextCompactionSetting((current) =>
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+        ? current
+        : compaction
+    )
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setProfileDefault((current) =>
       current?.llmProvider === settings.provider.llmProvider &&
@@ -1361,6 +1369,7 @@ export function OrchestratorChat() {
               onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
               onOpenSettings={() => setSettingsOpen(true)}
               contextUsage={contextUsage}
+              contextCompactionSetting={contextCompactionSetting}
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}

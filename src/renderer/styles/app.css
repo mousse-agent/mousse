@@ -2683,6 +2683,7 @@ html.platform-darwin .titlebar-left {
 
 /* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */
 .context-usage-ring {
+  overflow: visible;
   color: var(--accent-hover);
 }
 
@@ -2701,6 +2702,12 @@ html.platform-darwin .titlebar-left {
 
 .context-usage-ring-arc {
   stroke: currentColor;
+}
+
+/* Where the context compacts: a quiet tick across the stroke (a hair past the ring), in the text colour so it reads on the arc and the track. */
+.context-usage-ring-tick {
+  stroke: var(--text-secondary);
+  stroke-opacity: 0.7;
 }
 
 /* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
@@ -2749,24 +2756,6 @@ html.platform-darwin .titlebar-left {
   text-align: right;
   font-size: 11px;
   color: var(--ui-faint);
-}
-
-.context-usage-settings {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: -3px -4px -3px 0;
-  border-radius: var(--ui-menu-row-radius);
-  color: var(--ui-faint);
-  transition: background 0.12s, color 0.12s;
-}
-
-.context-usage-settings:hover {
-  background: var(--ui-hover);
-  color: var(--text-primary);
 }
 
 /* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
@@ -2830,6 +2819,41 @@ html.platform-darwin .titlebar-left {
 .context-usage-item-value {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+/* "Compacts at 300K" and its Change action, on one line. */
+.context-usage-compaction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-compaction-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.context-usage-compaction-change {
+  flex-shrink: 0;
+  margin: -3px -6px -3px 0;
+  padding: 3px 6px;
+  border-radius: var(--ui-menu-row-radius);
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 0.12s, color 0.12s;
+}
+
+.context-usage-compaction-change:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.context-usage-compaction-change:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: 1px;
 }
 
 .context-usage-notes {

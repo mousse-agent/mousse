@@ -7892,8 +7892,11 @@ export class OrchestratorService extends EventEmitter {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
+      let driver: string | undefined
       try {
-        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
+        const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
+        caps = resolved.caps
+        driver = resolved.driver
       } catch {
         caps = undefined
       }
@@ -7921,7 +7924,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      return {
+        ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
+        // Pi compacts its own session near the window (only the on/off is passed to it); the other
+        // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
+        ...(driver === 'pi' ? { compactedByRuntime: true } : {})
+      }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
