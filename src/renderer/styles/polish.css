@@ -907,6 +907,7 @@ html .composer-workspace-menu .composer-workspace-menu-item {
 }
 
 html .threads-context-menu-item:hover,
+html .threads-context-menu-item:focus-visible,
 html .composer-workspace-menu-item:hover,
 html .composer-workspace-menu-item:focus {
   background: var(--ui-hover);
@@ -916,7 +917,8 @@ html .threads-context-menu-item-danger {
   color: var(--danger);
 }
 
-html .threads-context-menu-item-danger:hover {
+html .threads-context-menu-item-danger:hover,
+html .threads-context-menu-item-danger:focus-visible {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
 }

@@ -16,7 +16,7 @@ export interface QuickAction {
 export const QUICK_ACTION_KINDS: QuickActionKind[] = ['send-current', 'send-new-chat', 'bash']
 
 export function quickActionKindLabel(kind: QuickActionKind): string {
-  if (kind === 'send-new-chat') return 'New chat + send'
+  if (kind === 'send-new-chat') return 'New thread + send'
   if (kind === 'bash') return 'Run command'
   return 'Send here'
 }

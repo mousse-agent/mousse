@@ -86,7 +86,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
 
   const worktreeEnabled = Boolean(workspace.projectId && workspace.worktreeEnabled)
   return (
-    <div className="composer-workspace-toolbar" role="group" aria-label="New chat workspace">
+    <div className="composer-workspace-toolbar" role="group" aria-label="New thread workspace">
       <button
         ref={triggerRef}
         type="button"
