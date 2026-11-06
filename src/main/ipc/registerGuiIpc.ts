@@ -384,7 +384,7 @@ export function registerGuiIpc(
 
   // Bot names seen in the Bot UI's replies, and the bot rows already announced, for bot notifications.
   const botNotifications = new BotNotificationIndex()
-  const BOT_NAMED_REPLIES = new Set(['bots.list', 'bots.create', 'bots.get', 'bots.update', 'bots.pause', 'bots.resume'])
+  const BOT_NAMED_REPLIES = new Set(['bots.personal.list', 'bots.create', 'bots.get', 'bots.update', 'bots.personal.pause', 'bots.personal.resume'])
   registerHandler('platform:request', async (event, request: unknown): Promise<PlatformResponse<unknown>> => {
     try {
       if (!request || typeof request !== 'object' || Array.isArray(request)) {

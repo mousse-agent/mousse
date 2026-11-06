@@ -117,7 +117,6 @@ import type {
   RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
-import type { BotEscalationSummary } from '../shared/bots/personal/escalation'
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
@@ -690,12 +689,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
-    },
-    /** The form editor's wall event; the daemon no longer sends it (asks arrive as `onMessage`). TODO(WP4): remove with `BotsWorkspace`. */
-    onEscalation: (cb: (escalation: BotEscalationSummary) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, escalation: BotEscalationSummary) => cb(escalation)
-      ipcRenderer.on('bots:escalation', handler)
-      return () => ipcRenderer.removeListener('bots:escalation', handler)
     }
   },
   skills: {

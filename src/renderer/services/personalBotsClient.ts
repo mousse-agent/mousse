@@ -30,13 +30,13 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
   const call = <M extends BotsPersonalV2Method>(method: M, params: BotsPersonalV2Params<M>) =>
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
-    list: async () => (await call('bots.list', {})).bots,
+    list: async () => (await call('bots.personal.list', {})).bots,
     create: async ({ look, name, description, clientRequestId }) =>
       (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
-    pause: async (botId) => (await call('bots.pause', { botId })).bot,
-    resume: async (botId) => (await call('bots.resume', { botId })).bot,
+    pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
+    resume: async (botId) => (await call('bots.personal.resume', { botId })).bot,
     remove: (botId) => call('bots.delete', { botId }),
     messages: (botId, page = {}) => call('bots.chat.list', { botId, ...page }),
     send: async (botId, text, clientRequestId, attachments) =>
