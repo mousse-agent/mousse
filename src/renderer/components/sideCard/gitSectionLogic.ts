@@ -630,6 +630,40 @@ export function pullRequestReadThreadId(ownThreadId: string | null, workspaceThr
   return ownThreadId !== null && workspaceThreadId === ownThreadId ? ownThreadId : null
 }
 
+/** What the Push, Commit and Create PR row offers for one folder and branch, wherever it is shown. */
+export interface GitActionRowModel {
+  branch: string | null
+  /** What Create PR, or "Commit, push and open PR", opens the form for; null without a branch. */
+  createScope: PullRequestScope | null
+  /** The Create PR button, when the branch could get a pull request; null when it has one or never can. */
+  createRow: PullRequestCreateRow | null
+  pushButton: PushButtonModel | null
+  availability: GitActionAvailability
+  fileCount: number
+}
+
+export function gitActionRowModel(input: {
+  path: string
+  scope: Pick<GitScope, 'workspaceThreadId'>
+  projectId: string | null
+  ownThreadId: string | null
+  status: GitStatusSnapshot | null
+  commitCount: number
+  pullRequest: GitPullRequestLookup | null
+  pullRequestPushTarget?: PullRequestPushTarget | null
+}): GitActionRowModel {
+  const branch = input.status?.branch ?? null
+  const row = pullRequestRow(input.pullRequest, input.status)
+  return {
+    branch,
+    createScope: pullRequestScope({ path: input.path, branch, projectId: input.projectId, ownThreadId: input.ownThreadId }),
+    createRow: row?.kind === 'create' ? row : null,
+    pushButton: pushButtonModel(input.status, input.commitCount, input.scope, input.pullRequestPushTarget ?? null),
+    availability: gitActionAvailability(input.status, input.pullRequest, input.commitCount, input.scope),
+    fileCount: changedFileCount(input.status)
+  }
+}
+
 export interface PushButtonModel {
   label: 'Push' | 'Publish'
   /** Unpushed commits for the badge; null for a branch with no upstream. */
@@ -898,6 +932,16 @@ const MERGE_METHOD_ACTIONS: Record<PullRequestMergeMethod, string> = {
  * it. `method` is undefined while it is read and null when it could not be (or the computer is too old to say); the
  * merge then goes without one, and the computer that merges uses the repository's default, else squash.
  */
+/**
+ * The pull request a merge or close question was asked about is no longer the one shown: another number, a new head,
+ * or it stopped being open. The question then needs a fresh look before it can run.
+ */
+export function pullRequestChangedSince(asked: PullRequestFoundRow, now: PullRequestFoundRow): boolean {
+  if (asked.value !== now.value || asked.url !== now.url) return true
+  if ((asked.merge === null) !== (now.merge === null)) return true
+  return (asked.merge?.headSha ?? null) !== (now.merge?.headSha ?? null)
+}
+
 export function mergeConfirmation(number: string, base: string, method: PullRequestMergeMethod | null | undefined): { text: string; action: string } {
   const into = base ? ` into ${base}` : ''
   if (method === undefined) return { text: `Merge ${number}${into}?`, action: 'Merge' }
@@ -1028,7 +1072,8 @@ export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
 /** Why mutating Git controls are disabled while one action runs. */
 export const GIT_BUSY_REASON = 'Another Git action is running'
 
-export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'merge' | 'close' | 'init'
+/** `files` is a stage, unstage or discard and `sync` a fetch, pull or abort, both run from the Git panel. */
+export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'merge' | 'close' | 'init' | 'files' | 'sync'
 
 export interface GitActionLock {
   disabled: boolean
