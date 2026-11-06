@@ -5,13 +5,16 @@ import type { PlatformRequestMethod } from '../../shared/platform'
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
 
-/** Why phone requests can't be approved from this computer yet, in one line; undefined when they can. */
+/**
+ * Why phone requests can't be approved from this computer yet, in one line; undefined when they can.
+ * Shown above This device on Settings → Devices, where each step is done.
+ */
 export function phonesBlocked(status: NetStatus | undefined, plus: PlusStatus | undefined): string | undefined {
   if (plus?.reconnecting) return 'Reconnecting to Mousse ID. Phones can be added once it is back.'
   if (!plus?.connected) return 'Sign in to add phones.'
-  if (!status?.enabled || !status.self) return 'Turn on networking under Devices to add phones.'
-  if (status.keystore !== 'unlocked') return 'Unlock this device under Devices to add phones.'
-  if (!status.protected) return 'Protect network keys under Devices to add phones.'
+  if (!status?.enabled || !status.self) return 'Turn on networking below to add phones.'
+  if (status.keystore !== 'unlocked') return 'Unlock this device below to add phones.'
+  if (!status.protected) return 'Protect network keys below to add phones.'
   if (!status.self.isAuthority) return 'Add phones from the device that owns this identity.'
   return undefined
 }
