@@ -362,7 +362,7 @@ export function EscalationRow({ escalation, botName, busy, onAnswer }: {
       <strong>{botName ?? escalation.botId}</strong> asks: {escalation.permissionText}
     </div>
     {escalation.reason && <p className="bots__muted">{escalation.reason}</p>}
-    <p className="bots__muted">Waits until {new Date(escalation.expiresAt).toLocaleString()}</p>
+    {escalation.expiresAt ? <p className="bots__muted">Waits until {new Date(escalation.expiresAt).toLocaleString()}</p> : null}
     <div className="bots__actions">
       {canAllowOnce
         ? <button type="button" className="btn btn-sm btn-primary" disabled={busy} title={`Only for this run: ${escalation.permissionText}`} onClick={() => budget ? onAnswer('allow_once', budget.amount) : onAnswer('allow_once')}>Allow once</button>

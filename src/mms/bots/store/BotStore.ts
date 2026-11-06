@@ -1,9 +1,14 @@
+import { readdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotActivationTrigger, BotManifest } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelChoice, BotSchedule } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
-import type { BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
+import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
+import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
+import type { ProviderSelection } from '../../../shared/harness/types'
+import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 
 /**
  * `<profileHome>/bots/bots.db` (PR 6 §4): personal bots' grants, threads, activations, dispatches
@@ -177,8 +182,105 @@ CREATE TABLE bot_schedule_state(
 ) STRICT;
 ALTER TABLE bot_activations ADD COLUMN reply_status TEXT;
 `
+  },
+  {
+    // Bot Phase 1 (§5.1.2): the chat, schedules owned by bots.db, pause and failures on the
+    // registry, lanes and model overrides on activations, and asks that never expire (one open ask
+    // per permission). Open escalations of the form editor are withdrawn. The memory tables
+    // (bot-context.md §3) are created by the same migration, so the journal starts with the chat.
+    version: 4,
+    sql: `
+CREATE TABLE bot_messages(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  bot_id TEXT NOT NULL,
+  at TEXT NOT NULL,
+  author TEXT NOT NULL CHECK(author IN ('owner','bot')),
+  kind TEXT NOT NULL CHECK(kind IN ('text','run_report','notice','error')),
+  text TEXT NOT NULL,
+  chips_json TEXT NOT NULL DEFAULT '[]',
+  ask_id TEXT,
+  error_json TEXT,
+  activation_id TEXT,
+  attachments_json TEXT,
+  client_request_id TEXT UNIQUE
+) STRICT;
+CREATE INDEX bot_messages_bot ON bot_messages(bot_id, seq);
+CREATE INDEX bot_messages_ask ON bot_messages(ask_id);
+CREATE TABLE bot_schedules(
+  id TEXT NOT NULL,
+  bot_id TEXT NOT NULL,
+  when_json TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  label TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by IN ('owner','bot')),
+  created_at TEXT NOT NULL,
+  removed_at TEXT,
+  PRIMARY KEY(bot_id, id)
+) STRICT;
+ALTER TABLE bot_registry ADD COLUMN paused_reason TEXT;
+ALTER TABLE bot_registry ADD COLUMN paused_until TEXT;
+ALTER TABLE bot_registry ADD COLUMN failure_streak INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_registry ADD COLUMN error_json TEXT;
+ALTER TABLE bot_registry ADD COLUMN read_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_registry ADD COLUMN model_json TEXT;
+ALTER TABLE bot_activations ADD COLUMN lane TEXT NOT NULL DEFAULT 'run' CHECK(lane IN ('chat','run'));
+ALTER TABLE bot_activations ADD COLUMN model_override_json TEXT;
+ALTER TABLE bot_activations ADD COLUMN reload_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_activations ADD COLUMN selection_json TEXT;
+CREATE INDEX bot_activations_by_lane ON bot_activations(bot_id, lane, status, created_at);
+CREATE TABLE bot_escalations_v4(
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  tool_call_id TEXT,
+  kind TEXT NOT NULL CHECK(kind IN ('escalate','gate','budget')),
+  permission_json TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('open','allowed_bot','allowed_once','denied','expired','cancelled','withdrawn')),
+  amount REAL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  answered_at TEXT,
+  applied_at TEXT,
+  mode TEXT NOT NULL DEFAULT 'wall' CHECK(mode IN ('wall','ask')),
+  fingerprint TEXT NOT NULL,
+  title TEXT,
+  note TEXT,
+  message_id TEXT,
+  cooldown_until TEXT
+) STRICT;
+INSERT INTO bot_escalations_v4(id, bot_id, activation_id, dispatch_n, tool_call_id, kind, permission_json, reason, status, amount, created_at, expires_at, answered_at, applied_at, mode, fingerprint)
+  SELECT e.id, COALESCE(a.bot_id, ''), e.activation_id, e.dispatch_n, e.tool_call_id, e.kind, e.permission_json, e.reason,
+    CASE WHEN e.status = 'open' THEN 'withdrawn' ELSE e.status END, e.amount, e.created_at, e.expires_at,
+    CASE WHEN e.status = 'open' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE e.answered_at END, e.applied_at, 'wall', e.permission_json
+  FROM bot_escalations e LEFT JOIN bot_activations a ON a.id = e.activation_id;
+DROP TABLE bot_escalations;
+ALTER TABLE bot_escalations_v4 RENAME TO bot_escalations;
+CREATE INDEX bot_escalations_by_activation ON bot_escalations(activation_id, status);
+CREATE INDEX bot_escalations_by_bot ON bot_escalations(bot_id, status);
+CREATE UNIQUE INDEX bot_escalations_open ON bot_escalations(bot_id, fingerprint) WHERE status = 'open';
+-- An activation that waited on a withdrawn wall would wait forever: it ends with the upgrade.
+UPDATE bot_activations SET status = 'cancelled', end_reason = 'bots_upgraded', ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'waiting_grant';
+${BOT_MEMORY_SCHEMA_SQL}
+`
   }
 ]
+
+/** The `bots.db` schema version this build writes. */
+export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
+/** How many `bots.db.pre-v<n>` copies are kept beside the database. */
+const KEPT_MIGRATION_COPIES = 2
+
+/** Why a bot's schedules are paused: the owner's Pause, three failed runs, or a usage limit until `pausedUntil`. */
+export type BotPauseReason = 'owner' | 'failures' | 'usage_limit'
+
+/** The stuck error a bot shows, with what caused it (internal, never in a payload). */
+export interface BotStoredError {
+  code: string
+  error: BotError
+}
 
 export interface BotRegistryRow {
   botId: string
@@ -186,6 +288,89 @@ export interface BotRegistryRow {
   homeThreadId: string | null
   createdAt: string
   deletedAt: string | null
+  pausedReason: BotPauseReason | null
+  pausedUntil: string | null
+  failureStreak: number
+  error: BotStoredError | null
+  readSeq: number
+  /** The last resolved selection (internal; never in a UI payload). */
+  model: { selection: ProviderSelection; activationId: string } | null
+}
+
+function registryOf(row: Row): BotRegistryRow {
+  return {
+    botId: row.bot_id as string,
+    revision: str(row.revision),
+    homeThreadId: str(row.home_thread_id),
+    createdAt: row.created_at as string,
+    deletedAt: str(row.deleted_at),
+    pausedReason: str(row.paused_reason) as BotPauseReason | null,
+    pausedUntil: str(row.paused_until),
+    failureStreak: num(row.failure_streak) ?? 0,
+    error: json<BotStoredError>(row.error_json),
+    readSeq: num(row.read_seq) ?? 0,
+    model: json<BotRegistryRow['model']>(row.model_json)
+  }
+}
+
+/** One row of `bot_messages`. */
+export interface BotMessageRow {
+  seq: number
+  id: string
+  botId: string
+  at: string
+  author: 'owner' | 'bot'
+  kind: BotMessageKind
+  text: string
+  chips: BotChip[]
+  askId: string | null
+  error: BotError | null
+  activationId: string | null
+  attachments: Array<{ name: string; path: string }> | null
+  clientRequestId: string | null
+}
+
+function messageOf(row: Row): BotMessageRow {
+  return {
+    seq: num(row.seq)!,
+    id: row.id as string,
+    botId: row.bot_id as string,
+    at: row.at as string,
+    author: row.author as BotMessageRow['author'],
+    kind: row.kind as BotMessageKind,
+    text: row.text as string,
+    chips: json<BotChip[]>(row.chips_json) ?? [],
+    askId: str(row.ask_id),
+    error: json<BotError>(row.error_json),
+    activationId: str(row.activation_id),
+    attachments: json<BotMessageRow['attachments']>(row.attachments_json),
+    clientRequestId: str(row.client_request_id)
+  }
+}
+
+/** One of a bot's schedules (`bot_schedules`), the only place schedules live. */
+export interface BotScheduleRow {
+  id: string
+  botId: string
+  when: BotSchedule['when']
+  prompt: string
+  label: string
+  createdBy: 'owner' | 'bot'
+  createdAt: string
+  removedAt: string | null
+}
+
+function scheduleOf(row: Row): BotScheduleRow {
+  return {
+    id: row.id as string,
+    botId: row.bot_id as string,
+    when: JSON.parse(row.when_json as string) as BotSchedule['when'],
+    prompt: row.prompt as string,
+    label: row.label as string,
+    createdBy: row.created_by as BotScheduleRow['createdBy'],
+    createdAt: row.created_at as string,
+    removedAt: str(row.removed_at)
+  }
 }
 
 export interface BotGrantRow {
@@ -210,6 +395,14 @@ export interface BotActivationRow {
   createdAt: string
   endedAt: string | null
   endReason: string | null
+  /** `chat`: the owner's chat on the home thread; `run`: a run on its own thread. */
+  lane: BotLane
+  /** `set_depth`/`use_model` for this activation only (internal). */
+  modelOverride: BotModelChoice | null
+  /** The model changed for this activation: its next dispatch resolves it again. */
+  reloadPending: boolean
+  /** The model this activation runs on, resolved at its first dispatch (internal; never in a payload). */
+  selection: ProviderSelection | null
 }
 
 export interface BotDispatchRow {
@@ -231,40 +424,60 @@ export interface BotDispatchRow {
   outcome: string | null
   settledBy: 'run' | 'startup' | null
   /** How a continuation is sent (the run it continues, the owner's acknowledgement), so a resend matches it. */
-  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean }
+  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean; /** A retry on another model after a usage limit. */ usageRetry?: boolean }
 }
 
 export interface BotEscalationRow {
   id: string
+  botId: string
   activationId: string
   dispatchN: number
   toolCallId: string | null
   kind: BotWallKind
-  permission: BotPermissionRequest
+  /** What is asked for: a permission, or an ask that grants nothing (`export_memory`). */
+  permission: BotAskRequest
   reason: string
   status: BotEscalationStatus
   amount: number | null
   createdAt: string
-  expiresAt: string
+  /** Asks never expire (null); only rows of older builds carry a time. */
+  expiresAt: string | null
   answeredAt: string | null
   appliedAt: string | null
+  /** `wall`: a chat turn waits for the answer; `ask`: a run carried on without it. */
+  mode: BotAskMode
+  /** The canonical JSON of what is asked for: one open ask per bot and fingerprint. */
+  fingerprint: string
+  title: string | null
+  note: string | null
+  /** The `bot_messages` row carrying the card. */
+  messageId: string | null
+  /** After Not now on a run ask: no new ask for the same permission before this time. */
+  cooldownUntil: string | null
 }
 
 function escalationOf(row: Row): BotEscalationRow {
   return {
     id: row.id as string,
+    botId: row.bot_id as string,
     activationId: row.activation_id as string,
     dispatchN: num(row.dispatch_n)!,
     toolCallId: str(row.tool_call_id),
     kind: row.kind as BotWallKind,
-    permission: JSON.parse(row.permission_json as string) as BotPermissionRequest,
+    permission: JSON.parse(row.permission_json as string) as BotAskRequest,
     reason: row.reason as string,
     status: row.status as BotEscalationStatus,
     amount: num(row.amount),
     createdAt: row.created_at as string,
-    expiresAt: row.expires_at as string,
+    expiresAt: str(row.expires_at),
     answeredAt: str(row.answered_at),
-    appliedAt: str(row.applied_at)
+    appliedAt: str(row.applied_at),
+    mode: (str(row.mode) ?? 'wall') as BotAskMode,
+    fingerprint: row.fingerprint as string,
+    title: str(row.title),
+    note: str(row.note),
+    messageId: str(row.message_id),
+    cooldownUntil: str(row.cooldown_until)
   }
 }
 
@@ -281,6 +494,7 @@ type Param = string | number | null
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const num = (value: unknown): number | null => (typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : null)
+const json = <T>(value: unknown): T | null => (typeof value === 'string' ? (JSON.parse(value) as T) : null)
 
 function activationOf(row: Row): BotActivationRow {
   return {
@@ -297,7 +511,11 @@ function activationOf(row: Row): BotActivationRow {
     result: str(row.result),
     createdAt: row.created_at as string,
     endedAt: str(row.ended_at),
-    endReason: str(row.end_reason)
+    endReason: str(row.end_reason),
+    lane: (str(row.lane) ?? 'run') as BotLane,
+    modelOverride: json<BotModelChoice>(row.model_override_json),
+    reloadPending: num(row.reload_pending) === 1,
+    selection: json<ProviderSelection>(row.selection_json)
   }
 }
 
@@ -337,11 +555,30 @@ export class BotStore {
   constructor(options: { profileHome: string; clock?: () => number; fault?: ProfileDatabaseFault }) {
     this.db = new ProfileDatabase({ profileHome: options.profileHome, name: 'bots', ...(options.clock ? { clock: options.clock } : {}), ...(options.fault ? { fault: options.fault } : {}) })
     try {
+      this.copyBeforeMigration()
       this.db.migrate(BOTS_MIGRATIONS)
     } catch (error) {
       this.db.close()
       throw error
     }
+  }
+
+  /**
+   * Before a migration of an existing database: `VACUUM INTO bots.db.pre-v<n>`, a consistent copy
+   * of what the older build wrote (bot-context.md §3). The last two copies are kept.
+   */
+  private copyBeforeMigration(): void {
+    const current = this.db.userVersion()
+    if (current === 0 || current >= BOTS_DB_VERSION) return
+    const copy = `${this.db.path}.pre-v${BOTS_DB_VERSION}`
+    rmSync(copy, { force: true })
+    this.db.database.exec(`VACUUM INTO '${copy.replaceAll("'", "''")}'`)
+    const prefix = `${this.db.path.slice(this.db.directory.length + 1)}.pre-v`
+    const copies = readdirSync(this.db.directory)
+      .filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)))
+      .map((name) => ({ name, version: Number(name.slice(prefix.length)) }))
+      .sort((a, b) => b.version - a.version)
+    for (const old of copies.slice(KEPT_MIGRATION_COPIES)) rmSync(join(this.db.directory, old.name), { force: true })
   }
 
   /** `<profileHome>/bots`. */
@@ -374,12 +611,40 @@ export class BotStore {
 
   registry(botId: string): BotRegistryRow | undefined {
     const row = this.get('SELECT * FROM bot_registry WHERE bot_id = ?', botId)
-    return row ? { botId: row.bot_id as string, revision: str(row.revision), homeThreadId: str(row.home_thread_id), createdAt: row.created_at as string, deletedAt: str(row.deleted_at) } : undefined
+    return row ? registryOf(row) : undefined
   }
 
-  /** Deleted bots whose cleanup is not done yet: it is retried until their home thread left. */
-  deletedRegistry(): BotRegistryRow[] {
-    return this.all('SELECT bot_id FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL ORDER BY deleted_at, bot_id').map((row) => this.registry(row.bot_id as string)!)
+  /** Deleted bots whose purge is not done yet (`before`: deleted before that time only). */
+  deletedRegistry(before?: string): BotRegistryRow[] {
+    return (before === undefined
+      ? this.all('SELECT * FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL ORDER BY deleted_at, bot_id')
+      : this.all('SELECT * FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL AND deleted_at <= ? ORDER BY deleted_at, bot_id', before)).map(registryOf)
+  }
+
+  /** Pause (`reason`) or resume (null) a bot's schedules; a resume also clears the failure streak. */
+  setPaused(botId: string, reason: BotPauseReason | null, until?: string): void {
+    if (reason === null) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL, failure_streak = 0 WHERE bot_id = ?', botId)
+    else this.run('UPDATE bot_registry SET paused_reason = ?, paused_until = ? WHERE bot_id = ?', reason, until ?? null, botId)
+  }
+
+  /** Adds one failed run (or resets with 0); the streak after the change. */
+  bumpFailureStreak(botId: string, reset = false): number {
+    if (reset) this.run('UPDATE bot_registry SET failure_streak = 0 WHERE bot_id = ?', botId)
+    else this.run('UPDATE bot_registry SET failure_streak = failure_streak + 1 WHERE bot_id = ?', botId)
+    return num(this.get('SELECT failure_streak FROM bot_registry WHERE bot_id = ?', botId)?.failure_streak) ?? 0
+  }
+
+  setError(botId: string, error: BotStoredError | null): void {
+    this.run('UPDATE bot_registry SET error_json = ? WHERE bot_id = ?', error ? JSON.stringify(error) : null, botId)
+  }
+
+  /** The owner has read up to `seq`; the marker never moves back. */
+  setReadSeq(botId: string, seq: number): void {
+    this.run('UPDATE bot_registry SET read_seq = MAX(read_seq, ?) WHERE bot_id = ?', seq, botId)
+  }
+
+  setModel(botId: string, model: BotRegistryRow['model']): void {
+    this.run('UPDATE bot_registry SET model_json = ? WHERE bot_id = ?', model ? JSON.stringify(model) : null, botId)
   }
 
   /** A deleted bot's cleanup is done: a home thread the owner restores later is left alone. */
@@ -472,10 +737,36 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, ...statuses).map(activationOf)
   }
 
-  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'>, limits: ActivationLimits): void {
+  /** Activations of a bot's lane in `statuses`, oldest first. */
+  laneActivations(botId: string, lane: BotLane, statuses: readonly BotActivationStatus[]): BotActivationRow[] {
+    const marks = statuses.map(() => '?').join(', ')
+    return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, lane, ...statuses).map(activationOf)
+  }
+
+  /** The bot's most recent activation that ended, if any. */
+  lastEndedActivation(botId: string): BotActivationRow | undefined {
+    const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
+    return row ? activationOf(row) : undefined
+  }
+
+  setActivationSelection(id: string, selection: ProviderSelection | null): void {
+    this.run('UPDATE bot_activations SET selection_json = ?, reload_pending = 0 WHERE id = ?', selection ? JSON.stringify(selection) : null, id)
+  }
+
+  /** `set_depth`/`use_model` with scope `now`: this activation's next dispatch runs on the new choice. */
+  setModelOverride(id: string, choice: BotModelChoice): void {
+    this.run('UPDATE bot_activations SET model_override_json = ?, reload_pending = 1 WHERE id = ?', JSON.stringify(choice), id)
+  }
+
+  /** The next dispatch resolves the model again (a usage limit, or a reload). */
+  markReload(id: string): void {
+    this.run('UPDATE bot_activations SET reload_pending = 1 WHERE id = ?', id)
+  }
+
+  insertActivation(row: Pick<BotActivationRow, 'id' | 'botId' | 'revision' | 'grantDigest' | 'trigger' | 'idempotencyKey' | 'status' | 'createdAt'> & { lane?: BotLane }, limits: ActivationLimits): void {
     this.run(
-      'INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt
+      'INSERT INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run'
     )
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
     this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
@@ -610,39 +901,87 @@ export class BotStore {
     return row ? escalationOf(row) : undefined
   }
 
-  escalations(filter: { activationId?: string; status?: BotEscalationStatus } = {}): BotEscalationRow[] {
+  escalations(filter: { activationId?: string; status?: BotEscalationStatus; botId?: string } = {}): BotEscalationRow[] {
     const where: string[] = []
     const params: Param[] = []
     if (filter.activationId) { where.push('activation_id = ?'); params.push(filter.activationId) }
+    if (filter.botId) { where.push('bot_id = ?'); params.push(filter.botId) }
     if (filter.status) { where.push('status = ?'); params.push(filter.status) }
     return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, id`, ...params).map(escalationOf)
   }
 
+  /** The walls an activation hit (a run's refused asks never count: they don't stop it). */
   countEscalations(activationId: string): number {
-    return Number(this.get('SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ?', activationId)?.n ?? 0)
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
   }
 
-  insertEscalation(row: Omit<BotEscalationRow, 'status' | 'amount' | 'answeredAt' | 'appliedAt'>): void {
-    this.run(
-      "INSERT INTO bot_escalations(id, activation_id, dispatch_n, tool_call_id, kind, permission_json, reason, status, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-      row.id, row.activationId, row.dispatchN, row.toolCallId, row.kind, JSON.stringify(row.permission), row.reason, row.createdAt, row.expiresAt
-    )
+  /**
+   * Writes an open ask; false when the bot already has an open ask with this fingerprint (there is
+   * at most one per permission).
+   */
+  insertEscalation(row: Omit<BotEscalationRow, 'status' | 'amount' | 'answeredAt' | 'appliedAt' | 'cooldownUntil'>): boolean {
+    return this.run(
+      "INSERT INTO bot_escalations(id, bot_id, activation_id, dispatch_n, tool_call_id, kind, permission_json, reason, status, created_at, expires_at, mode, fingerprint, title, note, message_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+      row.id, row.botId, row.activationId, row.dispatchN, row.toolCallId, row.kind, JSON.stringify(row.permission), row.reason, row.createdAt, row.expiresAt, row.mode, row.fingerprint, row.title, row.note, row.messageId
+    ) > 0
+  }
+
+  /** The bot's open ask for a fingerprint, if any. */
+  openAsk(botId: string, fingerprint: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status = 'open'", botId, fingerprint)
+    return row ? escalationOf(row) : undefined
+  }
+
+  /** A Not now on a run ask whose cooldown has not passed at `now`, if any. */
+  coolingAsk(botId: string, fingerprint: string, now: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status = 'denied' AND cooldown_until > ? ORDER BY cooldown_until DESC LIMIT 1", botId, fingerprint, now)
+    return row ? escalationOf(row) : undefined
+  }
+
+  /** The last ask the owner allowed for a fingerprint (About's "granted at"). */
+  allowedAsk(botId: string, fingerprint: string): BotEscalationRow | undefined {
+    const row = this.get("SELECT * FROM bot_escalations WHERE bot_id = ? AND fingerprint = ? AND status IN ('allowed_bot', 'allowed_once') ORDER BY answered_at DESC LIMIT 1", botId, fingerprint)
+    return row ? escalationOf(row) : undefined
+  }
+
+  /** A chat turn takes over a run's open ask as its wall: the card it already has stays the same ask. */
+  moveAskToWall(id: string, activationId: string, dispatchN: number): void {
+    this.run("UPDATE bot_escalations SET activation_id = ?, dispatch_n = ?, mode = 'wall', applied_at = NULL WHERE id = ? AND status = 'open'", activationId, dispatchN, id)
+  }
+
+  setEscalationMessage(id: string, messageId: string): void {
+    this.run('UPDATE bot_escalations SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
   }
 
   /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */
-  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number): boolean {
-    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), id) > 0
+  answerEscalation(id: string, status: Exclude<BotEscalationStatus, 'open'>, amount?: number, cooldownUntil?: string): boolean {
+    return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
   }
 
-  /** Ends every open escalation of an activation (it ended, expired, or was trashed). */
+  /** Ends every open escalation of an activation (it ended, expired, or was trashed); a run's asks stay open for the owner. */
   closeEscalations(activationId: string, status: 'expired' | 'cancelled'): number {
-    return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open'", status, this.now(), activationId)
+    return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open' AND mode = 'wall'", status, this.now(), activationId)
+  }
+
+  /** Withdraws every open ask of a bot (it was deleted). */
+  withdrawAsks(botId: string): number {
+    return this.run("UPDATE bot_escalations SET status = 'withdrawn', answered_at = ? WHERE bot_id = ? AND status = 'open'", this.now(), botId)
+  }
+
+  /** The bot's open asks, oldest first. */
+  openAsks(botId: string): BotEscalationRow[] {
+    return this.escalations({ botId, status: 'open' })
   }
 
   /** The answered escalation whose continuation has not been sent yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
-    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
+  }
+
+  /** Every answered wall of an activation whose continuation has not been sent yet, oldest first. */
+  pendingAnswers(activationId: string): BotEscalationRow[] {
+    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, id", activationId).map(escalationOf)
   }
 
   markApplied(id: string): void {
@@ -658,7 +997,7 @@ export class BotStore {
     }))
   }
 
-  putOverlay(activationId: string, escalationId: string, permission: BotPermissionRequest, amount?: number): void {
+  putOverlay(activationId: string, escalationId: string, permission: BotAskRequest, amount?: number): void {
     this.run(
       'INSERT INTO bot_overlays(activation_id, escalation_id, permission_json, amount, created_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       activationId, escalationId, JSON.stringify(permission), amount ?? null, this.now()
@@ -742,8 +1081,8 @@ export class BotStore {
    */
   insertActivationOnce(row: Parameters<BotStore['insertActivation']>[0], limits: ActivationLimits): boolean {
     const inserted = this.run(
-      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt
+      'INSERT OR IGNORE INTO bot_activations(id, bot_id, revision, grant_digest, trigger_json, idempotency_key, status, created_at, lane) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.id, row.botId, row.revision, row.grantDigest, JSON.stringify(row.trigger), row.idempotencyKey, row.status, row.createdAt, row.lane ?? 'run'
     )
     if (!inserted) return false
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
@@ -762,5 +1101,96 @@ export class BotStore {
   /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
   regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
     this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
+  }
+
+  // -- Chat (bot_messages) ----------------------------------------------------------------------
+
+  /**
+   * Inserts a chat row; inside the caller's transaction, so its journal row joins it. False when a
+   * row with the same id or client request id exists already.
+   */
+  insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
+    return this.run(
+      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
+      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId
+    ) > 0
+  }
+
+  message(id: string): BotMessageRow | undefined {
+    const row = this.get('SELECT * FROM bot_messages WHERE id = ?', id)
+    return row ? messageOf(row) : undefined
+  }
+
+  messageByRequest(clientRequestId: string): BotMessageRow | undefined {
+    const row = this.get('SELECT * FROM bot_messages WHERE client_request_id = ?', clientRequestId)
+    return row ? messageOf(row) : undefined
+  }
+
+  /** The newest message carrying an ask's card. */
+  messageForAsk(askId: string): BotMessageRow | undefined {
+    const row = this.get('SELECT * FROM bot_messages WHERE ask_id = ? ORDER BY seq DESC LIMIT 1', askId)
+    return row ? messageOf(row) : undefined
+  }
+
+  /** Every message carrying an ask's card, oldest first. */
+  messagesForAsk(askId: string): BotMessageRow[] {
+    return this.all('SELECT * FROM bot_messages WHERE ask_id = ? ORDER BY seq', askId).map(messageOf)
+  }
+
+  /** A page of a bot's chat, oldest first: the `limit` rows before `beforeSeq` (the newest without it). */
+  messages(botId: string, options: { beforeSeq?: number; limit: number }): BotMessageRow[] {
+    const rows = options.beforeSeq === undefined
+      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT ?', botId, options.limit)
+      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', botId, options.beforeSeq, options.limit)
+    return rows.map(messageOf).reverse()
+  }
+
+  lastMessage(botId: string): BotMessageRow | undefined {
+    const row = this.get('SELECT * FROM bot_messages WHERE bot_id = ? ORDER BY seq DESC LIMIT 1', botId)
+    return row ? messageOf(row) : undefined
+  }
+
+  /** The bot's messages after the owner's read marker. */
+  unread(botId: string, readSeq: number): number {
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+  }
+
+  deleteMessages(botId: string): void {
+    this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
+  }
+
+  // -- Schedules (bot_schedules) ----------------------------------------------------------------
+
+  /** A bot's schedules that are not removed, oldest first. */
+  schedules(botId: string): BotScheduleRow[] {
+    return this.all('SELECT * FROM bot_schedules WHERE bot_id = ? AND removed_at IS NULL ORDER BY created_at, id', botId).map(scheduleOf)
+  }
+
+  schedule(botId: string, id: string): BotScheduleRow | undefined {
+    const row = this.get('SELECT * FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, id)
+    return row ? scheduleOf(row) : undefined
+  }
+
+  /** Adds a schedule; false when its id exists already (a schedule moved by the v4 upgrade included). */
+  putSchedule(row: Omit<BotScheduleRow, 'removedAt'>): boolean {
+    return this.run(
+      'INSERT INTO bot_schedules(id, bot_id, when_json, prompt, label, created_by, created_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      row.id, row.botId, JSON.stringify(row.when), row.prompt, row.label, row.createdBy, row.createdAt
+    ) > 0
+  }
+
+  removeSchedule(botId: string, id: string): boolean {
+    return this.run('UPDATE bot_schedules SET removed_at = ? WHERE bot_id = ? AND id = ? AND removed_at IS NULL', this.now(), botId, id) > 0
+  }
+
+  deleteSchedules(botId: string): void {
+    this.run('DELETE FROM bot_schedules WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_schedule_state WHERE bot_id = ?', botId)
+  }
+
+  /** The bot's threads, for the delete and the purge. */
+  botThreads(botId: string): Array<{ threadId: string; role: 'home' | BotThreadRole; activationId: string | null }> {
+    return this.all('SELECT * FROM bot_threads WHERE bot_id = ? ORDER BY role, thread_id', botId).map((row) => ({ threadId: row.thread_id as string, role: row.role as 'home' | BotThreadRole, activationId: str(row.activation_id) }))
   }
 }

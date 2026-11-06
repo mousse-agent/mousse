@@ -57,8 +57,9 @@ describe('an unopenable bots.db', () => {
     await services.orchestrator.send({ content: 'hello', mode: 'agent' }, false, { threadId: thread.id })
     expect(runTurn).toHaveBeenCalledTimes(1)
 
-    registerPersonalBotMethods(domains, () => services.personalBots)
+    registerPersonalBotMethods(domains, () => services.personalBots?.service)
     const context = { connection: { id: 'c', binding: { profileId: 'p', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
-    await expect(domains.dispatch(context, 'bots.definitions.list', {})).rejects.toMatchObject({ code: 'bots_unavailable' })
+    await expect(domains.dispatch(context, 'bots.list', {})).rejects.toMatchObject({ code: 'bots_unavailable' })
+    await expect(domains.dispatch(context, 'bots.chat.send', { botId: 'site-editor', text: 'hi', clientRequestId: 'c-1' })).rejects.toMatchObject({ code: 'bots_unavailable' })
   }, 60_000)
 })

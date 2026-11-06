@@ -1,4 +1,5 @@
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
+import type { BotLane } from '../../../shared/bots/personal/definition'
 import type { BindPolicy, ProviderSelection } from '../../../shared/harness/types'
 import type { BotTurnPayload } from '../../run/types'
 
@@ -39,10 +40,16 @@ export interface PreparedBotTurn {
   /** Skill ids the turn may list and load. */
   skills: readonly string[]
   /**
-   * `none`: the first dispatch of an activation, on a new thread that must have no history.
+   * `none`: the first dispatch of a run, on a new thread that must have no history.
+   * `cleared`: the first dispatch of a chat activation, on the home thread, whose context the engine
+   * has just cleared (`clearConversationContext`): the transcript stays, the native context is empty.
    * `thread`: a continuation or a consult, on the thread's own history.
    */
-  history: 'none' | 'thread'
+  history: 'none' | 'cleared' | 'thread'
+  /** The activation's lane: the owner's chat on the home thread, or a run. */
+  lane?: BotLane
+  /** The context pack (bot-context.md §5), frozen for the activation: placed in the turn's preamble. */
+  preamble?: string
 }
 
 /** The abort reason of a bot dispatch that ended at a wall (PR 6 §5): its run ends `bot_wall`. */
@@ -51,6 +58,18 @@ export class BotWallAbort extends Error {
   constructor(message = 'bot_wall') {
     super(message)
     this.name = 'BotWallAbort'
+  }
+}
+
+/**
+ * The abort reason of a dispatch ended to change its model (`set_depth`/`use_model` with scope
+ * `now`, Bot Phase 1 §5.6): the wall-abort path with no wall. It continues on the same thread.
+ */
+export class BotReloadAbort extends BotWallAbort {
+  readonly botReload = true
+  constructor() {
+    super('bot_reload')
+    this.name = 'BotReloadAbort'
   }
 }
 

@@ -1,7 +1,8 @@
 /**
  * PR 6 §4 through the real profile: trashing a thread of a working bot ends its activation and
  * stops its run before the trash's own idle check, so the trash is not refused. Ordinary threads
- * are trashed as before.
+ * are trashed as before. Deleting a bot (Bot Phase 1 §5.3.3) archives its threads, and the purge
+ * 30 days later deletes them for good.
  */
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -12,7 +13,8 @@ import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
-import type { BotDefinitionV1 as BotDefinition } from '../../src/shared/bots/personal/definition'
+import type { BotDefinition } from '../../src/shared/bots/personal/definition'
+import type { BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import type { BotStore } from '../../src/mms/bots/store/BotStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
@@ -93,9 +95,16 @@ async function withBot() {
   vi.spyOn(services.harness, 'nativeToolNames').mockReturnValue({ ok: true, names: [] })
   cleanup.push(() => vi.restoreAllMocks())
   const bots = services.personalBots!
+  // The seams the lead wires in `MmsProfileServices` (WP3's model resolver, #681's archive, WP6's purge), as fakes.
+  const purged: string[] = []
+  const host = (bots as unknown as { host: BotEngineHost }).host
+  host.models = { resolve: async () => ({ selection: { instanceId: 'pi:test', model: 'test' } }), markLimited: () => {} }
+  host.archiveThread = (threadId) => { services.threads.setThreadSettled(threadId, true) }
+  host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
   const definition: BotDefinition = {
-    id: 'review-bot', name: 'Review bot', role: 'test',
-    main: { key: 'main', title: 'Main', agent: { instructions: '' }, selection: { instanceId: 'pi:test', model: 'test' } },
+    format: 2, id: 'review-bot', name: 'Review bot', description: 'test', look: { colour: 'coral', accessory: 'none' },
+    owner: { kind: 'person', id: 'self' }, placement: { kind: 'this_computer' }, role: 'test',
+    main: { key: 'main', title: 'Main', agent: { instructions: '' }, model: { mode: 'auto', depth: 'normal' } },
     context: [], triggers: { manual: true },
     permissions: { tools: [], appTools: [], mcp: [], skills: [], workspace: null, budget: { maxActiveMs: 60_000 }, audience: 'owner' }
   }
@@ -104,7 +113,7 @@ async function withBot() {
   bots.approve(definition.id, botManifestDigest(definition.permissions))
   const activation = await bots.activate({ botId: definition.id, input: 'test', clientRequestId: 'one' })
   const home = (services as unknown as { botStore: BotStore }).botStore.registry('review-bot')!.homeThreadId!
-  return { services, bots, activation, home, domains, profileId }
+  return { services, bots, activation, home, domains, profileId, purged }
 }
 
 describe('round 2: the trash cancels bot work only when it is accepted', () => {
@@ -141,15 +150,25 @@ describe('round 2: the trash cancels bot work only when it is accepted', () => {
   }, 60_000)
 })
 
-describe('round 2: deleting a bot through the real request path', () => {
-  it('deletes its home thread for good, once', async () => {
-    const { services, bots, activation, home, domains, profileId } = await withBot()
-    registerPersonalBotMethods(domains, () => bots)
-    await dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId, epoch: 1 }, capabilities: new Set() } } as never, 'bots.definitions.delete', { botId: 'review-bot' })
-    expect(services.threads.lifecycleStore.require(home).state).toBe('purged')
+describe('deleting a bot through the real request path (archive, then the 30-day purge)', () => {
+  it('archives its threads now and deletes them for good once 30 days have passed', async () => {
+    const { services, bots, activation, home, domains, profileId, purged } = await withBot()
+    registerPersonalBotMethods(domains, () => bots.service)
+    const result = await dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId, epoch: 1 }, capabilities: new Set() } } as never, 'bots.delete', { botId: 'review-bot' }) as { purgeAt: string }
+    expect(Date.parse(result.purgeAt) - Date.now()).toBeGreaterThan(29 * 24 * 60 * 60_000)
     expect(bots.getActivation(activation.id).status).toBe('cancelled')
-    await bots.finishDeletions()
+    // Kept, archived: it leaves every list but is not purged yet.
+    expect(services.threads.getThread(home)?.settledAt).toBeTruthy()
+    expect(services.threads.lifecycleStore.get(home)?.state ?? 'active').not.toBe('purged')
+    expect(bots.service.list().bots).toEqual([])
+    expect(await bots.sweepDeleted(Date.now())).toEqual([])
+    expect(purged).toEqual([])
+    // Thirty days later the sweep deletes the threads for good and purges the memory, once.
+    expect(await bots.sweepDeleted(Date.now() + 31 * 24 * 60 * 60_000)).toEqual(['review-bot'])
     expect(services.threads.lifecycleStore.require(home).state).toBe('purged')
+    expect(purged).toEqual(['review-bot'])
+    expect(await bots.sweepDeleted(Date.now() + 32 * 24 * 60 * 60_000)).toEqual([])
+    expect(purged).toEqual(['review-bot'])
   }, 60_000)
 })
 

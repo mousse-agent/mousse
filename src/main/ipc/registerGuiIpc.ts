@@ -11,7 +11,7 @@ import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
-import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -193,7 +193,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BRIDGE_ACTIVITY_METHODS,
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
-  ...BOTS_PERSONAL_METHODS,
+  ...BOTS_PERSONAL_V2_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,

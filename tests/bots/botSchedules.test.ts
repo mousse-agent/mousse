@@ -1,5 +1,5 @@
 /**
- * PR 6 §6 unit 6d: bot schedules. Each due occurrence is one activation under the key
+ * PR 6 §6 unit 6d, Bot Phase 1 §5.5: bot schedules, kept in `bots.db` (`bot_schedules`). Each due occurrence is one activation under the key
  * `sched:<botId>:<scheduleId>:<occurrenceAt>`, inserted in the same transaction that moves the
  * schedule on, so a repeated tick or a tick after a crash inserts nothing. Occurrences missed while
  * Mousse was closed collapse into one; a busy bot queues the next one; nothing ticks before the
@@ -20,7 +20,7 @@ import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
-import type { BotDefinitionV1 as BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
+import type { BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
 
 let base: string
 let profile: string
@@ -39,19 +39,37 @@ const tick = () => new Promise((resolve) => setImmediate(resolve))
 
 const every5: BotSchedule = { id: 'tidy', when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy the site.' }
 
-const definition = (schedules: BotSchedule[] = [every5]): BotDefinition => ({
-  id: 'site-editor',
-  name: 'Site editor',
+const definition = (id = 'site-editor', name = 'Site editor'): BotDefinition => ({
+  format: 2,
+  id,
+  name,
+  description: 'Keeps the site tidy.',
+  look: { colour: 'teal', accessory: 'cap' },
+  owner: { kind: 'person', id: 'self' },
+  placement: { kind: 'this_computer' },
   role: 'You keep the site tidy.',
-  main: { key: 'main', title: 'Main', agent: { instructions: 'Answer briefly.' }, selection: { instanceId: 'pi:openrouter', model: 'some/model' } },
+  main: { key: 'main', title: 'Main', agent: { instructions: 'Answer briefly.' }, model: { mode: 'auto', depth: 'normal' } },
   context: [],
   permissions: { tools: ['read'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 10 * MIN }, audience: 'owner' },
-  triggers: { manual: true, schedules }
+  triggers: { manual: true }
 })
 
-const publish = (schedules?: BotSchedule[]) => {
-  const saved = bots.save(definition(schedules), bots.list().find((bot) => bot.id === 'site-editor')?.draftHash)
-  return bots.publish('site-editor', saved.draftHash)
+/** The bot's schedules, as `bot_schedules` holds them (the definition carries none). */
+const setSchedules = (schedules: BotSchedule[], botId = 'site-editor') => {
+  for (const row of store.schedules(botId)) if (!schedules.some((schedule) => schedule.id === row.id)) store.removeSchedule(botId, row.id)
+  for (const schedule of schedules) {
+    const current = store.schedule(botId, schedule.id)
+    if (current && JSON.stringify(current.when) !== JSON.stringify(schedule.when)) store.run('DELETE FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, schedule.id)
+    if (current?.removedAt) store.run('DELETE FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, schedule.id)
+    store.putSchedule({ id: schedule.id, botId, when: schedule.when, prompt: schedule.prompt, label: 'label', createdBy: 'owner', createdAt: iso(clock) })
+  }
+}
+
+const publish = (schedules: BotSchedule[] = [every5]) => {
+  const saved = bots.save(definition(), bots.list().find((bot) => bot.id === 'site-editor')?.draftHash)
+  const revision = bots.publish('site-editor', saved.draftHash)
+  setSchedules(schedules)
+  return revision
 }
 const approve = () => bots.approve('site-editor', botManifestDigest(bots.get('site-editor').published!.permissions))
 // Oldest occurrence first (the test clock does not move, so creation times tie).
@@ -83,6 +101,7 @@ beforeEach(() => {
       nativeToolNames: (_instanceId, tools) => ({ ok: true, names: tools.flatMap((tool) => [...(PI_NATIVE_TOOLS[tool] ?? [])]) })
     },
     notifyEffects: () => {},
+    models: { resolve: async () => ({ selection: { instanceId: 'pi:openrouter', model: 'some/model' } }), markLimited: () => {} },
     stopThread: () => {},
     clock: () => clock,
     monotonic: () => clock,
@@ -166,8 +185,7 @@ describe('bot schedules', () => {
 
   it('a schedule whose previous run still waits in the queue is skipped, never queued twice', async () => {
     await scheduled()
-    publish([every5, { id: 'other', when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }])
-    approve()
+    setSchedules([every5, { id: 'other', when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }])
     await bots.tickSchedules(new Date(T0 + 1000))
     await bots.tickSchedules(new Date(T0 + 5 * MIN))
     // `tidy` runs; `other` starts from this tick.
@@ -230,41 +248,85 @@ describe('bot schedules', () => {
 
   it('an edited schedule restarts from now; a removed one forgets its state', async () => {
     await scheduled()
-    publish([{ ...every5, when: { kind: 'interval', minutes: 60 } }])
-    approve()
+    setSchedules([{ ...every5, when: { kind: 'interval', minutes: 60 } }])
     await bots.tickSchedules(new Date(T0 + 4 * MIN))
     expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 64 * MIN))
     expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
-    publish([])
+    setSchedules([])
     await bots.tickSchedules(new Date(T0 + 6 * MIN))
     expect(store.scheduleStates('site-editor')).toEqual([])
   })
 
-  it('a cron with a step of 0 or a value out of range is refused at publish at once, never searched', () => {
+  it('a cron with a step of 0 or a value out of range is refused at once, never searched', () => {
     const started = Date.now()
     for (const expr of ['1-5/0 * * * *', '*/0 * * * *', '0 1-3/0 * * *', 'a b c d e', '60 * * * *', '0 24 * * *', '0 0 0 * *', '5-1 * * * *'])
       expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr }, prompt: 'p' }), expr).toMatch(/invalid/)
-    const saved = bots.save(definition([{ id: 'bad', when: { kind: 'cron', expr: '1-5/0 * * * *' }, prompt: 'p' }]))
-    expect(() => bots.publish('site-editor', saved.draftHash)).toThrow(/invalid/)
+    publish([])
+    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '1-5/0 * * * *' }, prompt: 'p' }, 'bot')).toThrow(/invalid/)
     expect(Date.now() - started).toBeLessThan(2000)
   })
 
-  it('a malformed schedule is refused at publish', () => {
+  it('a malformed schedule is refused', () => {
     expect(scheduleProblem({ id: 'x', when: { kind: 'interval', minutes: 0 }, prompt: 'p' })).toMatch(/at least 1/)
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '* * *' }, prompt: 'p' })).toMatch(/five fields/)
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' })).toMatch(/something to do/)
     expect(scheduleProblem({ id: 'x', when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: 'p' })).toBeUndefined()
-    const saved = bots.save({ ...definition([every5, every5]) })
-    expect(() => bots.publish('site-editor', saved.draftHash)).toThrow(/own id/)
+    publish([])
+    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' }, 'bot')).toThrow(/something to do/)
+  })
+
+  it('a bot\'s own schedules: at most 8, at least 5 minutes apart, each with a label and no approval', () => {
+    publish([])
+    approve()
+    const revision = store.registry('site-editor')!.revision
+    expect(() => bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 4 }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
+    expect(() => bots.addSchedule('site-editor', { when: { kind: 'cron', expr: '* * * * *' }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
+    const added = bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 30 }, prompt: 'Check links.' }, 'bot')
+    expect(added).toEqual({ scheduleId: expect.stringMatching(/^s-[0-9a-f]{8}$/), label: 'every 30 minutes' })
+    expect(store.schedule('site-editor', added.scheduleId)).toMatchObject({ createdBy: 'bot', prompt: 'Check links.', label: 'every 30 minutes', removedAt: null })
+    for (let i = 1; i < 8; i += 1) bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')
+    expect(() => bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 60 }, prompt: 'ninth' }, 'bot')).toThrow(expect.objectContaining({ code: 'schedule_limit' }))
+    // Schedules change no revision, so no approval is needed.
+    expect(store.registry('site-editor')!.revision).toBe(revision)
+    expect(bots.list()[0]!.needsApproval).toEqual([])
+    expect(bots.listSchedules('site-editor')).toHaveLength(8)
+    expect(bots.removeSchedule('site-editor', added.scheduleId)).toBe(true)
+    expect(bots.removeSchedule('site-editor', added.scheduleId)).toBe(false)
+    expect(bots.listSchedules('site-editor')).toHaveLength(7)
+  })
+
+  it('a paused bot skips its occurrences (chat is not affected); resuming runs the next one', async () => {
+    await scheduled()
+    bots.pauseBot('site-editor')
+    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(scheduleRow()).toMatchObject({ lastSkipReason: 'paused', nextRunAt: iso(T0 + 10 * MIN) })
+    await bots.resumeBot('site-editor')
+    expect((await bots.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toHaveLength(1)
+    expect(scheduleRow()!.lastSkipReason).toBeNull()
+  })
+
+  it('a usage-limit pause skips occurrences until its reset, then ends by itself', async () => {
+    await scheduled()
+    store.setPaused('site-editor', 'usage_limit', iso(T0 + 12 * MIN))
+    expect((await bots.tickSchedules(new Date(T0 + 5 * MIN))).inserted).toEqual([])
+    expect(scheduleRow()!.lastSkipReason).toBe('usage_limited')
+    expect((await bots.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toHaveLength(1)
+    expect(store.registry('site-editor')!.pausedReason).toBeNull()
   })
 
   it('one bot that cannot be read never stops the others\' schedules', async () => {
     await scheduled()
-    const other = bots.save({ ...definition([{ id: 'hourly', when: { kind: 'interval', minutes: 60 }, prompt: 'Report.' }]), id: 'reporter', name: 'Reporter' })
+    const other = bots.save(definition('reporter', 'Reporter'))
     bots.publish('reporter', other.draftHash)
+    setSchedules([{ id: 'hourly', when: { kind: 'interval', minutes: 60 }, prompt: 'Report.' }], 'reporter')
     bots.approve('reporter', botManifestDigest(bots.get('reporter').published!.permissions))
     await bots.tickSchedules(new Date(T0))
     const revision = host.definitions.revision.bind(host.definitions)
+    const schedulesOf = store.schedules.bind(store)
+    vi.spyOn(store, 'schedules').mockImplementation((botId) => {
+      if (botId === 'site-editor') throw new Error('Unexpected token in JSON')
+      return schedulesOf(botId)
+    })
     vi.spyOn(host.definitions, 'revision').mockImplementation((botId, rev) => {
       if (botId === 'site-editor') throw new Error('Unexpected token in JSON')
       return revision(botId, rev)
@@ -284,12 +346,15 @@ describe('bot schedules', () => {
     expect(store.activation(inserted[0]!)!.status).toBe('running')
   })
 
-  it('publishing tells the scheduler, so a new schedule is read at once', () => {
+  it('adding or removing a schedule tells the scheduler, so it is read at once', () => {
     let told = 0
     bots.close()
     bots = new BotEngine({ ...host, schedulesChanged: () => { told += 1 } })
-    publish()
+    publish([])
+    const { scheduleId } = bots.addSchedule('site-editor', { when: { kind: 'interval', minutes: 10 }, prompt: 'p' }, 'owner')
     expect(told).toBe(1)
+    bots.removeSchedule('site-editor', scheduleId)
+    expect(told).toBe(2)
   })
 
   it('nextOccurrence keeps the cadence when on time and collapses when late', () => {
@@ -326,8 +391,8 @@ describe('activation requests', () => {
   })
 })
 
-describe('bots.db v3', () => {
-  it('a populated v2 database migrates and keeps its activations', () => {
+describe('bots.db v2 → v4', () => {
+  it('a populated v2 database migrates and keeps its activations; a wait on a withdrawn wall ends', () => {
     const home = join(base, 'v2-profile')
     mkdirSync(home, { recursive: true })
     const v2 = new ProfileDatabase({ profileHome: home, name: 'bots', clock: () => clock })
@@ -338,18 +403,18 @@ describe('bots.db v3', () => {
         .run(id, JSON.stringify({ kind: 'manual', input: 'Fix it' }), `manual:${id}`, status)
     v2.statement("INSERT INTO bot_escalations(id, activation_id, dispatch_n, kind, permission_json, reason, status, created_at, expires_at) VALUES('esc_1', 'act_wait', 1, 'gate', '{}', 'r', 'open', 'x', 'y')").run()
     v2.close()
-    const v3 = new BotStore({ profileHome: home, clock: () => clock })
+    const v4 = new BotStore({ profileHome: home, clock: () => clock })
     try {
-      expect(v3.activation('act_done')).toMatchObject({ status: 'done', result: 'Done.', trigger: { kind: 'manual', input: 'Fix it' } })
-      expect(v3.activation('act_wait')!.status).toBe('waiting_grant')
-      expect(v3.escalations({ activationId: 'act_wait', status: 'open' })).toHaveLength(1)
+      expect(v4.activation('act_done')).toMatchObject({ status: 'done', result: 'Done.', lane: 'run', trigger: { kind: 'manual', input: 'Fix it' } })
+      expect(v4.activation('act_wait')).toMatchObject({ status: 'cancelled', endReason: 'bots_upgraded' })
+      expect(v4.escalation('esc_1')).toMatchObject({ status: 'withdrawn', botId: 'site-editor', mode: 'wall', expiresAt: 'y' })
       // `reply_status` stays in the schema (the removed Channels feature wrote it).
-      expect(v3.all("SELECT reply_status FROM bot_activations WHERE id = 'act_done'")).toEqual([{ reply_status: null }])
-      v3.putScheduleState('site-editor', 'tidy', '{}', iso(T0))
-      v3.setScheduleSkip('site-editor', 'tidy', 'bot_waiting_for_owner', iso(T0))
-      expect(v3.scheduleStates('site-editor')).toEqual([{ scheduleId: 'tidy', spec: '{}', nextRunAt: iso(T0), lastSkipAt: iso(T0), lastSkipReason: 'bot_waiting_for_owner' }])
+      expect(v4.all("SELECT reply_status FROM bot_activations WHERE id = 'act_done'")).toEqual([{ reply_status: null }])
+      v4.putScheduleState('site-editor', 'tidy', '{}', iso(T0))
+      v4.setScheduleSkip('site-editor', 'tidy', 'bot_waiting_for_owner', iso(T0))
+      expect(v4.scheduleStates('site-editor')).toEqual([{ scheduleId: 'tidy', spec: '{}', nextRunAt: iso(T0), lastSkipAt: iso(T0), lastSkipReason: 'bot_waiting_for_owner' }])
     } finally {
-      v3.close()
+      v4.close()
     }
   })
 })

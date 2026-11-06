@@ -719,9 +719,12 @@ export class MmsProtocolServer {
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
     })
-    // A wall asks the owner: the Bots tab's inbox and a desktop notification.
-    if (services.personalBots) onEmitter(services.personalBots.events, 'escalation', (escalation: unknown) => {
-      emitToSubscribers(this.ring.push('bots.escalation', escalation, undefined))
+    // A new or changed chat row (run reports, asks and errors notify), and a working bot's live chip.
+    if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.message', event, undefined))
+    })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.activity', event, undefined))
     })
   }
 
