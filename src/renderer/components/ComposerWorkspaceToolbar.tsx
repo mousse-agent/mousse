@@ -202,9 +202,9 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           type="button"
           className={`composer-icon-btn composer-workspace-private${workspace.localOnly ? ' active' : ''}`}
           title={workspace.localOnly
-            ? 'Private: this chat stays on this computer'
-            : 'Make private: keep this chat on this computer, away from your other devices'}
-          aria-label="Private chat"
+            ? 'Private: this thread stays on this computer'
+            : 'Make private: keep this thread on this computer, away from your other devices'}
+          aria-label="Private thread"
           aria-pressed={Boolean(workspace.localOnly)}
           disabled={disabled || opening}
           onClick={() => onPrivateChange(!workspace.localOnly)}
