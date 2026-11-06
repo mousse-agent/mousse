@@ -61,6 +61,7 @@
         "tests/ptyLiveness.test.ts",
         "tests/pullRequestPanel.test.ts",
         "tests/quickActionWorkspace.test.ts",
+        "tests/settingsContrast.test.ts",
         "tests/sideCardActions.test.ts",
         "tests/sideCardDevice.test.ts",
         "tests/sideCardGit.test.ts",
