@@ -301,16 +301,15 @@ import {
   compactNativeContext,
   createNativeContext,
   appendNativeMessage,
-  DEFAULT_COMPACTION_RESERVE_TOKENS,
   estimateActiveContextTokens,
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
   normalizeNativeContext,
-  shouldCompactNativeContext,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
+import { contextCompactionPoint } from '../../shared/contextCompaction'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
 interface SnapshotFolder {
@@ -10153,16 +10152,14 @@ export class OrchestratorService extends EventEmitter {
           prepareNativeContext: (provider, model) => {
             const capacity = this.nativeContext.nativeProviderModel
             const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
-            const threshold = typeof contextSettings.compactionTokens === 'number'
-              ? contextSettings.compactionTokens : knownLimit
             const previous = session.lastMeasuredContextSignature === `${provider}:${model}`
               ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
               : 0
             const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
             // When the runtime has not reported capacity yet, a numeric Mousse threshold
             // still applies; model-max waits for an actual provider window.
-            if (!contextSettings.compactionEnabled || threshold === undefined ||
-                !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
+            const compactsAt = contextCompactionPoint(contextSettings, knownLimit)
+            if (compactsAt === undefined || !Number.isFinite(activeTokens) || activeTokens < compactsAt) return null
             onCompaction('start')
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
