@@ -12,7 +12,7 @@ import { ThreadComputerBadge } from './ComputerBadge'
 import { DiscardConfirmDialog, type DiscardQuestion } from './git/DiscardConfirmDialog'
 import { GitActionButtons, useGitActionRunner } from './git/GitActionButtons'
 import { GitChangesList, type SelectedFile } from './git/GitChangesList'
-import { runRowAction, runSync, type RowRequest, type SyncRequest } from './git/gitPanelActions'
+import { runRowAction, runSync, whileFolder, type RowRequest, type SyncRequest } from './git/gitPanelActions'
 import {
   discardConfirmLabel,
   IDLE_SYNC_ACTIVITY,
@@ -88,6 +88,9 @@ export function GitPanel() {
   const location = useActiveProjectLocation()
   // `projectPath` is the folder as shown; `folderId` is what its Git state and running actions are cached under.
   const { path: projectPath, key: folderId, projectId, workspaceThreadId } = location
+  // The folder on screen now: a Git action that finishes after the panel moved on reports nothing here.
+  const folderRef = useRef(folderId)
+  folderRef.current = folderId
   // Tells the daemon which folder a Git action belongs to; a thread's own worktree gets the thread's rules.
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const projects = useAppStore((state) => state.projects)
@@ -192,7 +195,7 @@ export function GitPanel() {
 
   const runSyncAction = useCallback((request: SyncRequest) => {
     if (!folderId) return
-    void withBusy('sync', () => runSync(folderId, scope, request, setActivity))
+    void withBusy('sync', () => runSync(folderId, scope, request, whileFolder(folderRef, folderId, setActivity)))
   }, [folderId, scope, withBusy])
 
   const runFileRequest = useCallback((request: RowRequest) => {
@@ -207,6 +210,7 @@ export function GitPanel() {
         discardKeptForMs: status?.discardKeptForMs,
         confirm: (message) => askDiscard(message, discardConfirmLabel(request.files === 'all' ? [] : request.files))
       })
+      if (folderRef.current !== folderId) return
       if (outcome.kind === 'failed') {
         setRowError(outcome.message)
       } else if (outcome.kind === 'done') {
