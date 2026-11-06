@@ -292,6 +292,8 @@ export interface ResolvedTurnSelection {
   /** The model's name (`modelName`). */
   name: string
   caps: HarnessCaps
+  /** The driver's `compactsNearWindow`: the runtime compacts near the window, not at the Compact context size. */
+  compactsNearWindow?: true
   /** The selection named an entry that moved to this instance (`config.movedTo`). */
   movedFrom?: string
   /** The model that selection named, when the agent runs another one for it (`movedModel`). */
@@ -984,6 +986,7 @@ export class Harness implements HarnessGateway {
       ...(effort ? { effort } : {}),
       name: this.modelName(resolved.instanceId, model),
       caps,
+      ...(driver.compactsNearWindow ? { compactsNearWindow: true as const } : {}),
       ...(target ? { movedFrom: named } : {}),
       ...(target && model !== selection.model ? { movedFromModel: selection.model } : {})
     }
