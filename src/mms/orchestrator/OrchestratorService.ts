@@ -113,7 +113,7 @@ import { isRunningSubagent, type SubagentNoticeItem, type SubagentSummary } from
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { TranscriptAssembler } from '../run/transcript/TranscriptAssembler'
+import { TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -10282,6 +10282,8 @@ export class OrchestratorService extends EventEmitter {
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
           },
+          ...(contextSettings.compactionEnabled && typeof contextSettings.compactionTokens === 'number'
+            ? { compactionTokens: contextSettings.compactionTokens } : {}),
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
             return nativeAgentHistory(this.nativeContext)
@@ -10434,8 +10436,15 @@ export class OrchestratorService extends EventEmitter {
         stripActionBlocks(assistantText).trim() ||
         this.transcript.openAssistantContent()?.trim() ||
         ''
-      if (!this.transcript.abandonAssistant(partial, true) && partial) {
-        const stopped = this.addMessage('assistant', partial)
+      // Notes before the turn's tool calls keep their rows; the row that ends the turn (the open
+      // one, else the last closed one) holds the rest and is marked incomplete.
+      const replies = this.transcript.closedReplies()
+      const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
+      const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
+      if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
+        this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
+      } else if (!this.transcript.abandonAssistant(unshown, true) && unshown) {
+        const stopped = this.addMessage('assistant', unshown)
         const index = this.messages.findIndex((message) => message.id === stopped.id)
         if (index !== -1) {
           const updated = { ...this.messages[index], incomplete: true }
@@ -10469,6 +10478,8 @@ export class OrchestratorService extends EventEmitter {
         this.activeAssistantMessageId = null
         this.removeMessage(streamingId)
       }
+      // The plan card holds the turn's whole text, its notes before tool calls too.
+      for (const reply of this.transcript.closedReplies()) this.removeMessage(reply.id)
       const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
       if (this.appletStore && !executionFailed) {
         planMsg.turnId = turnId
@@ -10499,18 +10510,25 @@ export class OrchestratorService extends EventEmitter {
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
+    // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
+    const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
+    const finalText = unshownReplyText(
+      displayText,
+      this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
+    )
 
     if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
-        displayText || 'Done.',
+        finalText || 'Done.',
         false,
         responseMetadata
       )
       this.activeAssistantMessageId = null
     } else if (
       this.lastCompletedAssistantMessageId &&
-      stripActionBlocks(this.lastCompletedAssistantContent) === displayText
+      stripActionBlocks(this.lastCompletedAssistantContent) === finalText
     ) {
       // Compare stripped-to-stripped: the streamed snapshot is raw (often
       // trailing whitespace / action fences) while displayText is stripped.
@@ -10518,16 +10536,16 @@ export class OrchestratorService extends EventEmitter {
       // a visually identical twin message.
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
-        displayText,
+        finalText,
         false,
         responseMetadata
       )
     } else {
-      this.addMessage('assistant', displayText || 'Done.', undefined, responseMetadata)
+      this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata)
     }
 
     if (this.appletStore && !executionFailed) {
-      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (displayText || 'Done.'))
+      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (finalText || 'Done.'))
       if (finalMessage) {
         finalMessage.turnId = turnId
         this.persist(true)

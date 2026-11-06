@@ -1439,28 +1439,6 @@ export function OrchestratorChat() {
           }}
         />
 
-            {newChat && (
-              <ComposerWorkspaceToolbar
-                key={`${profileId}:${activeThreadId ?? '__blank__'}`}
-                projects={toolbarProjects}
-                workspace={workspace}
-                disabled={workspaceLocked}
-                device={{
-                  localName,
-                  devices: runOnDevices,
-                  notSharing,
-                  onRefresh: refreshRunOnDevices,
-                  onSelect: (node) => void selectRunOnDevice(node),
-                  onOpenRemoteProject: openProjectOnRunOnDevice
-                }}
-                onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                onPrivateChange={(localOnly) =>
-                  setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node), privateDefaultMs))}
-                onExpiryChange={(ms, stopsRun) => setComposerWorkspaceDraft(activeThreadId, workspaceWithExpiry(workspace, ms, stopsRun))}
-                onOpenProject={openProjectForDraft}
-                onError={setSendError}
-              />
-            )}
             <ChatComposer
               disabled={workspacePending || !workspaceReady}
               input={input}
@@ -1500,7 +1478,33 @@ export function OrchestratorChat() {
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
               privateChat={newChat ? Boolean(workspace.localOnly) : activeThread?.localOnly === true}
-              banner={<><RemoteSubagentNotice runsOn={activeThread?.runsOn} /><SubagentComposerBanner threadId={activeThreadId} /></>}
+              // The new-thread row is the card's top row: one surface with the input.
+              banner={<>
+                {newChat && (
+                  <ComposerWorkspaceToolbar
+                    key={`${profileId}:${activeThreadId ?? '__blank__'}`}
+                    projects={toolbarProjects}
+                    workspace={workspace}
+                    disabled={workspaceLocked}
+                    device={{
+                      localName,
+                      devices: runOnDevices,
+                      notSharing,
+                      onRefresh: refreshRunOnDevices,
+                      onSelect: (node) => void selectRunOnDevice(node),
+                      onOpenRemoteProject: openProjectOnRunOnDevice
+                    }}
+                    onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+                    onPrivateChange={(localOnly) =>
+                      setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node), privateDefaultMs))}
+                    onExpiryChange={(ms, stopsRun) => setComposerWorkspaceDraft(activeThreadId, workspaceWithExpiry(workspace, ms, stopsRun))}
+                    onOpenProject={openProjectForDraft}
+                    onError={setSendError}
+                  />
+                )}
+                <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
+                <SubagentComposerBanner threadId={activeThreadId} />
+              </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}

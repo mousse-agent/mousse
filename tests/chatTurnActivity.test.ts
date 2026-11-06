@@ -70,3 +70,39 @@ describe('a tool call group', () => {
     expect(text(html)).toContain('Tool calls 3')
   })
 })
+
+describe('a finished turn', () => {
+  const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
+  const turn = [
+    user,
+    reply('n1', 'Checking the start script first.'),
+    command('c1'),
+    thought('t1', 'The script is fine', 'output-available'),
+    reply('a1', 'The app starts on port 3000.'),
+    thought('t2', 'Nothing else to check', 'output-available')
+  ]
+
+  /** The visible rows of the turn's answer, in order. */
+  const rows = (html: string) =>
+    html
+      .slice(html.indexOf('turn-answer'))
+      .split(/<[^>]+>/)
+      .map((piece) => piece.trim())
+      .filter((piece) => piece && !piece.includes('turn-answer'))
+
+  it('ends on its answer, with its notes and the activity after it folded into one group above it', () => {
+    const html = render(turn, 'ready')
+    // The group is titled from its latest thought and collapsed: the note is inside it, not shown.
+    expect(rows(html)).toEqual(['Nothing else to check', 'The app starts on port 3000.'])
+  })
+
+  it('keeps the order things happened in while the turn still runs', () => {
+    const html = render(turn, 'streaming')
+    expect(rows(html)).toEqual([
+      'Checking the start script first.',
+      'The script is fine',
+      'The app starts on port 3000.',
+      'Nothing else to check'
+    ])
+  })
+})

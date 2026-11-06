@@ -20,6 +20,7 @@ const LONG = 'x'.repeat(160_000)
 class FittingAdapter extends ScriptedAdapter {
   readonly prepared: Array<RecoveredContext | null> = []
   readonly recovered: Array<RecoveredContext | null> = []
+  readonly compactionTokens: Array<number | undefined> = []
   mode: 'reply' | 'prepare' | 'overflow' = 'reply'
 
   constructor() {
@@ -27,6 +28,7 @@ class FittingAdapter extends ScriptedAdapter {
   }
 
   override async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+    this.compactionTokens.push(host.context.compactionTokens)
     if (this.mode === 'prepare') this.prepared.push(await host.context.prepareNativeContext(input.llmProvider, input.model))
     if (this.mode === 'overflow') this.recovered.push(await host.context.recoverOverflow())
     return super.startTurn(input, sink, ctl, host)
@@ -94,5 +96,19 @@ describe('compaction before a handoff to a prompt runtime', () => {
     await daemon.orch.send('hello', false, { threadId: thread.id, clientRequestId: 'short' })
     expect(adapter.prepared).toEqual([null])
     expect(notes(thread.id)).toEqual([])
+  })
+
+  it("hands the runtime the compaction threshold for its own session, unless compaction is off or at the model's maximum", async () => {
+    const thread = daemon.store.createThread('Threshold')
+    daemon.orch.setThreadModelOverride(thread.id, CLAUDE)
+    const send = (id: string) => daemon.orch.send('hi', false, { threadId: thread.id, clientRequestId: id })
+    await send('default')
+    daemon.settings.context = { compactionEnabled: true, compactionTokens: 256000 }
+    await send('256k')
+    daemon.settings.context = { compactionEnabled: true, compactionTokens: 'model-max' }
+    await send('model-max')
+    daemon.settings.context = { compactionEnabled: false, compactionTokens: 256000 }
+    await send('off')
+    expect(adapter.compactionTokens).toEqual([128000, 256000, undefined, undefined])
   })
 })

@@ -176,6 +176,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       // Mousse call with the turn's token (`per_call` turn binding).
       mcp: host.bridge?.mcp ?? null,
       mcpTurnToken: host.bridge?.mcp ? host.bridge.turnToken : undefined,
+      autoCompactTokens: host.context.compactionTokens,
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
       // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
       // A locked turn's instructions replace Claude Code's own system prompt instead (`locked`).
@@ -201,8 +202,11 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
-        // A thought that came before this call keeps its own row, above it; the next one starts below.
-        if (event.phase === 'start' && !event.parentCallId) streams.thinking.break()
+        // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) {
+          streams.thinking.break()
+          streams.text.break()
+        }
         toolStarted = true
         sink.tool(runtimeToolEvent(event))
       },

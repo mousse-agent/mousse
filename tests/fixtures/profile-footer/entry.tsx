@@ -6,7 +6,7 @@ import { useAppStore } from '../../../src/renderer/stores/appStore'
 import '../../../src/renderer/styles/app.css'
 import '../../../src/renderer/styles/sentence-case.css'
 import '../../../src/renderer/styles/geist-fonts.css'
-import { XTERM_FONT } from '../../../src/renderer/lib/xtermTheme'
+import { xtermFont } from '../../../src/renderer/lib/xtermTheme'
 
 // ?scenario=switching holds the profile list back so stale replies can be checked; any other scenario answers at once.
 // ?account=none is a build without MOUSSE_ID_ORIGIN, in is signed in to Mousse ID, out is signed out.
@@ -86,7 +86,7 @@ useAppStore.getState().activateProfile(alpha.id)
   refresh: () => window.dispatchEvent(new Event('mousse:profiles-changed')),
   profile: () => useAppStore.getState().profileId,
   externalSwitch: () => { bound = alpha.id; useAppStore.getState().activateProfile(alpha.id) },
-  terminalFont: XTERM_FONT
+  terminalFont: xtermFont()
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><div className="app">
   <ChatsSidebar />

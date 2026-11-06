@@ -99,9 +99,12 @@ it('delivers 5 MiB through actual MMS with awaited backpressure, no audience lea
     expect(parts.every((part, index) => part.part === index && part.content === chunk)).toBe(true)
     expect(parts.reduce((n, part) => n + part.content.length, 0)).toBe(5 * 1024 * 1024)
     expect(others).toEqual([])
+    // The profile's background provider check may publish providers.* events meanwhile (slow CI
+    // gets there inside this test); the connection lane itself adds nothing to the sequenced log.
     const after = await same.subscribe(baseline.sequence)
-    expect(after.sequence).toBe(baseline.sequence)
-    expect(after.replay).toEqual([])
+    expect(after.gap).toBe(false)
+    expect(after.replay.filter((event) => !event.type.startsWith('providers.'))).toEqual([])
+    expect(after.sequence).toBe(after.replay.at(-1)?.sequence ?? baseline.sequence)
     expect(same.requiresResnapshot).toBe(false)
     const old = producer!
     await a.request('profiles.bind', { profile: bob.id })

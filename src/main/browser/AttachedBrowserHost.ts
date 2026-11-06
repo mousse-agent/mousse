@@ -381,7 +381,9 @@ export class AttachedBrowserHost {
 
   private emitState(record: Registration, state: Partial<AttachedControlState>): void {
     if (!record.sender.isDestroyed() && sameBinding(this.connection.binding(record.sender.id), record.binding)) {
-      record.sender.send('browser:automation-state', { ...state, uiTabId: record.localTabId, profileId: record.binding.profileId })
+      record.sender.send('browser:automation-state', {
+        ...state, uiTabId: record.localTabId, profileId: record.binding.profileId, ...(record.threadId ? { threadId: record.threadId } : {})
+      })
     }
   }
 }
