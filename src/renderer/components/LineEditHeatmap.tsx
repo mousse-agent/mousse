@@ -155,6 +155,7 @@ export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
   return (
     <>
       <SettingsGroup
+        anchor="account-activity"
         title="Activity"
         icon={Activity}
         className="activity-group"
@@ -224,6 +225,7 @@ export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
       </SettingsGroup>
 
       <SettingsGroup
+        anchor="account-token-usage"
         title="Token usage"
         icon={Coins}
         className="activity-group"
