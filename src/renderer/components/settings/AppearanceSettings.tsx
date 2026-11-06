@@ -1,10 +1,16 @@
 import type { CSSProperties } from 'react'
-import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
+import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import { Palette } from '../../lib/icons'
-import { Select } from '../ui/Select'
+import { Select, type SelectOption } from '../ui/Select'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
 import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
+
+const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
+  { value: 'summary', label: 'Summary line' },
+  { value: 'list', label: 'Full list' },
+  { value: 'off', label: 'Off' }
+]
 
 const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
   off: 'Off',
@@ -223,6 +229,18 @@ export function AppearanceSettings({
               label="Render math"
               checked={appearance.renderMath}
               onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Changed files after each turn"
+          anchor="appearance-turn-changed-files"
+          control={
+            <Select
+              ariaLabel="Changed files after each turn"
+              value={appearance.turnChangedFiles}
+              onChange={(turnChangedFiles) => void onUpdate({ appearance: { ...appearance, turnChangedFiles } })}
+              options={TURN_CHANGED_FILES_OPTIONS}
             />
           }
         />
