@@ -3986,6 +3986,13 @@ html[data-theme='high-contrast'] {
   position: relative;
 }
 
+.resizable-panel-sidebar.resizable-panel-sidebar-fill {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  border-right: 0;
+}
+
 .panel-sidebar-resize-handle {
   position: absolute;
   z-index: 5;

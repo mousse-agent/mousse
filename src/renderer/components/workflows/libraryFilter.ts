@@ -21,6 +21,20 @@ export function uniqueWorkflowTags(items: WorkflowLibraryItem[]): string[] {
   return [...new Set(items.flatMap((item) => item.tags ?? []))].sort((a, b) => a.localeCompare(b))
 }
 
+const STATUS_ORDER: Exclude<WorkflowLibraryStatus, 'all'>[] = ['draft', 'published', 'unpublished-changes', 'unsupported']
+
+/** The statuses the library's workflows are in: the status filter offers only these. */
+export function uniqueWorkflowStatuses(items: WorkflowLibraryItem[]): Exclude<WorkflowLibraryStatus, 'all'>[] {
+  const used = new Set<WorkflowLibraryStatus>(items.map(publicationState))
+  if (items.some((item) => item.unsupportedNodes?.length)) used.add('unsupported')
+  return STATUS_ORDER.filter((status) => used.has(status))
+}
+
+/** Whether anything but the sort narrows the list, so a no-match result needs "Clear filters". */
+export function isWorkflowLibraryFiltered(query: WorkflowLibraryQuery): boolean {
+  return Boolean(query.search.trim() || query.tag || query.status !== 'all')
+}
+
 export function publicationState(item: WorkflowLibraryItem): 'draft' | 'published' | 'unpublished-changes' {
   if (!item.headRevisionId && !item.headSemanticHash) return 'draft'
   if (item.draftSemanticHash && item.headSemanticHash && item.draftSemanticHash !== item.headSemanticHash) {
