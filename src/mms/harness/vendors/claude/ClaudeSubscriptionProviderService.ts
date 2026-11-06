@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -64,6 +64,7 @@ import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
+import { claudeHomeOf, cutBefore, cutRefused, KEPT_TURNS, sessionEnd, type SessionTurn } from './sessionCuts'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
@@ -76,6 +77,16 @@ type SavedSession = {
   usageBaseline?: ClaudeUsageBaseline
   /** Provider instance that owns the session; absent on sessions saved before instances existed. */
   instanceId?: string
+  /**
+   * The session's turns, oldest first (issue #360): an undo or an edit that returns the history to
+   * what one of them left resumes the session cut after it. Absent on sessions saved before.
+   */
+  turns?: SessionTurn[]
+  /**
+   * A fork's branch that no turn has made yet: the first turn resumes `from` cut at `at` into a new
+   * session named `sessionId`, so the source session is never changed.
+   */
+  fork?: { from: string; at: string }
 }
 type Settings = {
   /**
@@ -124,6 +135,12 @@ export type ClaudeSubscriptionChatInput = {
   /** Prefixed to the prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
   turnPreamble?: string
   history?: string
+  /** The prompt carries history handed over from elsewhere (`TurnInput.historyHandedOver`): a fork's branch is not resumed beside it. */
+  historyHandedOver?: boolean
+  /** Planning this turn's handoffs failed (`TurnInput.handoffUnplanned`): a fork's branch is not trusted. */
+  handoffUnplanned?: boolean
+  /** The session the turn ran on and the id of the prompt Mousse pushed, once the turn succeeded. */
+  onSession?: (session: { sessionId: string; promptId?: string }) => void
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
@@ -698,6 +715,28 @@ const historyKey = (history: string) => createHash('sha256').update(history).dig
 function sessionBoundTo(saved: SavedSession, instanceId: string): boolean {
   return (saved.instanceId ?? CLAUDE_INSTANCE_ID) === instanceId
 }
+/** The session now holds `history`: the next turn resumes it, and an undo back to here can cut it after its latest turn. */
+function fingerprintSession(saved: SavedSession, history: string): void {
+  saved.historyKey = historyKey(history)
+  const latest = saved.turns?.[saved.turns.length - 1]
+  if (latest) latest.key = saved.historyKey
+}
+/**
+ * Where to resume when the history is what an earlier turn of the session left (an undo, an edit):
+ * the session cut before the prompt of the turn after it, with the turns kept. Undefined when no
+ * remembered turn left this history, the turn after it has no prompt of Mousse's, or the session's
+ * file does not hold that prompt.
+ */
+function cutForHistory(saved: SavedSession, key: string, home: string): { at: string; turns: SessionTurn[] } | undefined {
+  const turns = saved.turns ?? []
+  for (let index = turns.length - 2; index >= 0; index -= 1) {
+    if (turns[index].key !== key) continue
+    const next = turns[index + 1].prompt
+    const at = next ? cutBefore(home, saved.sessionId, next) : undefined
+    return at ? { at, turns: turns.slice(0, index + 1) } : undefined
+  }
+  return undefined
+}
 
 export class ClaudeSubscriptionProviderService {
   private readonly dir: string
@@ -849,6 +888,35 @@ export class ClaudeSubscriptionProviderService {
     const { [threadId]: _dropped, ...rest } = this.settings.sessions
     this.settings.sessions = rest
     this.save()
+  }
+  /**
+   * Native fork (issue #360): binds `threadId` to a branch of the session that ran the turn whose
+   * prompt is `prompt`, cut after that turn, and returns the branch's session id. The cut is read
+   * now, so turns the source thread runs later stay out of the fork; the branch itself is made by the
+   * fork's first turn (Claude Code copies the session up to the cut into a new one), so the source
+   * session is never changed. Null when no saved session of `instanceId` holds that turn any more, a
+   * turn of the source thread is running, or its session file cannot be read.
+   */
+  forkConversation(source: { prompt: string; instanceId?: string }, threadId: string): string | null {
+    const instanceId = source.instanceId ?? CLAUDE_INSTANCE_ID
+    for (const [sourceThread, saved] of Object.entries(this.settings.sessions ?? {})) {
+      const turns = saved.turns ?? []
+      const index = turns.findIndex((turn) => turn.prompt === source.prompt)
+      if (index < 0 || saved.fork || !sessionBoundTo(saved, instanceId)) continue
+      if (this.activeThreads.has(sourceThread)) return null
+      const home = claudeHomeOf(this.environment())
+      const next = turns[index + 1]?.prompt
+      const at = index + 1 < turns.length ? (next ? cutBefore(home, saved.sessionId, next) : undefined) : sessionEnd(home, saved.sessionId)
+      if (!at) return null
+      const sessionId = randomUUID()
+      this.settings.sessions = {
+        ...this.settings.sessions,
+        [threadId]: { sessionId, cwd: saved.cwd, ...(saved.model ? { model: saved.model } : {}), instanceId, turns: turns.slice(0, index + 1), fork: { from: saved.sessionId, at } }
+      }
+      this.save()
+      return sessionId
+    }
+    return null
   }
   /**
    * `/compact`: Claude Code's own compaction of the thread's saved session, outside a turn: the session is
@@ -1490,7 +1558,7 @@ export class ClaudeSubscriptionProviderService {
     if (!this.readyToCommit.delete(threadId)) return
     const saved = this.settings.sessions?.[threadId]
     if (saved) {
-      saved.historyKey = historyKey(history)
+      fingerprintSession(saved, history)
       this.save()
     }
   }
@@ -1511,7 +1579,7 @@ export class ClaudeSubscriptionProviderService {
     this.interruptedSessions.delete(threadId)
     const saved = this.settings.sessions?.[threadId]
     if (!sessionId || !saved || saved.sessionId !== sessionId) return
-    saved.historyKey = historyKey(history)
+    fingerprintSession(saved, history)
     this.save()
   }
   /**
@@ -1988,7 +2056,25 @@ export class ClaudeSubscriptionProviderService {
       }
     }
   }
+  /**
+   * One turn. A turn that resumed the session cut (an undo, an edit) and that Claude Code refused
+   * because the session's file or the cut entry is gone runs again once with the history in the
+   * prompt; a fork's first turn that cannot open its branch fails, and the resend forks again.
+   */
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
+    try {
+      return await this.chatTurn(input, true)
+    } catch (error) {
+      if (!(error instanceof CutRefused)) throw error
+      if (error.fork) {
+        this.forgetConversation(input.threadId)
+        throw new AppError({ code: 'binding_stale', message: 'Claude Code could not open this fork\'s session. Send the message again.', errorInfo: { category: 'unavailable', retryable: true } })
+      }
+      console.warn('[claude-subscription] could not resume the session cut; the history goes in the prompt', { threadId: input.threadId, error: error.message })
+      return this.chatTurn(input, false)
+    }
+  }
+  private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean): Promise<string> {
     input.signal?.throwIfAborted()
     if (this.checkDue()) {
       // Reserve the thread while the sign-in check runs so a second turn cannot slip in.
@@ -2066,13 +2152,30 @@ export class ClaudeSubscriptionProviderService {
     if (previous && !input.continuation) previous.meta.pushedFailed = false
     const instanceId = input.instanceId ?? CLAUDE_INSTANCE_ID
     // A native session belongs to one instance; another instance starts fresh.
-    const stored = this.settings.sessions?.[input.threadId]
+    let stored = this.settings.sessions?.[input.threadId]
+    if (stored?.fork && (input.historyHandedOver || input.handoffUnplanned || locked)) {
+      // The prompt carries the parent's history, or whether turns ran elsewhere since the branch was made
+      // is unknown: the branch is not resumed beside it.
+      this.forgetConversation(input.threadId)
+      stored = undefined
+    }
     const saved = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
-    const resume =
-      saved?.cwd === resolve(input.cwd) && saved.model === parseThinkingSuffixFromModelId(input.model).baseId && saved.historyKey === historyKey(input.history ?? '')
-        ? saved.sessionId
-        : undefined
-    const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
+    const historyNow = historyKey(input.history ?? '')
+    const sameSetup = saved?.cwd === resolve(input.cwd) && saved.model === parseThinkingSuffixFromModelId(input.model).baseId
+    const resume = !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
+    /**
+     * Issue #360: the session resumed cut, into a new session (`id`) so the one it came from stays
+     * whole. A fork's first turn makes its branch (whatever the thread's history holds: every turn
+     * since the branch was made ran here and did not finish); an undo or an edit cuts the session
+     * after the turn whose history this one carries.
+     */
+    let branch: { from: string; at: string; id: string; turns: SessionTurn[]; fork: boolean } | undefined
+    if (saved?.fork && branching) branch = { ...saved.fork, id: saved.sessionId, turns: saved.turns ?? [], fork: true }
+    else if (saved && !saved.fork && !resume && sameSetup && branching && !input.continuation && !locked) {
+      const cut = cutForHistory(saved, historyNow, claudeHomeOf(env))
+      if (cut) branch = { from: saved.sessionId, at: cut.at, id: randomUUID(), turns: cut.turns, fork: false }
+    }
+    const metrics = new ClaudeMetricsCollector(resume ?? branch?.from, saved?.usageBaseline)
     const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
     const savedHistoryKey = stored?.historyKey
     if (stored) {
@@ -2081,6 +2184,13 @@ export class ClaudeSubscriptionProviderService {
     }
     const frames = new TurnFrames(input, metrics)
     let success = false
+    /** The id of the prompt this turn pushed (none for a turn Claude started). */
+    let promptId: string | undefined
+    /** The turns of the session this turn ran on, before it: a cut's kept ones, the saved ones of the session it continued, none of a new one. */
+    const turnsBefore = (sessionId: string): SessionTurn[] =>
+      branch ? branch.turns : saved?.sessionId === sessionId ? saved.turns ?? [] : []
+    const withTurn = (sessionId: string): SessionTurn[] =>
+      [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     const steers: string[] = []
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
@@ -2173,10 +2283,11 @@ export class ClaudeSubscriptionProviderService {
         input.mcp ? [input.mcp.url, input.mcp.token] : null,
         readOnlyChild
       ]
-      const historyNow = historyKey(input.history ?? '')
       const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume, historyNow) !== undefined
+      // A process that holds this history already is the conversation; nothing is cut.
+      if (reuse) branch = undefined
       const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
-        (!resume && !reuse && input.history
+        (!resume && !branch && !reuse && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
           : '') + input.prompt
       const content: SDKUserMessage['message']['content'] = [
@@ -2199,8 +2310,9 @@ export class ClaudeSubscriptionProviderService {
         parent_tool_use_id: null,
         session_id: sessionId
       })
+      // The prompt carries an id of Mousse's, which Claude Code writes it under: a later cut finds it by that id.
       const messages = async function* (): AsyncGenerator<SDKUserMessage> {
-        yield userMessage(resume ?? '')
+        yield { ...userMessage(resume ?? branch?.id ?? ''), ...(promptId ? { uuid: promptId as SDKUserMessage['uuid'] } : {}) }
       }
       const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => {
         // Mousse's instructions first, then the user's own append text.
@@ -2211,7 +2323,9 @@ export class ClaudeSubscriptionProviderService {
           extraArgs: { ...CLAUDE_TURN_EXTRA_ARGS, ...base.extraArgs },
           model: selected.baseId,
           effort,
-          resume,
+          resume: resume ?? branch?.from,
+          // Claude Code copies the session up to the cut into a new one and leaves the source as it was.
+          ...(branch ? { resumeSessionAt: branch.at, forkSession: true, sessionId: branch.id } : {}),
           permissionMode,
           // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
           // unless Claude Code's settings forbid bypassing permissions at all.
@@ -2318,7 +2432,7 @@ export class ClaudeSubscriptionProviderService {
             // A cancel under way (another turn was cut off) would sweep this prompt up; wait for it.
             for (;;) {
               try {
-                live.push(liveRun, userMessage(live.sessionId ?? resume ?? ''))
+                promptId = live.push(liveRun, userMessage(live.sessionId ?? resume ?? branch?.id ?? ''))
                 break
               } catch (error) {
                 if (!(error instanceof CancelInProgress)) throw error
@@ -2384,6 +2498,7 @@ export class ClaudeSubscriptionProviderService {
       } else {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
+        promptId = randomUUID()
         let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
         for (;;) {
@@ -2425,6 +2540,10 @@ export class ClaudeSubscriptionProviderService {
           const sessionId = frames.sessionId
           if (!sessionId) throw new Error('Claude steering could not identify the active session')
           options.resume = sessionId
+          // The cut is made: the steer continues the session the turn runs on.
+          delete options.resumeSessionAt
+          delete options.forkSession
+          delete options.sessionId
           metrics.beginQuery(sessionId)
           const guidance = steers.splice(0).join('\n')
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
@@ -2446,14 +2565,17 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, turns: withTurn(sessionId) }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
       if (live && liveRun) this.liveCommits.set(input.threadId, { live, run: liveRun })
+      input.onSession?.({ sessionId, ...(promptId ? { promptId } : {}) })
       return frames.text
     } catch (error) {
       if (readUsageLimit(error)) usageLimited = true
+      // Claude Code could not open the cut (its file or entry is gone) and started nothing.
+      if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
       // Only this turn's controller: a live query is not the turn's to abort.
@@ -2485,10 +2607,16 @@ export class ClaudeSubscriptionProviderService {
         const savedSessionId = baseline?.sessionId ?? (stopped ? sessionId : undefined)
         if (savedSessionId && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]
+          // A fork's branch Claude Code made is the thread's session now, whatever became of the turn.
+          const { fork: _made, ...kept }: Partial<SavedSession> = current?.sessionId === savedSessionId ? current : {}
+          // The prompt of a turn that did not finish but reached the session is a turn of it: a later cut
+          // leaves it out with the turns after it. A finished turn saved its own above.
+          const reached = promptId !== undefined && (stopped || (liveRun !== undefined && liveRun.ids.size > 0))
           this.settings.sessions = {
             ...this.settings.sessions,
             [input.threadId]: {
-              ...(current?.sessionId === savedSessionId ? current : {}),
+              ...kept,
+              ...(success ? {} : { turns: reached ? withTurn(savedSessionId) : turnsBefore(savedSessionId) }),
               sessionId: savedSessionId,
               cwd: resolve(input.cwd),
               // A stopped turn saves no model of its own, and the next turn resumes only on the same one.
@@ -2571,6 +2699,13 @@ export class ClaudeSubscriptionProviderService {
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
     this.closeLive()
     this.readyToCommit.clear()
+  }
+}
+
+/** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
+class CutRefused extends Error {
+  constructor(message: string, readonly fork: boolean) {
+    super(message)
   }
 }
 
