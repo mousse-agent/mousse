@@ -1,6 +1,7 @@
 import type { BotAllowedObserver, NormalisedCall } from '../../../shared/bots/personal/authority'
 import type { BotChip } from '../../../shared/bots/personal/chat'
 import { chipForCall, rollUpChips, type BotChipCall, type BotChipContext } from '../../../shared/bots/personal/chips'
+import { stableStringify } from '../../run/json'
 import type { BotActivityContext, BotActivitySink } from '../seams'
 
 /**
@@ -32,10 +33,19 @@ export interface BotActivitySinkOptions {
 /** At most one live chip per activation in this long (four a second). */
 export const BOT_ACTIVITY_MIN_INTERVAL_MS = 250
 
+/**
+ * One call is checked at several points (locked Claude: PreToolUse, canUseTool and the app-tool
+ * registry; Pi: its gate and the registry), and each allowed check reports it. The same tool with
+ * the same input within this long of its first report, in one dispatch, is that same call.
+ */
+export const BOT_ACTIVITY_SAME_CALL_MS = 5_000
+
 interface DispatchActivity {
   ctx: BotActivityContext
   chipContext: BotChipContext
   calls: BotChipCall[]
+  /** When each call (tool and input) was first reported, to count a call checked several times once. */
+  seen: Map<string, number>
 }
 
 interface LiveState {
@@ -75,6 +85,11 @@ export class BotActivityLog implements BotActivitySink {
   onAllowed(ctx: BotActivityContext, call: { tool: string; input: unknown }): void {
     try {
       const dispatch = this.dispatch(ctx)
+      const key = `${call.tool}\u0000${stableStringify(call.input ?? null)}`
+      const at = this.now()
+      const first = dispatch.seen.get(key)
+      if (first !== undefined && at - first < BOT_ACTIVITY_SAME_CALL_MS) return
+      dispatch.seen.set(key, at)
       dispatch.calls.push({ tool: call.tool, input: call.input })
       const chip = chipForCall(call.tool, call.input, dispatch.chipContext)
       if (chip) this.show(ctx, chip)
@@ -117,7 +132,7 @@ export class BotActivityLog implements BotActivitySink {
   private dispatch(ctx: BotActivityContext): DispatchActivity {
     let dispatch = this.dispatches.get(ctx.dispatchId)
     if (!dispatch) {
-      dispatch = { ctx: { ...ctx }, chipContext: this.options.chipContext?.(ctx) ?? {}, calls: [] }
+      dispatch = { ctx: { ...ctx }, chipContext: this.options.chipContext?.(ctx) ?? {}, calls: [], seen: new Map() }
       this.dispatches.set(ctx.dispatchId, dispatch)
     }
     this.current.set(ctx.activationId, ctx.dispatchId)

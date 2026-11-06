@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, flush, PI, runDispatch, type BotFixture } from './botFixture'
+import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 
 let f: BotFixture
 let botId: string
@@ -38,7 +39,7 @@ describe('usage limits', () => {
     await flush()
     expect(f.limited.get('claude:main')).toBe(until)
     const retry = f.store.dispatch(activation.id, 2)!
-    expect(retry).toMatchObject({ kind: 'continue', prompt: { text: '[Mousse] The last try did not go through. Answer this again:\n\nThree AI headlines' }, send: { usageRetry: true } })
+    expect(retry).toMatchObject({ kind: 'continue', prompt: { text: `[Mousse] The last try did not go through. Answer this again:\n\nThree AI headlines\n\n${BOT_RUN_REPORT_LINE}` }, send: { usageRetry: true } })
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', selection: { instanceId: 'pi:openrouter' }, reloadPending: false })
     const prepared = await runDispatch(f, activation.id, 2, { text: 'Here are three.' })
     expect(prepared.selection).toMatchObject({ instanceId: 'pi:openrouter', model: 'some/model' })

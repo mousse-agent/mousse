@@ -6,8 +6,8 @@ import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
  * The personal-bot methods (PR 6 §4): profile-bound, apart from the Space-bot `bots.*` set and
  * not behind `net.v1`. Walls and escalation (6c-2) add `bots.escalations.*`, `continue`, `markDone`
  * and `bots.context.reset`.
- * TODO(WP2): the v1 form methods stop being registered for clients once the v2 set below is; they
- * stay engine functions that tests use.
+ * These v1 form methods are no longer registered for clients (the v2 set below is); they stay
+ * engine functions that tests use.
  */
 export const BOTS_PERSONAL_METHODS = [
   'bots.definitions.list',
@@ -101,8 +101,8 @@ export type BotsPersonalV2Params<M extends BotsPersonalV2Method> = BotsPersonalV
 export type BotsPersonalV2Result<M extends BotsPersonalV2Method> = BotsPersonalV2Api[M]['result']
 
 /**
- * Events of the v2 methods. `bots.message` with an `ask` replaces `bots.escalation`. TODO(WP2):
- * retire `bots.escalation` with the v1 methods.
+ * Events of the v2 methods. `bots.message` with an `ask` replaces `bots.escalation`, which is no
+ * longer bridged to clients.
  */
 export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity'] as const
 export type BotsPersonalV2Event = (typeof BOTS_PERSONAL_V2_EVENTS)[number]

@@ -169,7 +169,7 @@ describe('asks in the chat', () => {
     expect(prepared.authority.time.signal.aborted).toBe(false)
     await finish(f, payload, 'completed', { text: 'I need two things.' })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
-    const rows = chatOf(f, botId).filter((row) => row.activationId === activation.id)
+    const rows = chatOf(f, botId).filter((row) => row.activationId === activation.id && row.author === 'bot')
     expect(rows).toMatchObject([
       { kind: 'text', text: 'I need two things.', ask: { title: `read files in ${invoices}`, status: 'open' } },
       { kind: 'notice', text: `Penny wants to change files in ${notes}.`, ask: { title: `change files in ${notes}`, status: 'open' } }

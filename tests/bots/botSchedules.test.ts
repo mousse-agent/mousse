@@ -21,6 +21,7 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import type { BotDefinition, BotSchedule } from '../../src/shared/bots/personal/definition'
+import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 
 let base: string
 let profile: string
@@ -159,7 +160,7 @@ describe('bot schedules', () => {
       idempotencyKey: `sched:site-editor:tidy:${iso(T0 + 5 * MIN)}`,
       trigger: { kind: 'schedule', input: 'Tidy the site.', scheduleId: 'tidy', occurrenceAt: iso(T0 + 5 * MIN) }
     })
-    expect(store.dispatch(row!.id, 1)).toMatchObject({ prompt: { text: 'Tidy the site.' } })
+    expect(store.dispatch(row!.id, 1)).toMatchObject({ prompt: { text: `Tidy the site.\n\n${BOT_RUN_REPORT_LINE}` } })
     expect(scheduleRow()!.nextRunAt).toBe(iso(T0 + 10 * MIN))
   })
 

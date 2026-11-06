@@ -5,6 +5,7 @@ import type { BotLook } from '../../shared/bots/personal/look'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import { BotEngineError } from './activation/BotEngine'
 import type { BotChatService } from './chat/BotChatService'
+import { botMemoryMethods } from './memory/methods'
 import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 
 /**
@@ -131,9 +132,11 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
-    case 'bots.memory.list': return bots.memoryList(botId, p.history as boolean | undefined)
-    case 'bots.memory.forget': return bots.memoryForget(botId, p.id as string)
-    case 'bots.memory.export': return bots.memoryExport(botId, p.dir as string)
+    // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
+    case 'bots.memory.list':
+    case 'bots.memory.forget':
+    case 'bots.memory.export':
+      return botMemoryMethods(bots.memoryFor(botId))[method](p)
   }
 }
 

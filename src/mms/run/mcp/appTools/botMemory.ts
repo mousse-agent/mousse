@@ -4,7 +4,6 @@ import {
   MAX_BOT_MEMORY_READ_AROUND,
   MAX_BOT_MEMORY_SEARCH_LIMIT,
   MAX_BOT_MEMORY_TEXT_CHARS,
-  parseMemoryRef,
   type BotMemorySearchKind,
   type BotMemoryTool
 } from '../../../../shared/bots/personal/memory'
@@ -93,8 +92,12 @@ const error = (text: string): ToolOutcome => ({ text, isError: true })
 const str = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
 const int = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : undefined)
 
-export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
-  const store = host.memory
+/**
+ * The five memory tools. `source` may be read at call time: the profile's memory store opens with
+ * `bots.db`, after the app-tool registry is built; until then (or without it) the tools refuse.
+ */
+export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolHost | undefined)): MousseTool[] {
+  const hostNow = typeof source === 'function' ? source : () => source
   // Per run: searches and reads, for the "three searches and no read" count (bot-context.md §6).
   const runs = new Map<string, { searches: number; reads: number; counted: boolean }>()
   const runStats = (runId: string) => {
@@ -107,7 +110,7 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
     return stats
   }
 
-  const scope = (ctx: ToolCallContext): { botId: string; activationId: string; lane: BotLane } | string => {
+  const scope = (host: BotMemoryToolHost, ctx: ToolCallContext): { botId: string; activationId: string; lane: BotLane } | string => {
     const activation = host.activationOf(ctx.caller.threadId)
     if (!activation) return 'Only a bot has a memory.'
     if (ctx.turn.bot && ctx.turn.bot.activationId !== activation.activationId) return 'This turn does not belong to that bot.'
@@ -116,14 +119,14 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
 
   const report = (ctx: ToolCallContext, activation: { botId: string; activationId: string }, tool: BotMemoryTool, result: unknown) => {
     try {
-      host.onAppResult?.({ botId: activation.botId, activationId: activation.activationId, threadId: ctx.caller.threadId, runId: ctx.caller.runId }, tool, result)
+      hostNow()?.onAppResult?.({ botId: activation.botId, activationId: activation.activationId, threadId: ctx.caller.threadId, runId: ctx.caller.runId }, tool, result)
     } catch {
       // A chip never fails the call.
     }
   }
 
   const tool = (name: BotMemoryTool, describe: (args: Record<string, unknown>) => string,
-    run: (args: Record<string, unknown>, ctx: ToolCallContext, activation: { botId: string; activationId: string; lane: BotLane }) => ToolOutcome): MousseTool => {
+    run: (args: Record<string, unknown>, ctx: ToolCallContext, activation: { botId: string; activationId: string; lane: BotLane }, store: BotMemoryStore) => ToolOutcome): MousseTool => {
     const definition = BOT_MEMORY_TOOL_DEFINITIONS[name]
     return {
       name,
@@ -137,10 +140,12 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
       available: (turn) => (turn.bot ? true : 'Only a bot has a memory.'),
       describe,
       handler: (args, ctx) => {
-        const activation = scope(ctx)
+        const host = hostNow()
+        if (!host) return error('Bot memory is not available right now.')
+        const activation = scope(host, ctx)
         if (typeof activation === 'string') return error(activation)
         try {
-          return run(args, ctx, activation)
+          return run(args, ctx, activation, host.memory)
         } catch (failure) {
           if (failure instanceof BotJournalError) return error("I can't save to memory right now: there is no room on disk.")
           throw failure
@@ -150,7 +155,7 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
   }
 
   return [
-    tool('memory_search', (args) => (str(args.query) ? `Look back · ${str(args.query)}` : 'Look back'), (args, ctx, { botId }) => {
+    tool('memory_search', (args) => (str(args.query) ? `Look back · ${str(args.query)}` : 'Look back'), (args, ctx, { botId }, store) => {
       const kinds = Array.isArray(args.kinds) ? args.kinds.filter((kind): kind is BotMemorySearchKind => SEARCH_KINDS.includes(kind as BotMemorySearchKind)) : undefined
       const query = typeof args.query === 'string' ? args.query.slice(0, 500) : ''
       const hits = store.search(botId, {
@@ -167,7 +172,7 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
       store.noteSearch(botId, query.trim() ? { query, hits: hits.length } : undefined, readless ? 1 : 0)
       return json({ note: QUOTED, hits, ...(hits.length ? {} : { tip: 'Nothing found. Try other words, fewer words, or no query to see the latest.' }) })
     }),
-    tool('memory_read', (args) => `Read back · ${str(args.ref) ?? str(args.activationId) ?? ''}`.trim(), (args, ctx, { botId }) => {
+    tool('memory_read', (args) => `Read back · ${str(args.ref) ?? str(args.activationId) ?? ''}`.trim(), (args, ctx, { botId }, store) => {
       const ref = str(args.ref)
       const activationId = str(args.activationId)
       if (!ref && !activationId) return error('memory_read needs a ref (j123, m12) or an activationId.')
@@ -183,11 +188,11 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
       }
       return json({ note: QUOTED, ...result })
     }),
-    tool('memory_list', () => 'List memory', (args, _ctx, { botId }) => {
+    tool('memory_list', () => 'List memory', (args, _ctx, { botId }, store) => {
       const listing = store.list(botId, args.history === true)
       return json({ ...listing, entries: listing.entries.map(({ ref, kind, text, since, until, learnedAt, by, status }) => ({ id: ref, kind, text, since, ...(until ? { until } : {}), learnedAt, by, status })) })
     }),
-    tool('memory_save', (args) => `Remember · ${str(args.text)?.slice(0, 60) ?? ''}`, (args, ctx, activation) => {
+    tool('memory_save', (args) => `Remember · ${str(args.text)?.slice(0, 60) ?? ''}`, (args, ctx, activation, store) => {
       const text = str(args.text)
       if (!text) return error('memory_save needs the text to remember.')
       const result = store.save(activation.botId, {
@@ -203,18 +208,16 @@ export function botMemoryTools(host: BotMemoryToolHost): MousseTool[] {
       report(ctx, activation, 'memory_save', { ...result, text })
       return json(activation.lane === 'run' ? { ...result, kind: 'run_note', note: 'In a run, saves are run notes.' } : result)
     }),
-    tool('memory_forget', () => 'Forget', (args, ctx, activation) => {
+    tool('memory_forget', () => 'Forget', (args, ctx, activation, store) => {
       if (activation.lane === 'run') return { text: JSON.stringify({ error: 'refused', reason: 'Ask the owner in the chat.' }), isError: true }
       if (!str(args.reason)) return error('memory_forget needs a reason.')
       const refs = Array.isArray(args.refs) ? args.refs.filter((ref): ref is string => typeof ref === 'string').slice(0, 100) : []
       if (!str(args.id) && !refs.length) return error('Say which entry (id) or rows (refs) to forget.')
-      // The text, for the chip, before it is gone.
       const id = str(args.id)
-      const memId = id ? parseMemoryRef(id)?.id : undefined
-      const entry = memId ? store.list(activation.botId, true).entries.filter((e) => e.id === memId && e.text).pop() : undefined
       const result = store.forget(activation.botId, { ...(id ? { id } : {}), refs, by: 'chat', activationId: activation.activationId })
       if ('error' in result) return error(result.error)
-      report(ctx, activation, 'memory_forget', { ...result, text: entry?.text ?? '' })
+      // Without the forgotten text: its chip is stored with the message, and says only that something was forgotten.
+      report(ctx, activation, 'memory_forget', result)
       return json({ ...result, next: 'Tell the owner what you removed, and offer to look for other mentions.' })
     })
   ]

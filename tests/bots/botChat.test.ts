@@ -189,7 +189,8 @@ describe('bots.chat.list, chips and read markers', () => {
     expect(f.bots.service.chatList(botId).live).toEqual({ activationId: activation.id, chip: { icon: 'search', text: 'searching the web', live: true } })
     const events: unknown[] = []
     f.bots.events.on('activity', (event) => events.push(event))
-    f.chips.set(payload.runId, [{ icon: 'search', text: 'searched the web · 3' }])
+    // Chips are kept by dispatch (`bot_dispatches.client_request_id`).
+    f.chips.set(f.store.dispatch(activation.id, 1)!.clientRequestId, [{ icon: 'search', text: 'searched the web · 3' }])
     await finish(f, payload, 'completed', { text: 'Found three.' })
     expect(events).toEqual([{ botId, activationId: activation.id, chip: null }])
     expect(f.bots.service.chatList(botId).live).toBeUndefined()

@@ -26,6 +26,7 @@ import { foldersOf, type BotDefinition, type BotManifest } from '../../src/share
 import { permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import { addedPermissions } from '../../src/shared/bots/personal/manifest'
+import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 
 let base: string
 let profile: string
@@ -396,7 +397,7 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', 'read'])
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'read'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)

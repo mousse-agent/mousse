@@ -240,7 +240,7 @@ memory_forget({ id?: string; refs?: string[]; reason: string })
 **Other rules:**
 - **Caps:** owner 600, notes 1,400, run notes 500 tokens (estimated). An over-cap save fails with the current list. Expired and superseded entries don't count.
 - **Relative dates:** text with unresolved relative dates ("tomorrow", "next week") is refused, and the refusal suggests the absolute form.
-- **Chips:** every save and forget appends a `memory_op` journal row and produces a `memory` chip, "remembered · <short text>" or "forgot · <short text>".
+- **Chips:** every save and forget appends a `memory_op` journal row and produces a `memory` chip, "remembered · <short text>" or "forgot something you asked me to" (never the forgotten text, which the chip would store in `chips_json`).
 
 ## 8. Time, contradictions, forgetting, deletion
 

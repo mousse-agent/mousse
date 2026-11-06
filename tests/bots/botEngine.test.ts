@@ -21,6 +21,8 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload } from '../../src/mms/run/types'
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
+import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
+import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 
 let base: string
 let profile: string
@@ -212,7 +214,7 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })
     expect(activation).toMatchObject({ status: 'running', threadId: 'thread:bot:site-editor:act:' + activation.id, trigger: { kind: 'manual', input: 'Fix the footer' } })
     const dispatch = store.dispatch(activation.id, 1)!
-    expect(dispatch).toMatchObject({ kind: 'start', clientRequestId: `${activation.id}:d1`, policyDigest: botManifestDigest(manifest()), prompt: { text: 'Fix the footer' } })
+    expect(dispatch).toMatchObject({ kind: 'start', clientRequestId: `${activation.id}:d1`, policyDigest: botManifestDigest(manifest()), prompt: { text: `Fix the footer\n\n${BOT_RUN_REPORT_LINE}` } })
     expect(runs.getRun(dispatch.runId!)).toMatchObject({ status: 'queued', source: 'bot' })
     expect(turnStart(dispatch.runId!)).toEqual({ kind: 'bot', runId: dispatch.runId, threadId: activation.threadId, activationId: activation.id, dispatchN: 1 })
     expect(store.threadRole(activation.threadId!)).toBe('activation')
@@ -231,9 +233,10 @@ describe('activation and dispatch', () => {
     const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
     const prepared = bots.prepare(payload)
     if ('refused' in prepared) throw new Error(prepared.refused)
-    expect(prepared.prompt).toBe(' /deploy now')
+    // A run's request ends with what its last message is for (bot-context.md §5.2).
+    expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', 'read'] }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, 'read'].sort() }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(10 * 60_000)
@@ -314,7 +317,8 @@ describe('activation and dispatch', () => {
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', 'read'] }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
+    // The memory tools are every bot's, beside its grant (Bot Phase 1 §5.10).
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, 'read'].sort() }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
     expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })

@@ -565,13 +565,13 @@ If no runtime can run the bot, the activation fails before dispatch. The bot the
 
 ### 5.5 Schedules (C5)
 
-Bot app tools, in every bot's default app tools:
+Bot app tools, in every bot's default app tools. They are named `bot_schedule_*` because the job scheduler's agent tools already own `schedule_list` and the other `schedule_*` names:
 
 ```ts
-schedule_add({ when: { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string }, prompt: string })
+bot_schedule_add({ when: { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string }, prompt: string })
   → { scheduleId, label }          // label also becomes a chip on the reply: icon 'schedule'
-schedule_remove({ scheduleId }) → { removed: true }
-schedule_list() → Array<{ scheduleId, label, nextAt }>
+bot_schedule_remove({ scheduleId }) → { removed: true }
+bot_schedule_list() → Array<{ scheduleId, label, nextAt }>
 ```
 
 - Each tool is checked with `scheduleProblem` (`triggers/scheduler.ts`). There are at most 8 schedules per bot (`MAX_BOT_SCHEDULES`), and the minimum interval is 5 minutes.
@@ -705,8 +705,8 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
   | `web_fetch` | "reading a page · example.com" |
   | `read`, `list`, `search` | "reading files · Invoices" |
   | `edit`, `write` | "changing files · Notes"; in the files folder, "saved a file · <name>" |
-  | `schedule_add` | outcome chip with the label |
-  | `memory_save`, `memory_forget` | outcome chip: "remembered · <short text>" / "forgot · <short text>" (bot-context.md §7) |
+  | `bot_schedule_add` | outcome chip with the label |
+  | `memory_save`, `memory_forget` | outcome chip: "remembered · <short text>" / "forgot something you asked me to" (never the forgotten text: chips are stored with the message; bot-context.md §7) |
   | `memory_search`, `memory_read`, `memory_list` | "looked back · <query>", rolled up as "looked back · 3" |
   | `set_depth` | "taking more time", or "going quicker" |
   | `set_profile` | "renamed itself · <name>" |
@@ -755,7 +755,7 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
 
 ### 5.10 Bot instructions and tools
 
-- **`BOT_DEFAULT_APP_TOOLS`** (in `manifest.ts`): `web_search`, `web_fetch`, `schedule_add`, `schedule_remove`, `schedule_list`, `set_profile`, `set_depth`, `use_model`, `escalate`, and the five memory tools `memory_search`, `memory_read`, `memory_list`, `memory_save`, `memory_forget`. `BOT_APP_TOOLS` grows by the same tools, and `consult` stays conditional.
+- **`BOT_DEFAULT_APP_TOOLS`** (in `manifest.ts`): `web_search`, `web_fetch`, `bot_schedule_add`, `bot_schedule_remove`, `bot_schedule_list`, `set_profile`, `set_depth`, `use_model`, `escalate`, and the five memory tools `memory_search`, `memory_read`, `memory_list`, `memory_save`, `memory_forget`. `BOT_APP_TOOLS` grows by the same tools, and `consult` stays conditional.
   - The memory tool names are a constant, `BOT_MEMORY_TOOLS`, in `src/shared/bots/personal/memory.ts`, so WP3's lists and WP6's tools agree.
   - The memory tools are always on and never grantable. Their lane rules (runs write only run notes and can't forget) are enforced inside the tools from `BotToolHost.activationOf`, never from arguments (bot-context.md §7).
 - **The files folder** is `<profileHome>/bots/files/<botId>/`, created at bot creation. It holds documents and deliverables only; memory lives in `bots.db`, and no prompt reads this folder back.
@@ -769,7 +769,7 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
   - talk in plain, short words;
   - never name or discuss models or providers; say "I'll take more time" or "I'll be quicker";
   - ask for permissions with `escalate`, one plain sentence each;
-  - set schedules with `schedule_add` and confirm them in words;
+  - set schedules with `bot_schedule_add` and confirm them in words;
   - remember things with `memory_save`, using absolute dates, and search before saying you don't know. What the owner likes, including how much time to take, is saved as `owner` memory entries, which are always injected. This is the founders' "preferences saved as a skill" (bot-context.md §10). The memory protocol block of the pack (bot-context.md §5.1) carries the detailed rules;
   - keep documents you make in your files folder;
   - when something is refused, carry on and say what you skipped;
@@ -1190,7 +1190,7 @@ They are type-checked, with no behaviour.
 
     A named unavailable model returns `named_unavailable`.
   - [ ] Candidates exclude Codex and every instance that `canHoldBot` refuses.
-  - [ ] `schedule_add` with a weekday 09:00 cron returns the label "every weekday · 09:00", writes through `BotToolHost`, and produces an outcome chip. Nine schedules are refused.
+  - [ ] `bot_schedule_add` with a weekday 09:00 cron returns the label "every weekday · 09:00", writes through `BotToolHost`, and produces an outcome chip. Nine schedules are refused.
   - [ ] `set_depth({scope:'now'})` leads to a reload with the new effort or tier. `always` changes `main.model` without re-approval.
   - [ ] Chips: allowed calls give live attempt chips. The rolled-up chips for 3 searches and 2 page reads are "searched the web · 3" and "read 2 pages · example.com".
   - [ ] The files folder is writable by the bot and never listed as a permission. `BOT_DEFAULT_APP_TOOLS` contains `BOT_MEMORY_TOOLS`, and a memory save produces a "remembered · …" chip.
@@ -1424,7 +1424,7 @@ The UI gets no new surface in Phase 1. Memory shows as chips and is managed by a
 | C2 Owner chat on the home thread | `bots.chat.send/list/stop` on the home thread | `bot_thread_read_only` isn't lifted; the chat goes through `bots.*` |
 | C3 Activity summaries | `BotChip {icon, text, highlight?, live?}` on messages, and the `bots.activity` event | chips describe attempts, except app tools, which describe outcomes |
 | C4 Ask | `BotAskCard`, `bots.asks.answer {allow \| not_now}`, `BotDetail.permissions`, `bots.permissions.revoke` | one open ask per permission; scheduled runs carry on without it rather than wait |
-| C5 Schedules and triggers | the bot tools `schedule_add/remove/list`, `BotDetail.runs`, `bots.schedules.remove` | triggers are Phase 2 |
+| C5 Schedules and triggers | the bot tools `bot_schedule_add/remove/list`, `BotDetail.runs`, `bots.schedules.remove` | triggers are Phase 2 |
 | C6 Hidden model | no model crosses the boundary; problems arrive as `BotSummary.error` and state | — |
 | C7 State | `BotState` plus `BotError {text, action}`, `stateText` | adds `stuck` from the UI's §4.9; "done" comes from `lastOutcome` |
 | C8 Definition fields | `look`, `description` on `BotSummary` and the definition | — |

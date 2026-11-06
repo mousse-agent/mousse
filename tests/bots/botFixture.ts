@@ -50,7 +50,7 @@ export interface BotFixture {
   stopped: string[]
   afterDispatch: Array<{ activationId: string; lane: 'chat' | 'run'; threadId: string; endedBy: BotDispatchEnd }>
   packs: Array<{ lane: 'chat' | 'run'; activationId: string; scheduleId?: string }>
-  /** Chips the fake sink rolls up per dispatch (run id). */
+  /** Chips the fake sink rolls up per dispatch (`<activationId>:d<n>`). */
   chips: Map<string, BotChip[]>
   allowed: Array<{ tool: string; dispatchId: string }>
   timers: Array<{ fn: () => void; ms: number }>

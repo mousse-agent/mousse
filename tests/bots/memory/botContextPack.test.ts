@@ -199,7 +199,9 @@ describe('the run pack', () => {
     expect(pack).toContain('[m1 · 7 Nov 2026] The owner is vegetarian.')
     expect(pack).toContain('In a run, memory_save keeps run notes only')
     expect(pack).toContain('Last run: done,')
-    expect(pack.endsWith(BOT_RUN_REPORT_LINE)).toBe(true)
+    // The report line follows the request, not the pack (the engine appends it to the run's prompt).
+    expect(pack).not.toContain(BOT_RUN_REPORT_LINE)
+    expect(pack.endsWith(BOT_MEMORY_WRAPPER_CLOSE)).toBe(true)
     expect(estimateTokens(pack)).toBeLessThanOrEqual(6_500)
   })
 

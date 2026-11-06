@@ -34,9 +34,10 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 | chat summary (≤1k tokens) | its first 600 tokens |
 | verbatim window: owner messages, bot replies, run reports (≤8k) | last 3 reports of this schedule id (any trigger for a manual run) |
 | situation: time and zone, the owner's last message, open asks, schedules, the last run | owner messages since this schedule last ran (≤8); a schedule's first run gets the message from when it was made |
-| | the situation, then "Your last message is your report to the owner …" |
+| | the situation |
 
 - **The window moves in chunks.** When it passes 8k tokens, its oldest rows drop until it is under 4k and fold into the chat summary, newest first: owner messages cut at 300 characters, the first line of a run report, the first sentence of a reply. No model call. Between jumps each pack's prefix extends the last one, so prompt caches hold.
+- A run's request (its prompt, after the pack) ends with "Your last message is your report to the owner …" (`BOT_RUN_REPORT_LINE`), which the engine appends.
 - The rows of the current activation (the owner's new message) are left out: they arrive as the request.
 - The **guard** checks every row entering a pack. A row it rejects shows as "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
 

@@ -172,6 +172,9 @@ export class BotChatService {
       if (existing.botId !== input.botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
       return { message: this.engine.chat.toMessage(existing) }
     }
+    // The activation this message belongs to: its row and journal row say so (the chat pack then
+    // leaves it out, as it is the request).
+    const target = this.engine.chatActivationFor(input.botId)
     let message: BotChatMessage
     try {
       message = this.engine.chat.post({
@@ -181,6 +184,7 @@ export class BotChatService {
         text,
         ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
         clientRequestId: input.clientRequestId,
+        activationId: target.activationId,
         lane: 'chat'
       })
     } catch (error) {
@@ -194,7 +198,7 @@ export class BotChatService {
     try {
       if (await this.engine.continueChatWith(input.botId, prompt)) return { message }
       this.engine.approveStarterIfNeeded(definition.id)
-      await this.engine.enqueueChat(input.botId, `chat:${input.clientRequestId}`, prompt)
+      await this.engine.enqueueChat(input.botId, `chat:${input.clientRequestId}`, prompt, target.continues ? undefined : target.activationId)
     } catch (error) {
       // The message is kept; the chat says why nothing answered it.
       if (!(error instanceof BotEngineError)) throw error
@@ -239,21 +243,22 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
-  private memory(botId: string): BotMemoryAdmin {
+  /** The profile's bot memory, for one of its bots (`bots.memory.*`, through `botMemoryMethods`). */
+  memoryFor(botId: string): BotMemoryAdmin {
     this.engine.definitionOf(botId)
     if (!this.options.memory) throw new BotEngineError('bots_unavailable', 'Bot memory is not available in this build.')
     return this.options.memory
   }
 
   memoryList(botId: string, history?: boolean): BotMemoryListing {
-    return this.memory(botId).list(botId, history)
+    return this.memoryFor(botId).list(botId, history)
   }
 
   memoryForget(botId: string, id: string): BotMemoryForgetResult {
-    return this.memory(botId).forget(botId, id)
+    return this.memoryFor(botId).forget(botId, id)
   }
 
   memoryExport(botId: string, dir: string): Promise<{ files: string[] }> {
-    return this.memory(botId).export(botId, dir)
+    return this.memoryFor(botId).export(botId, dir)
   }
 }

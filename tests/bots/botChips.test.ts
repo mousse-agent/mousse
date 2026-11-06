@@ -4,7 +4,7 @@
  * outcome chips once they return. The model never writes a chip, and no chip names a model.
  */
 import { describe, expect, it } from 'vitest'
-import { BOT_ACTIVITY_MIN_INTERVAL_MS, createBotActivitySink, type BotActivityEvent } from '../../src/mms/bots/activity/BotActivitySink'
+import { BOT_ACTIVITY_MIN_INTERVAL_MS, BOT_ACTIVITY_SAME_CALL_MS, createBotActivitySink, type BotActivityEvent } from '../../src/mms/bots/activity/BotActivitySink'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { chipForCall, rollUpChips, type BotChipCall } from '../../src/shared/bots/personal/chips'
 
@@ -68,7 +68,7 @@ describe('rollUpChips: settled chips', () => {
     expect(rollUpChips([{ tool: 'bot_schedule_list', input: {} }], ctx)).toEqual([])
   })
 
-  it('memory saves and forgets are "remembered · …" and "forgot · …", one chip each', () => {
+  it('memory saves are "remembered · …" and forgets "forgot something you asked me to", one chip each, never with the forgotten text', () => {
     const chips = rollUpChips([
       { tool: 'memory_save', input: { text: 'Maya Chen is the accountant; her mail always matters.', kind: 'owner' }, result: { id: 'm3', version: 1, gauge: 'core 200/2,000' } },
       { tool: 'memory_save', input: { text: 'Too much', kind: 'note' }, result: { error: 'over_cap', core: [] } },
@@ -78,7 +78,7 @@ describe('rollUpChips: settled chips', () => {
     ], ctx)
     expect(chips).toEqual([
       { icon: 'memory', text: 'remembered', highlight: 'Maya Chen is the accountant; her mail…' },
-      { icon: 'memory', text: 'forgot', highlight: 'Ana prefers calls' },
+      { icon: 'memory', text: 'forgot something you asked me to' },
       { icon: 'memory', text: 'looked back', highlight: '2' }
     ])
   })
@@ -158,6 +158,18 @@ describe('BotActivitySink', () => {
       { icon: 'memory', text: 'remembered', highlight: 'Invoices go to ~/Documents/Invoices' },
       { icon: 'schedule', text: 'every weekday · 09:00' }
     ])
+  })
+
+  it('counts a call once when several check points allow it, and a repeat later as a new call', () => {
+    const { activity, advance } = sink()
+    // Locked Claude checks one call at PreToolUse, canUseTool and the registry; Pi at its gate and the registry.
+    for (let check = 0; check < 3; check += 1) activity.onAllowed(at, { tool: 'web_search', input: { query: 'rules' } })
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'other' } })
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'other' } })
+    advance(BOT_ACTIVITY_SAME_CALL_MS)
+    // The same search again, later: the bot made it twice.
+    activity.onAllowed(at, { tool: 'web_search', input: { query: 'rules' } })
+    expect(activity.drain('d1')).toEqual([{ icon: 'search', text: 'searched the web', highlight: '3' }])
   })
 
   it('observes an authority: allowed calls become live chips on any runtime', () => {

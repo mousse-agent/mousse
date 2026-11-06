@@ -139,7 +139,6 @@ export interface BotDefinition {
 
 /**
  * A format-1 thread: a fixed model selection. Read only to upgrade old files.
- * TODO(WP2): the engine and the definition store still run on format 1; move them to `BotThreadSpec`.
  */
 export interface BotThreadSpecV1 {
   key: string
@@ -152,7 +151,7 @@ export interface BotThreadSpecV1 {
 
 /**
  * A format-1 definition (no `format` field), as the Automations → Bots form wrote it. Read only to
- * upgrade old files (Bot Phase 1 §5.2). TODO(WP2): retire with the form editor.
+ * upgrade old files (Bot Phase 1 §5.2).
  */
 export interface BotDefinitionV1 {
   id: string
@@ -265,7 +264,7 @@ export interface BotThreadCheck {
 
 /**
  * One bot, as the Automations → Bots form lists it. The Bot UI's summary is `BotSummary` in
- * `chat.ts`. TODO(WP2/WP4): retire with the form editor.
+ * `chat.ts`; this one stays for the engine's v1 functions, which tests use.
  */
 export interface BotSummaryV1 {
   id: string

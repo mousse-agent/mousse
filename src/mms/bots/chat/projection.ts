@@ -2,13 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAskCard, BotAskStatus, BotChatMessage, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
-import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { foldersOf, workspaceOf, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { askFingerprint, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, canonicalManifest } from '../../../shared/bots/personal/manifest'
-import { BOT_MEMORY_TOOLS, type BotJournalKind } from '../../../shared/bots/personal/memory'
+import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
-import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BotJournal } from '../seams'
 import type { BotEscalationRow, BotMessageRow, BotStore } from '../store/BotStore'
 
@@ -20,30 +19,12 @@ import type { BotEscalationRow, BotMessageRow, BotStore } from '../store/BotStor
  */
 
 /**
- * The bot app tools every bot holds from creation (§5.10): the web, its schedules, its profile,
- * its depth, asking, and its memory. Only those this build can grant are listed, so the starter
- * grant stays valid before every tool exists.
- * TODO(WP3): `BOT_DEFAULT_APP_TOOLS` from `manifest.ts` replaces this list.
- */
-const STARTER_APP_TOOLS = ['web_search', 'web_fetch', 'schedule_add', 'schedule_remove', 'schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS]
-
-/** Built-ins of the starter grant: they reach only the bot's files folder (no other folder is granted). */
-const STARTER_TOOLS: NeutralTool[] = ['read', 'list', 'search', 'edit', 'write']
-
-/**
- * The starter grant (§5.3.1): files in the bot's own files folder, its default app tools and 15
- * minutes of work per activation, and nothing outside. Pressing Create bot approves it.
+ * The starter grant (§5.3.1, `botStarterManifest`): files in the bot's own files folder, the web,
+ * its own tools (`BOT_DEFAULT_APP_TOOLS`) and 15 minutes of work per activation, and nothing
+ * outside. Pressing Create bot approves it.
  */
 export function starterManifest(): BotManifest {
-  return canonicalManifest({
-    tools: [...STARTER_TOOLS],
-    appTools: STARTER_APP_TOOLS.filter((tool) => BOT_APP_TOOLS.has(tool)),
-    mcp: [],
-    skills: [],
-    workspace: null,
-    budget: { maxActiveMs: DEFAULT_BOT_ACTIVE_MS },
-    audience: 'owner'
-  })
+  return canonicalManifest(botStarterManifest())
 }
 
 /** How a chat row is journaled (bot-context.md §3). */
@@ -282,7 +263,8 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
   const items: BotPermissionRequest[] = []
   for (const [path, access] of foldersOf(manifest.workspace)) items.push({ path, access })
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
-  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool)) items.push({ tool })
+  // The bot's own tools are never permissions: About never lists them.
+  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
   for (const skill of manifest.skills) items.push({ skill })
   for (const pair of manifest.mcp) items.push({ mcp: { serverId: pair.serverId, tool: pair.tool } })
   for (const key of ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const) {
