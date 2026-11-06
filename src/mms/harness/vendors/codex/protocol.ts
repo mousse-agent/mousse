@@ -276,6 +276,8 @@ export interface CodexRequestMap {
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse }
   'thread/fork': { params: ThreadForkParams; result: ThreadForkResponse }
   'thread/unsubscribe': { params: { threadId: string }; result: ThreadUnsubscribeResponse }
+  /** Compacts the thread's context now; it runs as a turn and ends with that turn's `turn/completed`. */
+  'thread/compact/start': { params: { threadId: string }; result: Record<string, never> }
   'turn/start': { params: TurnStartParams; result: TurnStartResponse }
   'turn/steer': { params: TurnSteerParams; result: TurnSteerResponse }
   'turn/interrupt': { params: TurnInterruptParams; result: TurnInterruptResponse }

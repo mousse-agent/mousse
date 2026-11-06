@@ -1962,6 +1962,15 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
  * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
  * the instances list, under a line saying what happened.
  */
+/** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
+function ContextClearedDivider({ text }: { text: string }) {
+  return <div role="separator" aria-label={text} className="context-cleared">
+    <span aria-hidden="true" className="context-cleared-rule" />
+    <span>{text}</span>
+    <span aria-hidden="true" className="context-cleared-rule" />
+  </div>;
+}
+
 function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
@@ -2159,6 +2168,8 @@ function AssistantParts({
   if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
+    return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
