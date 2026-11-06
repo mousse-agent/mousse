@@ -61,6 +61,14 @@ export interface AppearanceSettings {
   animationSpeed: AnimationSpeed
   /** What a turn that changed files shows at its end. */
   turnChangedFiles: TurnChangedFilesMode
+  /** The chat shows blurred through a translucent composer. Off by default: the blur costs graphics memory. */
+  frostedComposer: boolean
+  /** Frosted composer opacity, in percent. */
+  frostedComposerOpacity: number
+  /** Frosted composer blur radius, in pixels. */
+  frostedComposerBlur: number
+  /** Frosted composer saturation multiplier (shown as "Color boost"). */
+  frostedComposerSaturation: number
 }
 
 export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
@@ -547,6 +555,24 @@ export const ACRYLIC_INTENSITY_MIN = 0
 export const ACRYLIC_INTENSITY_MAX = 100
 export const ACRYLIC_INTENSITY_DEFAULT = 55
 
+export type FrostedComposerSlider = 'frostedComposerOpacity' | 'frostedComposerBlur' | 'frostedComposerSaturation'
+
+/** Slider bounds and defaults for the frosted composer. */
+export const FROSTED_COMPOSER_RANGES: Readonly<Record<FrostedComposerSlider, { min: number; max: number; step: number; default: number }>> = {
+  frostedComposerOpacity: { min: 20, max: 95, step: 1, default: 60 },
+  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 16 },
+  frostedComposerSaturation: { min: 1, max: 1.6, step: 0.02, default: 1.12 }
+}
+
+/** Clamps a frosted composer slider value to its range and step; anything unreadable is the default. */
+export function clampFrostedComposer(key: FrostedComposerSlider, value: unknown): number {
+  const range = FROSTED_COMPOSER_RANGES[key]
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN
+  if (!Number.isFinite(n)) return range.default
+  const stepped = range.min + Math.round((n - range.min) / range.step) * range.step
+  return Math.round(Math.max(range.min, Math.min(range.max, stepped)) * 100) / 100
+}
+
 export const ACCENT_COLORS: AccentColorOption[] = [
   { id: 'purple', label: 'Purple', value: '#a785c7' },
   { id: 'violet', label: 'Violet', value: '#8a66b6' },
@@ -738,7 +764,11 @@ export function getDefaultSettings(): MousseSettings {
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
       animationSpeed: 'normal',
-      turnChangedFiles: 'summary'
+      turnChangedFiles: 'summary',
+      frostedComposer: false,
+      frostedComposerOpacity: FROSTED_COMPOSER_RANGES.frostedComposerOpacity.default,
+      frostedComposerBlur: FROSTED_COMPOSER_RANGES.frostedComposerBlur.default,
+      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default
     },
     notifications: {
       threadCompletionSound: true,
@@ -860,7 +890,11 @@ export function normalizeAppearance(
     threadProjectColors:
       typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
-    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles)
+    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles),
+    frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,
+    frostedComposerOpacity: clampFrostedComposer('frostedComposerOpacity', raw.frostedComposerOpacity),
+    frostedComposerBlur: clampFrostedComposer('frostedComposerBlur', raw.frostedComposerBlur),
+    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation)
   }
 }
 

@@ -1155,8 +1155,13 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   pointer-events: auto;
 }
 
+.chat:not(.chat--empty) {
+  /* Space between the composer and the bottom of the window. */
+  --chat-composer-gap: 22px;
+}
+
 .chat:not(.chat--empty) .chat-input-area {
-  padding-bottom: 22px;
+  padding-bottom: var(--chat-composer-gap);
 }
 
 /* The last line ends above the composer and the strip Go to latest sits in. */
@@ -1198,6 +1203,39 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 
 .chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump {
   display: none;
+}
+
+/*
+ * Frosted composer (Settings → Appearance, off by default). The transcript runs on under a
+ * translucent, blurred composer instead of fading out above it. The backdrop blur makes the GPU
+ * keep a copy of the window, which is why it is opt-in. Vars are set in lib/frostedComposer.ts.
+ */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div {
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + 12px);
+}
+
+/* Full strength up to the composer; gone by its bottom edge, so nothing shows in the gap below it. */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list {
+  --transcript-mask: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 28px,
+    #000 max(28px, calc(100% - var(--chat-composer-gap) - 16px)),
+    transparent max(28px, calc(100% - var(--chat-composer-gap))),
+    transparent 100%
+  );
+}
+
+html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer,
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
+  background-color: rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6));
+  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+  backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+}
+
+/* Go to latest sits on the content now, so it takes the composer's glass, just above it. */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
+  bottom: calc(var(--chat-composer-stack, 32px) + 8px);
 }
 
 .chat-jump-live {

@@ -62,7 +62,11 @@ describe('appearance settings', () => {
       codeFont: { source: 'default' },
       threadProjectColors: true,
       animationSpeed: 'normal',
-      turnChangedFiles: 'summary'
+      turnChangedFiles: 'summary',
+      frostedComposer: false,
+      frostedComposerOpacity: 60,
+      frostedComposerBlur: 16,
+      frostedComposerSaturation: 1.12
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',
