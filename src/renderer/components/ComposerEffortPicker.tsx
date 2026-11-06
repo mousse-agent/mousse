@@ -1,10 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { shortModelName } from '../../shared/modelNames'
 import { listingServes } from '../../shared/providerInstances'
 import type { ModelPickTarget } from './ModelFamilyMenu'
 import { applyEffortToModelId, findModelFamily, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
-import { Check, ChevronUp, Zap } from '../lib/icons'
+import { Check, Zap } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { describePermissionMode } from '../../shared/permissionMode'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
@@ -113,71 +113,6 @@ function levelNote(unsupported: string, model: LlmModelOption | undefined, reaso
   return `${reasoningLevelLabel(unsupported)} isn't offered for ${model ? parseModelVariant(model).familyLabel : 'this model'}; using ${reasoning.defaultLevel ? 'its default' : reasoningLevelLabel(effort ?? '')}.`
 }
 
-/**
- * How a turn runs: reasoning level, speed when the model lists more than one, and the permission mode,
- * each section only when the agent and model offer it. A level the model does not offer (saved, or
- * carried over from the model picked before) runs at the model's default, and a line says so.
- */
-function runSections({ selection, onSelect, permission, readOnly, onClose, dropped, current = true }: {
-  selection: Selection
-  onSelect: (providerId: string, modelId: string) => void
-  permission?: PermissionControl
-  readOnly: boolean
-  onClose: () => void
-  /** A level carried over from the model picked before that this one does not offer. */
-  dropped?: string
-  /** The selection is the thread's: picking the level already chosen changes nothing. */
-  current?: boolean
-}, run: ReturnType<typeof useRunOptions>): ReactNode[] {
-  const { reasoning, speeds, effort, pickEffort, pickSpeed } = run
-  const choice = permission ? permissionChoice(permission) : undefined
-  const modelName = parseThinkingSuffixFromModelId(selection.modelId).baseId
-  const model = selection.models.find((entry) => entry.id === selection.modelId || entry.id === modelName)
-  const unsupported = dropped ?? reasoning.unsupported
-  // Picking the level the thread runs at by default saves it as chosen, so it carries to the next model.
-  const chosen = parseThinkingSuffixFromModelId(selection.modelId).effort
-  const sections: ReactNode[] = []
-  if (reasoning.levels.length > 0) sections.push(<div key="reasoning" className="composer-mode-menu-section" role="group" aria-label="Reasoning">
-    <div className="composer-mode-menu-heading">Reasoning</div>
-    {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} disabled={readOnly} title={reasoning.descriptions[value]} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!current || value !== chosen) pickEffort(value) }}>
-      <span>{reasoningLevelLabel(value)}</span>
-      {value === reasoning.defaultLevel && <span className="composer-mode-menu-item-meta">Default</span>}
-    </button>)}
-    {unsupported && <div className="composer-run-menu-note" role="note" aria-live="polite">{levelNote(unsupported, model, reasoning, effort)}</div>}
-  </div>)
-  // Speed is one line of segments, one per speed the model lists (Standard | Fast, and any faster tier).
-  if (speeds) sections.push(<div key="speed" className="composer-mode-menu-section composer-run-menu-speed" role="group" aria-label="Speed">
-    <div className="composer-mode-menu-heading">Speed</div>
-    <div className="composer-run-menu-segments">
-      {speeds.options.map((option) => {
-        const on = option.speed === speeds.current
-        return <button key={option.speed} type="button" role="menuitemradio" aria-checked={on} disabled={readOnly} className={`composer-run-menu-segment${on ? ' selected' : ''}`} onClick={() => { onClose(); if (!current || !on) pickSpeed(option.modelId) }}>{speedLabel(option.speed)}</button>
-      })}
-    </div>
-  </div>)
-  if (permission && choice) sections.push(<PermissionModeSection key="permissions" control={permission} choice={choice} onPicked={onClose} />)
-  return sections.map((section, index) => index === 0 ? section : <div key={`group-${index}`} className="composer-mode-menu-group">{section}</div>)
-}
-
-/** The run settings as their own menu: the composer's when the model is assigned (a subagent's), where only the permission mode can change. */
-function RunMenu({ selection, onSelect, permission, readOnly, contentRef, style, onClose }: {
-  selection: Selection
-  onSelect: (providerId: string, modelId: string) => void
-  permission?: PermissionControl
-  readOnly: boolean
-  contentRef: RefObject<HTMLDivElement | null>
-  style: React.CSSProperties
-  onClose: () => void
-}) {
-  const run = useRunOptions(selection, onSelect)
-  // The chosen item takes focus, so the arrow keys start from it.
-  useLayoutEffect(() => { focusRunSettings(contentRef.current) }, [contentRef])
-  const sections = runSections({ selection, onSelect, permission, readOnly, onClose }, run)
-  return <FloatingPortal><div ref={contentRef} style={style} className={`composer-mode-menu composer-mode-menu-floating composer-run-menu${permission ? ' has-permissions' : ''}`} role="menu" aria-label="Run options" onKeyDown={moveFocus}>
-    {sections}
-  </div></FloatingPortal>
-}
-
 /** The level as the composer shows it after the model name ("High"). */
 export function runLevelText(selection: Selection): string {
   const reasoning = resolveReasoning(selection.providerId, selection.modelId, selection.models)
@@ -190,18 +125,6 @@ export function runLevelText(selection: Selection): string {
 export function runFasterSpeed(selection: Selection): string {
   const speeds = getModelSpeedOptions(selection.providerId, selection.modelId, selection.models)
   return speeds && speeds.current !== 'standard' && speeds.current !== 'slow' ? speedLabel(speeds.current) : ''
-}
-
-/** The composer's run settings menu for an assigned model: its level shows, only the permission mode changes. */
-export function ComposerRunMenu({ selection, permission, anchorRef, contentRef, onClose }: {
-  selection: Selection
-  permission: PermissionControl
-  anchorRef: RefObject<HTMLElement | null>
-  contentRef: RefObject<HTMLDivElement | null>
-  onClose: () => void
-}) {
-  const style = useFloatingPosition({ open: true, anchorRef, contentRef, placement: 'above-start', deps: [selection.modelId, permission.mode] })
-  return <RunMenu selection={selection} onSelect={() => {}} permission={permission} readOnly contentRef={contentRef} style={style} onClose={onClose} />
 }
 
 /** A model the picker shows run settings for, as `carryReasoningLevel` resolved it. */
@@ -302,11 +225,11 @@ export function SpeedToggle({ target, onSelect, onClose }: {
 }
 
 /**
- * The picker footer's permission button: the thread's mode (icon, name), opening a small menu above
- * it with the modes as one row and a line on the chosen or hovered one. The menu keeps focus inside;
- * Escape closes it back to the button, leaving the picker open.
+ * The composer's permission chip: the thread's mode as an icon, left of the model button. One click
+ * opens the modes above it, as one row with a line on the chosen or hovered one. Only Full access is
+ * tinted (amber). The menu keeps focus inside; Escape closes it back to the chip.
  */
-export function PermissionMenuButton({ control, onClose }: { control: PermissionControl; onClose: () => void }) {
+export function PermissionChip({ control }: { control: PermissionControl }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -314,19 +237,33 @@ export function PermissionMenuButton({ control, onClose }: { control: Permission
   const choice = permissionChoice(control)
   const Icon = permissionModeIcon(choice.shown)
   const name = describePermissionMode(choice.shown)
+  // Why the mode runs or is capped differently: the agent cannot enforce it, or a limit sits below.
+  const limit = choice.reason ?? Object.values(choice.blocked)[0]
+  const style = useFloatingPosition({ open, anchorRef: buttonRef, contentRef: menuRef, placement: 'above-start', deps: [control.mode] })
   const close = () => { setOpen(false); buttonRef.current?.focus() }
+  // The layer stays hidden until it is measured, and a hidden row cannot take focus.
+  const shown = open && style.visibility === 'visible'
+  useEffect(() => {
+    if (shown) focusRunSettings(menuRef.current, openedByKeyboard.current)
+  }, [shown])
   useEffect(() => {
     if (!open) return
-    focusRunSettings(menuRef.current, openedByKeyboard.current)
     const dismiss = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node) && !buttonRef.current?.contains(event.target as Node)) setOpen(false)
     }
+    // Escape closes wherever focus is (it can still be on the chip after a click).
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
     document.addEventListener('mousedown', dismiss)
-    return () => document.removeEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
   }, [open])
   const keys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
-      // Only this menu closes; the picker stays open.
       event.preventDefault()
       event.stopPropagation()
       close()
@@ -341,29 +278,28 @@ export function PermissionMenuButton({ control, onClose }: { control: Permission
     }
     moveFocus(event)
   }
-  return <div className="model-picker-permission">
-    {open ? <div ref={menuRef} className="model-picker-permission-menu" role="menu" aria-label="Permissions" onKeyDown={keys}>
-      <PermissionModeSection control={control} choice={choice} onPicked={() => { setOpen(false); onClose() }} />
-    </div> : null}
+  const label = `Permissions: ${name}`
+  return <>
     <button
       ref={buttonRef}
       type="button"
-      className={`model-picker-permission-btn${open ? ' open' : ''}${choice.reason ? ' is-limited' : ''}`}
+      className={`composer-icon-btn composer-permission-chip${open ? ' open' : ''}${choice.shown === 'full' ? ' is-full' : ''}`}
       aria-haspopup="menu"
       aria-expanded={open}
-      aria-label={`Permission mode: ${name}`}
-      title={choice.reason ? `${name}. ${choice.reason}` : name}
+      aria-label={limit ? `${label}. ${limit}` : label}
+      title={limit ? `${label}. ${limit}` : label}
       onClick={(event) => {
         // A click from Enter or Space has no pointer detail.
         openedByKeyboard.current = event.detail === 0
         setOpen(!open)
       }}
     >
-      <Icon size={14} aria-hidden="true" className="model-picker-permission-icon" />
-      <span>{name}</span>
-      <ChevronUp size={12} aria-hidden="true" />
+      <Icon size={15} aria-hidden="true" />
     </button>
-  </div>
+    {open ? <FloatingPortal><div ref={menuRef} style={style} className="composer-mode-menu composer-mode-menu-floating composer-run-menu composer-permission-menu" role="menu" aria-label="Permissions" onKeyDown={keys}>
+      <PermissionModeSection control={control} choice={choice} onPicked={close} />
+    </div></FloatingPortal> : null}
+  </>
 }
 
 /**

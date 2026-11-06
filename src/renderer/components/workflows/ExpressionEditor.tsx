@@ -1,4 +1,5 @@
 import { EXPRESSION_OPS, parseWorkflowExpression, type WorkflowExpression } from '../../../shared/workflows'
+import { Select } from '../ui/Select'
 
 export function ExpressionEditor({
   id,
@@ -19,25 +20,21 @@ export function ExpressionEditor({
   return (
     <div className="wf-field" id={id} data-expression={id}>
       <label htmlFor={`${id}-input`}>{label}</label>
-      <select
-        aria-label={`${label} operation`}
+      <Select
+        ariaLabel={`${label} operation`}
         disabled={readOnly}
         value={opOf(value)}
-        onChange={(event) => {
-          const op = event.target.value
+        onChange={(op) => {
           if (op === 'literal') onChange({ literal: true })
           else if (op === 'input') onChange({ ref: 'input', pointer: '' })
           else onChange({ op: op as (typeof EXPRESSION_OPS)[number], args: [{ literal: true }, { literal: true }] })
         }}
-      >
-        <option value="literal">Literal</option>
-        <option value="input">Input pointer</option>
-        {EXPRESSION_OPS.map((op) => (
-          <option key={op} value={op}>
-            {op}
-          </option>
-        ))}
-      </select>
+        options={[
+          { value: 'literal', label: 'Literal' },
+          { value: 'input', label: 'Input pointer' },
+          ...EXPRESSION_OPS.map((op) => ({ value: op, label: op }))
+        ]}
+      />
       <textarea
         id={`${id}-input`}
         className="wf-json"

@@ -1,4 +1,4 @@
-import type { AgentRuntimeKind } from '../../../shared/agents/types'
+import { AGENT_RUNTIME_KINDS, type AgentRuntimeKind } from '../../../shared/agents/types'
 import type { AgentLibraryItem } from './client'
 
 export type AgentLibrarySort = 'name' | 'updated' | 'lastRun'
@@ -33,6 +33,17 @@ export function uniqueLibraryModels(items: AgentLibraryItem[]): Array<{ id: stri
     map.set(id, item.modelLabel ?? id)
   }
   return [...map.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label))
+}
+
+/** The runtimes the library's agents use, in the shared order: the runtime filter offers only these. */
+export function uniqueLibraryRuntimes(items: AgentLibraryItem[]): AgentRuntimeKind[] {
+  const used = new Set(items.map((item) => item.runtimeKind))
+  return AGENT_RUNTIME_KINDS.filter((kind) => used.has(kind))
+}
+
+/** Whether anything but the sort narrows the list, so a no-match result needs "Clear filters". */
+export function isLibraryFiltered(query: AgentLibraryQuery): boolean {
+  return Boolean(query.search.trim() || query.tag || query.runtime !== 'all' || query.model || query.favoritesOnly)
 }
 
 export function publicationState(item: AgentLibraryItem): 'draft' | 'published' | 'unpublished-changes' {
