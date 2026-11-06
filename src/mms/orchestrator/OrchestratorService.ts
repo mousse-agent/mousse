@@ -76,7 +76,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1414,6 +1414,17 @@ export class OrchestratorService extends EventEmitter {
 
   setBotDispatcher(dispatcher: BotTurnDispatcher | null): void {
     this.botDispatcher = dispatcher
+  }
+
+  /**
+   * What the bots' own app tools reach (Bot Phase 1 §5.5, §5.6, §5.10): the engine's tool host, the
+   * activity chips, the model resolver, and the memory tools' host. Read at each call: `bots.db`
+   * opens after the app-tool registry is built. Null: the tools refuse.
+   */
+  private botAppTools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null = null
+
+  setBotAppTools(tools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null): void {
+    this.botAppTools = tools
   }
 
   /** Wakes the effect worker: a `turn.start` was written outside the orchestrator (a bot dispatch). */
@@ -3147,6 +3158,8 @@ export class OrchestratorService extends EventEmitter {
       host: this.mcpToolHost(),
       engine: this.requireRunEngine(),
       turns: this.appToolTurns,
+      bots: () => this.botAppTools?.bots,
+      botMemory: () => this.botAppTools?.memory,
       // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
       ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
     }).registry

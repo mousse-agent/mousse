@@ -77,8 +77,8 @@ export function createAppToolRegistry(input: {
   options?: Partial<ToolRegistryOptions>
   /** The personal bots' engine side, read at call time (Bot Phase 1 §5.5, §5.6); absent: their own tools refuse. */
   bots?: () => BotAppToolDeps | undefined
-  /** The bots' memory tools (WP6); absent: not registered. */
-  botMemory?: BotMemoryToolHost
+  /** The bots' memory tools (WP6), read at call time (the memory store opens with `bots.db`, later); absent: not registered. */
+  botMemory?: BotMemoryToolHost | (() => BotMemoryToolHost | undefined)
 }): { registry: ToolRegistry; families: Record<AppToolFamily, string[]> } {
   const { host, engine } = input
   const registry = new ToolRegistry({

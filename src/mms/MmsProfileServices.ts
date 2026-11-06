@@ -47,8 +47,18 @@ import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
+import { createBotActivitySink } from './bots/activity/BotActivitySink'
+import { botFilesFolder } from './bots/grants/compile'
+import { botInstructions } from './bots/instructions'
+import { createBotMemoryAdmin } from './bots/memory/admin'
+import { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
+import { createBotContextProvider } from './bots/memory/contextPack'
+import { createBotModelResolver } from './bots/model/BotModelResolver'
+import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduler } from './bots/triggers/scheduler'
 import type { BotStore } from './bots/store/BotStore'
+import { botScheduleLabel } from '../shared/scheduleLabel'
 import { RunStore } from './run/RunStore'
 import { jobPermissionRequest } from './scheduled/jobPermission'
 import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
@@ -131,9 +141,12 @@ const LIFECYCLE_EXEMPT_METHODS = new Set([
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.usage',
-  // Deleting a bot deletes its home thread once its runs stopped; its own request is not other work.
-  'bots.definitions.delete'
+  // Deleting a bot archives its threads once its runs stopped; its own request is not other work.
+  'bots.delete'
 ])
+
+/** How often deleted bots past their 30 days are purged. */
+const BOT_SWEEP_EVERY_MS = 24 * 60 * 60_000
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
 const IDLE_WAIT_METHODS = new Set(['speech.host.wait'])
@@ -257,6 +270,8 @@ export class MmsProfileServices {
   readonly personalBots: BotEngine | null
   private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
+  /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
+  private botSweepTimer: ReturnType<typeof setInterval> | null = null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -334,6 +349,15 @@ export class MmsProfileServices {
     // The built-in instances' launch settings and sign-out live in their instance config (the
     // gateway's); the vendor services read them from there and save through `configure`.
     const launchOf = (instanceId: string) => () => this.harnessImpl?.launchFor(instanceId) ?? {}
+    // Bot processes (Bot Phase 1 §5.9): the runtimes report each one by pid and thread, and the
+    // profile's registry supervises it outside the daemon's loop. The drivers are built before
+    // `bots.db` opens, so the registry is bound later; a report before then (or without bots) is
+    // refused, and the runtime ends that process.
+    let botProcesses: BotProcessRegistry | undefined
+    const superviseBotProcess = (pid: number, threadId: string): void => {
+      if (!botProcesses) throw new Error(BOT_SUPERVISOR_MISSING)
+      botProcesses.attachThread(threadId, pid)
+    }
     const signedOutOf = (instanceId: string) => () => this.harnessImpl?.signedOutInMousse(instanceId) ?? false
     const saveLaunchOf = (instanceId: string) => async (patch: CliProviderConfigPatch) => {
       if (!this.harnessImpl) throw new Error('Providers are not ready yet')
@@ -481,7 +505,8 @@ export class MmsProfileServices {
             customModels: (instanceId) => decodeModelPrefs(config.getProvidersSection().modelPrefs?.[instanceId]).custom,
             registry: () => this.orchestrator.mcpToolRegistry(),
             // Mousse stays the only refresher of an OAuth sign-in; Pi gets the access token only.
-            oauth: piOAuthBroker(this.providerAuth)
+            oauth: piOAuthBroker(this.providerAuth),
+            onBotProcess: superviseBotProcess
           })
         }),
         claudeCodeDriver({
@@ -495,7 +520,8 @@ export class MmsProfileServices {
             secrets: this.integrationContext.secrets,
             pluginRoot: join(homeDir, 'providers', 'claude-subscription', 'skill-plugins'),
             env
-          })
+          }),
+          onLockedProcess: superviseBotProcess
         }),
         codexDriver({ builtIn: () => this.codex }),
         antigravityDriver({ builtIn: () => this.antigravity }),
@@ -537,6 +563,18 @@ export class MmsProfileServices {
     // A `bots.db` that cannot be opened (corrupt, newer schema) fails closed for bots only: the
     // profile opens, its other threads work, and bot methods report bots unavailable.
     const harness = this.harnessImpl
+    // The bots' hidden model (§5.6): the ready providers in this device's scope that can hold the bot.
+    const botModels = createBotModelResolver({
+      snapshots: () => harness.instances.snapshots({ kind: 'device' }),
+      models: (instanceId) => harness.catalog.models(instanceId, { kind: 'device' }),
+      hold: { canHoldBot: (instanceId, policy, model) => harness.canHoldBot(instanceId, policy, model) }
+    })
+    // Activity chips (§5.8): live as `bots.activity` through the engine, rolled up into each message.
+    const botActivity = createBotActivitySink({
+      emit: (event) => this.personalBots?.publishActivity(event),
+      chipContext: (ctx) => ({ filesFolder: botFilesFolder(homeDir, ctx.botId), home: homedir() })
+    })
+    let botMemory: BotMemoryStore | undefined
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
@@ -568,12 +606,65 @@ export class MmsProfileServices {
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A published schedule is read at once; before the scheduler started this does nothing.
-      schedulesChanged: () => { void this.botScheduler?.wake() }
+      schedulesChanged: () => { void this.botScheduler?.wake() },
+      models: botModels,
+      activity: botActivity,
+      clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
+      archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
+      // Naming a new bot: one short call on the model its activations would use.
+      oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
+        selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
+        signal,
+        purpose: 'title',
+        system: 'Name a helper in 2–3 words.',
+        prompt,
+        maxChars: 60
+      })).text,
+      instructions: (bot) => botInstructions(bot),
+      scheduleLabel: (when) => botScheduleLabel(when),
+      providerLabel: (instanceId) => this.botProviderLabel(instanceId)
+    }, ({ store }) => {
+      // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
+      const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
+      botMemory = memory
+      const journal = createBotJournal({
+        store: memory,
+        readThread: (threadId) => this.threads.loadThreadData(threadId),
+        listThreads: () => botThreadsForCatchUp(store.allThreads())
+      })
+      const context = createBotContextProvider({
+        store: memory,
+        journal,
+        situation: (botId) => this.botSituation(botId),
+        scheduleCreatedAt: (botId, scheduleId) => store.schedules(botId).find((schedule) => schedule.id === scheduleId)?.createdAt
+      })
+      const admin = createBotMemoryAdmin({
+        store: memory,
+        definition: (botId) => {
+          try { return this.personalBots?.definitionOf(botId) } catch { return undefined }
+        }
+      })
+      // Process control (WP1) over this `bots.db`: the engine arms each dispatch, the runtimes attach to it.
+      botProcesses = createBotProcessRegistry({ store })
+      return { journal, context, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
     this.personalBots = opened?.engine ?? null
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
+    if (personalBots && botMemory) {
+      const memory = botMemory
+      this.orchestrator.setBotAppTools({
+        bots: { host: personalBots.tools, activity: botActivity, models: botModels },
+        memory: {
+          activationOf: (threadId) => personalBots.tools.activationOf(threadId),
+          memory,
+          // A save's or forget's chip, on the caller's current dispatch.
+          onAppResult: (at, tool, result) => botActivity.onAppResult({ botId: at.botId, activationId: at.activationId, dispatchId: personalBots.activationOf(at.threadId)?.dispatchId ?? '' }, tool, result)
+        }
+      })
+    }
     // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
     if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
       if (event.type !== 'run.status') return
@@ -1191,6 +1282,8 @@ export class MmsProfileServices {
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
     this.botScheduler?.stop()
+    if (this.botSweepTimer) clearInterval(this.botSweepTimer)
+    this.botSweepTimer = null
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -1215,6 +1308,26 @@ export class MmsProfileServices {
   /** Finishes the deletes a crash or a lock cut short (see `ThreadDeleter.finishCutShort`); run at start, after the move above is done. */
   finishCutShortDeletes(skip?: ReadonlySet<string>): ReturnType<ThreadDeleter['finishCutShort']> {
     return this.threadDeletes.finishCutShort(skip)
+  }
+
+  /** What a bot's context pack says about the present (bot-context.md §5.1): the owner's name, open asks and schedules. */
+  private botSituation(botId: string): { ownerName?: string; openAsks?: string[]; schedules?: Array<{ label: string; nextAt?: string }> } {
+    const engine = this.personalBots
+    const store = this.botStore
+    if (!engine || !store) return {}
+    const ownerName = this.settings.get().profile.username.trim()
+    const openAsks = store.openAsks(botId).filter((ask) => ask.messageId !== null).map((ask) => engine.chat.card(ask).title)
+    const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
+    return { ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}) }
+  }
+
+  /** A provider family in plain words for a bot's usage-limit pause ("your Claude usage limit"); never a model. */
+  private botProviderLabel(instanceId: string): string {
+    const driver = this.providerInstances.get(instanceId)?.driver
+    if (driver === 'claude') return 'Claude'
+    if (driver === 'codex') return 'ChatGPT'
+    const provider = driver === 'pi' ? instanceId.split(':')[1] : undefined
+    return provider ? this.providerAuth.getProviderDisplayName(provider) : ''
   }
 
   /**
@@ -1398,8 +1511,14 @@ export class MmsProfileServices {
     // Threads that expired, also while the daemon was not running, are deleted once the start's own request
     // ended (a delete waits for the profile to be idle). Until then no turn starts in them: the orchestrator refuses.
     this.threadExpiry.start()
-    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
+    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended,
+    // then every day: a deleted bot is purged 30 days after its delete, also while schedules are off.
     void this.personalBots?.finishDeletions().catch(() => {})
+    if (this.personalBots && !this.botSweepTimer) {
+      const bots = this.personalBots
+      this.botSweepTimer = setInterval(() => { void bots.sweepDeleted().catch(() => []) }, BOT_SWEEP_EVERY_MS)
+      this.botSweepTimer.unref?.()
+    }
   }
 
   private async startOwned(): Promise<void> {
@@ -1702,6 +1821,7 @@ export class MmsProfileServices {
       this.orchestrator.setRunEngine(null)
       this.orchestrator.setBotDispatcher(null)
       this.orchestrator.setBotThreads(null)
+      this.orchestrator.setBotAppTools(null)
       this.personalBots?.close()
       this.botStore?.close()
       this.runEngine.store.db.close()
