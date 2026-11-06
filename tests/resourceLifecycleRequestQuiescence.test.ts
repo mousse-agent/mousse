@@ -4,6 +4,7 @@ import { expect, it, vi } from 'vitest'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import type { LifecyclePurgePreview } from '../src/shared/resourceLifecycle'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
+import { archived } from './support/archived'
 
 it.each([false, true])('drains browser polls and preserves the final fence for a late writer (writer=%s)', async (writer) => {
   const f = await lifecycleHarness()
@@ -20,7 +21,7 @@ it.each([false, true])('drains browser polls and preserves the final fence for a
     poll = peer.request('browser.access.status', { profileId: f.alice.id })
     await vi.waitFor(() => expect(f.services.getOwnedActivity()['rpc:browser.access.status']).toBe(1))
     let settled = false
-    trash = f.rpc.request('threads.trash', { threadId: thread.id }).finally(() => { settled = true })
+    trash = f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) }).finally(() => { settled = true })
     const outcome = trash.then(() => ({ ok: true, error: '' }), (error) => ({ ok: false, error: String(error) }))
     await vi.waitFor(() => expect(f.services.getOwnedActivity()['rpc:threads.trash']).toBe(1))
     // Fresh short writes and completion traffic keep their ordinary admission;
@@ -61,7 +62,7 @@ it('retains a stalled browser poll and task bytes after the drain deadline witho
     vi.spyOn(browser, 'accessStatus').mockImplementation(() => hold.then(() => status) as never)
     poll = peer.request('browser.access.status', { profileId: f.alice.id })
     await vi.waitFor(() => expect(f.services.getOwnedActivity()['rpc:browser.access.status']).toBe(1))
-    await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toThrow(/profile requests are still active.*browser.access.status/)
+    await expect(f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow(/profile requests are still active.*browser.access.status/)
     expect(f.services.getOwnedActivity()['rpc:browser.access.status']).toBe(1)
     expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
     expect(readFileSync(join(location, 'preserved.txt'), 'utf8')).toBe('only copy')
@@ -74,7 +75,7 @@ it('settles admitted browser polls before both public purge preview and the exac
   let release = () => {}, poll: Promise<unknown> | undefined, operation: Promise<unknown> | undefined
   try {
     const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'purge with GUI polling' })
-    await f.rpc.request('threads.trash', { threadId: thread.id })
+    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
     const peer = await f.connect(f.alice.id, ['browser.viewer.v1'])
     const browser = f.services.platform.browser, status = browser.accessStatus()
     let preview!: LifecyclePurgePreview

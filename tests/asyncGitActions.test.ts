@@ -16,6 +16,7 @@ import { testHarness } from '../src/mms/run/testkit/harness'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { piAdapter } from './run/phase6Fixture'
 import { PI_TEST_CAPABILITIES } from './support/piStub'
+import { archived } from './support/archived'
 
 const previousPath = process.env.PATH
 
@@ -172,7 +173,7 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     const started = slowRetirementStatus(worktree, 3)
     const begun = Date.now()
     // Trash retires the thread's checkout in the same request; retirement's status read of it takes 3 seconds.
-    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: thread.id })
+    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: archived(mms.threads, thread.id) })
     await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
     expect(readFileSync(started, 'utf8')).toMatch(/ status --porcelain=v1 --untracked-files=all$/m)
     expect(await pending(trashing)).toBe(true)

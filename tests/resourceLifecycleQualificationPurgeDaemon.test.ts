@@ -21,6 +21,7 @@ it('recovers actual built-daemon SIGKILL after purge intent and mid-file removal
       const original = JSON.parse(readFileSync(recordPath, 'utf8')) as TaskLifecycleRecord
       writeFileSync(join(original.location, 'payload-a.bin'), Buffer.alloc(4096, 23))
       writeFileSync(join(original.location, 'payload-b.bin'), Buffer.alloc(8192, 57))
+      await daemon!.rpc.request('threads.settle', { threadId: thread.id, settled: true })
       await daemon!.rpc.request('threads.trash', { threadId: thread.id })
       const trashed = JSON.parse(readFileSync(recordPath, 'utf8')) as TaskLifecycleRecord
       const { preview } = await daemon!.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })

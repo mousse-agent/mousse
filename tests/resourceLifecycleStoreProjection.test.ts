@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { archived } from './support/archived'
 
 describe('retained standalone conversation projections', () => {
   for (const normalizeLegacyOrder of [false, true]) it(`preserves hidden child entries through ${normalizeLegacyOrder ? 'legacy order normalization' : 'visible reordering'} and parent restore`, async () => {
@@ -16,7 +17,7 @@ describe('retained standalone conversation projections', () => {
       writeFileSync(join(childPath, 'messages.json'), JSON.stringify(conversation))
       const { thread: first } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'first survivor' })
       const { thread: second } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'second survivor' })
-      await f.rpc.request('threads.trash', { threadId: parent.id })
+      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, parent.id) })
       const indexPath = join(f.services.getProfileHomeDir(), 'threads-index.json')
       const childBefore = (JSON.parse(readFileSync(indexPath, 'utf8')) as Thread[]).find((row) => row.id === child.id)
       expect(childBefore).toBeDefined()

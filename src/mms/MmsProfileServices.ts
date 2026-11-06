@@ -95,6 +95,7 @@ import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
 import { returnTrashedThreadsToArchive } from './lifecycle/trashToArchive'
+import { ThreadDeleter, type DeleteOptions } from './lifecycle/threadDelete'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
@@ -171,6 +172,7 @@ export class MmsProfileServices {
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
+  private readonly threadDeletes: ThreadDeleter
   readonly undoRetention: UndoRetentionSweeper
   /** Watches the pull requests of threads that opted in and tells them about checks and reviews. */
   readonly pullRequestWatch: PullRequestWatchService
@@ -550,7 +552,8 @@ export class MmsProfileServices {
         for (let attempt = 0; ; attempt += 1) {
           await this.requests.waitForIdle(2_000, include).catch(() => {})
           try {
-            return await this.trashThread(threadId)
+            // Through the one delete: it is archived, then deleted for good; with unpublished work it stays in Archived.
+            return await this.deleteThreadForGood(threadId, { human: false, discard: false, internal: true })
           } catch (error) {
             const busy = error instanceof Error && 'code' in error && (error as { code?: unknown }).code === 'busy'
             if (!busy || attempt >= 2) throw error
@@ -714,6 +717,15 @@ export class MmsProfileServices {
         this.bridge.currentIdentity.preparePrivateAudience(...args)
     })
     this.platform.onDispose(() => this.chatNetwork.close())
+    this.threadDeletes = new ThreadDeleter({
+      store: this.threads.lifecycleStore,
+      purge: { preview: (taskId) => this.lifecycle.cleanup.preview(taskId), purge: (input) => this.lifecycle.cleanup.purge(input) },
+      getThread: (threadId) => this.threads.getThread(threadId),
+      listThreads: () => this.threads.listAllThreads(),
+      trash: (threadId, operationId, expectedGeneration) => this.trashThread(threadId, operationId, expectedGeneration),
+      restore: (threadId) => this.restoreThread(threadId),
+      archive: (threadId) => this.archiveIfStartedByPerson(threadId)
+    })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
@@ -830,7 +842,7 @@ export class MmsProfileServices {
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
-    )
+    , { deletedThreadsRuleRetired: true })
     this.storageCleanup = new StorageCleanupService({
       store: this.threads.lifecycleStore,
       threads: this.threads,
@@ -924,11 +936,6 @@ export class MmsProfileServices {
     )
   }
 
-  /** The "Remove worktrees of deleted threads" rule; an unreadable policy keeps today's behaviour. */
-  private removesWorktreesWithDeletedThreads(): boolean {
-    try { return this.storagePolicy.policy().worktrees.removeWithDeletedThreads } catch { return true }
-  }
-
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
     const records = this.threads.lifecycleStore.list()
     const ids = new Set([taskId])
@@ -982,30 +989,22 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
-    // Read while the thread is listed: its checkout's repository is in this folder.
-    const projectPath = resolveThreadProjectPath(this.projects, this.threads, taskId)
-    const record = await this.lifecycle.trash({
+    // The trash is a step of a delete: the purge that follows removes the checkout, so it is not retired first.
+    await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
-    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
-    // checkout to the hourly cleanup.
-    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
-        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
-          .catch(() => 'aborted' as const) === 'ready') {
-      try {
-        // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
-        const item = await this.storageCleanup.retireDeletedWorktree(taskId)
-        if (item?.outcome === 'removed') this.storageUsage.rescanSoon()
-      } catch (error) {
-        this.threads.lifecycleStore.update(taskId, (current) => {
-          current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
-        })
-      }
-    }
     return this.threads.lifecycleStore.require(taskId)
+  }
+
+  /**
+   * Deletes a thread and its subagent threads for good (`ThreadDeleter`): it must be archived, or be Mousse's own
+   * delete (`internal`), and only a person in the app may discard unpublished work.
+   */
+  deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
+    return this.threadDeletes.delete(taskId, options)
   }
 
   async restoreThread(
@@ -1138,21 +1137,49 @@ export class MmsProfileServices {
     return null
   }
 
+  /** The one-time move of the old trash to Archived (see `returnTrashedThreadsToArchive`). */
+  returnTrashToArchive(): ReturnType<typeof returnTrashedThreadsToArchive> {
+    return returnTrashedThreadsToArchive({
+      store: this.threads.lifecycleStore,
+      restore: (taskId) => this.restoreThread(taskId),
+      archive: (taskId) => this.archiveIfStartedByPerson(taskId)
+    })
+  }
+
+  /** Finishes the deletes a crash or a lock cut short (see `ThreadDeleter.finishCutShort`); run at start, after the move above is done. */
+  finishCutShortDeletes(): ReturnType<ThreadDeleter['finishCutShort']> {
+    return this.threadDeletes.finishCutShort()
+  }
+
+  /** Archives a thread a person started; a subagent thread or a thread another owns (a bot's) is left as it is. */
+  private archiveIfStartedByPerson(taskId: string): void {
+    const thread = this.threads.getThread(taskId)
+    if (!thread || thread.settledAt || thread.lineage || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
+    this.threads.setThreadSettled(taskId, true)
+  }
+
   async initialize(): Promise<void> {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
     await refreshWorktreeFolders()
     await this.lifecycle.recoverAll()
-    // Once, after the trash operations a crash left are finished: what was in the trash comes back, archived.
+    // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
+    // Only then is a thread still in the trash a delete that was cut short, and it is finished.
     try {
-      const returned = await returnTrashedThreadsToArchive({
-        store: this.threads.lifecycleStore,
-        restore: (taskId) => this.restoreThread(taskId),
-        archive: (taskId) => { if (!this.threads.getThread(taskId)?.settledAt) this.threads.setThreadSettled(taskId, true) }
-      })
+      const returned = await this.returnTrashToArchive()
       if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
+      if (returned.done) {
+        const finished = await this.finishCutShortDeletes()
+        const kept = finished.filter((entry) => entry.outcome === 'kept')
+        if (kept.length) console.warn('some deletes that were cut short could not be finished; trying again at the next start', { kept })
+      }
     } catch (error) {
-      console.warn('threads in the trash could not be moved to Archived', { error: error instanceof Error ? error.message : String(error) })
+      console.warn('threads in the trash could not be moved to Archived or finished', { error: error instanceof Error ? error.message : String(error) })
     }
+    // Threads no longer wait in a trash, so its automatic emptying has nothing to do; a value saved before is turned off.
+    try {
+      const trash = this.lifecycle.cleanup.policy()
+      if (trash.automaticPurge) this.lifecycle.cleanup.configure({ ...trash, automaticPurge: false }, true)
+    } catch { /* An unreadable policy keeps the sweep off: it reads the same file and stops. */ }
     for (const thread of this.threads.listAllThreads()) {
       const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
       if (existsSync(episodes.path)) episodes.interruptOrphans()

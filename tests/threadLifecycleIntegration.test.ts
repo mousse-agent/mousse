@@ -9,6 +9,7 @@ import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { captureThreadLifecyclePath } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
+import { archived } from './support/archived'
 
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
@@ -90,9 +91,9 @@ describe('managed thread lifecycle integration', () => {
     try {
       const parent = f.services.threads.createThread('Parent')
       const child = f.services.threads.ensureExecutionThread('independent-trash-child', 'Child', undefined, { parentTaskId: parent.id })
-      await f.rpc.request('threads.trash', { threadId: child.id })
+      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, child.id) })
       const childLocation = f.services.threads.lifecycleStore.require(child.id).location
-      await f.rpc.request('threads.trash', { threadId: parent.id })
+      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, parent.id) })
       await f.rpc.request('threads.restore', { threadId: parent.id })
       expect(f.services.threads.lifecycleStore.require(child.id)).toMatchObject({ state: 'trashed', location: childLocation })
       expect(f.services.threads.getThread(child.id)).toBeUndefined()

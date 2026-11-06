@@ -18,6 +18,7 @@ import { createWorkflowExecutionClient } from '../src/renderer/services/workflow
 import type { Harness } from '../src/mms/harness/gateway'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
+import { archived } from './support/archived'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -173,7 +174,7 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     expect(beforeTrash.inventory.blockers).toEqual([])
     const runContainers = beforeTrash.inventory.resources.filter((entry) => entry.kind === 'workflow-record' && entry.identity.includes(view.runId)).map((entry) => entry.identity)
     expect(runContainers.length).toBeGreaterThan(0)
-    await rpc.request('threads.trash', { threadId: thread.id })
+    await rpc.request('threads.trash', { threadId: archived(services.threads, thread.id) })
     const { preview } = await rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
     expect(preview.blockers).toEqual([])
     expect(preview.ownedTaskIds).toEqual(expect.arrayContaining([thread.id, ...children.map((entry) => entry.id)]))

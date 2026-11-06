@@ -6,6 +6,7 @@ import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
 import type { LifecyclePurgePreview } from '../src/shared/resourceLifecycle'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { archived } from './support/archived'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -41,7 +42,7 @@ describe('resource error boundary and frozen purge recovery', () => {
       mkdirSync(join(directory, 'owned'), { recursive: true })
       const bytes = Buffer.from([0, 255, 21, 4])
       writeFileSync(join(directory, 'owned', 'payload.bin'), bytes)
-      await client.request('threads.trash', { threadId: thread.id })
+      await client.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
       const record = f.services.threads.lifecycleStore.require(thread.id)
       const path = join(record.location, 'owned', 'payload.bin')
       const { preview } = await client.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })

@@ -55,6 +55,8 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     const payload = Buffer.from([0, 1, 255, 10, 198, 99])
     writeFileSync(join(original, 'sole-copy.bin'), payload)
     writeFileSync(control, JSON.stringify({ from: original, marker }))
+    // The trash is a step of a delete: archived first.
+    await rpc!.request('threads.settle', { threadId: thread.id, settled: true })
     await rpc!.request('threads.trash', { threadId: thread.id }).catch(() => undefined)
     await until(() => first.daemon.done, Boolean)
     expect(existsSync(marker), 'fault must actually intercept the completed rename').toBe(true)

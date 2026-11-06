@@ -10,6 +10,7 @@ import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifec
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { archived } from './support/archived'
 
 it('preserves a shared artifact across its first owner purge and reclaims its bytes after the final owner in repeated public-protocol cycles', async () => {
   const f = await lifecycleHarness()
@@ -27,7 +28,7 @@ it('preserves a shared artifact across its first owner purge and reclaims its by
       const artifactPath = join(artifactRoot, ref.id)
       expect(readFileSync(join(artifactPath, 'blob'))).toEqual(Buffer.from(bytes))
       for (const [index, thread] of owners.entries()) {
-        await f.rpc.request('threads.trash', { threadId: thread.id })
+        await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
         const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
         expect(preview.blockers).toEqual([])
         if (index === 0) expect(preview.retained.some((resource) => resource.identity === artifactPath)).toBe(true)
@@ -116,7 +117,7 @@ it('rejects a reviewed purge preview after retained source bytes change and pres
   const f = await lifecycleHarness()
   try {
     const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'stale review proof' })
-    await f.rpc.request('threads.trash', { threadId: thread.id })
+    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
     const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
     expect(preview.blockers).toEqual([])
     const before = f.services.threads.lifecycleStore.require(thread.id)
@@ -142,7 +143,7 @@ it.each(['oversized', 'null', 'missing-owner'] as const)('blocks cleanup when a 
     const profileHome = join(f.home, 'profiles', f.alice.id)
     const index = join(profileHome, 'browser', 'artifact-index', `${ref.id}.json`)
     const original = readFileSync(index, 'utf8')
-    await f.rpc.request('threads.trash', { threadId: other.id })
+    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, other.id) })
     // Unreadable or malformed association authority cannot become no owner.
     if (corruption === 'oversized') writeFileSync(index, original + ' '.repeat(33 * 1024 * 1024))
     else if (corruption === 'null') writeFileSync(index, 'null')

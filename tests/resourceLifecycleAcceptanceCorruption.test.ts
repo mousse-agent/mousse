@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
+import { archived } from './support/archived'
 
 describe('durable authority failure acceptance', () => {
   it('preserves queued input when inventory rejects trash, then cancels replay only on successful trash', async () => {
@@ -16,10 +17,10 @@ describe('durable authority failure acceptance', () => {
       f.services.threads.saveMessageQueue(thread.id, queued)
       corruptPath = join(path, 'workspace.json')
       writeFileSync(corruptPath, '{truncated-workspace-ownership')
-      await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toThrow()
+      await expect(f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })).rejects.toThrow()
       expect(JSON.parse(readFileSync(join(path, 'queue.json'), 'utf8'))).toEqual(queued)
       unlinkSync(corruptPath); corruptPath = undefined
-      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
       await f.rpc.request('threads.restore', { threadId: thread.id })
       expect(f.services.threads.loadMessageQueue(thread.id)).toEqual([])
       expect(f.services.threads.loadThreadData(thread.id).messages).toEqual([])
@@ -83,7 +84,7 @@ describe('durable authority failure acceptance', () => {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'restore race' })
       const path = f.services.threads.getThreadDir(thread.id)
       writeFileSync(join(path, 'sole-copy.txt'), 'race payload')
-      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
       const peer = await f.connect()
       const [restore, purge] = await Promise.allSettled([
         f.rpc.request<{ thread: Thread }>('threads.restore', { threadId: thread.id }),

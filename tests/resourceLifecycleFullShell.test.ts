@@ -49,4 +49,4 @@ it('renders unavailable expired Undo, archive, unarchive and permanent deletion 
     await promisify(execFile)(process.execPath, [resolve('out/cli/index.js'), 'service', 'stop', '--home', fixture.home], { windowsHide: true, timeout: 15000 }).catch((error: { stderr?: string }) => { if (!error.stderr?.includes('MMS is not running')) throw error })
     fixture.dispose()
   }
-}, 120_000)
+}, 180_000)

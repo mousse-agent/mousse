@@ -6,6 +6,7 @@ import { expect, it } from 'vitest'
 import type { LifecyclePurgePreview } from '../src/shared/resourceLifecycle'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { archived } from './support/archived'
 
 // Windows only: a sharing violation from a real open handle does not exist on other platforms (the Windows CI job runs this).
 it.skipIf(process.platform !== 'win32')('keeps Windows sharing violations pending and retries the frozen purge after the real handle closes', async () => {
@@ -16,7 +17,7 @@ it.skipIf(process.platform !== 'win32')('keeps Windows sharing violations pendin
     const directory = f.services.threads.getThreadDir(thread.id)
     mkdirSync(join(directory, 'owned'), { recursive: true })
     writeFileSync(join(directory, 'owned', 'locked.bin'), Buffer.from([0, 255, 21, 4]))
-    await f.rpc.request('threads.trash', { threadId: thread.id })
+    await f.rpc.request('threads.trash', { threadId: archived(f.services.threads, thread.id) })
     const record = f.services.threads.lifecycleStore.require(thread.id), path = join(record.location, 'owned', 'locked.bin')
     // The child opens only this verified fixture path, denies Delete sharing, and never mutates it.
     lock = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$handle = [System.IO.File]::Open($env:MOUSSE_PURGE_LOCK_FIXTURE, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); [Console]::WriteLine('LOCKED'); [Console]::ReadLine() | Out-Null; $handle.Dispose()"], { windowsHide: true, env: { ...process.env, MOUSSE_PURGE_LOCK_FIXTURE: path }, stdio: ['pipe', 'pipe', 'pipe'] })
