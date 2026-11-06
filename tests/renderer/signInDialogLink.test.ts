@@ -57,3 +57,27 @@ it('keeps Open again, Copy link and the waiting line, with the paste field under
   await act(async () => { button('Continue')!.click() })
   expect(respondSignIn).toHaveBeenCalledWith('op-link', { promptId: 'op-link:2', kind: 'redirect_url', value: 'fixture-code' })
 })
+
+it('a failed sign-in says why and offers Try again only where it can start one', async () => {
+  act(() => applyOperationEvent({
+    operationId: 'op-link',
+    instanceId: 'claude',
+    kind: 'sign_in',
+    phase: 'failed',
+    error: { code: 'signed_out', message: 'The browser sign-in timed out.' }
+  }))
+  const button = (label: string) => [...document.body.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
+  act(() => root.render(createElement(SignInDialog, { operationId: 'op-link', name: 'Claude Code', onClose: () => {} })))
+  expect(document.body.querySelector('[role="alert"]')?.textContent).toBe('The browser sign-in timed out.')
+  expect(button('Try again')).toBeUndefined()
+
+  const onRetry = vi.fn(async () => {})
+  act(() => root.render(createElement(SignInDialog, { operationId: 'op-link', name: 'Claude Code', onClose: () => {}, onRetry })))
+  await act(async () => { button('Try again')!.click() })
+  expect(onRetry).toHaveBeenCalledTimes(1)
+
+  // A retry that cannot start says why in the dialog.
+  onRetry.mockRejectedValueOnce(new Error('The provider service is not running.'))
+  await act(async () => { button('Try again')!.click() })
+  expect(document.body.querySelector('[role="alert"]')?.textContent).toBe('The provider service is not running.')
+})

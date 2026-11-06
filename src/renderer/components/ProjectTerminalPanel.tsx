@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { isQualifiedId } from '../../shared/threadRef'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
-import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
+import { xtermFont, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
@@ -139,11 +139,10 @@ export function ProjectTerminalPanel() {
         allowTransparency: true,
         cursorBlink: true,
         fontSize: 13,
-        fontFamily: XTERM_FONT,
+        fontFamily: xtermFont(),
         theme: getXtermTheme()
       })
 
-      followXtermAppearance(terminal)
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
 
@@ -156,6 +155,10 @@ export function ProjectTerminalPanel() {
 
       terminal.open(wrapper)
       fitAddon.fit()
+      // Only the shown terminal refits; a hidden one has no size and refits when it is shown.
+      followXtermAppearance(terminal, () => {
+        if (wrapper.style.display !== 'none') fitTerminal(ptyId, false)
+      })
 
       const threadId =
         useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)?.ownerThreadId ?? undefined
@@ -172,7 +175,7 @@ export function ProjectTerminalPanel() {
         threadId
       })
     },
-    []
+    [fitTerminal]
   )
 
   const spawnShellForTab = useCallback(

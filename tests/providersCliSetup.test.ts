@@ -280,14 +280,31 @@ describe('Model list freshness', () => {
 })
 
 describe('Providers page toolbar', () => {
-  it('offers Refresh models beside Refresh provider status', () => {
+  it('heads the list with Add provider, then Refresh provider status and Refresh models; no scope without a project', () => {
     const html = renderToStaticMarkup(createElement(ProvidersSettings, {
       settings: {} as never, refreshProviderData: async () => ({ opts: {} as never }), updateSettings: async () => undefined, ensureValidProviderSelection: async (next) => next
     }))
-    expect(html).toContain('title="Refresh provider status"')
-    expect(html).toContain('title="Refresh models"')
-    expect(html.indexOf('title="Refresh provider status"')).toBeLessThan(html.indexOf('title="Refresh models"'))
-    expect(html).toContain('<span>Refresh models</span>')
+    expect(buttons(html)).toEqual(['Add provider', 'Refresh models'])
+    expect(labels(html)).toContain('Refresh provider status')
+    expect(html.indexOf('Add provider')).toBeLessThan(html.indexOf('aria-label="Refresh provider status"'))
+    expect(html.indexOf('aria-label="Refresh provider status"')).toBeLessThan(html.indexOf('Refresh models'))
+    // With no project to choose, the device is implied.
+    expect(html).not.toContain('Settings scope')
+    expect(html).not.toContain('Applying settings for')
+    // Usage stays on its own page.
+    expect(html).not.toMatch(/usage|quota|meter/i)
+  })
+})
+
+describe('Agent editor layout', () => {
+  it('keeps Setup to status and account, with the name and telemetry under Advanced', () => {
+    const entry = snapshot({ telemetry: { setting: 'off', defaultSetting: 'off', variables: ['DISABLE_TELEMETRY'] } })
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    const advanced = html.indexOf('Advanced</summary>')
+    expect(advanced).toBeGreaterThan(html.indexOf('>Setup<'))
+    expect(html.indexOf('Display name')).toBeGreaterThan(advanced)
+    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(advanced)
+    expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
 })
 

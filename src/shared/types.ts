@@ -425,6 +425,13 @@ export interface PendingUserQuestions {
 
 export type UserQuestionAnswers = Record<string, string | string[]>
 
+/** One answered question as the transcript keeps it: the prompt, the labels of the options chosen, and any text typed instead. */
+export interface AnsweredQuestion {
+  prompt: string
+  chosen: string[]
+  reply?: string
+}
+
 /**
  * The daemon's answer to `orchestrator.answerQuestions`. A saved approval request that someone else
  * answered first (or that was closed meanwhile) comes back with who decided what, so a client can say so.
@@ -654,6 +661,12 @@ export interface ChatMessage {
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
   origin?: AgentOrigin
+  /**
+   * Set on the message that records the answers to the agent's questions: each question with the
+   * options chosen and any reply typed instead. The transcript shows it as one step of the agent's
+   * turn, not as a message from the user; the text (`Q:`/`A:`) stays for older apps.
+   */
+  questionAnswers?: AnsweredQuestion[]
   /**
    * Set on a scheduled job's result appended to its thread when it ran on another thread (a
    * workflow's): that thread and run, which the transcript links to.

@@ -137,6 +137,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       <SettingsRow
         data-testid="storage-auto-empty"
         title={STORAGE_RULE_COPY.trash.title}
+        anchor="storage-trash"
         htmlFor="storage-auto-empty-select"
         description={props.trashPaused ? 'Paused after a system clock change.' : <RuleLine rule="trash" text={trashCountSentence(props.trashCount)} />}
         control={<>
@@ -166,6 +167,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       <SettingsRow
         data-testid="storage-remove-deleted"
         title={STORAGE_RULE_COPY.deletedThreads.title}
+        anchor="storage-deleted-threads"
         htmlFor="storage-remove-deleted-switch"
         description={<RuleLine rule="deletedThreads" />}
         control={<Switch id="storage-remove-deleted-switch" checked={policy?.worktrees.removeWithDeletedThreads ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeWithDeletedThreads: next })} />}
@@ -173,6 +175,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       <SettingsRow
         data-testid="storage-inactive"
         title={STORAGE_RULE_COPY.inactive.title}
+        anchor="storage-inactive"
         htmlFor="storage-inactive-select"
         description={<RuleLine rule="inactive" />}
         control={<DaysSelect
@@ -189,6 +192,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       <SettingsRow
         data-testid="storage-merged"
         title={STORAGE_RULE_COPY.merged.title}
+        anchor="storage-merged"
         htmlFor="storage-merged-switch"
         description={<RuleLine rule="merged" />}
         control={<Switch id="storage-merged-switch" checked={policy?.worktrees.removeMerged ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeMerged: next })} />}
@@ -199,6 +203,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       <SettingsRow
         data-testid="storage-captures"
         title={STORAGE_RULE_COPY.captures.title}
+        anchor="storage-captures"
         htmlFor="storage-captures-select"
         description={<RuleLine rule="captures" />}
         control={<DaysSelect
