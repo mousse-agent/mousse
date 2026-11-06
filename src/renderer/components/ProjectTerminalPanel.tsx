@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { isQualifiedId } from '../../shared/threadRef'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
-import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
+import { xtermFont, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
@@ -13,6 +13,7 @@ import {
   terminalNoticeFor,
   type TerminalNotice
 } from '../utils/terminalSession'
+import { DelayedLoader } from './ui/DelayedLoader'
 
 interface TerminalInstance {
   tabId: string
@@ -41,6 +42,8 @@ export function ProjectTerminalPanel() {
   const [notice, setNotice] = useState<TerminalNotice | null>(null)
   // Terminals another of the user's computers has open on this thread (this computer's own thread only).
   const [holders, setHolders] = useState<Array<{ ptyId: string; name: string }>>([])
+  // Stops in flight or failed, by terminal. A holder leaves the list only when its Stop succeeds.
+  const [holderStops, setHolderStops] = useState<Record<string, { busy: boolean; error?: string }>>({})
 
   useEffect(() => {
     if (mainView !== 'terminal' || !activeThreadId || isQualifiedId(activeThreadId)) {
@@ -66,7 +69,20 @@ export function ProjectTerminalPanel() {
   }, [mainView, activeThreadId])
 
   // What was said about one thread's terminal is not said about another's.
-  useEffect(() => setNotice(null), [activeThreadId])
+  useEffect(() => {
+    setNotice(null)
+    setHolderStops({})
+  }, [activeThreadId])
+
+  const stopHolder = useCallback((ptyId: string) => {
+    setHolderStops((stops) => ({ ...stops, [ptyId]: { busy: true } }))
+    window.mousse.pty.kill(ptyId, activeThreadId ?? undefined).then(() => {
+      setHolders((held) => held.filter((entry) => entry.ptyId !== ptyId))
+      setHolderStops(({ [ptyId]: _done, ...rest }) => rest)
+    }, (error: unknown) => {
+      setHolderStops((stops) => ({ ...stops, [ptyId]: { busy: false, error: error instanceof Error ? error.message : String(error) } }))
+    })
+  }, [activeThreadId])
 
   const threadKey = activeThreadId ?? '__standalone__'
   const visibleTabs = useMemo(
@@ -123,11 +139,10 @@ export function ProjectTerminalPanel() {
         allowTransparency: true,
         cursorBlink: true,
         fontSize: 13,
-        fontFamily: XTERM_FONT,
+        fontFamily: xtermFont(),
         theme: getXtermTheme()
       })
 
-      followXtermAppearance(terminal)
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
 
@@ -140,6 +155,10 @@ export function ProjectTerminalPanel() {
 
       terminal.open(wrapper)
       fitAddon.fit()
+      // Only the shown terminal refits; a hidden one has no size and refits when it is shown.
+      followXtermAppearance(terminal, () => {
+        if (wrapper.style.display !== 'none') fitTerminal(ptyId, false)
+      })
 
       const threadId =
         useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)?.ownerThreadId ?? undefined
@@ -156,7 +175,7 @@ export function ProjectTerminalPanel() {
         threadId
       })
     },
-    []
+    [fitTerminal]
   )
 
   const spawnShellForTab = useCallback(
@@ -346,38 +365,38 @@ export function ProjectTerminalPanel() {
 
   return (
     <div className="terminal-panel project-terminal-panel">
-      {holders.map((holder) => (
-        <div key={holder.ptyId} className="terminal-remote-holder" role="status">
-          <span>{holder.name} has a terminal open on this thread.</span>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              void window.mousse.pty
-                .kill(holder.ptyId, activeThreadId ?? undefined)
-                .catch(() => {})
-                .finally(() => setHolders((held) => held.filter((entry) => entry.ptyId !== holder.ptyId)))
-            }}
-          >
-            Stop
-          </button>
-        </div>
-      ))}
+      {holders.map((holder) => {
+        const stop = holderStops[holder.ptyId]
+        return (
+          <div key={holder.ptyId} className="terminal-remote-holder" role="status">
+            <span>{holder.name} has a terminal open on this thread.</span>
+            {stop?.error && <span className="terminal-remote-holder-error" role="alert" title={stop.error}>Couldn’t stop it</span>}
+            <button
+              type="button"
+              className="btn"
+              disabled={stop?.busy}
+              onClick={() => stopHolder(holder.ptyId)}
+            >
+              {stop?.error ? 'Retry' : 'Stop'}
+            </button>
+          </div>
+        )
+      })}
       <div
         className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}
       >
         {!terminalCwd && (
           <div className="terminal-empty">
-            <p>Loading terminal…</p>
+            <DelayedLoader label="Loading terminal" />
           </div>
         )}
         {activeTab?.exited && terminalCwd && (
           <div className="terminal-exited-overlay">
-            <p>Shell exited</p>
+            <span>Shell exited</span>
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn"
               onClick={() => void spawnShellForTab(activeTab.id)}
             >
               Restart shell

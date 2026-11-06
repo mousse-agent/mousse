@@ -4,9 +4,10 @@ import { useAppStore } from '../stores/appStore'
 import { isSessionClosing, readableError } from '../lib/errorText'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
+import { useComposerNotice, type ComposerNoticeProps } from './ComposerNotice'
 import { invalidateThreadActionHistory, readThreadActionHistory, type ThreadActionHistory } from '../utils/threadActionHistory'
 
-interface PromptUndoState {
+export interface PromptUndoState {
   threadId?: string | null
   history: ThreadActionHistory | null
   busy: boolean
@@ -137,30 +138,32 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
 }
 
 /**
- * Redo, progress and a failed Undo or Redo, as one notice above the composer. It is rendered inside the
- * composer block, so it sits with the composer's other notices instead of below the chat.
+ * Redo, progress and a failed Undo or Redo, as the composer's notice. Null when there is nothing to say, or
+ * when a conflict refused the Undo: `PromptUndoNotice` then shows the notice with Discard instead.
  */
+export function promptUndoNotice(state: PromptUndoState): ComposerNoticeProps | null {
+  const { history, busy, working, error, changes, notice } = state
+  if (error) return changes && state.threadId ? null : { tone: 'error', title: error, onDismiss: state.clearError }
+  if (working) return { tone: 'info', title: 'Updating conversation…' }
+  const undone = Boolean(history?.redoTarget)
+  if (!undone && !notice) return null
+  return {
+    tone: 'info',
+    title: undone ? 'Turn undone' : notice!,
+    ...(undone && notice ? { detail: notice } : {}),
+    ...(undone ? { actions: [{ label: 'Redo', title: 'Redo last undo', disabled: busy, onClick: () => void state.redo() }] } : {}),
+    ...(notice ? { onDismiss: state.clearNotice } : {})
+  }
+}
+
+/** The Undo notice above the composer. It renders inside the composer block, so it shares the composer's one notice slot. */
 export function PromptUndoNotice() {
   const state = useContext(PromptUndoContext)
-  if (!state) return null
-  const { threadId, history, busy, working, error, changes, notice } = state
-  if (error) {
-    return changes && threadId
-      ? <PendingChangesNotice className="connection-failed-pill" threadId={threadId} message={error} details={changes.details}
-          onResolved={() => { state.clearError(); changes.retry() }} />
-      : <div className="connection-failed-pill" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={state.clearError}>Dismiss</button>
-        </div>
-  }
-  if (working) return <div className="connection-failed-pill prompt-undo-notice" role="status"><span>Updating conversation…</span></div>
-  const message = [history?.redoTarget ? 'Turn undone' : null, notice].filter(Boolean).join('. ')
-  if (!message) return null
-  return <div className="connection-failed-pill prompt-undo-notice" role="status">
-    <span>{message}</span>
-    {history?.redoTarget && <button type="button" disabled={busy} onClick={() => void state.redo()}>Redo last undo</button>}
-    {notice && <button type="button" onClick={state.clearNotice}>Dismiss</button>}
-  </div>
+  useComposerNotice(state ? promptUndoNotice(state) : null)
+  const { threadId, error, changes } = state ?? {}
+  if (!state || !error || !changes || !threadId) return null
+  return <PendingChangesNotice threadId={threadId} message={error} details={changes.details}
+    onResolved={() => { state.clearError(); changes.retry() }} onDismiss={state.clearError} />
 }
 
 /** This is the actual control in each prompt toolbar, not a parallel history action. */

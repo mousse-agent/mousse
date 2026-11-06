@@ -1,4 +1,4 @@
-import { createElement } from 'react'
+import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
@@ -12,7 +12,7 @@ import type { MentionItem } from '../src/shared/composerCommands'
 
 const noop = () => {}
 
-function renderList(rows: SuggestionRow[], selected: number, extra: { footer?: string; emptyText?: string } = {}): string {
+function renderList(rows: SuggestionRow[], selected: number, extra: { footer?: string; emptyText?: ReactNode } = {}): string {
   return renderToStaticMarkup(
     createElement(ComposerSuggestionList, { rows, selected, ariaLabel: 'Suggestions', onHover: noop, onPick: noop, ...extra })
   )
@@ -70,8 +70,13 @@ describe('mention suggestion list', () => {
 
   it('shows the footer and the empty text', () => {
     expect(renderList([], 0, { footer: 'Indexing files…' })).toContain('Indexing files…')
-    expect(renderList([], 0, { emptyText: 'No skills enabled.' })).toContain('No skills enabled.')
-    expect(renderList([{ key: 'a', content: 'A' }], 0, { emptyText: 'No skills enabled.' })).not.toContain('No skills enabled.')
+    expect(renderList([], 0, { emptyText: 'No skills' })).toContain('No skills')
+    expect(renderList([{ key: 'a', content: 'A' }], 0, { emptyText: 'No skills' })).not.toContain('No skills')
+  })
+
+  it('shows an empty text with an action in it', () => {
+    const html = renderList([], 0, { emptyText: createElement('button', { type: 'button' }, 'Settings') })
+    expect(html).toContain('<div class="composer-command-suggestion-empty"><button type="button">Settings</button></div>')
   })
 
   it('keeps focus in the text box when the list is pressed, so composition is not interrupted', () => {

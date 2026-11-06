@@ -124,7 +124,9 @@ async function run(): Promise<void> {
       await waitFor('document.querySelector("[data-editor-status]")?.textContent.includes("Published")', 'workflow publish')
       const workflowId = await js<string>('document.querySelector("[data-workflow-editor]").getAttribute("data-definition-id")')
       const semantic = await js<string>('document.querySelector("[data-semantic-identity]").textContent')
-      await click('[aria-label="Export workflow"]')
+      await click('[aria-label="Workflow actions"]')
+      await waitFor('Boolean(document.querySelector("[role=menu] [data-action=export]"))', 'workflow actions menu')
+      await click('[role="menu"] [data-action="export"]')
       for (let i = 0; i < 100 && !downloadDone; i += 1) await delay(25)
       if (!downloadDone) throw new Error('Workflow export did not start')
       await downloadDone

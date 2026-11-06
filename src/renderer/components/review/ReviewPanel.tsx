@@ -5,7 +5,9 @@ import { REVIEW_MAX_FILES, type ReviewFileEntry, type ReviewFilesResult, type Re
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
 import { ResizablePanelSidebar } from '../ResizablePanelSidebar'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select, type SelectOption } from '../ui/Select'
+import { Collapse } from '../ui/Collapse'
 import { ReviewDiffPane, WhitespaceToggle } from './ReviewDiffPane'
 import { commentCounts, commentScopeLabel, scopeKey } from './reviewComments'
 import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type WorkspaceAvailability } from './reviewData'
@@ -66,9 +68,9 @@ function TreeRows({
                 {open ? <ChevronDown size={12} strokeWidth={2} /> : <ChevronRight size={12} strokeWidth={2} />}
                 <span className="git-file-path">{node.name}</span>
               </button>
-              {open && (
+              <Collapse open={open} itemCount={node.children.length}>
                 <TreeRows nodes={node.children} depth={depth + 1} selectedPath={selectedPath} collapsed={collapsed} comments={comments} onToggle={onToggle} onSelect={onSelect} />
-              )}
+              </Collapse>
             </div>
           )
         }
@@ -99,6 +101,11 @@ function TreeRows({
   )
 }
 
+/** A POSIX, drive-letter or UNC path; anything else is relative to the worktree. */
+function isAbsoluteReviewPath(path: string): boolean {
+  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)
+}
+
 function firstFilePath(nodes: TreeNode[]): string | null {
   for (const node of nodes) {
     if (node.kind === 'file') return node.path
@@ -115,7 +122,7 @@ export function ReviewPanel() {
   const threadState = useReviewStore((s) => (threadId ? s.byThread[threadId] : undefined))
   const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? NO_REFERENCES)
   const platform = useAppStore((s) => s.appInfo?.platform ?? '')
-  const { setScope, selectFile, saveViewState, resolveCommentReveal } = useReviewStore.getState()
+  const { setScope, selectFile, saveViewState, resolvePendingFile } = useReviewStore.getState()
 
   const [availability, setAvailability] = useState<{ threadId: string; value: WorkspaceAvailability } | null>(null)
   const [choices, setChoices] = useState<TurnChoice[]>([])
@@ -207,14 +214,16 @@ export function ReviewPanel() {
   const tree = useMemo(() => (files ? buildFileTree(files) : []), [files])
   const totals = useMemo(() => totalCounts(files ?? []), [files])
 
-  // A clicked comment pill names its file by absolute path; once its scope's list is here, open that file.
-  const pendingComment = threadState?.pendingComment
+  // A clicked comment pill or changed-files row names its file by absolute path (or relative to the worktree);
+  // once its scope's list is here, open that file.
+  const pendingFile = threadState?.pendingFile
   const root = result?.root
   useEffect(() => {
-    if (!threadId || !pendingComment || !files || !root) return
-    const match = files.find((file) => sameReviewFile(joinReviewPath(root, file.path), pendingComment.absolutePath, platform))
-    resolveCommentReveal(threadId, match?.path ?? null)
-  }, [threadId, pendingComment, files, root, platform, resolveCommentReveal])
+    if (!threadId || !pendingFile || !files || !root) return
+    const target = isAbsoluteReviewPath(pendingFile.path) ? pendingFile.path : joinReviewPath(root, pendingFile.path)
+    const match = files.find((file) => sameReviewFile(joinReviewPath(root, file.path), target, platform))
+    resolvePendingFile(threadId, match?.path ?? null)
+  }, [threadId, pendingFile, files, root, platform, resolvePendingFile])
 
   const commentsPerFile = useMemo(
     () =>
@@ -229,11 +238,11 @@ export function ReviewPanel() {
   // Keep the selected file when it is still listed; otherwise open the first one.
   const selectedPath = threadState?.selectedPath ?? null
   useEffect(() => {
-    if (!threadId || !files || list?.key !== listKey || pendingComment) return
+    if (!threadId || !files || list?.key !== listKey || pendingFile) return
     if (selectedPath && files.some((file) => file.path === selectedPath)) return
     const next = firstFilePath(tree)
     if (next !== selectedPath) selectFile(threadId, next)
-  }, [threadId, files, list?.key, listKey, selectedPath, pendingComment, tree, selectFile])
+  }, [threadId, files, list?.key, listKey, selectedPath, pendingFile, tree, selectFile])
 
   const toggleFolder = useCallback((path: string) => {
     setCollapsed((current) => {
@@ -268,10 +277,14 @@ export function ReviewPanel() {
   const selectedEntry = files?.find((file) => file.path === selectedPath)
   const currentList = result !== null
   const error = listError?.key === listKey ? listError.message : null
+  const hasFiles = Boolean(files && files.length > 0)
+  // A scope known to have no changes is one line; there is no file to open beside it.
+  const noChanges = currentList && !hasFiles && !result?.unavailable && !error
+  const emptyLabel = result?.unavailable ? 'Nothing to show' : hasFiles ? 'Select a changed file to view its diff' : ''
 
   return (
     <div className="review-panel">
-      <ResizablePanelSidebar className="git-sidebar review-sidebar" defaultWidth={300}>
+      <ResizablePanelSidebar className="git-sidebar review-sidebar" defaultWidth={300} fill={noChanges}>
         <div className="panel-toolbar review-toolbar">
           <Select
             size="small"
@@ -285,9 +298,11 @@ export function ReviewPanel() {
             <RefreshCw size={14} strokeWidth={2} />
           </button>
         </div>
-        <div className="review-toggle-row">
-          <WhitespaceToggle />
-        </div>
+        {!noChanges && (
+          <div className="review-toggle-row">
+            <WhitespaceToggle />
+          </div>
+        )}
         {reason && <div className="review-banner" role="status">{reason}</div>}
         {error && (
           <div className="review-banner review-banner-error" role="alert">
@@ -303,7 +318,7 @@ export function ReviewPanel() {
           <div className="review-banner" role="status">This turn merged or pulled other commits; their files are included.</div>
         )}
         <div className="review-tree">
-          {files && files.length > 0 && (
+          {hasFiles && files && (
             <div className="review-tree-header">
               <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
               <span className="turn-edits-stat">
@@ -314,7 +329,7 @@ export function ReviewPanel() {
             </div>
           )}
           <div className="review-tree-list">
-            {files && files.length > 0 ? (
+            {hasFiles ? (
               <TreeRows
                 nodes={tree}
                 depth={0}
@@ -324,30 +339,32 @@ export function ReviewPanel() {
                 onToggle={toggleFolder}
                 onSelect={(entry) => selectFile(threadId, entry.path)}
               />
-            ) : currentList && !result?.unavailable && !error ? (
+            ) : noChanges ? (
               <div className="git-empty git-empty-nested">No changes in {scope ? scopeLabel(scope, choices) : 'this scope'}</div>
             ) : !result && !error ? (
-              <div className="git-empty git-empty-nested">Loading…</div>
+              <div className="git-empty git-empty-nested"><DelayedLoader size="small" label="Loading changes" /></div>
             ) : null}
           </div>
         </div>
       </ResizablePanelSidebar>
 
-      <div className="git-diff">
-        {scope && (
-          <ReviewDiffPane
-            target={{ threadId, scope }}
-            path={selectedEntry?.path ?? null}
-            oldPath={selectedEntry?.oldPath}
-            version={version}
-            ignoreWhitespace={ignoreWhitespace}
-            scopeLabel={commentScopeLabel(scope, choices)}
-            viewState={selectedPath ? threadState?.viewState[selectedPath] : undefined}
-            onSaveViewState={(path, state) => saveViewState(threadId, path, state)}
-            emptyLabel={result?.unavailable ? 'Nothing to show' : 'Select a changed file to view its diff'}
-          />
-        )}
-      </div>
+      {!noChanges && (
+        <div className="git-diff">
+          {scope && (
+            <ReviewDiffPane
+              target={{ threadId, scope }}
+              path={selectedEntry?.path ?? null}
+              oldPath={selectedEntry?.oldPath}
+              version={version}
+              ignoreWhitespace={ignoreWhitespace}
+              scopeLabel={commentScopeLabel(scope, choices)}
+              viewState={selectedPath ? threadState?.viewState[selectedPath] : undefined}
+              onSaveViewState={(path, state) => saveViewState(threadId, path, state)}
+              emptyLabel={emptyLabel}
+            />
+          )}
+        </div>
+      )}
     </div>
   )
 }

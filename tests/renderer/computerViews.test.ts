@@ -2,7 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ComputerBadgeView, ThreadComputerBadge, computerBadgeTitle } from '../../src/renderer/components/ComputerBadge'
-import { ComputerNotice } from '../../src/renderer/components/ComputerNotice'
+import { computerNotice } from '../../src/renderer/components/ComputerNotice'
+import { ComposerNotice } from '../../src/renderer/components/ComposerNotice'
 import { ComputerSurfaceNote, surfaceNoteFor } from '../../src/renderer/components/ComputerSurfaceNote'
 import { EarlierMessagesBarView } from '../../src/renderer/components/EarlierMessagesBar'
 import { ThreadComputerBarView } from '../../src/renderer/components/ThreadComputerBar'
@@ -73,16 +74,20 @@ describe('the bar above a thread of another computer', () => {
 
 describe('the line above the composer', () => {
   it('shows what the other computer said as it said it', () => {
-    const notice = html(createElement(ComputerNotice, { message: 'Studio refused this device.' }))
+    const notice = html(createElement(ComposerNotice, computerNotice('Studio refused this device.')))
     expect(notice).toContain('Studio refused this device.')
     expect(notice).not.toContain('<button')
   })
 
+  it('can be dismissed when the composer gives it a dismiss', () => {
+    expect(html(createElement(ComposerNotice, computerNotice('Studio refused this device.', () => undefined)))).toContain('aria-label="Dismiss"')
+  })
+
   it('offers to open Devices for an action only an updated computer can do, and for nothing else', () => {
-    const notice = html(createElement(ComputerNotice, { message: 'Update Mousse on Build Linux to do this.' }))
+    const notice = html(createElement(ComposerNotice, computerNotice('Update Mousse on Build Linux to do this.')))
     expect(notice).toContain('Update Build Linux…')
     expect(notice).toContain('Update Mousse on Build Linux to do this.')
-    expect(html(createElement(ComputerNotice, { message: 'Build Linux is offline.' }))).not.toContain('Update')
+    expect(html(createElement(ComposerNotice, computerNotice('Build Linux is offline.')))).not.toContain('Update')
   })
 
   it('reads the computer from the error, or from its message once it has crossed to the window', () => {
@@ -103,9 +108,9 @@ describe('the line above the composer', () => {
 describe('older messages of a long thread', () => {
   it('says how many are left and offers to load them', () => {
     const bar = html(createElement(EarlierMessagesBarView, { count: 40, busy: false, onLoad: () => undefined }))
-    expect(bar).toContain('40 earlier messages are not loaded')
-    expect(bar).toContain('Load earlier messages')
-    expect(html(createElement(EarlierMessagesBarView, { count: 1, busy: false, onLoad: () => undefined }))).toContain('1 earlier message is not loaded')
+    expect(bar).toContain('40 earlier messages')
+    expect(bar).toContain('>Load<')
+    expect(html(createElement(EarlierMessagesBarView, { count: 1, busy: false, onLoad: () => undefined }))).toContain('1 earlier message<')
   })
 
   it('shows progress and a failure', () => {

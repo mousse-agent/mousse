@@ -52,16 +52,19 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
     store.openSurfaceKind('browser')
     return true
   }
-  window.dispatchEvent(new CustomEvent('mousse:open-file', {
-    detail: {
-      path: route.path,
-      line: route.line,
-      column: route.column,
-      threadId: context?.threadId,
-      projectId: context?.projectId
-    }
-  }))
+  openFileInPanel({
+    path: route.path,
+    line: route.line,
+    column: route.column,
+    threadId: context?.threadId,
+    projectId: context?.projectId
+  })
   return true
+}
+
+/** Opens a file in the Files panel; a relative path is read from the thread's folder. */
+export function openFileInPanel(detail: { path: string; line?: number; column?: number; threadId?: string; projectId?: string }): void {
+  window.dispatchEvent(new CustomEvent('mousse:open-file', { detail }))
 }
 
 /** React-markdown URL transform which allows only links handled by routeLink. */

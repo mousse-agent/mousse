@@ -425,6 +425,13 @@ export interface PendingUserQuestions {
 
 export type UserQuestionAnswers = Record<string, string | string[]>
 
+/** One answered question as the transcript keeps it: the prompt, the labels of the options chosen, and any text typed instead. */
+export interface AnsweredQuestion {
+  prompt: string
+  chosen: string[]
+  reply?: string
+}
+
 /**
  * The daemon's answer to `orchestrator.answerQuestions`. A saved approval request that someone else
  * answered first (or that was closed meanwhile) comes back with who decided what, so a client can say so.
@@ -655,6 +662,12 @@ export interface ChatMessage {
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
   origin?: AgentOrigin
   /**
+   * Set on the message that records the answers to the agent's questions: each question with the
+   * options chosen and any reply typed instead. The transcript shows it as one step of the agent's
+   * turn, not as a message from the user; the text (`Q:`/`A:`) stays for older apps.
+   */
+  questionAnswers?: AnsweredQuestion[]
+  /**
    * Set on a scheduled job's result appended to its thread when it ran on another thread (a
    * workflow's): that thread and run, which the transcript links to.
    */
@@ -697,6 +710,8 @@ export interface ChatMessage {
     | 'warning'
     /** Presentation-only marker emitted when retained model context is compacted. */
     | 'context_compaction'
+    /** Presentation-only divider where `/clear` started the model context again. */
+    | 'context_cleared'
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
@@ -800,6 +815,8 @@ export interface OrchestratorResponse {
    */
   queued?: boolean
   queueItem?: QueuedMessage
+  /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
+  heldByPause?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
@@ -1064,7 +1081,7 @@ export interface Thread {
   permissionMode?: PermissionMode
   /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
-   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
    * Toggleable from the new-chat input bar before the first message; locked once a
    * workspace is provisioned or the thread has started.
@@ -1138,6 +1155,12 @@ export type TurnStateSnapshot = Record<string, TurnState>
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
+}
+
+/** Whether Stop can end the turn: one that runs, or one that waits on an approval or an answer. */
+export function isTurnStoppable(state: Pick<TurnState, 'phase' | 'turnId'> | undefined): boolean {
+  if (!state) return false
+  return isTurnActivePhase(state.phase) || (state.phase === 'awaiting_input' && Boolean(state.turnId))
 }
 
 /** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
@@ -1272,6 +1295,11 @@ export interface NativeLlmContext {
   /** Steer queue IDs whose content has been checkpointed into native history. */
   acceptedSteerItemIds?: string[]
   compaction?: NativeCompactionCheckpoint
+  /**
+   * Where the last `/clear` started the context again: the messages before it are kept for the record
+   * and Undo, and compaction never reads them back.
+   */
+  clearedAtIndex?: number
   /** Actual model capacity reported by a native provider, retained across compaction. */
   nativeProviderModel?: {
     /** `llmProvider` of the runtime that reported this capacity. */

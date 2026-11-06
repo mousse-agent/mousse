@@ -25,13 +25,26 @@ it('renders the read aloud button immediately before the copy button under each 
     const end = html.indexOf('</button>', match.index) + '</button>'.length
     const readAloud = html.slice(start, end)
     expect(readAloud).toContain('title="Read aloud"')
-    expect(readAloud).toContain('tabindex="-1"')
     expect(readAloud).toContain('data-read-aloud="idle"')
     // The next element in the toolbar row is the copy button.
     const next = html.slice(end)
-    expect(next.startsWith('<button type="button" tabindex="-1"')).toBe(true)
-    expect(next.slice(0, next.indexOf('</button>'))).not.toContain('aria-label')
+    expect(next.startsWith('<button type="button" title="Copy" aria-label="Copy"')).toBe(true)
   }
+})
+
+it('lets the keyboard reach and see every message action, and announces a copy', () => {
+  const html = render(true)
+  // No action under a message is skipped by Tab.
+  expect(html).not.toContain('tabindex="-1"')
+  // Focus inside the toolbar shows it the way hover does.
+  const toolbars = [...html.matchAll(/class="chat-message-toolbar [^"]*"/g)].map((m) => m[0])
+  expect(toolbars).toHaveLength(2)
+  for (const toolbar of toolbars) {
+    expect(toolbar).toContain('focus-within:opacity-100')
+    expect(toolbar).toContain('focus-within:pointer-events-auto')
+  }
+  // One polite status region per Copy button; it says "Copied" after a copy.
+  expect(html.match(/<span class="sr-only" role="status" aria-live="polite"><\/span>/g)).toHaveLength(2)
 })
 
 it('omits the read aloud button when the copy toolbar is hidden', () => {

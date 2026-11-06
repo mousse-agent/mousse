@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
+import { motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
@@ -20,6 +21,7 @@ import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
+import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
 import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
@@ -43,6 +45,7 @@ import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { openThread } from "../../../lib/openThread";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
+import { getToolStatus } from "./utils/format-tool";
 import {
   activityGroupLabel,
   analyzeAssistantMessage,
@@ -58,8 +61,10 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
+import { formatDurationLong, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
 import {
   classifyIntent,
+  nextComposerCompact,
   reduceFollow,
   type FollowEvent,
   type FollowMode,
@@ -76,8 +81,11 @@ import {
   type RowItem,
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
+import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
 import { useThreadFind } from "./find/use-thread-find";
+import { flashLocated, revealMessage } from "./reveal-message";
+import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
@@ -85,6 +93,8 @@ export type MessageListProps = {
   status: ChatStatus;
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
+  /** The composer should fold to one line: the reader is browsing earlier messages. */
+  onComposerCompactChange?: (compact: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
@@ -175,52 +185,6 @@ function readCreatedAt(message: UIMessage | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function durationParts(milliseconds: number): {
-  hours: number;
-  minutes: number;
-  seconds: number;
-} {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  return {
-    hours: Math.floor(totalSeconds / 3600),
-    minutes: Math.floor((totalSeconds % 3600) / 60),
-    seconds: totalSeconds % 60,
-  };
-}
-
-function countLabel(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
-
-/** Live label while a turn is still running. Seconds tick every second. */
-function formatWorkingFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    return `Working for ${countLabel(hours, "hour")}, ${countLabel(minutes, "minute")}, and ${countLabel(seconds, "second")}`;
-  }
-  if (minutes > 0) {
-    return `Working for ${countLabel(minutes, "minute")} and ${countLabel(seconds, "second")}`;
-  }
-  return `Working for ${countLabel(seconds, "second")}`;
-}
-
-/** Compact "Worked for 2m 6s" from a finished turn. Under a minute stays in seconds. */
-function formatWorkedFor(milliseconds: number): string {
-  const { hours, minutes, seconds } = durationParts(milliseconds);
-  if (hours > 0) {
-    const parts = [`${hours}h`];
-    if (minutes) parts.push(`${minutes}m`);
-    if (seconds) parts.push(`${seconds}s`);
-    return `Worked for ${parts.join(" ")}`;
-  }
-  if (minutes > 0) {
-    return seconds
-      ? `Worked for ${minutes}m ${seconds}s`
-      : `Worked for ${minutes}m`;
-  }
-  return `Worked for ${seconds}s`;
-}
-
 /** A line Mousse adds to the thread (see `ThreadNotice`); it is not part of a turn's work. */
 function isThreadNotice(message: UIMessage | undefined): boolean {
   return (message?.metadata as { notice?: boolean } | undefined)?.notice === true;
@@ -287,9 +251,13 @@ function TurnWorkStatus({
           ? formatWorkingFor(elapsedMs)
           : formatWorkedFor(elapsedMs);
   if (!label) return null;
+  const longLabel =
+    elapsedMs == null || (active && waitingLabel)
+      ? undefined
+      : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
   return (
     <div className="turn-work" data-find-ignore>
-      <div className="turn-work-label">{label}</div>
+      <div className="turn-work-label" title={longLabel}>{label}</div>
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
@@ -337,34 +305,40 @@ function CopyButton({
     onCopied?.();
   };
   return (
-    <button
-      type="button"
-      tabIndex={-1}
-      onClick={handleCopy}
-      onPointerDown={(event) => {
-        event.stopPropagation();
-      }}
-      onMouseDown={(event) => event.stopPropagation()}
-      className={cn(
-        "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
-        "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
-      )}
-    >
-      <div className="relative w-3.5 h-3.5">
-        <IconCopy
-          className={cn(
-            "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-            copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
-          )}
-        />
-        <IconCheck
-          className={cn(
-            "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
-            copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
-          )}
-        />
-      </div>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={handleCopy}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+        title="Copy"
+        aria-label="Copy"
+        className={cn(
+          "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
+          "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
+        )}
+      >
+        <div className="relative w-3.5 h-3.5">
+          <IconCopy
+            className={cn(
+              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
+              copied ? "opacity-0 scale-50" : "opacity-100 scale-100",
+            )}
+          />
+          <IconCheck
+            className={cn(
+              "absolute inset-0 w-3.5 h-3.5 text-an-foreground-muted transition-[opacity,transform] duration-150 ease-out",
+              copied ? "opacity-100 scale-100" : "opacity-0 scale-50",
+            )}
+          />
+        </div>
+      </button>
+      <span className="sr-only" role="status" aria-live="polite">
+        {copied ? "Copied" : ""}
+      </span>
+    </>
   );
 }
 
@@ -442,14 +416,13 @@ function MetadataButton({
     <div ref={rootRef} className="relative flex items-center">
       <button
         type="button"
-        tabIndex={-1}
         onClick={() => setOpen((value) => !value)}
         onPointerDown={(event) => {
           event.stopPropagation();
         }}
         onMouseDown={(event) => event.stopPropagation()}
-        title="Response metadata"
-        aria-label="Response metadata"
+        title="Details"
+        aria-label="Details"
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls={panelId}
@@ -472,7 +445,6 @@ function MetadataButton({
             </span>
             <button
               type="button"
-              tabIndex={-1}
               onClick={() => setOpen(false)}
               aria-label="Close response metadata"
               className="flex size-5 items-center justify-center rounded-md opacity-60 hover:opacity-100 hover:bg-an-foreground/10"
@@ -545,7 +517,8 @@ function MessageToolbar({
     <div
       data-find-ignore
       className={cn(
-        "relative flex items-center gap-1 pt-1 text-sm text-an-foreground-muted/70 opacity-0 transition-opacity duration-100 pointer-events-none",
+        // Keyboard focus shows the toolbar the same way hover does.
+        "chat-message-toolbar relative flex items-center gap-1 pt-1 text-sm text-an-foreground-muted/70 opacity-0 transition-opacity duration-100 pointer-events-none focus-within:opacity-100 focus-within:pointer-events-auto",
         heightClass,
         alignClass,
         hoverClass,
@@ -612,6 +585,26 @@ function cappedWords(text: string, limit: number): string {
   return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
 }
 
+/** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
+const PROMPT_RAIL_WIDTH = 40;
+const PROMPT_RAIL_GAP = 8;
+/** The rail is for long threads: shown once the transcript is taller than this many screens. */
+const PROMPT_RAIL_MIN_SCREENS = 3;
+
+/**
+ * Where the rail sits (px from the left of the list), right beside the transcript's text, or null when
+ * the thread is short or the gutter is too narrow for the rail to stay clear of the text.
+ */
+export function promptRailLeft({ textLeft, scrollHeight, clientHeight }: {
+  textLeft: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): number | null {
+  if (clientHeight <= 0 || scrollHeight <= clientHeight * PROMPT_RAIL_MIN_SCREENS) return null;
+  const left = Math.round(textLeft - PROMPT_RAIL_GAP - PROMPT_RAIL_WIDTH);
+  return left >= 4 ? left : null;
+}
+
 /**
  * Conversation ticks. Deliberately isolated with its own state: position
  * recomputes (ResizeObserver + streaming + expand/collapse) must never
@@ -643,6 +636,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [previewId, setPreviewId] = useState<string>();
+  const [railLeft, setRailLeft] = useState<number | null>(null);
   const markerPositionsRef = useRef<PromptMarker[]>([]);
   const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
@@ -711,6 +705,12 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       }
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);
+      const listLeft = (container.parentElement ?? container).getBoundingClientRect().left;
+      setRailLeft(promptRailLeft({
+        textLeft: content.getBoundingClientRect().left - listLeft + (parseFloat(getComputedStyle(content).paddingLeft) || 0),
+        scrollHeight,
+        clientHeight: container.clientHeight,
+      }));
       updateActiveMarker();
       setMarkers((prev) => {
         if (
@@ -799,17 +799,15 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return;
       }
       cancelScroll();
-      const reduceMotion =
-        typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (reduceMotion) {
+      // Animation speed (or the OS reduced-motion setting) scales the glide; Off jumps.
+      const scale = motionScale();
+      if (scale === 0) {
         container.scrollTop = targetTop;
         return;
       }
       // Custom eased glide — native smooth scroll is janky over long
       // distances. Distance-based duration keeps short hops snappy.
-      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22);
+      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22) * scale;
       const startedAt = performance.now();
       const step = (now: number) => {
         const t = Math.min(1, (now - startedAt) / duration);
@@ -839,7 +837,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
     ],
   );
 
-  if (markers.length === 0) return null;
+  if (markers.length === 0 || railLeft === null) return null;
   const previewMarker = markers.find((marker) => marker.id === previewId);
   const highlightedIndex = markers.findIndex((marker) => marker.id === previewId);
 
@@ -848,6 +846,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       data-testid="prompt-markers"
       data-find-ignore
       className={cn("chat-prompt-rail", visible && "is-active", previewId && "is-previewing")}
+      style={{ left: railLeft }}
       onMouseLeave={(event) => {
         const focused = document.activeElement;
         setPreviewId(focused instanceof HTMLButtonElement && event.currentTarget.contains(focused)
@@ -896,6 +895,7 @@ export const MessageList = memo(function MessageList({
   showCopyToolbar = true,
   lastTurnNotice,
   onAtBottomChange,
+  onComposerCompactChange,
   suppressQuestionTool = false,
   initialScrollBehavior = "bottom",
   enableImagePreview = true,
@@ -977,10 +977,26 @@ export const MessageList = memo(function MessageList({
 
   const isStreaming = status === "streaming" || status === "submitted";
 
+  // Folded or not, recomputed with every follow event; reported only on change.
+  const composerCompactRef = useRef(false);
+  const onComposerCompactChangeRef = useRef(onComposerCompactChange);
+  onComposerCompactChangeRef.current = onComposerCompactChange;
+
   const dispatchFollow = useCallback((event: FollowEvent) => {
     const next = reduceFollow(followModeRef.current, event);
     followModeRef.current = next;
     setIsPinned(next === "following-end");
+    const container = chatContainerRef.current;
+    const compact = nextComposerCompact(composerCompactRef.current, {
+      mode: next,
+      distanceFromEnd: container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight
+        : 0,
+    });
+    if (compact !== composerCompactRef.current) {
+      composerCompactRef.current = compact;
+      onComposerCompactChangeRef.current?.(compact);
+    }
   }, []);
 
   // What the user just did to the scroll position. Assigned on every render so
@@ -1432,6 +1448,42 @@ export const MessageList = memo(function MessageList({
         : undefined,
     [windowed],
   );
+
+  // `scrollToMessage` from elsewhere (search, the composer's approval cue): the transcript that has
+  // the message takes the request, lands its turn, centres it and highlights it for a moment.
+  const messageRequest = useChatNavigationStore((state) => state.message);
+  useEffect(() => {
+    if (!messageRequest) return;
+    const { settleMessage } = useChatNavigationStore.getState();
+    if (isStale(messageRequest)) {
+      settleMessage(messageRequest.seq);
+      return;
+    }
+    const { messageId } = messageRequest;
+    const index = turns.findIndex(
+      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !container || !rows || !virtualization) return;
+    settleMessage(messageRequest.seq);
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    void revealMessage(
+      { turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current), messageId },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      if (element) flashLocated(element);
+    });
+  }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -1646,6 +1698,7 @@ export const MessageList = memo(function MessageList({
                           }
                         />
                         <div className="turn-answer flex flex-col gap-3">
+                          <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
                           {(() => {
                             // Consecutive thoughts and tool calls collapse into one
                             // group titled with the latest thought. A run with
@@ -1720,6 +1773,11 @@ export const MessageList = memo(function MessageList({
                                     msg={msg}
                                     isLast={isLastMsg}
                                     isStreaming={isStreaming}
+                                    retryPromptId={
+                                      isLastTurn && !isStreaming
+                                        ? turn.userMsg?.id
+                                        : undefined
+                                    }
                                     suppressQuestionTool={suppressQuestionTool}
                                     ToolRendererComponent={CustomToolRenderer}
                                     toolRenderers={toolRenderers}
@@ -1761,6 +1819,13 @@ export const MessageList = memo(function MessageList({
                                   }
                                   label={groupLabel}
                                   autoOpen={anyToolPending}
+                                  failed={
+                                    items.filter(
+                                      (item) =>
+                                        getToolStatus(item.part).isError,
+                                    ).length
+                                  }
+                                  live={isLastTurn && isStreaming}
                                 >
                                   {items.map((item, k) => (
                                     <CustomToolRenderer
@@ -1778,6 +1843,7 @@ export const MessageList = memo(function MessageList({
                               );
                             });
                           })()}
+                          </TurnIdContext.Provider>
                         </div>
                         {!isTurnStreaming && (
                           <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
@@ -1857,6 +1923,7 @@ export const MessageList = memo(function MessageList({
         type="button"
         onClick={handleJumpToLatest}
         aria-label="Go to latest"
+        title="Go to latest"
         data-find-ignore
         className={cn(
           "chat-jump absolute left-1/2 z-10 -translate-x-1/2",
@@ -1895,6 +1962,15 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
  * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
  * the instances list, under a line saying what happened.
  */
+/** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
+function ContextClearedDivider({ text }: { text: string }) {
+  return <div role="separator" aria-label={text} className="context-cleared">
+    <span aria-hidden="true" className="context-cleared-rule" />
+    <span>{text}</span>
+    <span aria-hidden="true" className="context-cleared-rule" />
+  </div>;
+}
+
 function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
@@ -1925,6 +2001,7 @@ function AssistantParts({
   msg,
   isLast,
   isStreaming,
+  retryPromptId,
   suppressQuestionTool,
   ToolRendererComponent,
   toolRenderers,
@@ -1932,6 +2009,8 @@ function AssistantParts({
   msg: UIMessage;
   isLast: boolean;
   isStreaming: boolean;
+  /** The last turn's prompt, offered for Retry beside an error. Absent on earlier turns. */
+  retryPromptId?: string;
   suppressQuestionTool: boolean;
   ToolRendererComponent: React.ComponentType<ToolRendererProps>;
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
@@ -1940,6 +2019,10 @@ function AssistantParts({
     () => normalizeAssistantToolParts(msg.parts ?? []) as unknown[],
     [msg.parts],
   );
+  const turnActions = useTurnActions();
+  const retryTitle =
+    retryPromptId && turnActions ? turnActions.retryTitle(retryPromptId) : null;
+  const retry = retryPromptId && turnActions ? turnActions.retry : undefined;
 
   const { elements } = useMemo(() => {
     const elems: React.ReactNode[] = [];
@@ -2022,6 +2105,12 @@ function AssistantParts({
             key={`${msg.id}-error-${i}`}
             title={part.title}
             message={part.message}
+            onRetry={
+              retry && retryPromptId && retryTitle !== null
+                ? () => retry(retryPromptId)
+                : undefined
+            }
+            retryTitle={retryTitle ?? undefined}
           />,
         );
         i++;
@@ -2068,6 +2157,9 @@ function AssistantParts({
     msg.id,
     isLast,
     isStreaming,
+    retryPromptId,
+    retry,
+    retryTitle,
     suppressQuestionTool,
     ToolRendererComponent,
     toolRenderers,
@@ -2076,6 +2168,8 @@ function AssistantParts({
   if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
+    return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
