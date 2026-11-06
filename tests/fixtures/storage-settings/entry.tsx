@@ -188,7 +188,7 @@ const swatchesMatch = () => $$(tid('storage-usage-row')).every((row) => {
 })
 const viewOf = () => ({ rows: rowsOf(), total: text(tid('storage-usage-total')), arcs: $$(tid('storage-donut-arc')).length, legend: $$('[data-testid="storage-legend-item"]').length, swatchesMatch: swatchesMatch() })
 // The page's sections in document order; the rule-review notice, when shown, is part of it.
-const pageOrder = () => $('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
+const pageOrder = () => $$('[data-testid="storage-review-notice"], #storage-usage, #storage-cleanup, #storage-worktrees, #storage-browser').map((element) => element.id || element.dataset.testid!)
 const valueOf = (testId: string) => $(tid(testId))?.dataset.value
 const unavailable = () => text(tid('storage-usage-unavailable'))
 
