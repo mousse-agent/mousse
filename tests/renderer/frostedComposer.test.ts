@@ -13,7 +13,7 @@ import {
   getDefaultSettings,
   normalizeAppearance
 } from '../../src/shared/settings'
-import { applyFrostedComposer } from '../../src/renderer/lib/frostedComposer'
+import { applyFrostedComposer, createFrostedComposerSaver } from '../../src/renderer/lib/frostedComposer'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -89,6 +89,51 @@ describe('applyFrostedComposer', () => {
     applyFrostedComposer({ frostedComposer: false, frostedComposerOpacity: 60, frostedComposerBlur: 16, frostedComposerSaturation: 1.12 })
     expect(root().hasAttribute('data-frosted-composer')).toBe(false)
     for (const name of VARS) expect(root().style.getPropertyValue(name)).toBe('')
+  })
+})
+
+describe('frosted composer saving', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('saves two sliders moved within the delay together', async () => {
+    const save = vi.fn(async (patch: object) => patch)
+    const saved = vi.fn()
+    const saver = createFrostedComposerSaver(save, saved)
+    saver.queue('frostedComposerOpacity', 40)
+    await vi.advanceTimersByTimeAsync(60)
+    saver.queue('frostedComposerBlur', 30)
+    await vi.advanceTimersByTimeAsync(120)
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save).toHaveBeenCalledWith({ frostedComposerOpacity: 40, frostedComposerBlur: 30 })
+    expect(saved).toHaveBeenCalledWith({ frostedComposerOpacity: 40, frostedComposerBlur: 30 })
+  })
+
+  it('saves the pending value when Settings closes before the delay', async () => {
+    const save = vi.fn(async (patch: object) => patch)
+    const saved = vi.fn()
+    const saver = createFrostedComposerSaver(save, saved)
+    saver.queue('frostedComposerSaturation', 1.3)
+    saver.dispose()
+    await vi.runAllTimersAsync()
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save).toHaveBeenCalledWith({ frostedComposerSaturation: 1.3 })
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('ignores a reply that would undo a newer value', async () => {
+    let finish: (value: object) => void = () => undefined
+    const save = vi.fn((patch: object) => new Promise<object>((done) => { finish = () => done(patch) }))
+    const saved = vi.fn()
+    const saver = createFrostedComposerSaver(save, saved)
+    saver.queue('frostedComposerBlur', 10)
+    await vi.advanceTimersByTimeAsync(120)
+    saver.queue('frostedComposerBlur', 20)
+    finish({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(saved).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(120)
+    expect(save).toHaveBeenLastCalledWith({ frostedComposerBlur: 20 })
   })
 })
 

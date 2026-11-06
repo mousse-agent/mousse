@@ -1,7 +1,7 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { applyFrostedComposer } from '../lib/frostedComposer'
+import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
 import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
@@ -251,14 +251,17 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }, [settings])
 
   /** Frosted composer sliders: the same live preview and debounced save as glass intensity. */
-  const frostedCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const frostedCommitGen = useRef(0)
-  useEffect(
-    () => () => {
-      if (frostedCommitTimer.current) clearTimeout(frostedCommitTimer.current)
-    },
-    []
-  )
+  // Created in an effect so a StrictMode remount gets a fresh one. Closing Settings mid-drag still saves the last value.
+  const frostedSaver = useRef<ReturnType<typeof createFrostedComposerSaver<MousseSettings>> | null>(null)
+  useEffect(() => {
+    // Only the changed fields: the daemon merges them, so a slow save cannot undo another change.
+    const saver = createFrostedComposerSaver((patch) => window.mousse.settings.set({ appearance: patch } as MousseSettingsUpdate), setSettings)
+    frostedSaver.current = saver
+    return () => {
+      saver.dispose()
+      if (frostedSaver.current === saver) frostedSaver.current = null
+    }
+  }, [])
 
   const previewFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
     setSettings((prev) => {
@@ -270,16 +273,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }, [])
 
   const commitFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
-    if (frostedCommitTimer.current) clearTimeout(frostedCommitTimer.current)
-    const gen = ++frostedCommitGen.current
-    frostedCommitTimer.current = setTimeout(() => {
-      frostedCommitTimer.current = null
-      // Only this field: the daemon merges it, so a slow save cannot undo another change.
-      void window.mousse.settings.set({ appearance: { [key]: value } as Partial<MousseSettings['appearance']> } as MousseSettingsUpdate).then((updated) => {
-        if (gen !== frostedCommitGen.current) return
-        setSettings(updated)
-      })
-    }, 120)
+    frostedSaver.current?.queue(key, value)
   }, [])
 
   const ensureValidProviderSelection = useCallback(
