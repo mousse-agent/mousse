@@ -1,9 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent, TelemetrySetting } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 import { ProviderIcon } from '../../lib/providerIcons'
+import { confirmNavigation } from '../../services/navigationGuards'
+import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
@@ -17,13 +19,21 @@ import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup } from './provider
  */
 const DEVICE_WIDE = 'Applies to this device, in every project.'
 
+/** Agents whose subscription usage the Subscription usage page shows. */
+const USAGE_DRIVERS: ReadonlySet<InstanceSnapshot['driver']> = new Set(['claude', 'codex'])
+
+/** Leaves Settings for the Usage page; an integrations draft is asked about first, as on any navigation. */
+function openUsagePage() {
+  void confirmNavigation().then((allowed) => { if (allowed) useAppStore.getState().setUsageOpen(true) })
+}
+
 function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
   return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
 }
 
 /**
  * The editor's heading: the provider's logo and name, its version and delete on the
- * right. The status lives in Setup → Status; renaming lives under Advanced.
+ * right. The status lives in Setup → Status; renaming lives under Advanced → General.
  */
 export function EditorHeader({
   snapshot,
@@ -101,9 +111,9 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
 }
 
 /**
- * The editor of one agent instance: Setup (name, status, next step, account) and Models up front;
- * the rest (the executable Mousse resolved, updates, path and arguments, home, environment) under a
- * collapsed Advanced, so most people never meet it.
+ * The editor of one agent instance: Setup (status, next step, account) and Models up front; the rest
+ * (its name, telemetry, the executable Mousse resolved, updates, path and arguments, home,
+ * environment) under a collapsed Advanced, so most people never meet it.
  */
 export function AgentEditor({
   snapshot,
@@ -112,7 +122,8 @@ export function AgentEditor({
   actions,
   onRemove,
   onSaveModelPrefs,
-  onRefreshModels
+  onRefreshModels,
+  revealModels
 }: {
   snapshot: InstanceSnapshot
   status: StatusDescription
@@ -121,6 +132,8 @@ export function AgentEditor({
   onRemove?: (options: RemoveOptions) => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
+  /** Opens Models each time it changes (after a sign-in, to show what is now connected). */
+  revealModels?: number
 }) {
   const info = DRIVER_INFO[snapshot.driver]
   const source = snapshot.config?.source?.kind === 'registry' ? snapshot.config.source : undefined
@@ -147,14 +160,16 @@ export function AgentEditor({
         onRemove={onRemove}
       />
       <EditorSection title="Setup">
-        <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
-        <AccountRow snapshot={snapshot} actions={actions} />
-        <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
+        <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
       </EditorSection>
-      <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
+      <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
       <SettingsAdvanced>
+        <EditorSection title="General">
+          <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
+          <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
+        </EditorSection>
         <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
           <BinaryRow snapshot={snapshot} />
           {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
@@ -187,15 +202,22 @@ export function allowsCustomModels(snapshot: InstanceSnapshot): boolean {
 export function ModelsEditorSection({
   snapshot,
   onSave,
-  onRefresh
+  onRefresh,
+  reveal
 }: {
   snapshot: InstanceSnapshot
   onSave: (patch: ModelPrefsPatch) => Promise<void>
   onRefresh: () => Promise<void>
+  /** Opens the section each time it changes; the user can close it again. */
+  reveal?: number
 }) {
+  const ref = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    if (reveal && ref.current) ref.current.open = true
+  }, [reveal])
   // Collapsed by default, like Advanced; the summary keeps the counts in view while it is closed.
   return (
-    <details className={`settings-advanced prov-models-section ${COLLAPSE_DETAILS_CLASS}`}>
+    <details ref={ref} className={`settings-advanced prov-models-section ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         Models
@@ -225,7 +247,7 @@ export function ModelsEditorSection({
 
 /**
  * The editor of a model API: header, its Setup row (and Move, where it now runs as an agent), then
- * Models.
+ * Models, and its telemetry under Advanced.
  */
 export function ApiEditor({
   snapshot,
@@ -236,7 +258,8 @@ export function ApiEditor({
   onRemove,
   onSaveModelPrefs,
   onRefreshModels,
-  onSaveTelemetry
+  onSaveTelemetry,
+  revealModels
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
@@ -249,6 +272,8 @@ export function ApiEditor({
   onRefreshModels: () => Promise<void>
   /** Saves the entry's telemetry setting; without it the row is not shown. */
   onSaveTelemetry?: (telemetry: TelemetrySetting) => Promise<void>
+  /** Opens Models each time it changes (after a sign-in). */
+  revealModels?: number
 }) {
   return (
     <>
@@ -257,9 +282,15 @@ export function ApiEditor({
       <EditorSection title="Setup">
         {setup}
         {move}
-        {onSaveTelemetry && <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />}
       </EditorSection>
-      <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
+      <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
+      {onSaveTelemetry && snapshot.telemetry && (
+        <SettingsAdvanced>
+          <EditorSection title="General">
+            <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />
+          </EditorSection>
+        </SettingsAdvanced>
+      )}
     </>
   )
 }
