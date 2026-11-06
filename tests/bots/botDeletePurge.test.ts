@@ -80,6 +80,10 @@ describe('the 30-day purge', () => {
     expect(existsSync(f.bots.filesFolder(botId))).toBe(false)
     expect(f.store.botThreads(botId)).toEqual([])
     expect(f.store.deletedRegistry()).toEqual([])
+    // Its asks, activations (inputs and results), dispatches and grants go too.
+    for (const table of ['bot_escalations', 'bot_activations', 'bot_grants'])
+      expect(f.store.get(`SELECT COUNT(*) AS n FROM ${table} WHERE bot_id = ?`, botId)).toEqual({ n: 0 })
+    expect(f.store.get('SELECT COUNT(*) AS n FROM bot_activations WHERE bot_id = ?', other.botId)).not.toEqual({ n: 0 })
     // The other bot is untouched.
     expect(chatOf(f, other.botId).length).toBeGreaterThan(0)
     expect(f.store.schedules(other.botId)).toHaveLength(1)

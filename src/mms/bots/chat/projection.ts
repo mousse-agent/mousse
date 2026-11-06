@@ -214,7 +214,8 @@ export class BotChatProjection {
     // A usage-limit pause whose time has passed is over, even before the next tick clears it.
     const paused = Boolean(registry?.pausedReason) && !(registry?.pausedReason === 'usage_limit' && pausedUntil !== undefined && pausedUntil <= now)
     const error = registry?.error?.error
-    const asks = this.store.openAsks(definition.id)
+    // Only asks whose card is posted: a chat turn's asks show once its message is complete.
+    const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
     const live = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant']).length
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length, liveActivations: live })
     const last = this.store.lastMessage(definition.id)

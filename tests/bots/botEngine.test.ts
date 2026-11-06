@@ -218,7 +218,8 @@ describe('activation and dispatch', () => {
     expect(store.threadRole(activation.threadId!)).toBe('activation')
     expect(store.threadRole('thread:bot:site-editor')).toBe('home')
     expect(bots.roleOf(activation.threadId!)).toBe('activation')
-    expect(bots.roleOf('thread:bot:site-editor')).toBeUndefined()
+    // The home thread runs the chat lane's turns as bot turns.
+    expect(bots.roleOf('thread:bot:site-editor')).toBe('activation')
     expect(bots.ownerOf('thread:bot:site-editor')).toBe('Site editor')
     const again = await bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })
     expect(again.id).toBe(activation.id)

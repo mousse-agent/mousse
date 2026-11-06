@@ -205,3 +205,58 @@ describe('About', () => {
     expect(f.bots.service.get(botId).permissions).toEqual([])
   })
 })
+
+describe('asks across lanes and timing (review)', () => {
+  it('a chat card is answered only once its message is there; until then the bot is not "needs you"', async () => {
+    const { activation, payload, prepared } = await chat('ask me for my invoices', 'm-early')
+    prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'To sort them.' })
+    const ask = f.store.openAsks(botId)[0]!
+    expect(f.bots.service.get(botId).summary.state).toBe('working')
+    await expect(f.bots.service.answer(botId, ask.id, 'allow')).rejects.toMatchObject({ code: 'ask_not_ready' })
+    await finish(f, payload, 'completed', { text: 'May I read your invoices?' })
+    expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: `Wants to read files in ${invoices}` })
+  })
+
+  it('a limit has one open ask whichever way it was raised', async () => {
+    const { payload } = await run('limit-run')
+    // A run that reached its time: it ends, with one ask for more.
+    f.timers.at(-1)!.fn()
+    await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.openAsks(botId).filter((ask) => ask.kind === 'budget')).toHaveLength(1)
+    // The chat asking for the same limit takes that ask over rather than adding a second one.
+    const turn = await chat('work longer please', 'm-limit')
+    turn.prepared.authority.escalate!({ permission: { budget: { key: 'maxActiveMs', amount: 15 * 60_000 } }, reason: 'More time.' })
+    expect(f.store.openAsks(botId).filter((ask) => 'budget' in ask.permission)).toHaveLength(1)
+  })
+
+  it('stopping a chat that took over a run\'s ask leaves that ask open for the owner', async () => {
+    // The run's ask, raised by its refused call; the run ends done.
+    const live = await run('r-moved')
+    live.prepared.authority.check(readIn(notes))
+    await finish(f, live.payload, 'completed', { text: 'Skipped the notes.' })
+    const runAsk = f.store.openAsks(botId).find((ask) => 'path' in ask.permission)!
+    expect(runAsk.mode).toBe('ask')
+    // The chat hits the same permission: the run's ask becomes its wall.
+    const turn = await chat('tidy my notes', 'm-moved')
+    turn.prepared.authority.check(readIn(notes))
+    expect(f.store.escalation(runAsk.id)).toMatchObject({ mode: 'wall', activationId: turn.activation.id, status: 'open' })
+    await f.bots.service.chatStop(botId)
+    expect(f.store.escalation(runAsk.id)).toMatchObject({ mode: 'ask', status: 'open' })
+    expect(chatOf(f, botId).filter((message) => message.ask?.askId === runAsk.id).every((message) => message.ask!.status === 'open')).toBe(true)
+  })
+
+  it('a message sent while the chat waits at a limit starts a chat of its own', async () => {
+    const turn = await chat('a long job', 'm-long')
+    f.timers.at(-1)!.fn()
+    await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.activation(turn.activation.id)!.status).toBe('waiting_grant')
+    await f.bots.service.chatSend({ botId, text: 'never mind, just say hi', clientRequestId: 'm-hi' })
+    await flush()
+    expect(f.store.activation(turn.activation.id)).toMatchObject({ status: 'blocked', endReason: 'budget_denied' })
+    const next = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(next.trigger.input).toBe('never mind, just say hi')
+    await runDispatch(f, next.id, 1, { text: 'Hi!' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'Hi!' })
+  })
+})

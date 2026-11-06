@@ -224,3 +224,11 @@ describe('definitions format 1 → 2', () => {
     expect(() => engineFor(store!).upgradeDefinitions()).not.toThrow()
   })
 })
+
+describe('contract version', () => {
+  it('CONTRACT_VERSIONS.botsDb is the newest bots.db migration', async () => {
+    const { CONTRACT_VERSIONS } = await import('../../src/mms/contractVersions')
+    expect(CONTRACT_VERSIONS.botsDb).toBe(BOTS_MIGRATIONS.at(-1)!.version)
+    expect(CONTRACT_VERSIONS.botsDb).toBe(4)
+  })
+})

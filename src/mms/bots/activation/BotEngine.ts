@@ -222,6 +222,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
+  /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
+  private readonly lateTexts = new Map<string, string>()
   /** The owner's message that answered a wall while its turn was still ending: the continuation's input. */
   private readonly ownerTexts = new Map<string, string>()
   /** The rolled-up chips of each settled main dispatch, until its message is posted. */
@@ -406,6 +408,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       this.store.deleteMessages(botId)
       this.store.deleteSchedules(botId)
+      // Its asks, activations (their inputs and results), dispatches, grants and context generations go too.
+      this.store.deleteBotRows(botId)
       for (const thread of threads) this.store.dropThread(thread.threadId)
       this.store.markCleaned(botId)
     })
@@ -1062,6 +1066,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.afterEnd(after)
   }
 
+  /**
+   * An activation stopped short of its end (paused for interrupted calls, blocked by its grant or a
+   * limit the owner refused): its chat says so, once per reason, as Phase 1 has no Continue.
+   */
+  private stoppedRow(row: BotActivationRow): void {
+    const reason = row.endReason ?? row.status
+    this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: failureText(reason) }, activationId: row.id, lane: row.lane, id: `bm_${row.id}_stop_${reason}` }))
+  }
+
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
     this.cleanup(row)
@@ -1243,6 +1256,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       lane: row.lane,
       ...(pack ? { preamble: pack } : {})
     }
+  }
+
+  /** The time wall of an activation's dispatch, from its current limits. */
+  private timeWallAt(row: BotActivationRow, dispatchN: number): { dispatchN: number; kind: BotWallKind; permission: BotPermissionRequest; reason: string } {
+    const definition = this.host.definitions.revision(row.botId, row.revision)
+    const grant = this.store.activeGrant(row.botId)
+    const amount = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest).budget.maxActiveMs : undefined
+    return { dispatchN, kind: 'budget', permission: { budget: { key: 'maxActiveMs', ...(amount ? { amount } : {}) } }, reason: 'This bot used up its work time.' }
   }
 
   /** The time wall of a dispatch: its card offers twice the work time (the owner's Allow). */
@@ -1491,7 +1512,33 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return status === 'waiting_grant' ? { kind: 'waiting' } : status === 'paused' ? { kind: 'paused' } : { kind: 'ended' }
     }
     this.afterWall(activationId, raised)
+    // Outside a turn (before it started) no reply follows: the card is posted now.
+    if (raised.kind === 'wall' && !this.live.has(activationId)) this.announceWall(raised.escalation)
     return raised.kind === 'wall' ? { kind: 'escalated', permission: this.chat.card(raised.escalation).title } : { kind: 'ended' }
+  }
+
+  /** A wall raised outside a turn (a continuation or the startup pass): its card on a notice row, once per activation. */
+  private announceWall(escalation: BotEscalationRow): void {
+    if (this.store.messagesForAsk(escalation.id).some((message) => message.activationId === escalation.activationId)) return
+    const row = this.store.activation(escalation.activationId)
+    if (!row) return
+    const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
+    this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `${name} wants to ${this.chat.card(escalation).title}.`, askId: escalation.id, activationId: row.id, lane: row.lane }))
+  }
+
+  /**
+   * A time wall found while no turn runs (the startup pass): a run ends failed with its ask; a chat
+   * waits for the owner, its card posted now.
+   */
+  private wallAtRest(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotPermissionRequest; reason: string }): void {
+    if (row.lane === 'run') {
+      this.budgetEnd(row, input)
+      return
+    }
+    const raised = this.store.db.transaction(() => this.wallInTransaction(row.id, ['running'], input))
+    if (raised.kind === 'none') return
+    this.afterWall(row.id, raised)
+    if (raised.kind === 'wall') this.announceWall(raised.escalation)
   }
 
   /**
@@ -1536,10 +1583,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { kind: 'ended' }
   }
 
-  /** The fingerprint of an ask: one open ask per bot and permission; a limit's is the activation's own. */
-  private fingerprintOf(activationId: string, kind: BotWallKind, permission: BotAskRequest): string {
-    const fingerprint = askFingerprintOf(permission)
-    return kind === 'budget' ? `${fingerprint}#${activationId}` : fingerprint
+  /** The fingerprint of an ask: one open ask per bot and permission (a limit's by its key alone). */
+  private fingerprintOf(_activationId: string, _kind: BotWallKind, permission: BotAskRequest): string {
+    return askFingerprintOf(permission)
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
@@ -1768,6 +1814,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const escalation = this.store.escalation(askId)
     if (!escalation || escalation.botId !== botId) throw new BotEngineError('ask_not_found', 'No such ask.')
     if (escalation.status !== 'open') throw new BotEngineError('ask_answered', 'This was already answered.')
+    // A chat turn's asks are answered once its message (with their cards) is there.
+    if (escalation.mode === 'wall' && this.store.activation(escalation.activationId)?.status === 'running')
+      throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
     const special = isSpecialAsk(escalation.permission)
     let amount: number | undefined
     if (answer === 'allow' && !special) {
@@ -1819,6 +1868,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const walls = this.openChatWalls(botId)
     if (!walls.length) return false
     const activationId = walls[0]!.activationId
+    // A limit answered Not now ends the walled turn: the message starts a chat of its own.
+    const limit = walls.some((wall) => wall.activationId === activationId && 'budget' in wall.permission)
     const answered = this.store.db.transaction(() => {
       let any = false
       for (const wall of walls.filter((entry) => entry.activationId === activationId))
@@ -1831,6 +1882,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!answered) return false
     for (const wall of walls) this.republishAsk(wall.id)
     this.changed({ botId, activationId })
+    if (limit) {
+      await this.advance(activationId)
+      return false
+    }
     const row = this.store.activation(activationId)
     if (!row || row.status !== 'waiting_grant') return true
     // The walled turn is still letting go: its continuation, with this message, follows when it has.
@@ -1938,6 +1993,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!this.allRunsEnded(row)) return
     this.collectUnknownCalls(row)
     const main = this.store.lastMainDispatch(row.id)
+    if (text === undefined && main) {
+      const late = this.lateTexts.get(`${row.id}:${main.n}`)
+      if (late !== undefined) text = late
+    }
     if (row.status === 'running') {
       const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
       if (!main || main.endedAt === null || !run) return
@@ -1993,6 +2052,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return
       }
       if (ENDED_ACTIVATION_STATUSES.has(next.status)) return this.afterEnd(next)
+      if (next.status === 'paused') this.stoppedRow(next)
       this.cleanup(next)
       this.changed({ botId: row.botId, activationId: row.id })
       this.pumpLater(row.botId)
@@ -2022,6 +2082,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private postReply(row: BotActivationRow, dispatch: BotDispatchRow, text: string | undefined, expectText: boolean): void {
     const key = `${row.id}:${dispatch.n}`
     if (this.store.message(`bm_${row.id}_d${dispatch.n}`)) return
+    if (text === undefined) text = this.lateTexts.get(key)
     if (text === undefined && expectText) {
       if (this.pendingReplies.has(key)) return
       const timer = (this.host.setTimer ?? defaultTimer)(() => this.pendingReplies.get(key)?.post(undefined), REPLY_WAIT_MS)
@@ -2038,9 +2099,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     this.pendingReplies.get(key)?.timer.clear()
     this.pendingReplies.delete(key)
+    this.lateTexts.delete(key)
     const chips = this.drained.get(key) ?? []
     this.drained.delete(key)
-    const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open')
+    // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
+    const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
+      !this.store.messagesForAsk(ask.id).some((message) => message.activationId === row.id))
     const body = (text ?? '').trim()
     const report = row.lane === 'run' && row.status === 'done'
     if (!body && !chips.length && !asks.length && !report) return
@@ -2134,7 +2198,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const uncertain = previousRun?.status === 'uncertain'
     const effective = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest) : undefined
     const answers = input.answers ?? []
-    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'none' } | { kind: 'sent'; dispatch: BotDispatchRow } => {
+    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
       if (!definition || !grant || !effective || grant.digest !== current.grantDigest) {
@@ -2154,8 +2218,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       const remaining = effective.budget.maxActiveMs - this.store.counters(row.id).activeMs
       if (remaining < ACTIVE_TIME_CHUNK_MS) {
-        const wall = this.wallInTransaction(row.id, [current.status], this.timeWall(previous?.n ?? 0, effective))
         for (const answer of answers) this.store.markApplied(answer.id)
+        // A run has nobody to allow more: it ends with its ask (after this transaction).
+        if (current.lane === 'run' && current.status === 'running') return { kind: 'budget' }
+        const wall = this.wallInTransaction(row.id, [current.status], this.timeWall(previous?.n ?? 0, effective))
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       const n = this.store.nextDispatchN(row.id)
@@ -2166,7 +2232,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { text: input.usageRetry && previous ? previous.prompt.text : this.continuationPrompt(row, { ...input, answers }, neverRan) },
+        prompt: { text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, answers }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -2180,15 +2246,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })
       return { kind: 'sent', dispatch: this.store.dispatch(row.id, n)! }
     })
+    if (decided.kind === 'budget') {
+      this.budgetEnd(this.store.activation(row.id) ?? row, this.timeWall(previous?.n ?? 0, effective!))
+      return 'none'
+    }
     if (decided.kind === 'wall') {
       const escalation = this.store.escalations({ activationId: row.id, status: 'open' }).at(-1)
-      if (escalation) this.afterWall(row.id, { kind: 'wall', escalation })
+      if (escalation) {
+        this.afterWall(row.id, { kind: 'wall', escalation })
+        this.announceWall(escalation)
+      }
       return 'wall'
     }
     this.changed({ botId: row.botId, activationId: row.id })
     if (decided.kind !== 'sent') {
-      // Paused or blocked: the activation no longer holds its lane.
-      if (decided.kind === 'paused' || decided.kind === 'blocked') this.pumpLater(row.botId)
+      // Paused or blocked: the activation no longer holds its lane, and its chat says why.
+      if (decided.kind === 'paused' || decided.kind === 'blocked') {
+        this.stoppedRow(this.store.activation(row.id) ?? row)
+        this.pumpLater(row.botId)
+      }
       return decided.kind === 'paused' ? 'paused' : 'none'
     }
     await this.sendDispatch(this.store.activation(row.id)!, decided.dispatch)
@@ -2410,8 +2486,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const key = `${row.id}:${dispatch.n}`
     if (dispatch.endedAt !== null) {
       // Settled from the run's terminal event first: the executor's final message still lands.
-      if (outcome.text !== undefined)
+      if (outcome.text !== undefined) {
         this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused', 'waiting_grant') AND (result IS NULL OR result = '')", outcome.text, row.id)
+        // Capture may still be running for this dispatch: its reply takes this text when it is written.
+        if (!this.pendingReplies.has(key) && !this.store.message(`bm_${row.id}_d${dispatch.n}`)) this.lateTexts.set(key, outcome.text)
+      }
       this.pendingReplies.get(key)?.post(outcome.text)
       return
     }
@@ -2858,6 +2937,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
     if (unknown || run?.status === 'uncertain') {
       this.store.moveActivation(row.id, ['running'], 'paused', { endReason: unknown ? 'unknown_calls' : 'uncertain' })
+      this.stoppedRow(this.store.activation(row.id) ?? row)
       this.changed({ botId: row.botId, activationId: row.id })
       return
     }
@@ -2883,8 +2963,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const left = this.remainingMs(row)
       if (left !== undefined && left < ACTIVE_TIME_CHUNK_MS) {
         runs.markTerminal(run.runId, 'cancelled', { error: 'bot_dispatch_restarted' })
-        const raised = this.store.db.transaction(() => this.wallInTransaction(row.id, ['running'], { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxActiveMs' } }, reason: 'Mousse stopped unexpectedly before this bot\'s run began, and its work time was counted as used. Allow more time to continue.' }))
-        if (raised.kind !== 'none') this.afterWall(row.id, raised)
+        this.wallAtRest(row, { ...this.timeWallAt(row, main.n), reason: 'Mousse stopped unexpectedly before this bot\'s run began, and its work time was counted as used. Allow more time to continue.' })
         return
       }
       // Otherwise a new dispatch with the same prompt, never the old row again. The new intent is
@@ -2905,18 +2984,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Row 10: under 15 s of work time left after P3: a budget wall that says why.
     const remaining = this.remainingMs(row)
     if (remaining !== undefined && remaining < ACTIVE_TIME_CHUNK_MS) {
-      const raised = this.store.db.transaction(() => this.wallInTransaction(row.id, ['running'], {
-        dispatchN: main.n,
-        kind: 'budget',
-        permission: { budget: { key: 'maxActiveMs' } },
+      this.wallAtRest(row, {
+        ...this.timeWallAt(row, main.n),
         reason: 'Mousse stopped unexpectedly while this bot was working. Its remaining work time was counted as used, because Mousse can\'t tell how long its commands kept running. Allow more time to continue.'
-      }))
-      if (raised.kind !== 'none') this.afterWall(row.id, raised)
+      })
       return
     }
     // Rows 11 and 12: one automatic continuation, then the owner decides.
     if (row.autoRestarts >= 1) {
       this.store.moveActivation(row.id, ['running'], 'paused', { endReason: 'restarted_twice' })
+      this.stoppedRow(this.store.activation(row.id) ?? row)
       this.changed({ botId: row.botId, activationId: row.id })
       return
     }
@@ -2945,7 +3022,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       role = this.known.get(threadId)?.role
     }
-    return role === 'activation' || role === 'context' ? role : undefined
+    // The home thread runs the chat lane's turns: as bot turns, like an activation thread's.
+    return role === 'home' ? 'activation' : role === 'activation' || role === 'context' ? role : undefined
   }
 
   /** Never throws: a failed read answers from the threads this process knows of. */
@@ -3378,6 +3456,9 @@ function failureText(reason: string): string {
     case 'asked_too_often': return 'I stopped: I asked too many times in one go.'
     case 'bot_permissions_invalid': return 'My permissions are broken, so I stopped.'
     case 'bots_unavailable': return 'Mousse isn\'t ready to run me yet. Try again in a moment.'
+    case 'unknown_calls':
+    case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
+    case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }
 }

@@ -959,8 +959,16 @@ export class BotStore {
     return this.run("UPDATE bot_escalations SET status = ?, amount = ?, answered_at = ?, cooldown_until = ? WHERE id = ? AND status = 'open'", status, amount ?? null, this.now(), cooldownUntil ?? null, id) > 0
   }
 
-  /** Ends every open escalation of an activation (it ended, expired, or was trashed); a run's asks stay open for the owner. */
+  /**
+   * Ends every open wall of an activation (it ended, expired, or was trashed). A run's asks stay
+   * open for the owner, and so does one a chat turn took over from a run (its card was posted
+   * elsewhere): it goes back to being a run's ask.
+   */
   closeEscalations(activationId: string, status: 'expired' | 'cancelled'): number {
+    this.run(
+      "UPDATE bot_escalations SET mode = 'ask' WHERE activation_id = ? AND status = 'open' AND mode = 'wall' AND EXISTS (SELECT 1 FROM bot_messages m WHERE m.ask_id = bot_escalations.id AND (m.activation_id IS NULL OR m.activation_id <> bot_escalations.activation_id))",
+      activationId
+    )
     return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open' AND mode = 'wall'", status, this.now(), activationId)
   }
 
@@ -1155,6 +1163,18 @@ export class BotStore {
   /** The bot's messages after the owner's read marker. */
   unread(botId: string, readSeq: number): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND author = 'bot' AND seq > ?", botId, readSeq)?.n ?? 0)
+  }
+
+  /** The 30-day purge: every row of a bot's asks, activations (with their dispatches, counts and spend), grants and context generations. */
+  deleteBotRows(botId: string): void {
+    for (const row of this.all('SELECT id FROM bot_activations WHERE bot_id = ?', botId)) {
+      this.run('DELETE FROM bot_overlays WHERE activation_id = ?', row.id as string)
+      this.deleteActivation(row.id as string)
+    }
+    this.run('DELETE FROM bot_escalations WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_grants WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_contexts WHERE bot_id = ?', botId)
+    this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
   deleteMessages(botId: string): void {

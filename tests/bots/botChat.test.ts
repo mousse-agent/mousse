@@ -217,3 +217,19 @@ describe('bots.chat.list, chips and read markers', () => {
     expect(payloads).not.toContain('pi:openrouter')
   })
 })
+
+describe('the final message after capture (review)', () => {
+  it('a reply whose final message arrives while capture runs still carries it', async () => {
+    const { botId } = await createBot(f, { name: 'Penny', reply: 'Hello.' })
+    await f.bots.service.chatSend({ botId, text: 'what is new?', clientRequestId: 'late-1' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, activation.id)
+    // The run's terminal event settles first (no text); the executor's text follows during capture.
+    f.runs.markTerminal(payload.runId, 'completed')
+    f.bots.settleRun(payload.runId)
+    f.bots.settle(payload, { text: 'Two new invoices.' })
+    await flush()
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', kind: 'text', text: 'Two new invoices.' })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'done', result: 'Two new invoices.' })
+  })
+})

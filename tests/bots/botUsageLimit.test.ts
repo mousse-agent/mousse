@@ -38,7 +38,7 @@ describe('usage limits', () => {
     await flush()
     expect(f.limited.get('claude:main')).toBe(until)
     const retry = f.store.dispatch(activation.id, 2)!
-    expect(retry).toMatchObject({ kind: 'continue', prompt: { text: 'Three AI headlines' }, send: { usageRetry: true } })
+    expect(retry).toMatchObject({ kind: 'continue', prompt: { text: '[Mousse] The last try did not go through. Answer this again:\n\nThree AI headlines' }, send: { usageRetry: true } })
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', selection: { instanceId: 'pi:openrouter' }, reloadPending: false })
     const prepared = await runDispatch(f, activation.id, 2, { text: 'Here are three.' })
     expect(prepared.selection).toMatchObject({ instanceId: 'pi:openrouter', model: 'some/model' })
@@ -92,7 +92,7 @@ describe('usage limits', () => {
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     await runDispatch(f, activation.id, 1, limited(until))
     await flush()
-    expect(f.store.dispatch(activation.id, 2)).toMatchObject({ send: { usageRetry: true }, prompt: { text: 'Anything new?' } })
+    expect(f.store.dispatch(activation.id, 2)).toMatchObject({ send: { usageRetry: true }, prompt: { text: '[Mousse] The last try did not go through. Answer this again:\n\nAnything new?' } })
     await runDispatch(f, activation.id, 2, { text: 'Not yet.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', kind: 'text', text: 'Not yet.' })
     expect(f.store.registry(botId)).toMatchObject({ failureStreak: 0, pausedReason: null })
