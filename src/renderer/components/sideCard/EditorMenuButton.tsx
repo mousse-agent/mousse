@@ -63,7 +63,8 @@ export function OpenInEditor() {
     if (local || remote) void loadEditors()
   }, [local, remote])
 
-  if (node) return projectId && thread ? <OpenInRemoteEditor threadId={thread.id} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
+  // Keyed by thread: an open or ask still under way for the previous thread reports nothing in this one.
+  if (node) return projectId && thread ? <OpenInRemoteEditor key={thread.id} threadId={thread.id} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
   if (!projectId || !path || !editors) return null
   const open = async (editor: EditorInfo) => {
     await window.mousse.editors.open(editor.id, path)
@@ -103,7 +104,6 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
   const [working, setWorking] = useState<'opening' | 'asking' | null>(null)
   const [opens, setOpens] = useState(0)
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
-  useEffect(() => { setOutcome(null) }, [threadId])
   // After an ask the other computer may allow it any time: look again while the ask waits. Asking again while it
   // waits bothers nobody there, and a computer that now allows it answers `already_on`.
   const waitingUntil = outcome?.kind === 'asked' && outcome.result.ok && (outcome.result.reply.state === 'asked' || outcome.result.reply.state === 'pending') ? outcome.result.reply.expiresAt : 0

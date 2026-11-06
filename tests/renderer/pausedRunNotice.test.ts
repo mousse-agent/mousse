@@ -246,3 +246,23 @@ describe('the paused run client', () => {
     ])
   })
 })
+
+describe('the notice when the paused run changes', () => {
+  const inSlot = (child: ReactNode) => createElement(ComposerNoticeProvider, null, createElement(Fragment, null, createElement(ComposerNoticeSlot), child))
+  const paused = (runId: string): TurnState => ({ threadId: 't1', turnId: runId, phase: 'paused', updatedAt: new Date(NOW).toISOString(), pause: pause({ runId }) })
+
+  it('does not show the failure of a press made for the run before it, and is not busy', async () => {
+    let refuse!: () => void
+    const resumeNow = vi.fn(() => new Promise<undefined>((_resolve, reject) => { refuse = () => reject(new Error('The service did not answer.')) }))
+    const client: PausedRunClient = { resumeNow, cancel: vi.fn(async () => undefined) }
+    act(() => { useAppStore.setState({ turnStates: { t1: paused('run:1') } }) })
+    act(() => root.render(inSlot(createElement(PausedRunNotice, { threadId: 't1', client }))))
+    click(button('Try now'))
+    expect(button('Trying…')).toBeDefined()
+    // The run is replaced by another paused run of the same thread.
+    act(() => { useAppStore.setState({ turnStates: { t1: paused('run:2') } }) })
+    await act(async () => { refuse(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(names()).toEqual(['Try now', 'Cancel'])
+  })
+})
