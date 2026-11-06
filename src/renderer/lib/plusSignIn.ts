@@ -166,12 +166,12 @@ export function mousseIdPreparation(net?: NetStatus): 'ready' | 'automatic' | 'm
   return 'automatic'
 }
 
-/** What to do first when Mousse ID is not ready yet. */
+/** What to do first when Mousse ID is not ready yet; shown above This device on Settings → Devices. */
 export function mousseIdSetupStep(net?: NetStatus): string {
-  if (!net?.self) return 'Create a network identity under Devices first.'
-  if (!net.enabled) return 'Enable networking for this profile under Devices first.'
-  if (net.keystore !== 'unlocked') return 'Unlock this profile under Devices first.'
-  return 'Protect network keys with a passphrase under Devices first.'
+  if (!net?.self) return 'Create a network identity for this device first.'
+  if (!net.enabled) return 'Turn on networking for this device first.'
+  if (net.keystore !== 'unlocked') return 'Unlock this device first.'
+  return 'Protect network keys with a passphrase first.'
 }
 
 /** Sign-in failure in words a person can act on. */

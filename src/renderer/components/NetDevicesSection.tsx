@@ -2,6 +2,8 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, Bot, CircleCheck, Download, Gauge, Laptop, Monitor, MonitorSmartphone, MoreHorizontal, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Smartphone, Trash2, Undo2, type LucideIcon } from '../lib/icons'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
+import { AddDeviceChooser, InviteComputerDialog, RouteBack, addDeviceRoutes, type AddDeviceRouteId, type Invitation } from './devices/AddDeviceDialog'
+import { MousseIdAccount } from './MousseIdAccount'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
 import { EditorSshSettings } from './devices/EditorSshSettings'
 import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
@@ -9,12 +11,12 @@ import { Modal } from './ui/Modal'
 import { takePendingDevice } from '../lib/settingsNavigation'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
-import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
+import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
-import { PAIRING_DISCLOSURE, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -110,10 +112,11 @@ export function NetDevicesSection() {
   const id = useId()
   const alive = useRef(true), generation = useRef(0)
   const [status, setStatus] = useState<NetStatus>(), [devices, setDevices] = useState<Device[]>([]), [manifests, setManifests] = useState<TransportManifest[]>([])
-  const [error, setError] = useState(''), [keychainRefusal, setKeychainRefusal] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
+  const [error, setError] = useState(''), [keychainRefusal, setKeychainRefusal] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invitation, setInvitation] = useState<Invitation>(), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
-  const [adding, setAdding] = useState(false), [addKind, setAddKind] = useState<'computer'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
+  // Add device: the choice of routes, then the invitation or join form.
+  const [addStep, setAddStep] = useState<'choose' | 'invite' | 'join'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
   const [records, setRecords] = useState<NetAddonRecords>({}), [saved, setSaved] = useState<Record<string, unknown>>({}), [notice, setNotice] = useState(''), [servePort, setServePort] = useState('47890'), [serveDialog, setServeDialog] = useState<{ wasOn: boolean }>()
   const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
   const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
@@ -236,7 +239,7 @@ export function NetDevicesSection() {
   // The keychain refused to protect a new identity's keys, so a passphrase protects them instead.
   const needsPassphrase = !self && !!status?.vaultUnavailable
   const toggleNetworking = (next: boolean) => {
-    if (!next) { setInvite(''); void action('net.disable', {}) }
+    if (!next) { setInvitation(undefined); void action('net.disable', {}) }
     else if (self) void action('net.init', {})
     else void action('net.init', { name: name.trim(), listen: true, ...(needsPassphrase ? { passphrase } : {}) })
   }
@@ -253,23 +256,41 @@ export function NetDevicesSection() {
     void action(locked ? 'net.unlock' : 'net.protect', { passphrase })
   }
 
-  // "Add device" joins this device to my other devices, or invites a new one from the owner.
-  const addMode: 'join' | 'invite' | undefined = status && !self ? 'join' : authority ? 'invite' : undefined
+  // "Add device" offers every route; one this device cannot take yet says what it needs first.
   const inviteReady = unlocked && !!status?.protected
-  const closeAdd = () => { setAdding(false); setAddKind(undefined); setInvite(''); setJoinText(''); setPassphrase('') }
+  const routes = addDeviceRoutes({ hasIdentity: !!self, unlocked, authority, protectedKeys: !!status?.protected })
+  const closeAdd = () => { setAddStep(undefined); setInvitation(undefined); setJoinText(''); setPassphrase(''); setError('') }
+  const backToRoutes = () => { setInvitation(undefined); setJoinText(''); setPassphrase(''); setError(''); setAddStep('choose') }
+  const chooseRoute = (route: AddDeviceRouteId) => {
+    if (route === 'ssh') { closeAdd(); setSshSetup({}) }
+    else setAddStep(route)
+  }
+  const createInvitation = () => void action('bridge.invite', { name: 'New device' }, (value) => {
+    const issued = value as { invite: string; expiresAt?: number }
+    setInvitation({ text: issued.invite, expiresAt: issued.expiresAt })
+  })
   const reloadQuietly = () => void reload().catch(() => undefined)
   const submitJoin = (event: FormEvent) => {
     event.preventDefault()
     if (!joinText.trim() || !passphrase || !name.trim() || busy) return
-    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), passphrase }, () => { setJoinText(''); setAdding(false) })
+    void action('bridge.join', { invite: joinText.trim(), name: name.trim(), passphrase }, () => { setJoinText(''); setAddStep(undefined) })
+  }
+
+  // Mousse ID sign-in sits above This device; its Set up and Unlock bring the control it needs into view.
+  const mousseId = useMousseIdAvailable()
+  const focusSetUp = () => {
+    const target = locked ? `${id}-passphrase` : !self ? `${id}-name` : !status?.enabled ? `${id}-networking` : `${id}-passphrase`
+    const element = document.getElementById(target)
+    element?.scrollIntoView({ block: 'center' })
+    element?.focus()
   }
 
   const devicesDescription = !status ? undefined
-    : !self ? (mousseIdAvailable(useMousseIdStore.getState())
-      ? 'Sign in to Mousse ID under Account to join the computers signed in to it, or turn on networking to start a new set.'
+    : !self ? (mousseId
+      ? 'Sign in to Mousse ID above to join the computers signed in to it, or turn on networking to start a new set.'
       : 'Join devices you already use, or turn on networking to start a new set.')
       : !unlocked ? 'Unlock this device to see your other devices.'
-        : !authority ? 'Add devices from the device that owns this identity.'
+        : !authority ? 'Add devices from the computer that manages your devices.'
           : !inviteReady ? 'Protect network keys to add devices.'
             : undefined
 
@@ -308,8 +329,10 @@ export function NetDevicesSection() {
   }
 
   return <>
+    {mousseId && <MousseIdAccount onSetUp={focusSetUp} />}
+
     {/* The passphrase row answers a refused keychain; its "locked" error would only repeat it. */}
-    {error && !adding && !(needsPassphrase && error === keychainRefusal) && <p role="alert" className="chat-error devices-error">{error}</p>}
+    {error && !addStep && !(needsPassphrase && error === keychainRefusal) && <p role="alert" className="chat-error devices-error">{error}</p>}
 
     <SettingsGroup title="This device" icon={Monitor} className="devices-group">
       {!self && (
@@ -335,10 +358,10 @@ export function NetDevicesSection() {
         />
       )}
       <SettingsRow
-        title={selfDevice?.name ?? 'Networking'}
+        title="Networking"
         anchor="devices-networking"
-        description={networkingLine(status)}
-        control={<Switch checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
+        description={selfDevice?.name ? `${selfDevice.name} · ${networkingLine(status)}` : networkingLine(status)}
+        control={<Switch id={`${id}-networking`} checked={!!status?.enabled} label="Networking" disabled={busy || networkingLocked} onChange={toggleNetworking} />}
       />
       {status?.restartRequired && status.error === 'outcome_uncertain' && (
         <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
@@ -352,8 +375,9 @@ export function NetDevicesSection() {
         />
       )}
       {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
+        // Its own switch, apart from Networking: the short title is for scanning, the switch keeps the permission's full name.
         <SettingsRow
-          title="Let my other computers work on this computer's threads"
+          title="Let other computers work here"
           anchor="devices-inbound"
           description={workOnThreads
             ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
@@ -361,23 +385,20 @@ export function NetDevicesSection() {
           control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
         />
       )}
-      {self && (
-        (!status.protected || locked) ? (
-          <SettingsRow
-            title={locked ? 'Unlock' : 'Passphrase'}
-            anchor="devices-passphrase"
-            htmlFor={`${id}-passphrase`}
-            description={locked ? 'Enter the passphrase for this device’s network keys' : 'Protect this device’s network keys with a passphrase'}
-            control={
-              <form className="devices-inline-form" onSubmit={submitPassphrase}>
-                <input id={`${id}-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete={locked ? 'current-password' : 'new-password'} />
-                <button type="submit" className="settings-btn" disabled={busy || !passphrase || !!status.restartRequired}>{locked ? 'Unlock' : 'Protect'}</button>
-              </form>
-            }
-          />
-        ) : (
-          <SettingsRow anchor="devices-passphrase" title="Passphrase" description="Network keys on this device are protected" />
-        )
+      {/* Unlocking and protecting keys are next steps, so they stay here; keys already protected are noted under Advanced. */}
+      {self && (!status.protected || locked) && (
+        <SettingsRow
+          title={locked ? 'Unlock' : 'Passphrase'}
+          anchor="devices-passphrase"
+          htmlFor={`${id}-passphrase`}
+          description={locked ? 'Enter the passphrase for this device’s network keys' : 'Protect this device’s network keys with a passphrase'}
+          control={
+            <form className="devices-inline-form" onSubmit={submitPassphrase}>
+              <input id={`${id}-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete={locked ? 'current-password' : 'new-password'} />
+              <button type="submit" className="settings-btn" disabled={busy || !passphrase || !!status.restartRequired}>{locked ? 'Unlock' : 'Protect'}</button>
+            </form>
+          }
+        />
       )}
     </SettingsGroup>
 
@@ -388,11 +409,11 @@ export function NetDevicesSection() {
         icon={MonitorSmartphone}
         className="devices-group"
         description={devicesDescription}
-        action={addMode && (
-          <button type="button" className="settings-btn" disabled={busy || !!status.restartRequired || (addMode === 'invite' && !inviteReady)} onClick={() => { setError(''); setAdding(true) }}>
+        action={
+          <button type="button" className="settings-btn" disabled={busy || !!status.restartRequired} onClick={() => { setError(''); setAddStep('choose') }}>
             <Plus size={14} />Add device
           </button>
-        )}
+        }
       >
         {others.map((device) => {
           const items = deviceMenu(device), offer = device.sshOffer, record = sshRecordFor(device, sshRecords)
@@ -484,6 +505,12 @@ export function NetDevicesSection() {
 
     {status && (
       <SettingsAdvanced>
+        {self && status.protected && !locked && (
+          <SettingsGroup className="devices-group">
+            <SettingsRow anchor="devices-passphrase" title="Network keys" description="Protected on this device" />
+          </SettingsGroup>
+        )}
+
         {showAddons && (
           <SettingsGroup className="devices-group" anchor="devices-addons" title="Connection add-ons" description="Ways other devices can reach this one">
             {manifests.map((manifest) => {
@@ -579,7 +606,8 @@ export function NetDevicesSection() {
           className="devices-group"
           action={<button type="button" className="settings-btn" disabled={busy} onClick={() => void action('net.doctor', {}, (value) => setDoctor(value as NetDoctor))}><RefreshCw size={14} />Check connection</button>}
         >
-          {status.enabled && (
+          {/* Which parts of Mousse Net this build turns on: detail for a check, not a setting. */}
+          {status.enabled && doctor && (
             <SettingsRow title="Features" description={`Bridge ${status.features?.netBridge ? 'on' : 'off'} · Spaces ${status.features?.netSpaces ? 'on' : 'off'}`} />
           )}
           {doctor?.checks.map((check) => (
@@ -598,15 +626,18 @@ export function NetDevicesSection() {
       </SettingsAdvanced>
     )}
 
-    {adding && addMode === 'join' && (
+    {addStep === 'choose' && <AddDeviceChooser routes={routes} onChoose={chooseRoute} onClose={closeAdd} />}
+
+    {/* Joining needs the invitation, a name and a passphrase that protects this device's new keys. */}
+    {addStep === 'join' && (
       <Modal
         open
-        title="Join my devices"
+        title="Join with invitation"
         onClose={closeAdd}
+        headerStart={<RouteBack onBack={backToRoutes} />}
         footer={<button type="submit" form={`${id}-join`} className="settings-btn devices-dialog-btn primary" disabled={busy || !joinText.trim() || !passphrase || !name.trim()}>Join</button>}
       >
         <form id={`${id}-join`} className="devices-dialog" onSubmit={submitJoin}>
-          <p className="settings-muted">Paste the invitation from one of your devices.</p>
           <label className="devices-field">
             <span>Invitation</span>
             <textarea value={joinText} autoFocus onChange={(event) => setJoinText(event.target.value)} aria-label="Device invitation to join" />
@@ -624,50 +655,16 @@ export function NetDevicesSection() {
       </Modal>
     )}
 
-    {adding && addMode === 'invite' && !addKind && (
-      <Modal open title="Add a device" onClose={closeAdd}>
-        <div className="devices-dialog">
-          <button type="button" className="devices-choice" onClick={() => setAddKind('computer')}>
-            <span>Another computer with Mousse</span>
-            <span className="settings-muted">Create an invitation and paste it on the other computer. {PAIRING_DISCLOSURE}</span>
-          </button>
-          <button type="button" className="devices-choice" onClick={() => { closeAdd(); setSshSetup({}) }}>
-            <span>Remote machine over SSH</span>
-            <span className="settings-muted">Set up Mousse on a machine you reach with ssh.</span>
-          </button>
-        </div>
-      </Modal>
-    )}
-
-    {adding && addMode === 'invite' && addKind === 'computer' && (
-      <Modal
-        open
-        title="Add a device"
+    {addStep === 'invite' && (
+      <InviteComputerDialog
+        invitation={invitation}
+        ready={authority && inviteReady}
+        busy={busy}
+        error={error}
+        onCreate={createInvitation}
+        onBack={backToRoutes}
         onClose={closeAdd}
-        footer={
-          invite
-            ? undefined
-            : <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy || !inviteReady} onClick={() => void action('bridge.invite', { name: 'New device' }, (value) => setInvite((value as { invite: string }).invite))}>Create invitation</button>
-        }
-      >
-        <div className="devices-dialog">
-          {invite ? (
-            <>
-              <p className="settings-muted">On the new device, open Settings → Devices → Add device and paste this. Share it privately.</p>
-              <label className="devices-field">
-                <span>Invitation</span>
-                <textarea readOnly value={invite} autoFocus onFocus={(event) => event.currentTarget.select()} aria-label="Device invitation" />
-              </label>
-              <div className="devices-dialog-actions">
-                <CopyButton text={invite} label="Copy invitation" />
-              </div>
-            </>
-          ) : (
-            <p className="settings-muted">Create an invitation code, then paste it on the new device. {PAIRING_DISCLOSURE}</p>
-          )}
-          {error && <p role="alert" className="chat-error">{error}</p>}
-        </div>
-      </Modal>
+      />
     )}
 
     {updating && selfDevice?.version && (() => {

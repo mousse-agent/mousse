@@ -68,7 +68,7 @@ export function thisComputerLacksGrant(localName: string): string {
 
 /** Why a computer that stopped sharing cannot be picked: its owner switch is off, or it blocked this computer. */
 export function notSharingReason(name: string): string {
-  return `${name} is not sharing its threads with this computer. Turn on "Let my other computers work on this computer's threads" on ${name}, in Settings, Devices, or unblock this computer there.`
+  return `${name} is not sharing its threads with this computer. Turn on "Let other computers work here" on ${name}, in Settings, Devices, or unblock this computer there.`
 }
 
 /** The Run on rows: this computer first, then each connected computer, with the picked one active. */
