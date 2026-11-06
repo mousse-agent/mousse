@@ -855,6 +855,15 @@ export function OrchestratorChat() {
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
+        // A message sent while a run is paused by a usage limit waits in the queue: it is shown there, not in the transcript.
+        if (result.heldByPause && optimisticMessageId) {
+          const current = useAppStore.getState().messages
+          useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
+          if (result.queueItem) {
+            const held = result.queueItem
+            setOptimisticQueueItems((items) => [...items.filter((item) => item.id !== held.id), held])
+          }
+        }
         if (result.error) {
           // A failed turn shows its error in the transcript, with Retry. Only a lost connection to the service is a notice here.
           if (result.error.code === 'workspace_connection_lost') setSendError(sendErrorLine(result.error))
