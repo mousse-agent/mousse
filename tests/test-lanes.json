@@ -4,6 +4,7 @@
     "tests/agentDefinitions/agentChatDefinitionTurn.test.ts",
     "tests/agentLifecycleStatus.test.ts",
     "tests/asyncFileLock.test.ts",
+    "tests/bots/botSupervisor.test.ts",
     "tests/browserWindowsSandboxPermissions.test.ts",
     "tests/chatService.test.ts",
     "tests/conversationForkRetirement.test.ts",
