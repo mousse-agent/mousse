@@ -245,6 +245,55 @@ export function rowActionLabel(action: RowAction, file: GitFileChange): string {
   }
 }
 
+/** What each status letter means, for its tooltip and the row's accessible name. */
+export const STATUS_NAMES: Record<GitFileChange['status'], string> = {
+  modified: 'Modified',
+  added: 'Added',
+  deleted: 'Deleted',
+  renamed: 'Renamed',
+  copied: 'Copied',
+  untracked: 'Untracked',
+  ignored: 'Ignored',
+  conflicted: 'Conflicted'
+}
+
+/** The More menu's item for a file: deleting an untracked file, else throwing its changes away. */
+export function discardMenuLabel(file: GitFileChange): string {
+  return file.status === 'untracked' ? 'Delete file…' : 'Discard changes…'
+}
+
+/** The confirming button of a discard: Delete when every file is untracked and goes for good, else Discard. */
+export function discardConfirmLabel(files: readonly GitFileChange[]): 'Delete' | 'Discard' {
+  return files.length > 0 && files.every((file) => file.status === 'untracked') ? 'Delete' : 'Discard'
+}
+
+/** One arrow press moves a divider by this share of the pair. */
+export const SECTION_RATIO_STEP = 0.05
+
+/** The upper section's share of the two around a divider; a pair where either has no weight yet reads as even. */
+export function sectionPairRatio(sizes: Readonly<SectionSizes>, upper: GitSectionId, lower: GitSectionId): number {
+  const a = sizes[upper]
+  const b = sizes[lower]
+  if (a === undefined || b === undefined || a + b <= 0) return 0.5
+  return a / (a + b)
+}
+
+/** Where a key moves a divider: arrows by a step (down gives the upper section more), Home and End to the limits. Null for other keys. */
+export function keyedSectionRatio(ratio: number, key: string): number | null {
+  switch (key) {
+    case 'ArrowDown':
+      return ratio + SECTION_RATIO_STEP
+    case 'ArrowUp':
+      return ratio - SECTION_RATIO_STEP
+    case 'Home':
+      return SECTION_RATIO_MIN
+    case 'End':
+      return SECTION_RATIO_MAX
+    default:
+      return null
+  }
+}
+
 const DISCARD_LIST_LIMIT = 10
 
 /**
@@ -267,4 +316,53 @@ export function discardPrompt(files: readonly GitFileChange[], keptForMs?: numbe
   const listed = entries.slice(0, DISCARD_LIST_LIMIT).map(([path, untracked]) => `  ${path}${untracked ? ' (untracked, will be deleted)' : ''}`)
   const more = entries.length > DISCARD_LIST_LIMIT ? [`  …and ${entries.length - DISCARD_LIST_LIMIT} more`] : []
   return [`Discard changes to ${entries.length} files?`, '', ...listed, ...more, ...closing].join('\n')
+}
+
+/**
+ * Heights a person gave sections by dragging a divider, as flex weights. Kept only while the
+ * panel shows one folder, never saved; a section without one fits its content.
+ */
+export type SectionSizes = Partial<Record<GitSectionId, number>>
+
+/** The rows a list of files keeps in view when the panel is short; the rest of a longer list scrolls. */
+export const SECTION_FLOOR_ROWS = 3
+/** The share of the panel the Commits list keeps when many changed files would otherwise fill it. */
+export const COMMITS_FLOOR_SHARE = '35%'
+/** How far a divider between two sections may go: neither section gets less than this share of the pair. */
+export const SECTION_RATIO_MIN = 0.15
+export const SECTION_RATIO_MAX = 0.85
+
+export interface SectionStyle {
+  flex: string
+  minHeight: string
+}
+
+/**
+ * How a section sizes. Until a divider is dragged, each list of files is as tall as its rows and
+ * shrinks no lower than a few of them, and Commits takes the rest of the panel, keeping at least
+ * its own content or a share of the panel, so neither one file nor a long history pushes the
+ * other out of reach. A dragged section keeps the weight it was given. The row and header heights
+ * come from `--git-row` and `--git-section-head` on `.git-changes`.
+ */
+export function sectionStyle(id: GitSectionId, rows: number, size: number | undefined): SectionStyle {
+  if (size !== undefined) return { flex: `${size} 1 0`, minHeight: 'var(--git-section-head)' }
+  if (id === 'commits') {
+    const content = `calc(var(--git-section-head) + ${Math.max(1, rows)} * var(--git-row))`
+    return { flex: '1 1 0', minHeight: `min(${COMMITS_FLOOR_SHARE}, ${content})` }
+  }
+  return {
+    flex: '0 1 auto',
+    minHeight: `calc(var(--git-section-head) + ${Math.min(rows, SECTION_FLOOR_ROWS)} * var(--git-row))`
+  }
+}
+
+/**
+ * The weights once the divider between `upper` and `lower` is at `ratio` of the pair (kept between
+ * the limits); every other section keeps its own. Both sections need a weight first.
+ */
+export function resizeSectionPair(sizes: Readonly<SectionSizes>, upper: GitSectionId, lower: GitSectionId, ratio: number): SectionSizes {
+  const total = (sizes[upper] ?? 0) + (sizes[lower] ?? 0)
+  if (total <= 0) return { ...sizes }
+  const clamped = Math.min(SECTION_RATIO_MAX, Math.max(SECTION_RATIO_MIN, ratio))
+  return { ...sizes, [upper]: total * clamped, [lower]: total * (1 - clamped) }
 }
