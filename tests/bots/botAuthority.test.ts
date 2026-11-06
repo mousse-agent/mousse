@@ -161,9 +161,12 @@ describe('host approvals in checkPolicy', () => {
   })
 
   it('fail closed: no runtime runs a bot while bot runtimes still lack a piece, whatever its caps', () => {
-    expect(BOT_RUNTIME_GAPS.length).toBeGreaterThan(0)
-    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })
-    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    // None is missing since Bot Phase 1 (§5.9); the switch stays for a piece a later change needs.
+    expect(BOT_RUNTIME_GAPS).toEqual([])
+    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
+    const gaps = ['a piece bots rely on']
+    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: gaps })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
   })

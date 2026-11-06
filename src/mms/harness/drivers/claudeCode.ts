@@ -139,9 +139,16 @@ export interface ClaudeCodeDriverOptions {
   readPolicy?: (input: ManagedPolicyReadInput) => Promise<boolean>
   /** Test seam: the containment evidence (default `CONTAINMENT_EVIDENCE`). */
   evidence?: readonly ContainmentEvidence[]
-  /** Each Claude Code process a locked entry's bot turn starts (its active-time supervision). */
+  /**
+   * Each Claude Code process a locked entry's bot turn starts, by pid and bot thread: its active-time
+   * supervision (`BotProcessRegistry.attachThread`, Bot Phase 1 §5.9). When it throws, the process is
+   * ended and the turn fails. Without it a locked entry runs no bot turn.
+   */
   onLockedProcess?: (pid: number, threadId: string) => void
 }
+
+/** Why a locked entry refuses a bot turn when the profile gave it no process supervision. */
+export const CLAUDE_UNSUPERVISED_REFUSAL = 'Mousse can\'t supervise this bot runtime here, so the bot does not run on it.'
 
 /** The SDK's `resolveSettings`: the settings a turn's folder gives Claude Code, without starting it. */
 export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> }) => Promise<Pick<ResolvedSettings, 'sources'>>
@@ -531,6 +538,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             // Read again as each turn starts: the policy, the CLI version's gate-and-ledger evidence, and
             // for shell the sandbox and its evidence for this version here.
             admit: async () => {
+              // Every process of a bot turn is supervised (Bot Phase 1 §5.9): without the profile's
+              // registry, nothing would end it at its deadline outside the daemon's loop.
+              if (!options.onLockedProcess) return { ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL }
               if (await readManaged(context.instanceId)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
               const version = (await service.cliConfig()).version
               if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }, evidence))
