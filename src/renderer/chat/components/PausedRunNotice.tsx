@@ -23,32 +23,38 @@ export interface PausedRunNoticeInput {
 }
 
 /**
- * The notice's one line: "Usage limit reached · resumes 3:40 PM (in 2h 15m)". A pause without a timer "resets"
- * instead, since it does not resume by itself; past the reset it says what happens now.
+ * The notice's one line: "Usage limit reached · resumes 3:40 PM". A pause without a timer "resets" instead,
+ * since it does not resume by itself; past the reset it says what happens now.
  */
 export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoResume' | 'estimated'>): string {
   const head = 'Usage limit reached'
   if (text.stale) return `${head} · resume time unknown`
   if (text.due) return `${head} · ${pause.autoResume ? 'retrying now' : 'should have reset by now'}`
-  const when = `${pause.estimated ? 'around ' : ''}${text.resetAt}${text.timeLeft ? ` (in ${text.timeLeft})` : ''}`
-  return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${when}`
+  return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${pause.estimated ? 'around ' : ''}${text.resetAt}`
+}
+
+/** The tooltip: the time left ("Resets in 2h 15m."), then the limit and what happens next. */
+function pausedRunTooltip(text: PausedRunText, pause: Pick<TurnPause, 'autoResume'>): string {
+  const left = text.timeLeft && !text.due && !text.stale ? `${pause.autoResume ? 'Resumes' : 'Resets'} in ${text.timeLeft}. ` : ''
+  return `${left}${text.detail}`
 }
 
 /**
- * A run a usage limit paused, as the composer's notice: "Usage limit reached · resumes 3:40 PM (in 2h 15m)", the
- * limit and what happens next in the tooltip, then the one decision: Try now or Cancel. A busy button keeps focus (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
+ * A run a usage limit paused, as the composer's notice: "Usage limit reached · resumes 3:40 PM", the time left,
+ * the limit and what happens next in the tooltip, then the one decision: Try now or Cancel. A busy button keeps focus (`aria-disabled`, not `disabled`) so a keyboard press does not lose its place.
  */
 export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError }: PausedRunNoticeInput): ComposerNoticeProps {
   const text = describePausedRun(pause, now)
   const blocked = busy !== null
   const line = pausedRunLine(text, pause)
+  const tooltip = pausedRunTooltip(text, pause)
   return {
     tone: error ? 'error' : 'warning',
     priority: 'paused',
     ...(error ? {} : { icon: <Pause size={14} strokeWidth={2} aria-hidden="true" /> }),
     label: 'Run paused by a usage limit',
     title: error ?? line,
-    tooltip: error ? `${line}. ${text.detail}` : text.detail,
+    tooltip: error ? `${line}. ${tooltip}` : tooltip,
     actions: [
       { label: busy === 'resume' ? 'Trying…' : 'Try now', primary: true, blocked, busy: busy === 'resume', onClick: onResume },
       { label: busy === 'cancel' ? 'Cancelling…' : 'Cancel', title: 'Drop this run; queued messages still send', blocked, busy: busy === 'cancel', onClick: onEndPause }

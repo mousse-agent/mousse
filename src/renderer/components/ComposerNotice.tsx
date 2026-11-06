@@ -25,7 +25,7 @@ export interface ComposerNoticeAction {
   blocked?: boolean
   /** This button's press is in flight. */
   busy?: boolean
-  /** The action the notice is asking for; it gets a tinted fill, the others stay text. */
+  /** The action the notice is asking for; its text is the accent, the others are muted. */
   primary?: boolean
 }
 
@@ -73,9 +73,9 @@ function ToneIcon({ tone }: { tone: ComposerNoticeTone }) {
 }
 
 /** One notice: tone icon, one line, its actions, then jump and dismiss icons. */
-export function ComposerNotice({ tone, title, shortTitle, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label }: ComposerNoticeProps) {
+export function ComposerNotice({ tone, title, shortTitle, detail, tooltip, icon, actions = [], onJump, jumpLabel = 'Show', onDismiss, label, priority }: ComposerNoticeProps) {
   return (
-    <div className="composer-notice" data-tone={tone} role="group" aria-label={label ?? title}>
+    <div className="composer-notice" data-tone={tone} data-priority={priority} role="group" aria-label={label ?? title}>
       <span className="composer-notice-icon">{icon ?? <ToneIcon tone={tone} />}</span>
       <span className="composer-notice-text" role={tone === 'error' ? 'alert' : 'status'} title={tooltip ?? (detail ? `${title}: ${detail}` : title)}>
         <span className="composer-notice-title">
@@ -272,7 +272,7 @@ export function useComposerDockStrip(present: boolean): { state: ComposerDockStr
 
 /**
  * The dock on the composer's top edge: the top notice, or nothing (also when a strip such as the queue
- * is on top; it draws itself in the same place). It sits in the composer stack, joined to the composer.
+ * is on top; it draws itself in the same place). A quiet line in the composer stack, right above it.
  */
 export function ComposerNoticeSlot() {
   const store = useContext(ComposerNoticeContext) ?? NO_STORE
