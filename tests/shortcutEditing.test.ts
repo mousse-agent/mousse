@@ -216,7 +216,7 @@ describe('the list', () => {
   it('has no clash among the defaults', () => {
     for (const platform of [WIN, MAC]) {
       expect(shadowedBy({}, platform).size).toBe(0)
-      for (const command of COMMANDS) if (!command.fixed) expect(bindingFor(command.id, {}, platform)).not.toBeNull()
+      for (const command of COMMANDS) if (!command.fixed && command.defaultBinding !== null) expect(bindingFor(command.id, {}, platform)).not.toBeNull()
     }
   })
 })

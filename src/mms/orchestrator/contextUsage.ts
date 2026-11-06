@@ -1,5 +1,5 @@
 import type { Message } from '../../shared/transcript'
-import type { ContextUsageSnapshot } from '../../shared/types'
+import { CONTEXT_DRAFT_CATEGORY, type ContextUsageSnapshot } from '../../shared/types'
 import { estimateMessageTokens } from './nativeContext'
 
 const MESSAGE_OVERHEAD = 4
@@ -72,11 +72,12 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
     const parts = partitionMessages(messages)
     for (const part of parts) if (part.tokens) categories.push(part)
   }
-  if (draftTokens) categories.push({ label: 'Draft message', color: CONTEXT_CATEGORY_COLORS.draft, tokens: draftTokens })
+  if (draftTokens) categories.push({ label: CONTEXT_DRAFT_CATEGORY, color: CONTEXT_CATEGORY_COLORS.draft, tokens: draftTokens })
   const used = categories.reduce((sum, category) => sum + category.tokens, 0)
-  const limit = contextLimit > 0 ? contextLimit : 128_000
+  // An unknown window stays 0 (and the share 0), never a guessed capacity: the ring then shows nothing.
+  const limit = contextLimit > 0 ? contextLimit : 0
   return {
-    percent: Math.min(100, Math.round((used / limit) * 100)), used, limit, modelName,
+    percent: limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0, used, limit, modelName,
     source: hasMeasurement ? 'measured' : legacyEstimated ? 'legacy-estimated' : 'estimated', categories
   }
 }

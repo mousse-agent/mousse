@@ -57,15 +57,14 @@
 .chat-workspace-empty h1 { margin: 0; color: var(--text-primary); font-size: 21px; line-height: 1.3; font-weight: 500; }
 .chat-workspace-empty > p { margin: 10px 0 0; max-width: 320px; }
 .chat-workspace-empty > .chat-primary-button { margin-top: 22px; min-height: 38px; }
-.chat-primary-button { background: var(--accent); color: var(--surface-strong, #18151c); border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: 600; }
-.chat-primary-button:disabled { opacity: .5; }
+.chat-primary-button { border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: 600; }
 .chat-error { color: var(--error, #e79090); font-size: 12px; line-height: 1.5; }
 .chat-composer-error { padding: 0 20px; }
 .chat-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; background: #0008; display: grid; place-items: center; }
 .chat-dialog { width: min(420px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 14px; background: var(--bg-secondary, #201d23); color: var(--text-primary); padding: 20px; box-shadow: 0 18px 60px #0005; }
 .chat-dialog-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .chat-dialog h2 { font-size: 17px; margin: 0; }
-.chat-dialog button { color: inherit; } .chat-dialog .chat-primary-button { color: var(--surface-strong, #18151c); }
+.chat-dialog button { color: inherit; }
 .chat-dialog form > label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; margin: 14px 0; }
 .chat-dialog input:not([type=radio]):not([type=checkbox]), .chat-dialog select { background: #0002; color: var(--text-primary); border: 1px solid rgba(var(--accent-pale-rgb), .15); border-radius: 7px; padding: 9px; width: 100%; }
 .chat-dialog fieldset { border: 0; padding: 0; margin: 18px 0; }

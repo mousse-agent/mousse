@@ -6,7 +6,6 @@ import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
-import { PausedRunBanner, usePausedRun } from './PausedRunBanner'
 import { WorkspaceRecoveryBanner } from './WorkspaceRecoveryBanner'
 import { SubagentCardsContext, SubagentInheritedProviderContext } from './agent-elements/tools/subagent-cards-context'
 import { useThreadProviderId } from '../../components/SubagentAvatar'
@@ -16,6 +15,7 @@ import {
   type QuickActionApproval,
 } from './agent-elements/tools/quick-action-approval'
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
+import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
 import './agent-elements/agent-ui.css'
 
 /**
@@ -57,6 +57,17 @@ function MousseInputBarSlot() {
   return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
 
+/** The last turn of a stopped run; Continue picks the work up again. */
+export function RunInterruptedNotice({ onContinue }: { onContinue?: () => void }) {
+  return <div className="chat-run-interrupted" role="status">
+    <span className="chat-run-interrupted-label">
+      <X size={12} strokeWidth={1.8} aria-hidden="true" />
+      <span>Run interrupted</span>
+      {onContinue && <button type="button" className="chat-run-interrupted-action" onClick={onContinue}>Continue</button>}
+    </span>
+  </div>
+}
+
 interface MousseAgentChatShellProps {
   threadId?: string | null
   busy?: boolean
@@ -72,6 +83,8 @@ interface MousseAgentChatShellProps {
   quickActionApproval?: QuickActionApproval | null
   /** Waiting permission requests this window can answer inline, by request id. */
   permissionRequests?: Readonly<Record<string, PermissionRequestControls>>
+  /** Retry after an error and Continue after a stopped run, on the last turn. */
+  turnActions?: TurnActions | null
 }
 
 export function MousseAgentChatShell({
@@ -86,10 +99,10 @@ export function MousseAgentChatShell({
   composer,
   quickActionApproval,
   permissionRequests,
+  turnActions,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
-  const paused = usePausedRun(threadId) !== undefined
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -103,6 +116,7 @@ export function MousseAgentChatShell({
       <PermissionRequestContext.Provider value={permissionRequests ?? NO_PERMISSION_REQUESTS}>
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
+      <TurnActionsContext.Provider value={turnActions ?? null}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -114,17 +128,13 @@ export function MousseAgentChatShell({
           slots={slots}
           lastTurnNotice={<>
             <WorkspaceRecoveryBanner threadId={threadId} />
-            {paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <div className="chat-run-interrupted" role="status">
-              <span className="chat-run-interrupted-label">
-                <X size={12} strokeWidth={1.8} aria-hidden="true" />
-                <span>Run interrupted</span>
-              </span>
-            </div> : undefined}
+            {interrupted ? <RunInterruptedNotice onContinue={turnActions && !busy ? turnActions.continueRun : undefined} /> : undefined}
           </>}
           showCopyToolbar
           enableImagePreview
           enableFind
         />
+      </TurnActionsContext.Provider>
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>
       </PermissionRequestContext.Provider>

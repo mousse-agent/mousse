@@ -522,6 +522,60 @@ describe('StorageUsageService', () => {
       expect(after).toHaveLength(5) // six roots, one of them measured before the restart
     })
   })
+
+  describe('the timed scan after a start', () => {
+    const hour = 60 * 60_000
+    /** A profile whose cache holds a complete pass measured at `measuredAt`, and a restarted service that records what it measures. */
+    async function restartedAfter(age: number, options: { complete?: boolean } = {}) {
+      const w = world({ minimal: true })
+      const measuredAt = 1_800_000_000_000
+      const first = w.service({ now: () => measuredAt, ...(options.complete === false ? { scanEntryBudget: 10, discoveryEntryCost: 0 } : {}) })
+      await first.measure({ refresh: true })
+      expect(first.isComplete()).toBe(options.complete ?? true)
+      const calls: string[] = []
+      const restarted = w.service({
+        now: () => measuredAt + age, firstScanDelayMs: 5, intervalMs: 6 * hour, restMs: 5, autoContinue: true,
+        measure: (path, measureOptions) => { calls.push(path); return measureTree(path, measureOptions) }
+      })
+      restarted.start()
+      return { restarted, calls }
+    }
+    const waitFor = async (done: () => boolean): Promise<void> => {
+      for (let waited = 0; waited < 4000 && !done(); waited += 20) await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    it('does not measure a complete pass again soon after a restart', async () => {
+      const { restarted, calls } = await restartedAfter(5 * 60_000)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(calls).toEqual([])
+      await restarted.stop()
+    })
+
+    it('measures again soon after a restart once the pass is as old as the interval', async () => {
+      const { restarted, calls } = await restartedAfter(7 * hour)
+      await waitFor(() => calls.length > 0)
+      expect(calls.length).toBeGreaterThan(0)
+      await restarted.stop()
+    })
+
+    it('reads the cache when it is first needed, not at the start', async () => {
+      const w = world({ minimal: true })
+      const service = w.service({ firstScanDelayMs: 60_000 })
+      service.start()
+      const row = { id: '0123456789abcdef', kind: 'threads', bytes: 4321, files: 1, measuredAt: 1_700_000_000_000, generation: 1 }
+      writeFileSync(join(w.store.root, 'storage-usage.json'), JSON.stringify({ schemaVersion: 1, generation: 1, complete: true, durationMs: 1, results: [row] }))
+      const snapshot = await service.measure()
+      expect(snapshot.entries.map((entry) => entry.bytes)).toEqual([4321])
+      await service.stop()
+    })
+
+    it('carries on with an unfinished pass soon after a restart', async () => {
+      const { restarted, calls } = await restartedAfter(5 * 60_000, { complete: false })
+      await waitFor(() => calls.length > 0)
+      expect(calls.length).toBeGreaterThan(0)
+      await restarted.stop()
+    })
+  })
 })
 
 describe('groupUsage', () => {

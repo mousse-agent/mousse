@@ -15,6 +15,8 @@ type SidebarProps = {
   className: string
   defaultWidth: number
   children: ReactNode
+  /** Take the whole panel when there is nothing beside the sidebar; the saved width returns afterwards. */
+  fill?: boolean
 }
 
 export function ResizablePanelSidebar(props: SidebarProps) {
@@ -26,6 +28,7 @@ function ProfilePanelSidebar({
   className,
   defaultWidth,
   children,
+  fill = false,
   profileId
 }: SidebarProps & { profileId: string }) {
   const [width, setWidth] = useState(() => initialWidth(defaultWidth, profileId))
@@ -61,6 +64,8 @@ function ProfilePanelSidebar({
     window.addEventListener('pointerup', stop)
     window.addEventListener('pointercancel', stop)
   }
+
+  if (fill) return <div className={`${className} resizable-panel-sidebar resizable-panel-sidebar-fill`}>{children}</div>
 
   return (
     <div className={`${className} resizable-panel-sidebar`} style={{ width }}>

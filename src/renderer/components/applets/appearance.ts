@@ -3,6 +3,7 @@ import {
   validateAppletAppearance,
   type AppletAppearance
 } from '../../../shared/appletAppearance'
+import { motionOff } from '../../lib/motion'
 
 /** Resolve only whitelisted visual values; translucent host backgrounds become opaque applet surfaces. */
 export function readAppletAppearance(): AppletAppearance {
@@ -47,7 +48,8 @@ export function readAppletAppearance(): AppletAppearance {
         : 'dark',
     fontFamily: body.fontFamily || style.fontFamily || 'system-ui, sans-serif',
     fontSize: body.fontSize || style.fontSize || '14px',
-    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    // Off by the Animation speed setting or the OS; <html data-motion> changes refresh it.
+    reducedMotion: motionOff(),
     tokens
   })
 }

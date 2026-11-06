@@ -100,8 +100,8 @@ function readParts(message: UIMessage, math: boolean): SearchablePart[] {
     return blocks.length > 0 ? [{ partIndex: 0, blocks }] : [];
   }
   if (message.role !== "assistant") return [];
-  const metadata = message.metadata as { contextHandoff?: unknown; compaction?: unknown } | undefined;
-  if (metadata?.contextHandoff || metadata?.compaction) return [];
+  const metadata = message.metadata as { contextHandoff?: unknown; compaction?: unknown; contextCleared?: unknown } | undefined;
+  if (metadata?.contextHandoff || metadata?.compaction || metadata?.contextCleared) return [];
   const result: SearchablePart[] = [];
   parts.forEach((part, partIndex) => {
     if (!isTextPart(part) || !part.text) return;

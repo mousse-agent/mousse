@@ -12,10 +12,11 @@ import { showToast } from '../ui/Toast'
 import { threadToastInput } from '../../lib/threadToasts'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 
-const EVENTS: Record<ThreadNotificationEvent, { title: string; description: string }> = {
-  completed: { title: 'Finished', description: 'Done, with nothing waiting on you.' },
-  question: { title: 'Needs you', description: 'A question or an approval is waiting.' },
-  idle: { title: 'Stopped', description: 'Interrupted, failed or paused by a usage limit.' }
+/** Each row's settings-search anchor is listed in lib/settingsSearch.ts. */
+const EVENTS: Record<ThreadNotificationEvent, { title: string; description: string; anchor: string }> = {
+  completed: { title: 'Finished', description: 'Done, with nothing waiting on you.', anchor: 'general-notify-finished' },
+  question: { title: 'Needs you', description: 'A question or an approval is waiting.', anchor: 'general-notify-needs-you' },
+  idle: { title: 'Stopped', description: 'Interrupted, failed or paused by a usage limit.', anchor: 'general-notify-stopped' }
 }
 
 const CHANNELS: readonly { key: keyof NotificationChannels; label: string; hint: string; icon: IconComponent }[] = [
@@ -58,6 +59,7 @@ export function NotificationSettingsGroup({
         return (
           <SettingsRow
             key={event}
+            anchor={EVENTS[event].anchor}
             title={EVENTS[event].title}
             titleAction={
               <button
@@ -97,6 +99,7 @@ export function NotificationSettingsGroup({
       })}
       <SettingsRow
         title="All threads on my other computers"
+        anchor="general-remote-notifications"
         description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Off: only threads you started or opened here lately.</span>}
         control={
           <Switch
