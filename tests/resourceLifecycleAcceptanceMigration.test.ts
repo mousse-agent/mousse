@@ -5,7 +5,7 @@ import { expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
-it('restores a legacy-index trashed thread after profile startup without requiring an existing lifecycle record', async () => {
+it('brings a legacy-index trashed thread back to Archived at profile startup, once, with its bytes', async () => {
   const threadId = randomUUID()
   let original = '', trashPath = ''
   const f = await lifecycleHarness({ prepareProfile(profileHome) {
@@ -21,19 +21,19 @@ it('restores a legacy-index trashed thread after profile startup without requiri
     writeFileSync(join(profileHome, 'trash', 'threads', 'index.json'), JSON.stringify([record]))
   } })
   try {
-    expect(existsSync(original)).toBe(false)
+    // Threads no longer wait in a trash: what was there when that changed is back, archived, nothing lost.
     const discovered = await f.rpc.request<{ lifecycles: { taskId: string; state: string }[]; migrationDiagnostics: unknown[] }>('threads.inventory', {})
     expect(discovered.migrationDiagnostics).toEqual([])
-    expect(discovered.lifecycles).toContainEqual(expect.objectContaining({ taskId: threadId, state: 'trashed' }))
-    await expect(f.rpc.request('threads.purge', { threadId })).rejects.toThrow()
-    const restored = await f.rpc.request<{ thread: Thread }>('threads.restore', { threadId })
-    expect(restored.thread.id).toBe(threadId)
+    expect(discovered.lifecycles).toContainEqual(expect.objectContaining({ taskId: threadId, state: 'active' }))
     expect(readFileSync(join(original, 'sole-copy.bin'))).toEqual(Buffer.from([23, 0, 255, 96]))
     expect(existsSync(trashPath)).toBe(false)
-    expect((await f.rpc.request<{ threads: Thread[] }>('threads.list', {})).threads.filter((thread) => thread.id === threadId)).toHaveLength(1)
+    const listed = (await f.rpc.request<{ threads: Thread[] }>('threads.list', {})).threads.filter((thread) => thread.id === threadId)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.settledAt).toBeTruthy()
+    // It was done once: the marker says so, and the thread takes fresh writes.
+    expect(existsSync(join(f.home, 'profiles', f.alice.id, 'lifecycle', 'trash-returned-to-archive.json'))).toBe(true)
     await f.rpc.request('threads.rename', { threadId, name: 'restored legacy task accepts fresh writes' })
     expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId })).thread.name).toBe('restored legacy task accepts fresh writes')
-    expect((await f.rpc.request<{ migrationDiagnostics: unknown[] }>('threads.inventory', {})).migrationDiagnostics).toEqual([])
   } finally { await f.close() }
 })
 

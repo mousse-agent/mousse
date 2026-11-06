@@ -94,6 +94,7 @@ import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
+import { returnTrashedThreadsToArchive } from './lifecycle/trashToArchive'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
@@ -1141,6 +1142,17 @@ export class MmsProfileServices {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
     await refreshWorktreeFolders()
     await this.lifecycle.recoverAll()
+    // Once, after the trash operations a crash left are finished: what was in the trash comes back, archived.
+    try {
+      const returned = await returnTrashedThreadsToArchive({
+        store: this.threads.lifecycleStore,
+        restore: (taskId) => this.restoreThread(taskId),
+        archive: (taskId) => { if (!this.threads.getThread(taskId)?.settledAt) this.threads.setThreadSettled(taskId, true) }
+      })
+      if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
+    } catch (error) {
+      console.warn('threads in the trash could not be moved to Archived', { error: error instanceof Error ? error.message : String(error) })
+    }
     for (const thread of this.threads.listAllThreads()) {
       const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
       if (existsSync(episodes.path)) episodes.interruptOrphans()
