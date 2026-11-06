@@ -142,6 +142,8 @@ export class GuiMmsController extends EventEmitter {
   private quitting = false
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** The reconnect in progress; requests join it and `stop()` waits for it. */
+  private reconnecting: Promise<boolean> | null = null
   private eventUnsub: (() => void) | null = null
   private disconnectTimer: ReturnType<typeof setInterval> | null = null
   private lastHello: ProtocolHelloOk | null = null
@@ -240,7 +242,9 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    this.clearReconnectTimer()
     await this.startPromise?.catch(() => undefined)
+    await this.reconnecting?.catch(() => undefined)
     await Promise.allSettled([...this.windowSessionOpenings.values()])
     await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
@@ -702,8 +706,14 @@ export class GuiMmsController extends EventEmitter {
 
     try {
       const hello = await connectGuiClient(client, this.homeDir)
+      if (this.quitting) throw new Error('GuiMmsController is stopped')
 
       this.detachEventHandlers()
+      const previous = this.client
+      if (previous && previous !== client) {
+        this.client = null
+        await previous.close().catch(() => undefined)
+      }
       this.client = client
       this.lastHello = hello
       try {
@@ -729,6 +739,7 @@ export class GuiMmsController extends EventEmitter {
       this.watchDisconnect(client)
 
       await client.subscribe(client.lastKnownSequence > 0 ? client.lastKnownSequence : 0)
+      if (this.quitting) throw new Error('GuiMmsController is stopped')
       if (client.requiresResnapshot) {
         this.emit('resnapshot', { reason: 'subscribe_gap_or_instance', hello })
       }
@@ -741,8 +752,12 @@ export class GuiMmsController extends EventEmitter {
       } catch {
         /* ignore */
       }
-      if (this.client === client) this.client = null
-      this.enterFailed(err instanceof Error ? err : new Error(String(err)))
+      if (this.client === client) {
+        this.client = null
+        this.detachEventHandlers()
+      }
+      // After stop, the failure is stop's doing: stay stopped.
+      if (!this.quitting) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
       throw err
     }
   }
@@ -763,7 +778,7 @@ export class GuiMmsController extends EventEmitter {
 
   private scheduleReconnect(reason: string): void {
     if (this.quitting) return
-    if (this.reconnectTimer) return
+    if (this.reconnectTimer || this.reconnecting) return
     if (this.reconnectAttempts >= this.maxReconnect) {
       this.enterFailed(new Error(`MMS reconnect exhausted after ${reason}`))
       return
@@ -778,7 +793,20 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async reconnect(reason: string): Promise<void> {
-    if (this.quitting) return
+    if (this.quitting || this.reconnecting) return
+    const attempt = this.attemptReconnect(reason)
+    this.reconnecting = attempt
+    let retry = false
+    try {
+      retry = await attempt
+    } finally {
+      if (this.reconnecting === attempt) this.reconnecting = null
+    }
+    if (retry) this.scheduleReconnect('reconnect_failed')
+  }
+
+  /** One reconnect attempt. Resolves true when another attempt should be scheduled. */
+  private async attemptReconnect(reason: string): Promise<boolean> {
     try {
       this.detachEventHandlers()
       if (this.client) {
@@ -795,15 +823,16 @@ export class GuiMmsController extends EventEmitter {
       }
       const hello = await this.connectOnce()
       this.emit('resnapshot', { reason: `reconnect:${reason}`, hello })
+      return false
     } catch (err) {
-      if (this.quitting) return
+      if (this.quitting) return false
       // Tests with auto-start off fail fast; managed daemon keeps retrying while dev restarts MMS.
       if (this.disableAutoStart && !this.managedDaemon) {
         this.enterFailed(err instanceof Error ? err : new Error(String(err)))
-        return
+        return false
       }
       this.emit('error', err instanceof Error ? err : new Error(String(err)))
-      this.scheduleReconnect('reconnect_failed')
+      return true
     }
   }
 
