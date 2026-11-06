@@ -6,7 +6,8 @@ import { AlertTriangle, ArrowDown, CircleAlert, Info, X } from '../lib/icons'
  * Undo, dictation, a paused run, the lost background service) registers its notice with
  * `useComposerNotice`, and the queued-messages strip takes part with `useComposerDockStrip`. The dock
  * shows the highest priority (`ComposerDockPriority`), newest first within one; the others show once it
- * is dismissed or resolves.
+ * is dismissed or resolves. One exception: the lost background service over a waiting approval shows as
+ * two rows, the service on top, since the approval cannot be answered until it reconnects.
  */
 
 export type ComposerNoticeTone = 'info' | 'warning' | 'error'
@@ -162,6 +163,9 @@ export class ComposerNoticeStore {
 
   readonly top = (): ComposerNoticeProps | null => this.current
 
+  /** The row above `top`: the lost service while `top` is a waiting approval, else null. */
+  readonly above = (): ComposerNoticeProps | null => this.stacked
+
   readonly stripState = (id: string): ComposerDockStripState =>
     this.currentId !== id ? 'hidden' : this.leaving === id ? 'leaving' : 'shown'
 
@@ -188,22 +192,34 @@ export class ComposerNoticeStore {
   }
 
   private update(): void {
-    const id = this.revealed ?? this.pickId()
+    let id = this.revealed ?? this.pickId()
+    let stacked: ComposerNoticeProps | null = null
+    // The lost service over a waiting approval: the approval stays, with the service on a row above it.
+    if (!this.revealed && id && this.entries.get(id)?.rank === PRIORITY_RANK.service) {
+      const under = this.pickId((entry) => entry.rank !== PRIORITY_RANK.service)
+      if (under && this.entries.get(under)?.rank === PRIORITY_RANK.approval) {
+        stacked = this.entries.get(id)?.notice ?? null
+        id = under
+      }
+    }
     const notice = id ? this.entries.get(id)?.notice ?? null : null
     const leaving = this.leaving
-    if (id === this.currentId && notice === this.current && leaving === this.shownLeaving) return
+    if (id === this.currentId && notice === this.current && stacked === this.stacked && leaving === this.shownLeaving) return
     this.currentId = id
     this.current = notice
+    this.stacked = stacked
     this.shownLeaving = leaving
     for (const listener of this.listeners) listener()
   }
 
+  private stacked: ComposerNoticeProps | null = null
   private shownLeaving: string | null = null
 
-  private pickId(): string | null {
+  private pickId(include: (entry: Entry) => boolean = () => true): string | null {
     let best: [string, Entry] | undefined
     for (const candidate of this.entries) {
       const [, entry] = candidate
+      if (!include(entry)) continue
       if (!best) { best = candidate; continue }
       const rank = entry.rank - best[1].rank
       if (rank > 0 || (rank === 0 && entry.order > best[1].order)) best = candidate
@@ -237,7 +253,7 @@ export function ComposerNoticeSource({ notice }: { notice: ComposerNoticeProps |
   return null
 }
 
-const NO_STORE = { subscribe: () => () => undefined, top: () => null }
+const NO_STORE = { subscribe: () => () => undefined, top: () => null, above: () => null }
 const ALWAYS_SHOWN = (): ComposerDockStripState => 'shown'
 
 /**
@@ -261,6 +277,12 @@ export function useComposerDockStrip(present: boolean): { state: ComposerDockStr
 export function ComposerNoticeSlot() {
   const store = useContext(ComposerNoticeContext) ?? NO_STORE
   const notice = useSyncExternalStore(store.subscribe, store.top)
+  const above = useSyncExternalStore(store.subscribe, store.above)
   if (!notice) return null
-  return <div className="composer-notice-slot"><ComposerNotice {...notice} /></div>
+  return (
+    <div className="composer-notice-slot">
+      {above && <ComposerNotice {...above} />}
+      <ComposerNotice {...notice} />
+    </div>
+  )
 }

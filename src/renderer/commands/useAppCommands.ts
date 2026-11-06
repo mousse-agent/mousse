@@ -12,7 +12,7 @@ import {
 } from '../lib/threadActions'
 import { useAppStore } from '../stores/appStore'
 import { useCommand, useCommands } from './commandRegistry'
-import { togglePalette } from './paletteActions'
+import { openPalette, togglePalette } from './paletteActions'
 
 const logFailure = (what: string) => (error: unknown) => console.error(`${what} failed`, error)
 
@@ -29,7 +29,7 @@ export function useAppCommands(): void {
   useCommand('thread.new', () => void createAndSelectThread())
   useCommand('thread.next', () => void selectAdjacentThread(1))
   useCommand('thread.previous', () => void selectAdjacentThread(-1))
-  useCommand('threads.search', () => useAppStore.getState().setThreadSearchOpen(true))
+  useCommand('threads.search', () => openPalette('messages'))
   useCommand('thread.rename', () => {
     const thread = openStartedThread()
     if (thread) openThreadRenameDialog(thread.id)

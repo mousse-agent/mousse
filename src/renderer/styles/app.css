@@ -1387,6 +1387,17 @@ html[data-theme='high-contrast'] .chat-input-area {
 /* The lost service is about the link, not a failure of the user's work: a muted icon. */
 .composer-notice[data-priority='service'] .composer-notice-icon { color: var(--text-secondary); }
 
+/* A waiting approval shares only the line's place: its title and Deny / Approve keep full-strength text. */
+.composer-notice[data-priority='approval'] {
+  color: var(--text-primary);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.composer-notice[data-priority='approval'] .composer-notice-btn {
+  color: var(--text-primary);
+}
+
 .composer-notice-text {
   display: flex;
   flex: 1 1 auto;
@@ -1401,6 +1412,11 @@ html[data-theme='high-contrast'] .chat-input-area {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* With a detail after it, the title keeps its width and the detail is the part that is cut. */
+.composer-notice-title:has(+ .composer-notice-detail) {
+  flex: none;
 }
 
 /* A notice with a shorter title switches to it when the line is narrow. */
