@@ -926,6 +926,9 @@ export interface AgentOrigin {
   hops?: number
 }
 
+/** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
+export const CONTEXT_DRAFT_CATEGORY = 'Draft message'
+
 export interface ContextUsageCategory {
   label: string
   color: string
