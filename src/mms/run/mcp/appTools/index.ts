@@ -1,6 +1,7 @@
 import type { RunEngine } from '../../RunEngine'
 import { appletTools } from './applets'
-import { botTools } from './bots'
+import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
+import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
@@ -21,6 +22,8 @@ export * from './registry'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
+export type { BotAppToolDeps } from './bots'
+export type { BotMemoryToolHost } from './botMemory'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export {
   delegationToolDefinitions,
@@ -72,6 +75,10 @@ export function createAppToolRegistry(input: {
   engine?: RunEngine
   turns?: AppToolTurns
   options?: Partial<ToolRegistryOptions>
+  /** The personal bots' engine side, read at call time (Bot Phase 1 §5.5, §5.6); absent: their own tools refuse. */
+  bots?: () => BotAppToolDeps | undefined
+  /** The bots' memory tools (WP6); absent: not registered. */
+  botMemory?: BotMemoryToolHost
 }): { registry: ToolRegistry; families: Record<AppToolFamily, string[]> } {
   const { host, engine } = input
   const registry = new ToolRegistry({
@@ -103,7 +110,7 @@ export function createAppToolRegistry(input: {
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('applets', appletTools())
-  add('bots', botTools())
+  add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
   return { registry, families }
 }

@@ -303,3 +303,38 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
     }
   })
 })
+
+describe('onAllowed (Bot Phase 1 §5.8)', () => {
+  const observed = (onAllowed: (call: unknown) => void) => {
+    const compiled = compile()
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    return createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: compiled.permissions,
+      waiting: () => false,
+      counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => 0, signal: new AbortController().signal },
+      spend: null,
+      onAllowed
+    })
+  }
+
+  it('is told of every allowed call, on any runtime, and of no refused one', () => {
+    const calls: unknown[] = []
+    const authority = observed((call) => calls.push(call))
+    const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'index.html') } }
+    expect(authority.check(read)).toEqual({ ok: true })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: { query: 'x' } })).toEqual({ ok: true })
+    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'secret.txt') } }).ok).toBe(false)
+    expect(authority.check({ kind: 'app', tool: 'delegate_task', args: {} }).ok).toBe(false)
+    expect(calls).toEqual([read, { kind: 'app', tool: 'web_search', args: { query: 'x' } }])
+  })
+
+  it('never fails the call it watched', () => {
+    const authority = observed(() => {
+      throw new Error('broken sink')
+    })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: {} })).toEqual({ ok: true })
+  })
+})

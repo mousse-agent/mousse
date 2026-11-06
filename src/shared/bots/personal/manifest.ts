@@ -1,5 +1,6 @@
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
-import { folderAccess, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { DEFAULT_BOT_ACTIVE_MS, folderAccess, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { BOT_MEMORY_TOOLS } from './memory'
 
 /**
  * A bot manifest's canonical form, the subset rule of approval, and the plain words the approval
@@ -12,12 +13,48 @@ const BUDGET_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens'
 export const MAX_BOT_ACTIVE_MS = 24 * 60 * 60_000
 
 /**
- * The Mousse app tools a bot may be granted: ones that read the web or the bot's own skills.
+ * The bot's own app tools (Bot Phase 1 §5.10): its schedules, its name and description, how much
+ * time it takes, asking the owner, and its memory. They act only on the bot itself (in `bots.db`),
+ * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
+ */
+export const BOT_OWN_APP_TOOLS: readonly string[] = [
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS
+]
+
+/** Every new bot's app tools: the web, and its own tools. */
+export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web, and the bot's own tools.
  * Every other app tool starts, wakes, writes or reads other threads (delegation, forks, queues,
  * merge-backs), acts in the owner's name, or asks a person, so it would run work outside the grant.
  * Consults (6c-2) are the way a bot uses other threads. The skill tools come with granted skills.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set(['web_search', 'web_fetch'])
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set(BOT_DEFAULT_APP_TOOLS)
+
+const OWN_APP_TOOLS: ReadonlySet<string> = new Set(BOT_OWN_APP_TOOLS)
+
+/** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
+export function isOwnBotAppTool(tool: string): boolean {
+  return OWN_APP_TOOLS.has(tool)
+}
+
+/**
+ * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder until
+ * the owner allows a folder; the web and its own tools; no folder; 15 minutes per activation.
+ * Pressing Create bot approves it.
+ */
+export function botStarterManifest(): BotManifest {
+  return {
+    tools: ['read', 'list', 'search', 'edit', 'write'],
+    appTools: [...BOT_DEFAULT_APP_TOOLS],
+    mcp: [],
+    skills: [],
+    workspace: null,
+    budget: { maxActiveMs: DEFAULT_BOT_ACTIVE_MS },
+    audience: 'owner'
+  }
+}
 
 /** One MCP server id or tool name: no separator a qualified name or an identity key could hide. */
 const MCP_PART = /^[A-Za-z0-9](?:[A-Za-z0-9.-]|_(?!_)){0,127}$/
