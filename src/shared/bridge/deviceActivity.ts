@@ -141,6 +141,7 @@ const MERGE_BACK: Phrase = phrase('Merged a thread back', 'merged a thread back'
 const UNDO: Phrase = phrase('Undid a turn', 'undid a turn', 'undid {n} turns')
 const REDO: Phrase = phrase('Redid a turn', 'redid a turn', 'redid {n} turns')
 const REVERT: Phrase = phrase('Reverted code', 'reverted code', 'reverted code {n} times')
+const CONTEXT: Phrase = phrase('Cleared or compacted a thread’s context', 'cleared or compacted a thread’s context', 'cleared or compacted a thread’s context {n} times')
 const HISTORY: Phrase = phrase('Changed the thread’s history', 'changed a thread’s history', 'changed a thread’s history {n} times')
 const WORKSPACE: Phrase = phrase('Restored a workspace', 'restored a workspace', 'restored a workspace {n} times')
 const OPERATION: Phrase = phrase('Handled a Git operation in progress', 'handled a Git operation in progress', 'handled Git operations in progress {n} times')
@@ -223,6 +224,8 @@ const PHRASES: Record<string, Phrase> = {
   'threads.settle': ORGANIZE,
   'threads.delete': DELETE,
   'threads.regenerateTitle': RENAME,
+  'threads.clearContext': CONTEXT,
+  'threads.compact': CONTEXT,
   'threads.setWorktreeEnabled': THREAD_SETTING,
   'thread.fork': FORK,
   'thread.mergeBack': MERGE_BACK,

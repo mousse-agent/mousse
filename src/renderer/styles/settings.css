@@ -610,6 +610,29 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
   min-width: 0;
 }
 
+/* Compact context: the field, then one muted line under it (where the default model compacts, or
+   why the typed size was not saved). The line sits close to its field (4). */
+.settings-compaction {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.settings-compaction-note {
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.settings-compaction-note.invalid {
+  color: var(--danger);
+}
+
 /* Controls: one height, one radius, one text size. Buttons beside a group
    heading (.settings-group-action) match the row controls. */
 .settings-group-rows .settings-select,
@@ -705,6 +728,26 @@ html[data-theme='high-contrast'] .settings-title-icon-btn {
 
 html[data-theme='high-contrast'] .settings-icon-btn.primary {
   color: var(--text-primary);
+}
+
+/* A copy button that also says "Copied" beside itself for a moment. */
+.copy-announce {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.copy-announce-status {
+  color: var(--success);
+  font-size: var(--settings-fs-small);
+}
+
+.copy-announce-status.failed {
+  color: var(--danger);
+}
+
+.copy-announce-status:empty {
+  display: none;
 }
 
 /* Icon buttons side by side in one row control. */
@@ -1396,6 +1439,12 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   min-width: 0;
 }
 
+/* Shortcut rows are one short line each: a smaller step of the spacing scale
+   keeps them scannable while text and controls keep their sizes. */
+.shortcuts-group {
+  --settings-row-y: var(--space-8);
+}
+
 .shortcuts-toolbar .settings-btn {
   height: var(--settings-control-h);
   border-radius: var(--ui-control-radius);
@@ -1484,4 +1533,101 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   border-radius: 50%;
   background: var(--accent);
   flex-shrink: 0;
+}
+
+/* Notifications: per event, three icon toggles (In app, System, Sound) under one row of column
+   labels. On is selected the app's way, a filled background with the icon at full brightness;
+   off is the bare icon, faint. */
+.notification-row-controls {
+  display: inline-flex;
+  align-items: center;
+}
+
+.notification-channels {
+  display: grid;
+  grid-template-columns: repeat(3, var(--settings-control-h));
+  justify-items: center;
+  column-gap: 22px;
+}
+
+.notification-channel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--settings-control-h);
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  color: var(--text-primary);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.notification-channel svg {
+  opacity: 0.4;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.notification-channel:hover {
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.notification-channel:hover svg {
+  opacity: 0.75;
+}
+
+
+
+/* Selected exactly like a Segmented option (.settings-seg button.on). */
+.notification-channel.on {
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular);
+}
+
+/* A hovered row is lighter than the group surface; keep the selected tile above it, never sunken. */
+.settings-item:hover .notification-channel.on {
+  background: color-mix(in srgb, var(--ui-raised), var(--text-primary) 8%);
+}
+
+html[data-theme='high-contrast'] .notification-channel.on {
+  background: var(--ui-selected);
+  box-shadow: none;
+}
+
+.notification-channel.on svg {
+  opacity: 1;
+}
+
+.notification-channel:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+/* The column labels, on the heading line, over their columns (the rows' inset is --space-16). */
+.notification-channel-labels {
+  margin-right: var(--space-16);
+  align-self: flex-end;
+}
+
+.notification-channel-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Send a test: an icon button by the event's name, shown once the row is hovered or focused. */
+.notification-try.notification-try {
+  width: var(--settings-control-h);
+  height: var(--settings-control-h);
+  margin: -4px 0 -4px 6px;
+  color: var(--ui-faint, var(--text-secondary));
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.notification-try:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.settings-item:hover .notification-try,
+.notification-try:focus-visible {
+  opacity: 1;
 }

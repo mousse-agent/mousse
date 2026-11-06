@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { focusInitialMenuItem, useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import {
   ArchiveArrowBackRegular,
   ArchiveRegular,
@@ -26,12 +27,14 @@ export interface ThreadsContextMenuTarget {
 }
 
 interface ThreadsContextMenuProps {
+  /** Where the menu opens: the pointer for a right-click, below the "…" button or the row from the keyboard. */
   x: number
   y: number
   target: ThreadsContextMenuTarget
+  /** Closes the menu; the caller returns focus to the row or button it was opened from. */
   onClose: () => void
   onPin: () => void
-  onSettle: () => void
+  onArchive: () => void
   onRegenerateTitle: () => void
   onRename: () => void
   /** Projects: remove the project. Archived threads: delete the thread, after a confirmation. */
@@ -46,13 +49,17 @@ export function ThreadsContextMenu({
   target,
   onClose,
   onPin,
-  onSettle,
+  onArchive,
   onRegenerateTitle,
   onRename,
   onRemove,
   onTrustGitSettings
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
+  const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
+
+  // Opening the menu, by mouse or keyboard, puts focus on its first item so arrows, Enter and Escape work at once.
+  useEffect(() => { focusInitialMenuItem(menuRef.current) }, [])
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -106,6 +113,8 @@ export function ThreadsContextMenu({
         className="threads-context-menu"
         style={{ left: x, top: y, zIndex: FLOATING_LAYER_Z_INDEX }}
         role="menu"
+        aria-label={target.type === 'project' ? `Project ${target.name}` : `Thread ${target.name}`}
+        onKeyDown={onMenuKeyDown}
       >
         {target.type === 'project' && target.computerName && (
           <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
@@ -117,7 +126,7 @@ export function ThreadsContextMenu({
           </button>
         )}
         {target.type === 'thread' && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onSettle}>
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onArchive}>
             {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
             <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
           </button>
@@ -157,7 +166,7 @@ export function ThreadsContextMenu({
             onClick={onRemove}
           >
             <DeleteRegular />
-            <span>Remove</span>
+            <span>Remove project…</span>
           </button>
         )}
         {/* A thread is archived before it can be deleted; deleting is permanent and stays on the thread's computer. */}

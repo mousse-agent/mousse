@@ -31,7 +31,7 @@ describe('the run settings after a usage limit', () => {
     expect(normalizeRunSettings({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5 })).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
   })
 
-  it('start new chats in a worktree unless turned off explicitly', () => {
+  it('start new threads in a worktree unless turned off explicitly', () => {
     expect(normalizeRunSettings().worktreeByDefault).toBe(true)
     for (const value of ['no', 0, null, undefined]) expect(normalizeRunSettings({ worktreeByDefault: value as never }).worktreeByDefault).toBe(true)
     expect(normalizeRunSettings({ worktreeByDefault: false }).worktreeByDefault).toBe(false)

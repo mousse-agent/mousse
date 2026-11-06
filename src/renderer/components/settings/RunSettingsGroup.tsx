@@ -18,7 +18,7 @@ function capLabel(cap: number): string {
 }
 
 /**
- * Settings → General → Runs: where new chats start, and whether a run paused by a usage limit continues by
+ * Settings → General → Runs: where new threads start, and whether a run paused by a usage limit continues by
  * itself, and how often in a row. Resuming is one select: Off, or how many times in a row. Off keeps the
  * saved count, so turning it back on offers the same one.
  */
@@ -26,17 +26,17 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
   const cap = runs.usageLimitPauseCap
   const value = runs.resumeAfterUsageLimit ? String(cap) : OFF
   const tooltip = runs.resumeAfterUsageLimit
-    ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Resume now.`
-    : 'A run paused by a usage limit waits until you press Resume now.'
+    ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Try now.`
+    : 'A run paused by a usage limit waits until you press Try now.'
   return (
     <SettingsGroup title="Runs" icon={Pause}>
       <SettingsRow
-        title="Start new chats in a worktree"
+        title="Start new threads in a worktree"
         anchor="general-worktree-default"
-        description={<span title="Each new chat in a project gets its own Git worktree, so its changes stay apart from the project folder until you publish them. A new chat can still change this from the composer before its first message.">New chats in a project work in their own worktree.</span>}
+        description={<span title="Each new thread in a project gets its own Git worktree, so its changes stay apart from the project folder until you publish them. A new thread can still change this from the composer before its first message.">New threads in a project work in their own worktree.</span>}
         control={
           <Switch
-            label="Start new chats in a worktree"
+            label="Start new threads in a worktree"
             checked={runs.worktreeByDefault}
             onChange={(worktreeByDefault) => void onUpdate({ runs: { ...runs, worktreeByDefault } })}
           />

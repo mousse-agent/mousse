@@ -8,6 +8,7 @@ import { landOnSettingsAnchor, revealSettingsAnchor, searchIndex, searchSettings
 import { AgentsSettings } from '../../src/renderer/components/settings/AgentsSettings'
 import { SettingsRow } from '../../src/renderer/components/settings/SettingsRow'
 import { RunSettingsGroup } from '../../src/renderer/components/settings/RunSettingsGroup'
+import { NotificationSettingsGroup } from '../../src/renderer/components/settings/NotificationSettingsGroup'
 import { getDefaultSettings, type SettingsOptions } from '../../src/shared/settings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -15,7 +16,7 @@ import { getDefaultSettings, type SettingsOptions } from '../../src/shared/setti
 const PAGES: SettingsSearchPage[] = [
   { id: 'general', label: 'General', keywords: ['notification'] },
   { id: 'appearance', label: 'Appearance', keywords: ['theme'] },
-  { id: 'account', label: 'Account', keywords: ['mousse id'] },
+  { id: 'activity', label: 'Activity', keywords: ['heatmap'] },
   { id: 'providers', label: 'Providers', keywords: ['api key', 'subscription'] },
   { id: 'agents', label: 'Agents', keywords: ['context'] },
   { id: 'integrations', label: 'Skills & MCP', keywords: ['skills', 'mcp'] },
@@ -62,7 +63,8 @@ describe('the settings search', () => {
     for (const entry of SETTINGS_SEARCH_INDEX) {
       expect(SETTINGS_SECTION_IDS).toContain(entry.section)
       expect(entry.anchor).toMatch(/^[a-z][a-z-]*$/)
-      expect(sources, entry.anchor).toContain(`anchor="${entry.anchor}"`)
+      // On a row (`anchor="…"`), or in a list of rows that passes it on (`anchor: '…'`).
+      expect(sources.includes(`anchor="${entry.anchor}"`) || sources.includes(`anchor: '${entry.anchor}'`), entry.anchor).toBe(true)
       if (entry.needs) expect(sources, entry.needs.anchor).toContain(`anchor="${entry.needs.anchor}"`)
     }
   })
@@ -100,6 +102,14 @@ describe('landing on a search result', () => {
     expect(revealSettingsAnchor(host, 'speech-voice')).toBe(true)
     expect(document.activeElement).toBe(host.querySelector('[data-settings-anchor="speech-voice"]'))
     expect(revealSettingsAnchor(host, 'providers-telemetry')).toBe(false)
+  })
+
+  it('lands on each notification event\'s row, and on the remote threads row', () => {
+    act(() => root.render(createElement(NotificationSettingsGroup, { notifications: getDefaultSettings().notifications, onUpdate: async () => {} })))
+    for (const anchor of ['general-notify-finished', 'general-notify-needs-you', 'general-notify-stopped', 'general-remote-notifications']) {
+      expect(revealSettingsAnchor(host, anchor), anchor).toBe(true)
+      expect(host.querySelector(`[data-settings-anchor="${anchor}"]`)?.contains(document.activeElement), anchor).toBe(true)
+    }
   })
 
   it('opens the disclosure a setting sits in', () => {

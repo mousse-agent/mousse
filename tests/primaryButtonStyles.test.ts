@@ -71,7 +71,6 @@ const PRIMARY_CLASSES = [
   '.an-approve-fill',
   '.composer-implement-btn',
   '.composer-question-btn.is-primary',
-  '.chat-run-paused-btn-primary',
   '.chat-workspace-recovery-btn-primary',
   '.scheduled-btn.primary',
   '.devices-dialog-btn.primary',
@@ -149,16 +148,6 @@ describe('primary button styles', () => {
     const tokens = readFileSync(resolve(root, 'styles/polish.css'), 'utf8')
     expect(tokens.match(/--btn-primary-surface: transparent;/g)).toHaveLength(2)
     expect(tokens.match(/--btn-primary-bg: color-mix\(in srgb, var\(--accent\) 5%, var\(--btn-primary-surface\)\);/g)).toHaveLength(2)
-  })
-
-  it('next to the paused-run Resume now, Cancel and Stop are ghost buttons: no edge or fill at rest, a neutral fill on hover', () => {
-    const banner = allRules.filter((rule) => rule.file === 'chat/components/pausedRunBanner.css')
-    const base = banner.find((rule) => rule.selector === '.chat-run-paused-btn')
-    const hover = banner.find((rule) => rule.selector === '.chat-run-paused-btn:hover')
-    expect(base!.body).toMatch(/border:\s*1px solid transparent/)
-    expect(base!.body).toMatch(/background:\s*transparent/)
-    expect(base!.body).not.toMatch(/box-shadow/)
-    expect(hover!.body).toMatch(/background:\s*var\(--ui-hover\)/)
   })
 
   it('no component rule repaints a primary with its own fill or text colour', () => {

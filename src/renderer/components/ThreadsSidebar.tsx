@@ -2,19 +2,23 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search, Shield, Trash2 } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { pausedStatusLabel } from '../lib/pausedRun'
-import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
+import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
+import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
+import { needsMeThreads } from '../lib/needsMe'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectThread, selectThread } from '../lib/threadActions'
+import { createAndSelectProjectThread, selectThread } from '../lib/threadActions'
+import { runWithToast, showUndoToast } from '../lib/actionToast'
+import { Modal } from './ui/Modal'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
@@ -49,6 +53,12 @@ interface RenamingTarget {
 
   name: string
 
+  /** Started from the row's copy in the "Needs me" group: that copy shows the input, not the one in the list. */
+  inNeedsMe?: boolean
+
+  /** The row or button to give focus back to when the rename ends from the keyboard. */
+  returnFocus?: HTMLElement | null
+
 }
 
 interface DraggedSidebarItem {
@@ -60,8 +70,16 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
+const PROJECT_ATTENTION_TITLE: Record<Exclude<ThreadAttention, 'quiet' | 'needs-me'>, string> = {
+  working: 'Working',
+  paused: 'Paused',
+  done: 'Done'
+}
 const SIDEBAR_VIEWS = ['projects', 'threads', 'chats'] as const
 type SidebarView = (typeof SIDEBAR_VIEWS)[number]
+
+/** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
+const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
 
 function threadAge(iso?: string): string {
   if (!iso) return ''
@@ -80,7 +98,7 @@ function projectInitials(name: string): string {
   return letters.toUpperCase() || '•'
 }
 
-function ScrollingThreadTitle({ name }: { name: string }) {
+function ScrollingThreadTitle({ name, onDoubleClick }: { name: string; onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void }) {
   const containerRef = useRef<HTMLSpanElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
 
@@ -113,6 +131,7 @@ function ScrollingThreadTitle({ name }: { name: string }) {
       className="threads-sidebar-thread-name"
       data-overflow="false"
       onMouseEnter={measure}
+      onDoubleClick={onDoubleClick}
     >
       <span ref={textRef} className="threads-sidebar-thread-name-text">{name}</span>
     </span>
@@ -151,6 +170,9 @@ function SidebarRenameInput({
 
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Enter ends the rename, and the blur that can follow must not send it twice.
+  const done = useRef(false)
+
 
 
   useEffect(() => {
@@ -164,6 +186,9 @@ function SidebarRenameInput({
 
 
   const submit = () => {
+
+    if (done.current) return
+    done.current = true
 
     const trimmed = value.trim()
 
@@ -209,6 +234,8 @@ function SidebarRenameInput({
 
           event.preventDefault()
 
+          done.current = true
+
           onCancel()
 
         }
@@ -239,7 +266,8 @@ function ThreadCardBody({
   renamingName,
   isGeneratingTitle,
   onRename,
-  onCancelRename
+  onCancelRename,
+  onStartRename
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'worktreeEnabled' | 'node' | 'offline' | 'notShared'>
   projectName?: string
@@ -257,8 +285,11 @@ function ThreadCardBody({
   isGeneratingTitle: boolean
   onRename: (name: string) => void
   onCancelRename: () => void
+  /** Double-click on the title starts a rename. */
+  onStartRename?: (event: React.MouseEvent<HTMLElement>) => void
 }) {
   const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
+  const status = threadStatus(activity, awaitsApproval)
   return (
     <>
       {projectName ? (
@@ -271,32 +302,32 @@ function ThreadCardBody({
       <span className="threads-sidebar-card-body">
         <span className="threads-sidebar-card-meta">
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
-          {activity === 'processing' ? (
+          {status === 'working' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
               <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
               Working{age && age !== 'now' ? ` ${age}` : ''}
             </span>
-          ) : activity === 'waiting' ? (
+          ) : status === 'waiting' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
               <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
               Waiting{age && age !== 'now' ? ` ${age}` : ''}
             </span>
-          ) : activity === 'awaiting_input' && awaitsApproval ? (
+          ) : status === 'approval' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
               <Shield size={12} strokeWidth={2} aria-hidden="true" />
               Approval
             </span>
-          ) : activity === 'awaiting_input' ? (
+          ) : status === 'question' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
               <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
               Input
             </span>
-          ) : activity === 'paused' ? (
+          ) : status === 'paused' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-paused">
               <Pause size={12} strokeWidth={2} aria-hidden="true" />
               {pausedStatusLabel(pause, Date.now())}
             </span>
-          ) : activity === 'completed' ? (
+          ) : status === 'done' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
               <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
               Done
@@ -310,7 +341,7 @@ function ThreadCardBody({
         ) : isGeneratingTitle ? (
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
         ) : (
-          <span className="threads-sidebar-card-title">
+          <span className="threads-sidebar-card-title" onDoubleClick={onStartRename}>
             {thread.pinnedAt && <Pin size={11} strokeWidth={2} aria-label="Pinned" />}
             {thread.name}
           </span>
@@ -349,9 +380,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const upsertThread = useAppStore((s) => s.upsertThread)
 
-  // The Search threads dialog is mounted once, in the navigation rail.
-  const searchOpen = useAppStore((s) => s.threadSearchOpen)
-  const setThreadSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
+  // Search threads opens the command palette, mounted once in the app shell.
+  const searchOpen = useAppStore((s) => s.paletteOpen)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   // The project the user last opened or closed. Only that group animates; one revealed for the thread
@@ -360,7 +390,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
-  const [settledExpanded, setSettledExpanded] = useState(false)
+  const [archivedExpanded, setArchivedExpanded] = useState(false)
   // The archived threads waiting on a delete confirmation, and how that delete is going.
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })
@@ -387,7 +417,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     target: ThreadsContextMenuTarget
 
+    inNeedsMe?: boolean
+
+    /** The row or "…" button the menu was opened from: focus goes back to it when the menu closes. */
+    returnFocus?: HTMLElement | null
+
+    /** Set when a "…" button opened the menu, so that button reports itself expanded. */
+    anchorKey?: string
+
   } | null>(null)
+
+  // The project whose "Remove project…" confirmation is open.
+  const [removingProject, setRemovingProject] = useState<ThreadsContextMenuTarget | null>(null)
 
   const [renaming, setRenaming] = useState<RenamingTarget | null>(null)
   const [pendingTitleIds, setPendingTitleIds] = useState<Set<string>>(new Set())
@@ -424,12 +465,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
   // first. Later messages do not move a row.
   const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
-  const settledThreads = useMemo(
+  const archivedThreads = useMemo(
     () => sortThreadFeed(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
     [listedThreads, agentThreadIds]
   )
-  const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
-  const localSettledCount = settledThreads.filter((thread) => !thread.node).length
+  const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
+  // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
+  const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds), [threads, threadActivity, agentThreadIds])
+  // With one thread in all, its own row already says it: a group of it would only repeat it.
+  const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
 
   // A project that several computers hold for the same repository is one group; the others' projects that
   // match none of this computer's stay groups of their own, named with their computer.
@@ -440,9 +484,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
   )
-  const { byNode: computers } = useComputers(projects.some((project) => project.node) || settledThreads.some((thread) => thread.node))
+  const { byNode: computers } = useComputers(projects.some((project) => project.node) || archivedThreads.some((thread) => thread.node))
   const computerName = (node: string): string => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME
+  const localArchivedCount = archivedThreads.filter((thread) => !thread.node).length
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
+  // "No project": threads without one, and threads whose project was removed from the sidebar.
+  const orphanThreads = availableThreads.filter((thread) => !groupById.has(groupIdOf(thread.projectId) ?? ''))
 
   useEffect(() => {
     if (!activeThreadId) return
@@ -483,46 +530,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const openProject = async () => {
-
+  const openProject = () => runWithToast('add the project', async () => {
     const project = await window.mousse.projects.open()
-
     if (!project) return
-
     const thread = await window.mousse.threads.create(undefined, project.id)
-
     // Keep the project relationship available synchronously. The daemon also
     // broadcasts the full list, but that event can arrive after the user sends
     // the first message from the newly selected composer.
     upsertThread(thread)
-
     setExpandedProjects((prev) => new Set(prev).add(project.id))
-
     await selectThread(thread.id)
+  })
 
-  }
-
-
-
-  // `projectId` is the project that names its group, so it is also the group's id.
-  const createProjectThread = async (projectId: string) => {
-    const thread = findUnstartedThread(listedThreads, projectId) ??
-      await window.mousse.threads.create(undefined, projectId)
-
-    // Do not depend on the asynchronous threads:updated broadcast to attach
-    // this composer to its project before the first send promotes the draft.
-    upsertThread(thread)
-
+  // `projectId` is the project that names its group, so it is also the group's id. A retry reuses the draft a
+  // failed attempt may have made.
+  const createProjectThread = (projectId: string) => runWithToast('start a thread', async () => {
     setExpandedProjects((prev) => new Set(prev).add(projectId))
-
-    await selectThread(thread.id)
-
-  }
-
-  const openSearch = () => {
-    if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
-    else setThreadSearchOpen(true)
-  }
+    await createAndSelectProjectThread(projectId)
+  }, { retry: true })
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -614,115 +639,55 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const openContextMenu = (
-
-    event: React.MouseEvent,
-
-    target: ThreadsContextMenuTarget
-
-  ) => {
-
+  const openContextMenu = (event: React.MouseEvent<HTMLElement>, target: ThreadsContextMenuTarget, inNeedsMe = false) => {
     if (window.getSelection()?.toString()) return
-
     event.preventDefault()
-
     event.stopPropagation()
-
-    setContextMenu({ x: event.clientX, y: event.clientY, target })
-
+    setContextMenu({ x: event.clientX, y: event.clientY, target, inNeedsMe, returnFocus: event.currentTarget })
   }
 
-
-
-  const closeContextMenu = () => setContextMenu(null)
-
-
-
-  const handlePin = async () => {
-    if (!contextMenu) return
-    const { target } = contextMenu
-    closeContextMenu()
-    try {
-      if (target.type === 'thread') await window.mousse.threads.pin(target.id, !target.pinned)
-      else await window.mousse.projects.pin(target.id, !target.pinned)
-    } catch (error) {
-      console.error(`Pinning the ${target.type} failed`, error)
-    }
+  /** Opens the menu below an element: a "…" button, or a row from the keyboard. */
+  const openMenuBelow = (anchor: HTMLElement, target: ThreadsContextMenuTarget, inNeedsMe = false, anchorKey?: string) => {
+    const rect = anchor.getBoundingClientRect()
+    setContextMenu({ x: rect.left, y: rect.bottom + 4, target, inNeedsMe, returnFocus: anchor, anchorKey })
   }
 
-  const handleSettle = async () => {
-    if (!contextMenu || contextMenu.target.type !== 'thread') return
-    const { target } = contextMenu
-    closeContextMenu()
-    try {
-      await window.mousse.threads.settle(target.id, !target.settled)
-    } catch (error) {
-      console.error('Archiving the thread failed', error)
-    }
+  /** A "…" button: opens the menu, or closes it when this button opened it. */
+  const toggleMenuFrom = (event: React.MouseEvent<HTMLElement>, target: ThreadsContextMenuTarget, anchorKey: string, inNeedsMe = false) => {
+    event.stopPropagation()
+    if (contextMenu?.anchorKey === anchorKey) closeContextMenu()
+    else openMenuBelow(event.currentTarget, target, inNeedsMe, anchorKey)
   }
 
-  const handleRegenerateTitle = async () => {
-    if (!contextMenu || contextMenu.target.type !== 'thread') return
-    const threadId = contextMenu.target.id
-    closeContextMenu()
-    setPendingTitleIds((prev) => new Set(prev).add(threadId))
-    try {
-      await window.mousse.threads.regenerateTitle(threadId)
-    } finally {
-      setPendingTitleIds((prev) => {
-        const next = new Set(prev)
-        next.delete(threadId)
-        return next
-      })
-    }
+  /** Closes the menu and gives focus back to the row or button it was opened from. */
+  const closeContextMenu = () => {
+    const returnTo = contextMenu?.returnFocus
+    setContextMenu(null)
+    if (returnTo?.isConnected) returnTo.focus({ preventScroll: true })
   }
 
-  const handleTrustGitSettings = async () => {
-    if (!contextMenu || contextMenu.target.type !== 'project') return
-    const projectId = contextMenu.target.id
-    closeContextMenu()
-    await window.mousse.projects.trustGitSettings(projectId)
+  const startRename = (target: RenamingTarget) => setRenaming(target)
+
+  /** After a rename ends, focus goes back to its row, unless the person already moved it somewhere else. */
+  const endRename = () => {
+    const returnTo = renaming?.returnFocus
+    setRenaming(null)
+    if (!returnTo) return
+    window.setTimeout(() => {
+      const active = document.activeElement
+      if (returnTo.isConnected && (!active || active === document.body)) returnTo.focus({ preventScroll: true })
+    }, 0)
   }
 
-  const handleRename = () => {
+  const setPinned = (type: 'thread' | 'project', id: string, pinned: boolean) =>
+    runWithToast(pinned ? 'pin' : 'unpin', () => (type === 'thread' ? window.mousse.threads.pin(id, pinned) : window.mousse.projects.pin(id, pinned)), { retry: true })
 
-    if (!contextMenu) return
-
-    const { target } = contextMenu
-
-    closeContextMenu()
-
-    setRenaming({ type: target.type, id: target.id, name: target.name })
-
+  const setArchived = async (threadId: string, archived: boolean) => {
+    const done = await runWithToast(archived ? 'archive' : 'unarchive', () => window.mousse.threads.settle(threadId, archived), { retry: true })
+    if (done && archived) showUndoToast('Archived', 'unarchive', () => window.mousse.threads.settle(threadId, false))
   }
 
-
-
-  const handleRemove = async () => {
-
-    if (!contextMenu) return
-
-    const { target } = contextMenu
-
-    closeContextMenu()
-
-
-
-    if (target.type === 'thread') {
-
-      // Only an archived thread of this computer is deleted, and only after its confirmation.
-      if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
-
-    } else {
-
-      await window.mousse.projects.remove(target.id)
-
-    }
-
-  }
-
-
-
+  // A thread is archived first; deleting an archived thread is permanent, so it asks first and has no Undo.
   const askDelete = (request: DeleteRequest) => {
     setDeleteState({ busy: false })
     setDeleteRequest(request)
@@ -755,107 +720,135 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     })
   }
 
-  const submitRename = async (name: string) => {
-
-    if (!renaming) return
-
-
-
-    const { type, id } = renaming
-
-    setRenaming(null)
-
-
-
-    if (type === 'thread') {
-
-      await window.mousse.threads.rename(id, name)
-
-    } else {
-
-      await window.mousse.projects.rename(id, name)
-
-    }
-
+  const handlePin = () => {
+    if (!contextMenu) return
+    const { target } = contextMenu
+    closeContextMenu()
+    void setPinned(target.type, target.id, !target.pinned)
   }
 
+  const handleArchive = () => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const { target } = contextMenu
+    closeContextMenu()
+    void setArchived(target.id, !target.settled)
+  }
 
+  const handleRegenerateTitle = async () => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const threadId = contextMenu.target.id
+    closeContextMenu()
+    setPendingTitleIds((prev) => new Set(prev).add(threadId))
+    await runWithToast('regenerate the title', () => window.mousse.threads.regenerateTitle(threadId), { retry: true })
+    setPendingTitleIds((prev) => {
+      const next = new Set(prev)
+      next.delete(threadId)
+      return next
+    })
+  }
 
-  const renderThreadStatus = (threadId: string) => renderActivityStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], threadId)
+  const handleTrustGitSettings = () => {
+    if (!contextMenu || contextMenu.target.type !== 'project') return
+    const projectId = contextMenu.target.id
+    closeContextMenu()
+    void runWithToast('trust Git settings', () => window.mousse.projects.trustGitSettings(projectId), { retry: true })
+  }
 
-  const renderActivityStatus = (state: ThreadActivityState | undefined, threadId?: string) => {
-    if (!state || state === 'idle') return null
+  const handleRename = () => {
+    if (!contextMenu) return
+    const { target, inNeedsMe, returnFocus } = contextMenu
+    closeContextMenu()
+    startRename({ type: target.type, id: target.id, name: target.name, inNeedsMe, returnFocus })
+  }
 
-    if (state === 'processing') {
-      return (
-        <Loader2
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-spinner icon-spin"
-          aria-hidden="true"
-        />
-      )
+  // Only an archived thread of this computer is deleted, after its confirmation; a project asks first too.
+  const handleRemove = () => {
+    if (!contextMenu) return
+    const { target } = contextMenu
+    closeContextMenu()
+    if (target.type === 'thread') {
+      if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
+    } else setRemovingProject(target)
+  }
+
+  const confirmRemoveProject = () => {
+    if (!removingProject) return
+    const projectId = removingProject.id
+    setRemovingProject(null)
+    void runWithToast('remove the project', () => window.mousse.projects.remove(projectId), { retry: true })
+  }
+
+  const submitRename = (name: string) => {
+    if (!renaming) return
+    const { type, id } = renaming
+    endRename()
+    return runWithToast('rename', () => (type === 'thread' ? window.mousse.threads.rename(id, name) : window.mousse.projects.rename(id, name)), { retry: true })
+  }
+
+  const renderThreadStatus = (threadId: string) => {
+    const status = threadStatus(rolledUpActivity[threadId] ?? threadActivity[threadId], approvalThreads.has(threadId))
+    switch (status) {
+      case 'working':
+        return (
+          <Loader2
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-spinner icon-spin"
+            aria-hidden="true"
+          />
+        )
+      case 'done':
+        return (
+          <CircleCheck
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
+            aria-label="Agent finished"
+          />
+        )
+      case 'approval':
+        return (
+          <Shield
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
+            aria-label="Agent needs approval"
+          />
+        )
+      case 'question':
+        return (
+          <MessageQuestion
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
+            aria-label="Agent needs input"
+          />
+        )
+      case 'waiting':
+        return (
+          <CircleDotDashed
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
+            aria-label="Agent is waiting"
+          />
+        )
+      case 'paused': {
+        const turn = turnStates[threadId]
+        const own = turn?.phase === 'paused' ? turn.pause : undefined
+        const label = pausedStatusLabel(own, Date.now())
+        return (
+          <Pause
+            size={14}
+            strokeWidth={2}
+            className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
+            aria-label={label}
+          />
+        )
+      }
+      case 'quiet':
+        return null
     }
-
-    if (state === 'completed') {
-      return (
-        <CircleCheck
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
-          aria-label="Agent finished"
-        />
-      )
-    }
-
-    if (state === 'awaiting_input' && threadId && approvalThreads.has(threadId)) {
-      return (
-        <Shield
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-          aria-label="Agent needs approval"
-        />
-      )
-    }
-
-    if (state === 'awaiting_input') {
-      return (
-        <MessageQuestion
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-          aria-label="Agent needs input"
-        />
-      )
-    }
-
-    if (state === 'waiting') {
-      return (
-        <CircleDotDashed
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
-          aria-label="Agent is waiting"
-        />
-      )
-    }
-
-    if (state === 'paused') {
-      const turn = threadId ? turnStates[threadId] : undefined
-      const own = turn?.phase === 'paused' ? turn.pause : undefined
-      const label = pausedStatusLabel(own, Date.now())
-      return (
-        <Pause
-          size={14}
-          strokeWidth={2}
-          className="threads-sidebar-status-icon threads-sidebar-status-icon--paused"
-          aria-label={label}
-        />
-      )
-    }
-
-    return null
   }
 
   useEffect(() => {
@@ -909,10 +902,31 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
   }, [])
 
-  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: SidebarView = 'projects', layout: 'row' | 'card' = 'row') => {
+  // The composer's `/rename` with no title: rename the thread in its row, when the row is on screen.
+  // Handling it cancels the event, so the composer knows not to show its hint instead.
+  useEffect(() => {
+    const onRename = (event: Event) => {
+      const threadId = (event as CustomEvent<{ threadId?: string }>).detail?.threadId
+      const thread = threadId ? threads.find((entry) => entry.id === threadId) : undefined
+      if (!thread) return
+      // Other panels mark elements with the thread id too: only a sidebar row on screen counts.
+      const rows = document.querySelectorAll<HTMLElement>(`.threads-sidebar-thread[data-thread-id="${CSS.escape(thread.id)}"]`)
+      const visible = [...rows].filter((row) => row.offsetParent !== null)
+      if (visible.length === 0) return
+      // The thread's own row first; its copy in "Needs me" only when that is the one on screen.
+      const row = visible.find((entry) => !entry.closest('.threads-sidebar-needs-me')) ?? visible[0]
+      event.preventDefault()
+      startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe: Boolean(row.closest('.threads-sidebar-needs-me')), returnFocus: row.closest('button') ?? row })
+    }
+    window.addEventListener('mousse:rename-thread', onRename)
+    return () => window.removeEventListener('mousse:rename-thread', onRename)
+  }, [threads])
 
-    const isSettled = Boolean(thread.settledAt)
-    const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
+  // `inNeedsMe`: a copy of the row in the "Needs me" group, which filters rows and so does not reorder them.
+  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: SidebarView = 'projects', layout: 'row' | 'card' = 'row', inNeedsMe = false) => {
+
+    const isArchived = Boolean(thread.settledAt)
+    const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
     const showTrailing = Boolean(statusNode || thread.worktreeEnabled || thread.node)
@@ -921,13 +935,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
     // project has none.
     const hue = layout === 'card' && threadProjectColors && group ? hueByGroup.get(group.id) : undefined
+    const menuTarget: ThreadsContextMenuTarget = {
+      type: 'thread', id: thread.id, name: thread.name, pinned: Boolean(thread.pinnedAt), settled: isArchived,
+      ...(thread.node ? { node: thread.node, computerName: computerName(thread.node) } : {})
+    }
+    const menuKey = `thread:${thread.id}${inNeedsMe ? ':needs-me' : ''}`
+    // Double-click on the title renames; focus goes back to the row afterwards.
+    const renameFromTitle = (event: React.MouseEvent<HTMLElement>) => {
+      event.stopPropagation()
+      startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe, returnFocus: event.currentTarget.closest('button') })
+    }
 
 
 
     const hoverEnabled = !contextMenu && !isDragging && !isRenaming && !searchOpen && sidebarView === view
-    const feed = view === 'threads' && !isSettled
+    // A copy in "Needs me" is never dragged or dropped on, so it is not part of the reorderable feed.
+    const feed = view === 'threads' && !isArchived && !inNeedsMe
     const dragItem: DraggedSidebarItem = { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId), ...(feed ? { feed } : {}) }
-    const dropLine = feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
+    const dropLine = !inNeedsMe && feedDrop?.id === thread.id ? (feedDrop.after ? ' drop-after' : ' drop-before') : ''
     // The lower half of a row drops after it, so a row can also go last.
     const dropsAfter = (event: React.DragEvent) => {
       const rect = event.currentTarget.getBoundingClientRect()
@@ -962,7 +987,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           activeThreadId === thread.id ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
 
         style={hue ? ({ '--project-tint': `var(--hue-${hue})` } as CSSProperties) : undefined}
 
@@ -970,7 +995,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         data-thread-id={thread.id}
 
-        draggable={!isRenaming && !isSettled}
+        draggable={!isRenaming && !isArchived && !inNeedsMe}
 
         onDragStart={(event) => {
           event.stopPropagation()
@@ -978,7 +1003,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }}
 
         onDragOver={(event) => {
-          if (!canDropOn(dragItem)) return
+          if (inNeedsMe || !canDropOn(dragItem)) return
           event.preventDefault()
           if (!feed) return
           event.stopPropagation()
@@ -989,6 +1014,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
+          if (inNeedsMe) return
           if (feed) dropFeedThread(thread.id, dropsAfter(event))
           else void reorderBefore(dragItem)
         }}
@@ -997,29 +1023,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onClick={() => {
 
-          if (!isRenaming && !isSettled && !suppressClick.current) void selectThread(thread.id)
+          if (!isRenaming && !suppressClick.current) void selectThread(thread.id)
 
         }}
 
-        onContextMenu={(event) =>
+        onKeyDown={(event) => {
+          if (isRenaming) return
+          if (event.key === 'F2') {
+            event.preventDefault()
+            startRename({ type: 'thread', id: thread.id, name: thread.name, inNeedsMe, returnFocus: event.currentTarget })
+          } else if (isMenuKey(event)) {
+            event.preventDefault()
+            openMenuBelow(event.currentTarget, menuTarget, inNeedsMe)
+          }
+        }}
 
-          openContextMenu(event, {
-
-            type: 'thread',
-
-            id: thread.id,
-
-            name: thread.name,
-
-            pinned: Boolean(thread.pinnedAt),
-
-            settled: isSettled,
-
-            ...(thread.node ? { node: thread.node, computerName: computerName(thread.node) } : {})
-
-          })
-
-        }
+        onContextMenu={(event) => openContextMenu(event, menuTarget, inNeedsMe)}
 
       >
 
@@ -1038,7 +1057,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}
             onRename={(name) => void submitRename(name)}
-            onCancelRename={() => setRenaming(null)}
+            onCancelRename={endRename}
+            onStartRename={renameFromTitle}
           />
         ) : (
           <>
@@ -1056,7 +1076,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             onSubmit={(name) => void submitRename(name)}
 
-            onCancel={() => setRenaming(null)}
+            onCancel={endRename}
 
           />
 
@@ -1066,7 +1086,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ) : (
 
-          <ScrollingThreadTitle name={thread.name} />
+          <ScrollingThreadTitle name={thread.name} onDoubleClick={renameFromTitle} />
 
         )}
 
@@ -1100,7 +1120,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             title={thread.pinnedAt ? 'Unpin' : 'Pin'}
             onClick={(event) => {
               event.stopPropagation()
-              void window.mousse.threads.pin(thread.id, !thread.pinnedAt).catch((error) => console.error('Pinning the thread failed', error))
+              void setPinned('thread', thread.id, !thread.pinnedAt)
             }}
           >
             <Pin size={13} strokeWidth={2} aria-hidden="true" />
@@ -1108,16 +1128,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           <button
             type="button"
             className="threads-sidebar-thread-action"
-            aria-label={isSettled ? `Unarchive ${thread.name}` : `Archive ${thread.name}`}
-            title={isSettled ? 'Unarchive' : 'Archive'}
+            aria-label={isArchived ? `Unarchive ${thread.name}` : `Archive ${thread.name}`}
+            title={isArchived ? 'Unarchive' : 'Archive'}
             onClick={(event) => {
               event.stopPropagation()
-              void window.mousse.threads.settle(thread.id, !isSettled).catch((error) => console.error('Archiving the thread failed', error))
+              void setArchived(thread.id, !isArchived)
             }}
           >
             <Archive size={13} strokeWidth={2} aria-hidden="true" />
           </button>
-          {isSettled && (
+          {isArchived && (
             <button
               type="button"
               className="threads-sidebar-thread-action danger"
@@ -1133,6 +1153,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
             </button>
           )}
+          <button
+            type="button"
+            className="threads-sidebar-thread-action"
+            aria-label={`More actions for ${thread.name}`}
+            title="More"
+            aria-haspopup="menu"
+            aria-expanded={contextMenu?.anchorKey === menuKey}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => toggleMenuFrom(event, menuTarget, menuKey, inNeedsMe)}
+          >
+            <MoreHorizontal size={13} strokeWidth={2} aria-hidden="true" />
+          </button>
         </span>
       )}
 
@@ -1146,24 +1178,26 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  const renderNeedsMe = (view: SidebarView) => showNeedsMe && (
+    <section className="threads-sidebar-needs-me" aria-label={needsMeLabel(needsMe.length)}>
+      <div className="threads-sidebar-heading">
+        <span className="threads-sidebar-heading-label">Needs me · {needsMe.length}</span>
+      </div>
+      <div className="threads-sidebar-tree threads-sidebar-thread-feed">
+        {needsMe.map((thread) => renderThreadRow(thread, true, view, 'card', true))}
+      </div>
+    </section>
+  )
+
   return (
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
-
-      <div className="threads-sidebar-toolbar">
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
-          <Search size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createAndSelectThread() }} title="New chat" aria-label="New chat">
-          <Edit size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-      </div>
 
       <div className="threads-sidebar-tabs" role="tablist" aria-label="Sidebar" onKeyDown={onTabKeyDown}>
         {([
           ['projects', 'Projects', FolderKanban],
           ['threads', 'Threads', ListTree],
-          ['chats', 'Chats', MessagesSquare]
+          ['chats', 'Agents', MessagesSquare]
         ] as const).map(([view, label, Icon]) => (
           <button
             key={view}
@@ -1188,6 +1222,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={sidebarView !== 'projects'}>
 
+        {sidebarView === 'projects' && renderNeedsMe('projects')}
+
         <div className="threads-sidebar-tree">
 
           {projectGroups.length === 0 ? (
@@ -1206,10 +1242,27 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
               const projectThreads = availableThreads.filter((thread) => groupIdOf(thread.projectId) === group.id)
               const projectThreadCount = projectThreads.length
+              // The project row carries its threads' state: the worst of them, and while it is closed how many need the person.
+              const projectLevels = projectThreads.map((thread) => attentionOf(thread.id))
+              const projectAttention = worstOf(projectLevels)
+              const projectNeedsMe = projectLevels.filter((level) => level === 'needs-me').length
+              const projectAttentionTitle = projectAttention === 'needs-me'
+                ? needsMeLabel(projectNeedsMe)
+                : projectAttention === 'quiet' ? '' : PROJECT_ATTENTION_TITLE[projectAttention]
 
               const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
 
               const isRenaming = renaming?.type === 'project' && renaming.id === project.id
+              const menuTarget: ThreadsContextMenuTarget = {
+                type: 'project',
+                id: project.id,
+                name: project.name,
+                pinned: Boolean(project.pinnedAt),
+                // The menu acts on the project that names the group, on the computer that holds it.
+                ...(project.node ? { node: project.node, computerName: computers[project.node]?.name ?? UNKNOWN_COMPUTER_NAME } : {}),
+                ...(alsoOn.length ? { alsoOn: alsoOn.map((node) => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) } : {})
+              }
+              const menuKey = `project:${project.id}`
 
 
 
@@ -1250,26 +1303,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       }}
 
-                      onContextMenu={(event) =>
+                      onKeyDown={(event) => {
+                        if (isRenaming) return
+                        if (event.key === 'F2') {
+                          event.preventDefault()
+                          startRename({ type: 'project', id: project.id, name: project.name, returnFocus: event.currentTarget })
+                        } else if (isMenuKey(event)) {
+                          event.preventDefault()
+                          openMenuBelow(event.currentTarget, menuTarget)
+                        }
+                      }}
 
-                        openContextMenu(event, {
-
-                          type: 'project',
-
-                          id: project.id,
-
-                          name: project.name,
-
-                          pinned: Boolean(project.pinnedAt),
-
-                          // The menu acts on the project that names the group, on the computer that holds it.
-                          ...(project.node ? { node: project.node, computerName: computers[project.node]?.name ?? UNKNOWN_COMPUTER_NAME } : {}),
-
-                          ...(alsoOn.length ? { alsoOn: alsoOn.map((node) => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) } : {})
-
-                        })
-
-                      }
+                      onContextMenu={(event) => openContextMenu(event, menuTarget)}
 
                     >
 
@@ -1305,14 +1350,34 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                           onSubmit={(name) => void submitRename(name)}
 
-                          onCancel={() => setRenaming(null)}
+                          onCancel={endRename}
 
                         />
 
                       ) : (
 
-                        <span className="threads-sidebar-project-name">{project.name}</span>
+                        <span
+                          className="threads-sidebar-project-name"
+                          onDoubleClick={(event) => {
+                            event.stopPropagation()
+                            startRename({ type: 'project', id: project.id, name: project.name, returnFocus: event.currentTarget.closest('button') })
+                          }}
+                        >{project.name}</span>
 
+                      )}
+
+                      {projectAttention !== 'quiet' && (
+                        <span
+                          className={`threads-sidebar-project-status threads-sidebar-project-status--${projectAttention}`}
+                          role="img"
+                          aria-label={projectAttentionTitle}
+                          title={projectAttentionTitle}
+                        >
+                          <span className="threads-sidebar-status-dot" aria-hidden="true" />
+                          {!expanded && projectNeedsMe > 0 && (
+                            <span className="threads-sidebar-project-count" aria-hidden="true">{projectNeedsMe}</span>
+                          )}
+                        </span>
                       )}
 
                       <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
@@ -1330,14 +1395,27 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                     </button>
 
                     <button
+                      type="button"
+                      className="threads-sidebar-icon-btn threads-sidebar-project-new-chat threads-sidebar-project-more"
+                      title="More"
+                      aria-label={`More actions for ${project.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={contextMenu?.anchorKey === menuKey}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => toggleMenuFrom(event, menuTarget, menuKey)}
+                    >
+                      <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
+                    </button>
+
+                    <button
 
                       type="button"
 
                       className="threads-sidebar-icon-btn threads-sidebar-project-new-chat"
 
-                      title="New chat from a pull request"
+                      title="New thread from a pull request"
 
-                      aria-label="New chat from a pull request"
+                      aria-label="New thread from a pull request"
 
                       onClick={() => {
 
@@ -1357,9 +1435,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       className="threads-sidebar-icon-btn threads-sidebar-project-new-chat"
 
-                      title="New chat in project"
+                      title="New thread in project"
 
-                      aria-label="New chat in project"
+                      aria-label="New thread in project"
 
                       onClick={() => {
 
@@ -1441,8 +1519,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
       <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
+        {sidebarView === 'threads' && renderNeedsMe('threads')}
         <div
-          className="threads-sidebar-tree threads-sidebar-thread-feed"
+          className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
           // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
           onDragOver={(event) => {
             if (!draggedItem.current?.feed) return
@@ -1476,24 +1555,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       </div>
 
-        <section className="threads-sidebar-section threads-sidebar-bottom-recent" aria-label="Recent chats" hidden={sidebarView !== 'projects'}>
+        <section className="threads-sidebar-section threads-sidebar-bottom-recent" aria-label="No project" hidden={sidebarView !== 'projects'}>
           <div className="threads-sidebar-heading">
           <button type="button" className="threads-sidebar-heading-toggle"
             onClick={() => setRecentExpanded((expanded) => !expanded)} aria-expanded={recentExpanded}>
-            <MessagesSquare size={14} strokeWidth={2} aria-hidden="true" />
-            <span>Recent chats</span>
+            <Folder size={14} strokeWidth={2} aria-hidden="true" />
+            <span>No project</span>
             <span className="threads-sidebar-settled-count">{orphanThreads.length}</span>
           </button>
           </div>
           <Collapse open={recentExpanded} className="threads-sidebar-tree" itemCount={orphanThreads.length}>
-            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
+            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No threads</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
           </Collapse>
         </section>
 
 
       <div
 
-        className={`threads-sidebar-section threads-sidebar-section-settled${settledExpanded ? '' : ' collapsed'}`}
+        className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? '' : ' collapsed'}`}
 
         hidden={sidebarView !== 'threads'}
 
@@ -1505,22 +1584,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             ref={archivedHeadingRef}
             type="button"
             className="threads-sidebar-heading-toggle"
-            onClick={() => setSettledExpanded((expanded) => !expanded)}
-            aria-expanded={settledExpanded}
-            aria-label={settledExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
+            onClick={() => setArchivedExpanded((expanded) => !expanded)}
+            aria-expanded={archivedExpanded}
+            aria-label={archivedExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
           >
             <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
             <span>Archived</span>
-            <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
+            <span className="threads-sidebar-settled-count">{archivedThreads.length}</span>
           </button>
-          {localSettledCount > 0 && (
+          {localArchivedCount > 0 && (
             <button
               type="button"
               className="threads-sidebar-heading-action"
               data-testid="archived-clear-all"
               aria-label="Delete all archived threads…"
               title="Delete all archived threads"
-              onClick={() => askDelete(clearAllRequest(settledThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))}
+              onClick={() => askDelete(clearAllRequest(archivedThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))}
             >
               Clear all
             </button>
@@ -1528,11 +1607,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         </div>
 
-        <Collapse open={settledExpanded} className="threads-sidebar-tree threads-sidebar-settled-list" itemCount={settledThreads.length}>
-          {settledThreads.length === 0 ? (
+        <Collapse open={archivedExpanded} className="threads-sidebar-tree threads-sidebar-settled-list" itemCount={archivedThreads.length}>
+          {archivedThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No archived threads</div>
           ) : (
-            settledThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
+            archivedThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
           )}
         </Collapse>
 
@@ -1562,20 +1641,37 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           onClose={closeContextMenu}
 
-          onPin={() => void handlePin()}
+          onPin={handlePin}
 
-          onSettle={() => void handleSettle()}
+          onArchive={handleArchive}
 
           onRegenerateTitle={() => void handleRegenerateTitle()}
 
           onRename={handleRename}
 
-          onRemove={() => void handleRemove()}
-          onTrustGitSettings={() => void handleTrustGitSettings()}
+          onRemove={handleRemove}
+          onTrustGitSettings={handleTrustGitSettings}
 
         />
 
       )}
+
+      <Modal
+        open={removingProject !== null}
+        title="Remove project"
+        onClose={() => setRemovingProject(null)}
+        footer={<>
+          <button type="button" className="settings-btn" onClick={() => setRemovingProject(null)}>Cancel</button>
+          <button type="button" className="settings-btn" data-testid="remove-project-confirm" onClick={confirmRemoveProject}>Remove</button>
+        </>}
+      >
+        {removingProject && (
+          <p className="threads-sidebar-remove-project">
+            {removingProject.computerName ? `${removingProject.name} on ${removingProject.computerName}` : removingProject.name} leaves the sidebar. Its folder and threads stay.
+            {removingProject.alsoOn?.length ? ` ${removingProject.alsoOn.join(' and ')} keep${removingProject.alsoOn.length === 1 ? 's' : ''} theirs.` : ''}
+          </p>
+        )}
+      </Modal>
 
       {pullRequestProject && (
         <StartFromPullRequestDialog

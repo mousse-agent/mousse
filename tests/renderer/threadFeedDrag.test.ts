@@ -23,7 +23,7 @@ const thread = (id: string, day: number, projectId?: string): Thread => ({
   ...(projectId ? { projectId } : {})
 })
 
-const appKeys = ['projects', 'threads', 'activeThreadId', 'threadsSidebarView', 'threadFeedOrder'] as const
+const appKeys = ['projects', 'threads', 'activeThreadId', 'threadsSidebarView', 'threadFeedOrder', 'threadActivity'] as const
 const appOriginal = Object.fromEntries(appKeys.map((key) => [key, useAppStore.getState()[key]]))
 
 let host: HTMLDivElement
@@ -46,7 +46,8 @@ beforeEach(async () => {
     threads: [thread('a', 1, 'p1'), thread('b', 2, 'p2'), thread('c', 3), thread('d', 4, 'p1')],
     activeThreadId: null,
     threadsSidebarView: 'threads',
-    threadFeedOrder: []
+    threadFeedOrder: [],
+    threadActivity: {}
   })
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -60,7 +61,8 @@ afterEach(() => {
   useAppStore.setState(appOriginal)
 })
 
-const feed = () => host.querySelector<HTMLElement>('.threads-sidebar-thread-feed')!
+// The reorderable list, not the "Needs me" group above it, which shares the feed's look.
+const feed = () => host.querySelector<HTMLElement>('.threads-sidebar-feed-list')!
 const row = (id: string) => feed().querySelector<HTMLElement>(`[data-thread-id="${id}"]`)!
 const shown = () => [...feed().querySelectorAll<HTMLElement>('[data-thread-id]')].map((element) => element.dataset.threadId)
 
@@ -111,6 +113,19 @@ describe('dragging rows in the Threads tab', () => {
     expect(row('c').closest('.threads-sidebar-thread-container')?.classList.contains('drop-before')).toBe(true)
     fire(row('a'), 'dragend')
     expect(host.querySelector('.drop-before, .drop-after')).toBeNull()
+  })
+
+  it('still reorders with "Needs me" above the list, and its copies are neither dragged nor dropped on', () => {
+    act(() => useAppStore.setState({ threadActivity: { b: 'awaiting_input' } }))
+    const copy = host.querySelector<HTMLElement>('.threads-sidebar-needs-me [data-thread-id="b"]')!
+    expect(copy).not.toBeNull()
+    expect(copy.getAttribute('draggable')).toBe('false')
+    drag('a', row('c'), 0)
+    expect(shown()).toEqual(['d', 'a', 'c', 'b'])
+    fire(row('d'), 'dragstart')
+    expect(fire(copy, 'dragover', 0).defaultPrevented).toBe(false)
+    expect(copy.closest('.threads-sidebar-thread-container')?.className).not.toMatch(/drop-(before|after)/)
+    fire(row('d'), 'dragend')
   })
 
   it('keeps the dragged order when a later message arrives, and puts a newly started thread on top', () => {

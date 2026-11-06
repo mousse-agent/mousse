@@ -68,7 +68,7 @@ afterEach(() => {
 describe('the thread menu', () => {
   const menu = (target: Partial<ThreadsContextMenuTarget>, onRemove = vi.fn()) => render(createElement(ThreadsContextMenu, {
     x: 0, y: 0, target: { type: 'thread', id: 't', name: 'Fix login', pinned: false, ...target },
-    onClose: () => undefined, onPin: () => undefined, onSettle: () => undefined, onRegenerateTitle: () => undefined, onRename: () => undefined, onRemove
+    onClose: () => undefined, onPin: () => undefined, onArchive: () => undefined, onRegenerateTitle: () => undefined, onRename: () => undefined, onRemove
   }))
   const items = () => [...document.querySelectorAll<HTMLButtonElement>('.threads-context-menu button')].map((button) => button.textContent?.trim())
 

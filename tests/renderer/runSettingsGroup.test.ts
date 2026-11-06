@@ -48,7 +48,7 @@ function show(initial?: Partial<MousseSettings['runs']>) {
 }
 
 const saved = () => new SettingsStore(MousseConfigStore.load(home)).get().runs
-const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new chats in a worktree"]')!
+const worktreeToggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Start new threads in a worktree"]')!
 const resume = () => host.querySelector<HTMLButtonElement>('[aria-label="Resume after usage limits reset"]')!
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
 const optionLabels = () => {
@@ -74,7 +74,7 @@ describe('Settings > General > Runs', () => {
     expect(host.querySelector('[role="switch"][aria-label="Resume after usage limits reset"]')).toBeNull()
     expect(host.textContent).not.toContain('Automatic resumes in a row')
     expect(host.textContent).toContain('Continues a paused run when the limit resets.')
-    expect(tooltips()).toContain('waits until you press Resume now')
+    expect(tooltips()).toContain('waits until you press Try now')
     expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 3 times', 'Up to 5 times'])
   })
 
@@ -86,7 +86,7 @@ describe('Settings > General > Runs', () => {
     expect(resume().textContent).toContain('Up to 3 times')
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true })
     expect(tooltips()).toContain('at most 3 times in a row')
-    expect(tooltips()).toContain('Runs already paused are not resumed; press Resume now.')
+    expect(tooltips()).toContain('Runs already paused are not resumed; press Try now.')
   })
 
   it('Off keeps the saved count, so turning it back on offers the same one', () => {
@@ -98,7 +98,7 @@ describe('Settings > General > Runs', () => {
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5, worktreeByDefault: true })
   })
 
-  it('starts new chats in a worktree by default, and turning it off saves it without touching the rest', () => {
+  it('starts new threads in a worktree by default, and turning it off saves it without touching the rest', () => {
     const { updates } = show()
     expect(worktreeToggle().getAttribute('aria-checked')).toBe('true')
     click(worktreeToggle())

@@ -232,6 +232,8 @@ export const PROTOCOL_METHODS = [
   'threads.reorder',
   'threads.search',
   'threads.regenerateTitle',
+  'threads.clearContext',
+  'threads.compact',
   'threads.setModel',
   'threads.setWorktreeEnabled',
   'threads.setPermissionMode',

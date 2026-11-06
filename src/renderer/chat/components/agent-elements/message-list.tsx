@@ -84,6 +84,8 @@ import { useTurnWindow } from "./virtual/use-turn-window";
 import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
 import { useThreadFind } from "./find/use-thread-find";
+import { flashLocated, revealMessage } from "./reveal-message";
+import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
@@ -1446,6 +1448,42 @@ export const MessageList = memo(function MessageList({
         : undefined,
     [windowed],
   );
+
+  // `scrollToMessage` from elsewhere (search, the composer's approval cue): the transcript that has
+  // the message takes the request, lands its turn, centres it and highlights it for a moment.
+  const messageRequest = useChatNavigationStore((state) => state.message);
+  useEffect(() => {
+    if (!messageRequest) return;
+    const { settleMessage } = useChatNavigationStore.getState();
+    if (isStale(messageRequest)) {
+      settleMessage(messageRequest.seq);
+      return;
+    }
+    const { messageId } = messageRequest;
+    const index = turns.findIndex(
+      (turn) => turn.userMsg?.id === messageId || turn.assistantMsgs.some((message) => message.id === messageId),
+    );
+    const container = chatContainerRef.current;
+    const rows = rowsRef.current;
+    const virtualization = virtualizationRef.current;
+    if (index < 0 || !container || !rows || !virtualization) return;
+    settleMessage(messageRequest.seq);
+    dispatchFollow({ type: "navigate" });
+    const navigation = virtualization.beginNavigation();
+    void revealMessage(
+      { turnKey: resolveTurnKey(turns[index]!, index, turnKeyAliasRef.current), messageId },
+      navigation,
+      {
+        container,
+        rows,
+        scrollToKey: windowed ? (key, target) => virtualization.scrollToKey(key, target, navigation) : undefined,
+        onProgrammaticScroll: markProgrammaticScroll,
+      },
+    ).then((element) => {
+      if (element) flashLocated(element);
+    });
+  }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
+
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -1924,6 +1962,15 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
  * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
  * the instances list, under a line saying what happened.
  */
+/** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
+function ContextClearedDivider({ text }: { text: string }) {
+  return <div role="separator" aria-label={text} className="context-cleared">
+    <span aria-hidden="true" className="context-cleared-rule" />
+    <span>{text}</span>
+    <span aria-hidden="true" className="context-cleared-rule" />
+  </div>;
+}
+
 function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
@@ -2121,6 +2168,8 @@ function AssistantParts({
   if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
+    return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');

@@ -710,6 +710,8 @@ export interface ChatMessage {
     | 'warning'
     /** Presentation-only marker emitted when retained model context is compacted. */
     | 'context_compaction'
+    /** Presentation-only divider where `/clear` started the model context again. */
+    | 'context_cleared'
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
@@ -924,6 +926,9 @@ export interface AgentOrigin {
   hops?: number
 }
 
+/** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
+export const CONTEXT_DRAFT_CATEGORY = 'Draft message'
+
 export interface ContextUsageCategory {
   label: string
   color: string
@@ -939,6 +944,11 @@ export interface ContextUsageSnapshot {
   modelName: string | null
   source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
+  /**
+   * The agent runtime compacts this context itself, near its window (Pi), so the Compact context
+   * size does not apply. Absent: Mousse compacts it at that size.
+   */
+  compactedByRuntime?: boolean
 }
 
 export interface PtyCreateRequest {
@@ -1079,7 +1089,7 @@ export interface Thread {
   permissionMode?: PermissionMode
   /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
-   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
    * Toggleable from the new-chat input bar before the first message; locked once a
    * workspace is provisioned or the thread has started.
@@ -1293,6 +1303,11 @@ export interface NativeLlmContext {
   /** Steer queue IDs whose content has been checkpointed into native history. */
   acceptedSteerItemIds?: string[]
   compaction?: NativeCompactionCheckpoint
+  /**
+   * Where the last `/clear` started the context again: the messages before it are kept for the record
+   * and Undo, and compaction never reads them back.
+   */
+  clearedAtIndex?: number
   /** Actual model capacity reported by a native provider, retained across compaction. */
   nativeProviderModel?: {
     /** `llmProvider` of the runtime that reported this capacity. */

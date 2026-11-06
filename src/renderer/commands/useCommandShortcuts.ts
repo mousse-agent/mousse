@@ -23,12 +23,12 @@ export function handleCommandKeyDown(event: KeyboardEvent): void {
   if (event.isComposing || event.keyCode === 229) return
   const context = currentContext('key', asClosestTarget(event.target))
   const overrides = useAppStore.getState().shortcuts
-  const id = resolveCommand(event, overrides, context, isCommandRegistered, currentBindings(overrides, context.platform))
+  const id = resolveCommand(event, overrides, context, (candidate) => isCommandRegistered(candidate, 'key'), currentBindings(overrides, context.platform))
   if (!id) return
   event.preventDefault()
   event.stopPropagation()
   if (event.repeat && !REPEATABLE.has(id)) return
-  invokeCommand(id)
+  invokeCommand(id, 'key')
 }
 
 /** Listens for shortcuts on a window-like target; returns what removes the listener. */

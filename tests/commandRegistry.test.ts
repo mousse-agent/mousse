@@ -343,9 +343,14 @@ describe('runCommand', () => {
     expect(runCommand('surface.browser', 'palette')).toBe(true)
     expect(runCommand('surface.browser', 'menu')).toBe(true)
     expect(run).toHaveBeenCalledTimes(2)
-    // `when` still holds for them.
+    // Opening a surface shows the panel, so the palette may run it with the panel closed; a key may not.
     useAppStore.setState({ mainAreaOpen: false })
-    expect(runCommand('surface.browser', 'palette')).toBe(false)
+    expect(runCommand('surface.browser', 'palette')).toBe(true)
+    expect(runCommand('surface.browser', 'key')).toBe(false)
+    // Any other `when` still holds for the palette.
+    registerCommand('sideCard.toggle', { run })
+    useAppStore.setState({ activeThreadId: null })
+    expect(runCommand('sideCard.toggle', 'palette')).toBe(false)
   })
 
   it('lets the palette run over its own overlay but not over another', () => {
@@ -358,9 +363,9 @@ describe('runCommand', () => {
     expect(runCommand('thread.new', 'menu')).toBe(false)
     closePalette()
 
-    const closeSearch = pushOverlay('thread-search')
+    const closePicker = pushOverlay('model-picker')
     expect(runCommand('thread.new', 'palette')).toBe(false)
-    closeSearch()
+    closePicker()
     expect(run).toHaveBeenCalledTimes(1)
   })
 

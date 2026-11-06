@@ -7,8 +7,8 @@ export { formatPauseUntil, pauseProviderName, pauseWindowLabel }
 /** The message of the continue turn that follows a usage-limit pause. Fixed: it carries no replay of the paused turn. */
 export const CONTINUE_TEXT = 'Continue where you left off.'
 
-/** What a pause without a timer tells the person to do: only the button continues; a message waits in the queue. */
-export const MANUAL_CONTINUE_TEXT = 'Press Resume now to continue. Messages you send wait in the queue until then.'
+/** What a pause without a timer tells the person to do: only Try now continues; a message waits in the queue. */
+export const MANUAL_CONTINUE_TEXT = 'Press Try now to continue. Messages you send wait in the queue until then.'
 
 /** The system line written into the thread when a run pauses. */
 export function pausedLine(pause: Pick<RunPause, 'until' | 'estimated' | 'provider' | 'limitKind' | 'autoResume'>, nowMs: number = Date.now()): string {

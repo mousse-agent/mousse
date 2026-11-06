@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp } from '../lib/icons'
 import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
-import type { LlmProviderOption } from '../../shared/settings'
+import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
@@ -16,6 +16,7 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
 import { removeInlineSkillToken } from '../../shared/composerCommands'
+import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -47,7 +48,9 @@ import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
 import { usePermissionRequests } from '../hooks/usePermissionRequests'
-import { permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
+import { isWaitingPermissionRequest, permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
+import { usePendingRequestFocus } from '../stores/chatNavigationStore'
+import { ApprovalNotice, DENY_AND_SEND_LABEL } from './ApprovalNotice'
 import {
   findQuickActionCardForApproval,
   questionAnswerThreadId,
@@ -73,6 +76,9 @@ import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
+import { ServiceLostNotice } from './ServiceLostNotice'
+import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -82,10 +88,11 @@ import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 
+/** Before the first measurement arrives: no capacity, so the composer shows no ring. */
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
   used: 0,
-  limit: 128_000,
+  limit: 0,
   modelName: null,
   source: 'estimated',
   categories: []
@@ -293,6 +300,7 @@ export function OrchestratorChat() {
   )
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
+  const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -332,6 +340,14 @@ export function OrchestratorChat() {
   const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
   // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
   const shownMessages = useMemo(() => placePermissionRequests(uiMessages), [uiMessages, placePermissionRequests])
+  const approvalRequest = permissionRequests.current
+  const approvalRowId = approvalRequest ? `permission:${approvalRequest.requestId}` : null
+  const approvalPlaced = approvalRowId !== null && shownMessages.some((message) => message.id === approvalRowId)
+  // `focusPendingRequest` from the sidebar: once this thread is open, show its waiting request in the transcript.
+  usePendingRequestFocus(
+    activeThreadId,
+    approvalPlaced ? approvalRowId : (shownMessages.find(isWaitingPermissionRequest)?.id ?? null)
+  )
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
@@ -357,7 +373,7 @@ export function OrchestratorChat() {
   }, [messages])
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is
-  // injected mid-turn. Show the steered text as a pill above the composer so
+  // injected mid-turn. Show the steered text as a notice above the composer so
   // the steer is visible in the transcript even before the next drain.
   useEffect(() => {
     const unsub = window.mousse.orchestrator.onTurnSteered?.((payload) => {
@@ -370,13 +386,13 @@ export function OrchestratorChat() {
   useEffect(() => {
     setLastSteer(null)
   }, [activeThreadId])
-  // Clear the pill once the steered user message lands in the transcript.
+  // The "Steered" notice hides once the steered message lands in the transcript, or when the turn ends.
   useEffect(() => {
     if (!lastSteer) return
-    if (messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
+    if (!turnActive || messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
       setLastSteer(null)
     }
-  }, [messages, lastSteer])
+  }, [messages, lastSteer, turnActive])
 
   // Quick-action approvals render inline on the PlanTool-style card instead
   // of the generic question modal. Bridge the pending question (requestId)
@@ -535,6 +551,12 @@ export function OrchestratorChat() {
     ])
     setCatalog((current) => keepCatalog(current, options.llmProviders))
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
+    const compaction = normalizeContextSettings(settings.context)
+    setContextCompactionSetting((current) =>
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+        ? current
+        : compaction
+    )
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setProfileDefault((current) =>
       current?.llmProvider === settings.provider.llmProvider &&
@@ -961,6 +983,23 @@ export function OrchestratorChat() {
     })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
 
+  // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
+  const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
+    threadId: newChat ? null : activeThreadId,
+    turnActive: turnActive || loading,
+    hasAttachments,
+    openUsage: () => window.dispatchEvent(new Event('mousse:open-usage')),
+    stop: handleStop,
+    steer: (text) => window.mousse.orchestrator.steer(text, activeThreadId ?? undefined),
+    newThread: async (title) => { await window.mousse.threads.createAndSelect(title) },
+    clearContext: async (threadId) => { await window.mousse.threads.clearContext(threadId) },
+    compact: async (threadId, focus) => { await window.mousse.threads.compact(threadId, focus) },
+    fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
+    rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
+    // The sidebar cancels the event when it opened the thread's rename box.
+    openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true }))
+  })
+
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
@@ -995,31 +1034,22 @@ export function OrchestratorChat() {
     if (!stillVisible()) return
     const trimmed = text.trim()
 
-    // Desktop-local commands must be handled before they can become an ordinary
-    // agent prompt. The usage dialog intentionally contains every configured provider.
-    if (trimmed.toLowerCase() === '/usage' && images.length === 0) {
-      setInput('')
-      window.dispatchEvent(new Event('mousse:open-usage'))
-      return
-    }
-
-    // Immediate mid-run controls
-    if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
-      setInput('')
-      await handleStop()
-      return
-    }
-    if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
-      const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
-      if (!steerText) return
-      setInput('')
-      const steered = await window.mousse.orchestrator.steer(
-        steerText,
-        activeThreadId ?? undefined
-      )
-      if (steered) return
-      // No active turn: treat as a normal user message (next-turn guidance).
-      text = steerText
+    // Composer commands run here before they can become an ordinary agent prompt
+    // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
+    const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
+    const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    if (command) {
+      if (command.kind === 'done') {
+        setInput('')
+        return
+      }
+      if (command.kind === 'keep') return
+      if (command.kind === 'refused') {
+        if (stillVisible()) setSendError(command.message)
+        return
+      }
+      // A /steer no turn took: next-turn guidance, sent as an ordinary message.
+      text = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Alt+Enter during a run: the text goes into the running turn instead of the queue.
       const steered = await window.mousse.orchestrator.steer(trimmed, activeThreadId ?? undefined)
@@ -1031,13 +1061,6 @@ export function OrchestratorChat() {
     }
 
     if (!text && images.length === 0) return
-
-    const newThreadMatch = trimmed.match(/^\/new(?:\s+(.+))?$/)
-    if (newThreadMatch && images.length === 0) {
-      setInput('')
-      await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
-      return
-    }
 
     // Questions open above the composer: the message answers the question the card shows, and the card
     // moves on to the next unanswered one. Answering the last one submits all the answers, once.
@@ -1274,6 +1297,21 @@ export function OrchestratorChat() {
     ? remotePermissionCeiling(activeThread?.lineage ? permissionCeiling : undefined, remoteMode.limit, remoteComputer?.name ?? UNKNOWN_COMPUTER_NAME)
     : { ceiling: activeThread?.lineage ? permissionCeiling : undefined }
 
+  // Sending while an approval waits denies it (with the message as the reason); the composer says so.
+  const approvalWaiting = permissionRequests.waiting || Boolean(pendingQuestions?.approval)
+  const composerHasContent = input.trim().length > 0 || attachedFiles.length > 0
+
+  const retryConnection = () => {
+    setConnectionFailed(false)
+    setLoading(true)
+    void window.mousse.orchestrator
+      .retryConnection(activeThreadId ?? undefined)
+      .then((started) => {
+        if (!started) setLoading(false)
+        else void refreshTurnActive()
+      })
+  }
+
   const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
 
   return (
@@ -1300,31 +1338,23 @@ export function OrchestratorChat() {
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
+        <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
-          ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
-              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
-          : <ComputerNotice message={sendError} />)}
-        {!sendError && !connectionFailed && <PromptUndoNotice />}
-        {connectionFailed && (
-          <div className="connection-failed-pill" role="alert">
-            <span>Connection Failed</span>
-            <button
-              type="button"
-              onClick={() => {
-                setConnectionFailed(false)
-                setLoading(true)
-                void window.mousse.orchestrator
-                  .retryConnection(activeThreadId ?? undefined)
-                  .then((started) => {
-                    if (!started) setLoading(false)
-                    else void refreshTurnActive()
-                  })
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+          ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
+              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }}
+              onDismiss={() => { setSendError(null); setSendChanges(null) }} />
+          : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
+        <PromptUndoNotice />
+        <PausedRunNotice threadId={activeThreadId} />
+        <ServiceLostNotice lost={connectionFailed} onReconnect={retryConnection} onDismiss={() => setConnectionFailed(false)} />
+        <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
+        <ApprovalNotice
+          request={approvalRequest}
+          composerHasText={composerHasContent}
+          placed={approvalPlaced}
+          isShown={() => !inputAreaRef.current?.closest('[inert]')}
+          serviceLost={connectionFailed}
+        />
         <div
           className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
           aria-hidden={!showQuestions || undefined}
@@ -1363,6 +1393,8 @@ export function OrchestratorChat() {
           </div>
         </div>
 
+        {/* The dock on the composer's top edge: the top notice, or the queue; one at a time. */}
+        <ComposerNoticeSlot />
         <QueuedMessages
           threadId={activeThreadId}
           optimisticItems={optimisticQueueItems}
@@ -1399,13 +1431,6 @@ export function OrchestratorChat() {
             })()
           }}
         />
-        {lastSteer && (
-          <div className="steer-pill" role="status" aria-label="Steered into active turn">
-            <span className="steer-pill-label">Steered into active turn</span>
-            <span className="steer-pill-text">{lastSteer.text.length > 160 ? `${lastSteer.text.slice(0, 157)}…` : lastSteer.text}</span>
-            <button type="button" className="steer-pill-dismiss" aria-label="Dismiss steer notice" onClick={() => setLastSteer(null)}>×</button>
-          </div>
-        )}
 
             {newChat && (
               <ComposerWorkspaceToolbar
@@ -1450,16 +1475,17 @@ export function OrchestratorChat() {
               onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
               onOpenSettings={() => setSettingsOpen(true)}
               contextUsage={contextUsage}
+              contextCompactionSetting={contextCompactionSetting}
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
               placeholder={!workspaceReady ? ''
                 : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
-                  : permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
+                  : approvalWaiting ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
               sendLabel={questionsTakeMessage
                 ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
-                : undefined}
+                : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
@@ -1469,6 +1495,7 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
+        </ComposerNoticeProvider>
         {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
           <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />
         )}
