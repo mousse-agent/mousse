@@ -405,7 +405,7 @@ function savePersonalWorkspace(state: AppState): void {
 }
 
 /** The sections of the Automations page. */
-export type AutomationsSection = 'agents' | 'workflows' | 'scheduled' | 'bots'
+export type AutomationsSection = 'agents' | 'workflows' | 'scheduled'
 
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',

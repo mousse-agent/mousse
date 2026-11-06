@@ -1093,6 +1093,15 @@ const api = {
       ipcRenderer.on('app:openThread', handler)
       return () => ipcRenderer.removeListener('app:openThread', handler)
     },
+    /** A bot whose notification was clicked: open its chat. */
+    onOpenBot: (cb: (botId: string) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, botId: string) => cb(botId)
+      ipcRenderer.on('notifications:openBot', handler)
+      return () => ipcRenderer.removeListener('notifications:openBot', handler)
+    },
+    /** The bot whose chat this window shows (null: none), so its replies don't notify while it is on screen. */
+    setViewedBot: (botId: string | null): Promise<void> =>
+      ipcRenderer.invoke('notifications:viewBot', botId),
     /** Settings' "Try it": shows the system notification and plays the sound an event would use. */
     previewNotification: (request: { kind: ThreadNotificationEvent; system: boolean; sound: boolean }): Promise<void> =>
       ipcRenderer.invoke('notifications:preview', request),
@@ -1177,7 +1186,13 @@ const api = {
   dialog: {
     /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */
     pickExecutable: (options?: { title?: string; defaultPath?: string }): Promise<string | null> =>
-      ipcRenderer.invoke('dialog:pickExecutable', options ?? {})
+      ipcRenderer.invoke('dialog:pickExecutable', options ?? {}),
+    /** Native folder picker; resolves to the chosen absolute path, or null when cancelled. */
+    pickFolder: (options?: { title?: string; buttonLabel?: string }): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:pickFolder', options ?? {}),
+    /** Native multi-file picker; resolves to the chosen absolute paths, empty when cancelled. */
+    pickFiles: (options?: { title?: string }): Promise<string[]> =>
+      ipcRenderer.invoke('dialog:pickFiles', options ?? {})
   },
   window: {
     resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),
