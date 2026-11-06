@@ -1392,7 +1392,7 @@ html[data-theme='high-contrast'] .chat-input-area {
 .composer-notice-slot {
   display: flex;
   flex-direction: column;
-  margin-bottom: 2px;
+  margin-bottom: 8px;
   container: composer-notice / inline-size;
 }
 
