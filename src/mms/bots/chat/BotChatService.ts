@@ -72,7 +72,7 @@ export class BotChatService {
     return this.engine.chat.detail(this.engine.definitionOf(botId), this.options.now())
   }
 
-  /** `bots.list`: every bot that is not deleted, oldest first. */
+  /** `bots.personal.list`: every bot that is not deleted, oldest first. */
   list(): { bots: BotSummary[] } {
     return { bots: this.engine.botIds().map((botId) => this.summaryOf(botId)) }
   }
@@ -132,13 +132,13 @@ export class BotChatService {
     return { bot: this.summaryOf(botId) }
   }
 
-  /** `bots.pause`: its schedules stop; chat still works. */
+  /** `bots.personal.pause`: its schedules stop; chat still works. */
   pause(botId: string): { bot: BotSummary } {
     this.engine.pauseBot(botId)
     return { bot: this.summaryOf(botId) }
   }
 
-  /** `bots.resume`: clears the pause (the owner's, three failures, or a usage limit), the failure streak and the stuck error. */
+  /** `bots.personal.resume`: clears the pause (the owner's, three failures, or a usage limit), the failure streak and the stuck error. */
   async resume(botId: string): Promise<{ bot: BotSummary }> {
     await this.engine.resumeBot(botId)
     return { bot: this.summaryOf(botId) }
@@ -172,15 +172,24 @@ export class BotChatService {
       if (existing.botId !== input.botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
       return { message: this.engine.chat.toMessage(existing) }
     }
-    const message = this.engine.chat.post({
-      botId: input.botId,
-      author: 'owner',
-      kind: 'text',
-      text,
-      ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
-      clientRequestId: input.clientRequestId,
-      lane: 'chat'
-    })
+    let message: BotChatMessage
+    try {
+      message = this.engine.chat.post({
+        botId: input.botId,
+        author: 'owner',
+        kind: 'text',
+        text,
+        ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
+        clientRequestId: input.clientRequestId,
+        lane: 'chat'
+      })
+    } catch (error) {
+      // The message and its journal row are written together or not at all: the bot never runs unrecorded.
+      const code = (error as { code?: unknown } | null)?.code
+      if (code !== 'bot_journal_failed' && code !== 'storage_full') throw error
+      this.engine.journalFailedFor(input.botId)
+      throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
+    }
     const prompt = chatInput(text, input.attachments)
     try {
       if (await this.engine.continueChatWith(input.botId, prompt)) return { message }

@@ -907,7 +907,8 @@ export class BotStore {
     if (filter.activationId) { where.push('activation_id = ?'); params.push(filter.activationId) }
     if (filter.botId) { where.push('bot_id = ?'); params.push(filter.botId) }
     if (filter.status) { where.push('status = ?'); params.push(filter.status) }
-    return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, id`, ...params).map(escalationOf)
+    // Asks raised in the same millisecond keep the order they were raised in.
+    return this.all(`SELECT * FROM bot_escalations ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at, rowid`, ...params).map(escalationOf)
   }
 
   /** The walls an activation hit (a run's refused asks never count: they don't stop it). */
@@ -981,7 +982,7 @@ export class BotStore {
 
   /** Every answered wall of an activation whose continuation has not been sent yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
-    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, id", activationId).map(escalationOf)
+    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
 
   markApplied(id: string): void {

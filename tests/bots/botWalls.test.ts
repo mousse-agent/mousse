@@ -213,9 +213,10 @@ describe('walls', () => {
     expect(prepared.history).toBe('cleared')
     expect(cleared).toEqual([HOME])
     const wall = prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(other, 'a.md') } })
-    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: `read files in ${join(other, 'a.md')}` } })
+    // A file is asked for by its folder.
+    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: `read files in ${other}` } })
     expect(isBotWallAbort(prepared.authority.time.signal.reason)).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { path: join(other, 'a.md'), access: 'read' } } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { path: other, access: 'read' } } })
     expect(escalations).toHaveLength(1)
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })

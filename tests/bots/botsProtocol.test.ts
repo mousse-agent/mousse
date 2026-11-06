@@ -39,7 +39,7 @@ describe('personal bot methods', () => {
 
   it('needs a profile binding and reaches that profile\'s bots', async () => {
     const { domains, service, profiles } = setup()
-    await expect(domains.dispatch({ connection: { id: 'c', capabilities: new Set() } } as unknown as HandlerContext, 'bots.list', {})).rejects.toMatchObject({ code: 'profile_binding_required' })
+    await expect(domains.dispatch({ connection: { id: 'c', capabilities: new Set() } } as unknown as HandlerContext, 'bots.personal.list', {})).rejects.toMatchObject({ code: 'profile_binding_required' })
     await expect(domains.dispatch(context('p2'), 'bots.chat.send', { botId: 'site-editor', text: 'Fix the footer', clientRequestId: 'c-1' })).resolves.toMatchObject({ message: { seq: 1 } })
     expect(profiles).toEqual(['p2'])
     expect(service.chatSend).toHaveBeenCalledWith({ botId: 'site-editor', text: 'Fix the footer', clientRequestId: 'c-1' })
@@ -53,7 +53,7 @@ describe('personal bot methods', () => {
   })
 
   it('keeps the engine\'s error codes, and reports bots unavailable when bots.db could not be opened', async () => {
-    await expect(setup().domains.dispatch(context(), 'bots.pause', { botId: 'site-editor' })).rejects.toMatchObject({ code: 'bot_not_found' })
-    await expect(setup(false).domains.dispatch(context(), 'bots.list', {})).rejects.toMatchObject({ code: 'bots_unavailable' })
+    await expect(setup().domains.dispatch(context(), 'bots.personal.pause', { botId: 'site-editor' })).rejects.toMatchObject({ code: 'bot_not_found' })
+    await expect(setup(false).domains.dispatch(context(), 'bots.personal.list', {})).rejects.toMatchObject({ code: 'bots_unavailable' })
   })
 })

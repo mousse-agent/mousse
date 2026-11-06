@@ -16,12 +16,12 @@ import { BotDefinitionError, isBotId } from './definitions/BotDefinitionStore'
 type Params = Record<string, unknown>
 
 const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
-  'bots.list': [],
+  'bots.personal.list': [],
   'bots.create': ['look', 'name', 'description', 'clientRequestId'],
   'bots.get': ['botId'],
   'bots.update': ['botId', 'name', 'look'],
-  'bots.pause': ['botId'],
-  'bots.resume': ['botId'],
+  'bots.personal.pause': ['botId'],
+  'bots.personal.resume': ['botId'],
   'bots.delete': ['botId'],
   'bots.chat.list': ['botId', 'beforeSeq', 'limit'],
   'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId'],
@@ -117,12 +117,12 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
 async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatService): Promise<unknown> {
   const botId = p.botId as string
   switch (method) {
-    case 'bots.list': return bots.list()
+    case 'bots.personal.list': return bots.list()
     case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string })
     case 'bots.get': return bots.get(botId)
     case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}) })
-    case 'bots.pause': return bots.pause(botId)
-    case 'bots.resume': return bots.resume(botId)
+    case 'bots.personal.pause': return bots.pause(botId)
+    case 'bots.personal.resume': return bots.resume(botId)
     case 'bots.delete': return bots.delete(botId)
     case 'bots.chat.list': return bots.chatList(botId, { ...(p.beforeSeq !== undefined ? { beforeSeq: p.beforeSeq as number } : {}), ...(p.limit !== undefined ? { limit: p.limit as number } : {}) })
     case 'bots.chat.send': return bots.chatSend({ botId, text: p.text as string, ...(p.attachments ? { attachments: p.attachments as BotChatAttachment[] } : {}), clientRequestId: p.clientRequestId as string })

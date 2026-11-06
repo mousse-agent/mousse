@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
@@ -900,7 +900,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
       mkdirSync(this.filesFolder(row.botId), { recursive: true, mode: 0o700 })
       const clientRequestId = `${row.id}:d1`
-      const still = this.store.db.transaction(() => {
+      const still = this.recorded(row, () => {
         if (!this.store.moveActivation(row.id, ['running'], 'running', { threadId, scratch })) return false
         if (!this.store.dispatch(row.id, 1)) {
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text: row.trigger.input }, policyDigest: row.grantDigest })
@@ -912,7 +912,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return true
       })
-      // Stopped (or its grant ended) while its threads were made: no dispatch, no folder left.
+      // Stopped (or its grant ended, or its journal failed) while its threads were made: no dispatch, no folder left.
       if (!still) {
         rmSync(scratch, { recursive: true, force: true })
         return
@@ -955,7 +955,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return false
       }
       const previous = this.store.registry(row.botId)?.model?.selection
-      this.store.db.transaction(() => {
+      const saved = this.recorded(row, () => {
         this.store.setActivationSelection(row.id, resolved.selection)
         this.store.setModel(row.botId, { selection: resolved.selection, activationId: row.id })
         if (!previous || previous.instanceId !== resolved.selection.instanceId || previous.model !== resolved.selection.model || previous.effort !== resolved.selection.effort)
@@ -963,7 +963,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             botId: row.botId, kind: 'model_change', lane: row.lane, activationId: row.id, sourceKey: `act:${row.id}:model:${dispatch.n}`, who: 'mousse',
             text: 'The model changed.', json: { v: 1, from: previous ?? null, to: resolved.selection }
           })
+        return true
       })
+      if (!saved) return false
     }
     if (!this.packs.has(row.id) && this.host.context) {
       try {
@@ -1016,7 +1018,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const family = instanceId ? this.providerLabel(instanceId) : undefined
     const text = until ? `Paused until ${clockTime(until)} (${family ? `your ${family} usage limit` : 'a usage limit'})` : `Paused (${family ? `your ${family} usage limit` : 'a usage limit'})`
     const error: BotError = { text, action: { kind: 'resume', label: 'Resume' } }
-    const ended = this.store.db.transaction(() => {
+    const ended = this.recorded(row, () => {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: 'usage_limit' })) return false
       this.store.closeEscalations(row.id, 'cancelled')
       this.store.setPaused(row.botId, 'usage_limit', until)
@@ -1024,7 +1026,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_limit` })
       this.journalEnd(row, 'usage_limit')
       return true
-    })
+    }) ?? false
     if (!ended) return
     this.afterEnd(this.store.activation(row.id) ?? row)
   }
@@ -1046,14 +1048,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private failActivation(row: BotActivationRow, reason: string, stuck?: BotStoredError): void {
     const error = stuck?.error ?? { text: failureText(reason) }
-    const ended = this.store.db.transaction(() => {
+    const ended = this.recorded(row, () => {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: reason })) return false
       this.store.closeEscalations(row.id, 'cancelled')
       if (stuck) this.store.setError(row.botId, stuck)
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_failed` })
       this.journalEnd(row, reason)
       return true
-    })
+    }) ?? false
     if (!ended) return
     const after = this.store.activation(row.id) ?? row
     if (after.lane === 'run') this.countFailure(after)
@@ -1079,15 +1081,36 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * limit, a stop or a chat failure never counts.
    */
   private countFailure(row: BotActivationRow): void {
-    const paused = this.store.db.transaction(() => {
+    const paused = this.recorded(row, () => {
       const streak = this.store.bumpFailureStreak(row.botId)
       const registry = this.store.registry(row.botId)
       if (streak < BOT_FAILURE_PAUSE_STREAK || registry?.pausedReason) return false
       this.store.setPaused(row.botId, 'failures')
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: 'I\'ve paused my schedules after three failed runs. Resume when it\'s fixed.', activationId: row.id, lane: 'run', id: `bm_${row.id}_paused` })
       return true
-    })
+    }) ?? false
     if (paused) this.changed({ botId: row.botId })
+  }
+
+  /**
+   * A `bots.db` transaction that writes journal rows: when the journal cannot be written, nothing of
+   * it is kept, the activation fails and the bot is stuck (undefined then). A bot never runs unrecorded.
+   */
+  private recorded<T>(row: BotActivationRow, work: () => T): T | undefined {
+    try {
+      return this.store.db.transaction(work)
+    } catch (error) {
+      if (!isJournalFailure(error)) throw error
+      console.warn('a bot\'s journal could not be written', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      this.journalFailed(row)
+      return undefined
+    }
+  }
+
+  /** `bots.chat.send` could not journal the owner's message: the bot is stuck until the owner tries again. */
+  journalFailedFor(botId: string): void {
+    this.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    this.changed({ botId })
   }
 
   /** The journal could not be written: the activation fails and the bot is stuck; nothing more runs until the owner tries again. */
@@ -1940,7 +1963,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
       }
       const openWalls = this.store.escalations({ activationId: row.id, status: 'open' }).filter((ask) => ask.mode === 'wall')
-      const next = this.store.db.transaction(() => {
+      const next = this.recorded(row, () => {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (unknown || run.status === 'uncertain') {
           this.store.moveActivation(row.id, ['running'], 'paused', { endReason: run.status === 'uncertain' && !unknown ? 'uncertain' : 'unknown_calls', ...(text !== undefined ? { result: text } : {}) })
@@ -1958,6 +1981,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return this.store.activation(row.id)!
       })
+      if (!next) return
       this.postReply(next, main, text, options.expectText === true)
       if (reload && next.status === 'running') {
         await this.continueWith(row.id, ['running'], { reload: true })
@@ -2998,14 +3022,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return Promise.race([call, timedOut])
   }
 
-  /** `bots.pause`: the owner pauses the bot's schedules. Chat still works. */
+  /** `bots.personal.pause`: the owner pauses the bot's schedules. Chat still works. */
   pauseBot(botId: string): void {
     this.entry(botId)
     this.store.setPaused(botId, 'owner')
     this.changed({ botId })
   }
 
-  /** `bots.resume`: every pause ends (the owner's, three failures, a usage limit), with the failure streak and the stuck error. */
+  /** `bots.personal.resume`: every pause ends (the owner's, three failures, a usage limit), with the failure streak and the stuck error. */
   async resumeBot(botId: string): Promise<void> {
     this.entry(botId)
     this.store.db.transaction(() => {
@@ -3293,7 +3317,9 @@ function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermission
       // Only an absolute path is asked for, shown resolved (`..` removed); a relative one is refused.
       if (!isAbsolute(wall.path)) return undefined
       const path = resolve(wall.path)
-      return isAbsolutePath(path) ? { path, access: wall.access } : undefined
+      // A file is asked for by its folder ("read files in ~/Documents/Invoices"), a folder as itself.
+      const folder = isDirectory(path) ? path : dirname(path)
+      return isAbsolutePath(folder) && folder !== dirname(folder) ? { path: folder, access: wall.access } : undefined
     }
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
@@ -3325,6 +3351,14 @@ function contextKey(stored: string): [string, number] {
   const at = stored.lastIndexOf(':')
   const gen = at > 0 ? Number(stored.slice(at + 1)) : 1
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */
