@@ -7976,11 +7976,11 @@ export class OrchestratorService extends EventEmitter {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
-      let driver: string | undefined
+      let compactsNearWindow = false
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
-        driver = resolved.driver
+        compactsNearWindow = resolved.compactsNearWindow === true
       } catch {
         caps = undefined
       }
@@ -8010,9 +8010,9 @@ export class OrchestratorService extends EventEmitter {
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
       return {
         ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
-        // Pi compacts its own session near the window (only the on/off is passed to it); the other
+        // A runtime that compacts its own session near the window gets only the on/off; the other
         // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
-        ...(driver === 'pi' ? { compactedByRuntime: true } : {})
+        ...(compactsNearWindow ? { compactedByRuntime: true } : {})
       }
     }
     if (threadId && threadId !== this.session.threadId) {
