@@ -552,3 +552,71 @@ describe('favorites', () => {
     })
   })
 })
+
+describe('loading the snapshots of a scope', () => {
+  const deferred = () => {
+    let resolve!: (value: ReturnType<typeof snapshot>[]) => void
+    const promise = new Promise<ReturnType<typeof snapshot>[]>((done) => (resolve = done))
+    return { promise, resolve }
+  }
+  const setup = () => {
+    const replies: Array<ReturnType<typeof deferred>> = []
+    const snapshots = vi.fn(() => {
+      const reply = deferred()
+      replies.push(reply)
+      return reply.promise
+    })
+    vi.stubGlobal('window', { mousse: { providers: { snapshots } } })
+    useAppStore.setState({ profileId: 'p1' })
+    useProviderSnapshotsStore.setState({ profileId: 'p1', scopes: {} })
+    return { replies }
+  }
+  const load = async (scope: { kind: 'device' }) => (await import('../src/renderer/lib/providerSnapshots')).loadProviderSnapshots(scope)
+  const device = () => useProviderSnapshotsStore.getState().scopes.device
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useAppStore.setState({ profileId: 'default' })
+    useProviderSnapshotsStore.setState({ profileId: null, scopes: {} })
+  })
+
+  it('drops a reply that arrives after the window was bound to another profile', async () => {
+    const { replies } = setup()
+    const loading = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    useAppStore.setState({ profileId: 'p2' })
+    useProviderSnapshotsStore.setState({ profileId: 'p2', scopes: {} })
+    replies[0].resolve([snapshot({ instanceId: 'from-p1' })])
+    await loading
+    expect(device()?.snapshots).toBeUndefined()
+  })
+
+  it('keeps the newest of two overlapping loads, and stays loading until it arrives', async () => {
+    const { replies } = setup()
+    const first = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    const second = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(2))
+    replies[1].resolve([snapshot({ instanceId: 'newer' })])
+    await second
+    replies[0].resolve([snapshot({ instanceId: 'older' })])
+    await first
+    expect(device()?.snapshots?.map((entry) => entry.instanceId)).toEqual(['newer'])
+    expect(device()?.loading).toBe(false)
+  })
+
+  it('does not clear loading when an older load finishes before the newest', async () => {
+    const { replies } = setup()
+    const first = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    const second = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(2))
+    replies[0].resolve([snapshot({ instanceId: 'older' })])
+    await first
+    expect(device()?.loading).toBe(true)
+    expect(device()?.snapshots).toBeUndefined()
+    replies[1].resolve([snapshot({ instanceId: 'newer' })])
+    await second
+    expect(device()).toMatchObject({ loading: false, snapshots: [expect.objectContaining({ instanceId: 'newer' })] })
+  })
+})
