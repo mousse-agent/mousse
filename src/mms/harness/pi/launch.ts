@@ -2,7 +2,8 @@ import type { ChildProcess } from 'node:child_process'
 import { isAbsolute, join } from 'node:path'
 import type { RpcCommand } from '@earendil-works/pi-coding-agent'
 import { compareVersions } from '../driver'
-import { HOME_VARIABLES, INHERITED_CREDENTIALS, type InstanceEnv } from '../env'
+import type { CredentialKind } from '../../../shared/harness/status'
+import { HOME_VARIABLES, INHERITED_CREDENTIALS, lockedEnv, type InstanceEnv } from '../env'
 import { spawnHarness } from '../spawn'
 import { ANTHROPIC_OAUTH_ENV_KEYS, piOwnProviderKeys } from './envKeys'
 import { PiRpcClient, type PiRpcHandlers } from './rpcClient'
@@ -58,10 +59,28 @@ export interface PiLaunchInput {
   extraEnv?: Readonly<Record<string, string>>
   /** Mousse's own variables for its extension (`MOUSSE_PI_*`), set by the engine after the drops. */
   engineEnv?: Readonly<Record<`MOUSSE_PI_${string}`, string>>
+  /**
+   * A bot turn (Bot Phase 1 §5.9): the environment is built from nothing (`lockedEnv`) instead of
+   * the instance's, with the instance's own key variable and configured ids as its secrets, and the
+   * bot marker set after the drops.
+   */
+  locked?: PiLockedLaunch
   /** Where the instance's own provider key is read from: Mousse's environment unless a test passes one. */
   ambient?: NodeJS.ProcessEnv
   /** The host process (test seam): its executable and versions. */
   host?: { execPath: string; versions: Partial<NodeJS.ProcessVersions> }
+}
+
+/** What a bot turn's locked environment is built from. */
+export interface PiLockedLaunch {
+  /** What the instance runs on: only `ambient` passes its provider's cloud credentials. */
+  credential: CredentialKind
+  /** The activation's scratch folder (`TMPDIR` is `<scratch>/tmp` on POSIX). */
+  scratch: string
+  /** `MOUSSE_BOT_*` variables naming the bot process (the activation), set last. */
+  marker?: Readonly<Record<`MOUSSE_BOT_${string}`, string>>
+  /** Test seam (default `process.platform`). */
+  platform?: NodeJS.Platform
 }
 
 export type PiLaunch =
@@ -105,24 +124,44 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
   const home = input.env.home
   if (!home || find(input.env.env, homeVariable) !== home) throw new Error('Pi runs only with its Mousse-owned home')
 
-  const env: NodeJS.ProcessEnv = { ...input.env.env }
-  remove(env, (key) => key.toUpperCase() !== homeVariable && DROPPED.some((pattern) => pattern.test(key)))
-  // The instance env already dropped them (a private home); kept here so the launcher stands alone.
   const credentials = new Set((INHERITED_CREDENTIALS.pi ?? []).map((name) => name.toUpperCase()))
-  remove(env, (key) => credentials.has(key.toUpperCase()))
-
+  const refused = new Set([...credentials, ...ANTHROPIC_OAUTH_ENV_KEYS, ...Object.keys(PI_AWS_RETRY_ENV)].map((name) => name.toUpperCase()))
+  const allowedExtra = (name: string) => !refused.has(name.toUpperCase()) && !DROPPED.some((pattern) => pattern.test(name))
   // The instance's own provider key, as the pi loop honours it today; never a subscription token.
   const ambient = input.ambient ?? process.env
+  const ownKeys: Record<string, string> = {}
   for (const name of piOwnProviderKeys(input.provider)) {
     const value = find(ambient, name)
-    if (value) put(env, name, value)
+    if (value) ownKeys[name] = value
   }
+  const extra = Object.fromEntries(Object.entries(input.extraEnv ?? {}).filter(([name]) => allowedExtra(name)))
 
-  const refused = new Set([...credentials, ...ANTHROPIC_OAUTH_ENV_KEYS, ...Object.keys(PI_AWS_RETRY_ENV)].map((name) => name.toUpperCase()))
-  for (const [name, value] of Object.entries(input.extraEnv ?? {}))
-    if (!refused.has(name.toUpperCase()) && !DROPPED.some((pattern) => pattern.test(name))) put(env, name, value)
+  let env: NodeJS.ProcessEnv
+  if (input.locked) {
+    // Nothing of the instance's or Mousse's environment but the allowlist (`lockedEnv`), then the
+    // instance's own key and ids.
+    env = lockedEnv({
+      platform: input.locked.platform ?? process.platform,
+      base: input.env.env,
+      driver: 'pi',
+      provider: input.provider,
+      credential: input.locked.credential,
+      home,
+      secrets: { ...ownKeys, ...extra },
+      scratch: input.locked.scratch
+    })
+  } else {
+    env = { ...input.env.env }
+    remove(env, (key) => key.toUpperCase() !== homeVariable && DROPPED.some((pattern) => pattern.test(key)))
+    // The instance env already dropped them (a private home); kept here so the launcher stands alone.
+    remove(env, (key) => credentials.has(key.toUpperCase()))
+    for (const [name, value] of Object.entries(ownKeys)) put(env, name, value)
+    for (const [name, value] of Object.entries(extra)) put(env, name, value)
+  }
   for (const [name, value] of Object.entries(input.engineEnv ?? {}))
     if (/^MOUSSE_PI_/i.test(name)) put(env, name, value)
+  for (const [name, value] of Object.entries(input.locked?.marker ?? {}))
+    if (/^MOUSSE_BOT_/i.test(name)) put(env, name, value)
 
   put(env, 'PI_PACKAGE_DIR', input.runtime.root)
   put(env, 'PI_OFFLINE', '1')
@@ -157,11 +196,12 @@ export interface PiProcess {
 export function startPiProcess(
   env: InstanceEnv,
   launch: Extract<PiLaunch, { runs: 'yes' }>,
-  options: { cwd: string; handlers?: PiRpcHandlers }
+  options: { cwd: string; handlers?: PiRpcHandlers; onProcess?: (pid: number) => void }
 ): PiProcess {
   const child = spawnHarness({ ...env, env: launch.env }, 'turn', launch.command, launch.args, {
     cwd: options.cwd,
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(options.onProcess ? { onProcess: options.onProcess } : {})
   })
   let tail = ''
   // Always drained: a full stderr pipe would stall the child.

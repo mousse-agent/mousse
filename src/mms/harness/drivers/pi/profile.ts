@@ -39,6 +39,11 @@ export interface PiProfileInputs {
   oauth?: PiOAuthSource
   /** The process environment ambient credentials come from (test seam). */
   env?: NodeJS.ProcessEnv
+  /**
+   * Each process a bot turn starts (`PiRpcDriverOptions.onBotProcess`): the profile's bot process
+   * registry (`BotProcessRegistry.attachThread`). Without it no bot turn runs on Pi.
+   */
+  onBotProcess?: (pid: number, threadId: string) => void
 }
 
 /**
@@ -133,6 +138,7 @@ export function piRpcProfileOptions(inputs: PiProfileInputs): PiRpcDriverOptions
       return Object.fromEntries(Object.entries(env as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     },
     ...(inputs.oauth ? { oauth: inputs.oauth } : {}),
+    ...(inputs.onBotProcess ? { onBotProcess: inputs.onBotProcess } : {}),
     identity: async (providerId) => {
       const env = inputs.env ?? process.env
       const subject = piCredentialSubject(providerId, credential(providerId), env)

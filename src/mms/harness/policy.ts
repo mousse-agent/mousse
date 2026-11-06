@@ -165,13 +165,12 @@ export interface CheckPolicyOptions {
  * What every runtime still lacks before a bot may run on it (PR 6 §4). While this list is not
  * empty, every bot policy is refused, at approval, at dispatch and at turn admission, whatever the
  * runtime's caps say: a runtime promoted to `exact` tool control does not turn bots on by itself.
- * Each item is removed by the change that builds it.
+ * Each item is removed by the change that builds it. Empty since Bot Phase 1 (§5.9): the detached
+ * supervisor (`bots/supervisor/`) ends a dispatch's process group at its deadline and confirms the
+ * exit; Pi's bot turns and locked Claude Code never keep a process warm and start it in a group of
+ * its own; and both run in the locked environment (`lockedEnv`).
  */
-export const BOT_RUNTIME_GAPS: readonly string[] = Object.freeze([
-  'an active-time supervisor that stops a bot at its deadline and its prepaid time outside the daemon loop, with confirmed process exits',
-  'bot processes that are never kept warm, launched in their own process group',
-  'the locked environment for bot processes'
-])
+export const BOT_RUNTIME_GAPS: readonly string[] = Object.freeze([])
 
 /** Why bots cannot run yet, in plain words. */
 export function botRuntimeGapReason(gaps: readonly string[]): string {

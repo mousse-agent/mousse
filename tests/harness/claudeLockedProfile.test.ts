@@ -31,11 +31,11 @@ import { checkPolicy } from '../../src/mms/harness/policy'
 import type { DriverContext, InstanceConfig } from '../../src/mms/harness/driver'
 import type { RunPolicy } from '../../src/shared/harness/types'
 import { decodeInstanceConfig } from '../../src/mms/harness/driver'
-import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_REREAD_MS, CLAUDE_POLICY_TRUST_MS, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
+import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_REREAD_MS, CLAUDE_POLICY_TRUST_MS, CLAUDE_UNSUPERVISED_REFUSAL, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
 import { instanceEnv, lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
+import { ClaudeSubscriptionAdapter, type ClaudeLockedProfile } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
@@ -492,6 +492,19 @@ describe('locked Claude Code: its policy reading outside a turn (review r2)', ()
     await Promise.all(waiting)
     expect(reads).toBe(1)
     expect(driver.botAuthority!(lockedConfig, 'claude-c')).toBe(true)
+  })
+
+  it('a locked entry runs no bot turn without process supervision, and reports each process with its thread (Bot Phase 1 §5.9)', async () => {
+    const unsupervised = boundEntry(claudeCodeDriver({ evidence: evidence(), readPolicy: async () => false }), 'claude-u')
+    const lockedOf = (runtime: typeof unsupervised.runtime) => (runtime.adapter as unknown as { locked: ClaudeLockedProfile }).locked
+    expect(await lockedOf(unsupervised.runtime).admit()).toEqual({ ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL })
+    unsupervised.runtime.stop?.()
+    const reports: Array<[number, string]> = []
+    const supervised = boundEntry(claudeCodeDriver({ evidence: evidence(), readPolicy: async () => false, onLockedProcess: (pid, threadId) => void reports.push([pid, threadId]) }), 'claude-s')
+    expect(await lockedOf(supervised.runtime).admit()).not.toEqual({ ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL })
+    lockedOf(supervised.runtime).onProcess!(4242, 'bot-thread')
+    expect(reports).toEqual([[4242, 'bot-thread']])
+    supervised.runtime.stop?.()
   })
 
   it('one entry\'s reading never answers for another, and a stale or policy reading claims nothing', async () => {

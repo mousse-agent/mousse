@@ -191,6 +191,12 @@ export interface HarnessGateway {
    */
   checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /**
+   * Whether the instance's runtime can hold a bot to `policy` (Bot Phase 1 §5.9, `BotRuntimeHold`):
+   * a bot policy, a runtime that holds every call of a bot turn to its bot authority
+   * (`HarnessDriver.botAuthority`), and `checkPolicy`. The bot model's candidates are filtered by it.
+   */
+  canHoldBot(instanceId: string, policy: RunPolicy, model?: string): Enforceability
+  /**
    * Reads again, now, what the instance's bot checks depend on beyond its config
    * (`HarnessDriver.readPolicyFacts`: a locked Claude entry's organisation policy). The bot engine
    * awaits it before approval and dispatch; a failure leaves the entry claiming nothing.
@@ -1180,6 +1186,19 @@ export class Harness implements HarnessGateway {
     }
     const spendModel = model && hasSpendLimit(policy) ? record.runtime.spendModel?.(model) : undefined
     return checkPolicy(this.recordCaps(record), policy, instanceId, spendModel, this.policyOptions(record))
+  }
+
+  canHoldBot(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
+    const refuse = (reason: string): Enforceability => ({ ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } })
+    if (policy.authority?.kind !== 'bot') return refuse('This is not a bot policy.')
+    let record: InstanceRecord
+    try {
+      record = this.record(instanceId)
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error))
+    }
+    if (record.driver.botAuthority?.(record.config, record.instanceId) !== true) return refuse(`${this.displayName(record)} cannot hold a bot to its permissions.`)
+    return this.checkPolicy(instanceId, policy, model)
   }
 
   private policyOptions(record: InstanceRecord): CheckPolicyOptions {

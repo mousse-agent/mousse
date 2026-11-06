@@ -4,6 +4,10 @@
  * Messages API mock with a fake key and a temporary home. Nothing signs in and nothing leaves the
  * machine. Shell items (8–12, 16, 17) need Claude Code's sandbox and run only where it is available;
  * no record is written from here.
+ *
+ * It runs this platform's binary of the pinned SDK (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`),
+ * or the Claude Code named by `MOUSSE_CLAUDE_EVIDENCE_BINARY` (an installed version a record is made
+ * for). A passing run is what a `CONTAINMENT_EVIDENCE` record for that version and platform cites.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
@@ -18,8 +22,9 @@ import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionServ
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 
-const BINARY = join(process.cwd(), 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe')
-const hasBinary = process.platform === 'win32' && existsSync(BINARY)
+const BINARY = process.env.MOUSSE_CLAUDE_EVIDENCE_BINARY
+  || join(process.cwd(), 'node_modules', '@anthropic-ai', `claude-agent-sdk-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'claude.exe' : 'claude')
+const hasBinary = existsSync(BINARY)
 
 type Json = Record<string, unknown>
 
@@ -93,6 +98,9 @@ interface LockedRun {
   rows: Array<{ name: string; status: string; idempotent?: boolean }>
   charge: ReturnType<typeof vi.fn>
   pids: number[]
+  /** Linux: each CLI process's environment as it started (`/proc/<pid>/environ`). */
+  environs: Array<Record<string, string>>
+  instanceHome: string
   text: string
 }
 
@@ -141,7 +149,8 @@ describe('locked Claude Code against the real pinned CLI', () => {
       launchConfig: () => ({ binaryPath: BINARY, args: ['--dangerously-skip-permissions'], env: { USER_VARIABLE: 'x' } }),
       lockedEnv: (cwd) => lockedEnv({
         platform: process.platform,
-        base: { ...process.env, USERPROFILE: userHome, HOME: userHome, APPDATA: join(userHome, 'AppData', 'Roaming'), LOCALAPPDATA: join(userHome, 'AppData', 'Local') },
+        // A credential and a variable of Mousse's own environment: neither may reach the CLI (item 7).
+        base: { ...process.env, PARENT_SECRET: 'parent-secret-value', GITHUB_TOKEN: 'ghp-parent', USERPROFILE: userHome, HOME: userHome, APPDATA: join(userHome, 'AppData', 'Roaming'), LOCALAPPDATA: join(userHome, 'AppData', 'Local') },
         driver: 'claude', credential: 'api_key', home: instanceHome, scratch: cwd
       }),
       finalEnv: (env) => ({
@@ -174,10 +183,17 @@ describe('locked Claude Code against the real pinned CLI', () => {
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
     })
     const pids: number[] = []
-    const locked: ClaudeLockedTurn = { authority, ledger, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a test bot.', onProcess: (pid) => pids.push(pid) }
+    const environs: LockedRun['environs'] = []
+    const onProcess = (pid: number) => {
+      pids.push(pid)
+      // The spawn returns once the CLI was executed: its environment is the one it runs with.
+      if (process.platform === 'linux')
+        environs.push(Object.fromEntries(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean).map((entry) => [entry.slice(0, entry.indexOf('=')), entry.slice(entry.indexOf('=') + 1)])))
+    }
+    const locked: ClaudeLockedTurn = { authority, ledger, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a test bot.', onProcess }
     const text = await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'claude-sonnet-4-5', prompt: 'Read the files.', permissionMode: 'full', locked, onText: () => undefined })
     return {
-      base, root, scratch, outside, userHome, rows, charge, pids, text, marker,
+      base, root, scratch, outside, userHome, rows, charge, pids, environs, instanceHome, text, marker,
       results: anthropic.requests.at(-1)!.results.join('\n'),
       toolRequests: anthropic.requests.filter((request) => request.tools.length)
     }
@@ -209,6 +225,16 @@ describe('locked Claude Code against the real pinned CLI', () => {
     expect(existsSync(run.marker('user'))).toBe(false)
     expect(existsSync(run.marker('project'))).toBe(false)
     expect(readFileSync(join(run.outside, 'secret.txt'), 'utf8')).toBe('TOP-SECRET-VALUE')
+    // Item 7: the CLI runs in the locked environment, built from nothing: none of Mousse's own
+    // variables or credentials, nor the entry's configured ones; its own home and the scratch's TMPDIR.
+    if (process.platform === 'linux') {
+      expect(run.environs).toHaveLength(1)
+      const env = run.environs[0]
+      for (const name of ['PARENT_SECRET', 'GITHUB_TOKEN', 'USER_VARIABLE']) expect(env, name).not.toHaveProperty(name)
+      expect(env.CLAUDE_CONFIG_DIR).toBe(run.instanceHome)
+      expect(env.TMPDIR).toBe(join(run.scratch, 'tmp'))
+      expect(env.HOME).toBe(run.userHome)
+    }
   }, 120_000)
 
   it.skipIf(!hasBinary)('a path padded with whitespace or ending in a space or dot never leaves the folders (review r2: Claude Code trims paths)', async () => {
