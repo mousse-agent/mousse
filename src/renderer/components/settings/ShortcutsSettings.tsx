@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { getCommand, type CommandId, type CommandScope, type ShortcutOverrides } from '../../../shared/commands'
+import { getCommand, type CommandDefinition, type CommandId, type CommandScope, type ShortcutOverrides } from '../../../shared/commands'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import { setRecording } from '../../commands/commandRegistry'
 import {
@@ -13,7 +13,7 @@ import {
   type RecorderAction,
   type ShortcutRow
 } from '../../commands/shortcutEditing'
-import { RotateCcw } from '../../lib/icons'
+import { Pencil, RotateCcw } from '../../lib/icons'
 import { useAppStore } from '../../stores/appStore'
 import { SettingsGroup, SettingsRow } from './SettingsRow'
 import { SettingsSearch } from './SettingsSearch'
@@ -25,7 +25,39 @@ const SCOPE_NOTES: Record<CommandScope, string | null> = {
   'workflow-editor': 'Works in the workflow editor'
 }
 
-const title = (id: CommandId): string => getCommand(id).title
+/** Shorter names for rows whose section already says where they work. Command titles stay as they are. */
+const ROW_TITLES: Partial<Record<CommandId, string>> = {
+  'editor.save': 'Save file',
+  'workflow.undo': 'Undo',
+  'workflow.redo': 'Redo'
+}
+
+const rowTitle = (command: CommandDefinition): string => ROW_TITLES[command.id] ?? command.title
+
+/** A command named in a conflict notice, which may sit in another section: a short name keeps its section. */
+const title = (id: CommandId): string => {
+  const command = getCommand(id)
+  const short = ROW_TITLES[id]
+  if (!short) return command.title
+  return command.scope === 'global' ? short : `${short} (${command.category})`
+}
+
+/** The scope every row of a section shares, said once under its heading; null when the rows are global or mixed. */
+export function sectionScope(rows: readonly ShortcutRow[]): CommandScope | null {
+  const scope = rows[0]?.command.scope
+  if (!scope || scope === 'global') return null
+  return rows.every((row) => row.command.scope === scope) ? scope : null
+}
+
+/** What a row adds to its section: the editors own fixed keys, a scope its section does not share, a shadowing command. */
+export function rowNotes(row: ShortcutRow, scopeOfSection: CommandScope | null): string[] {
+  const { command } = row
+  const notes = [
+    command.fixed ? 'Set by the editor' : command.scope === scopeOfSection ? null : SCOPE_NOTES[command.scope],
+    row.shadowedBy ? `Not active while ${title(row.shadowedBy)} uses this shortcut` : null
+  ]
+  return notes.filter((note): note is string => Boolean(note))
+}
 
 /** A row waiting for the user: a refused binding, or one that needs a choice before it is saved. */
 type Pending = { id: CommandId; refused: string } | { id: CommandId; proposal: Extract<BindingProposal, { kind: 'confirm' }> }
@@ -181,19 +213,17 @@ export function ShortcutsSettings({
     setRecordingId(id)
   }
 
-  const renderRow = (row: ShortcutRow) => {
+  const renderRow = (row: ShortcutRow, scopeOfSection: CommandScope | null) => {
     const { command } = row
     const id = command.id
+    const name = rowTitle(command)
     const recording = recordingId === id
     const notice = pending?.id === id ? pending : null
-    const notes = [
-      command.fixed ? 'Set by the editor' : SCOPE_NOTES[command.scope],
-      row.shadowedBy ? `Not active while ${title(row.shadowedBy)} uses this shortcut` : null
-    ].filter(Boolean)
+    const notes = rowNotes(row, scopeOfSection)
     return (
       <SettingsRow
         key={id}
-        title={command.title}
+        title={name}
         titleAction={row.custom ? <span className="shortcut-badge">Custom</span> : undefined}
         description={notes.length ? notes.join('. ') : undefined}
         control={
@@ -216,7 +246,7 @@ export function ShortcutsSettings({
                     type="button"
                     className="settings-icon-btn"
                     title="Reset to default"
-                    aria-label={`Reset ${command.title} to its default shortcut`}
+                    aria-label={`Reset ${name} to its default shortcut`}
                     onClick={() => void save(resetPatch(id, overrides, platform))}
                   >
                     <RotateCcw size={14} />
@@ -224,14 +254,16 @@ export function ShortcutsSettings({
                 )}
                 <button
                   type="button"
-                  className="settings-btn"
+                  className="settings-icon-btn"
+                  title="Change shortcut"
+                  aria-label={`Change ${name} shortcut`}
                   ref={(node) => {
                     if (node) changeButtons.current.set(id, node)
                     else changeButtons.current.delete(id)
                   }}
                   onClick={() => startRecording(id)}
                 >
-                  Change
+                  <Pencil size={14} />
                 </button>
               </>
             )}
@@ -272,11 +304,14 @@ export function ShortcutsSettings({
         </button>
       </div>
       {saveError && <p className="settings-error" role="alert">{saveError}</p>}
-      {groups.map((group) => (
-        <SettingsGroup key={group.category} title={group.category}>
-          {group.rows.map(renderRow)}
-        </SettingsGroup>
-      ))}
+      {groups.map((group) => {
+        const scope = sectionScope(group.rows)
+        return (
+          <SettingsGroup key={group.category} title={group.category} description={scope ? SCOPE_NOTES[scope] : undefined} className="shortcuts-group">
+            {group.rows.map((row) => renderRow(row, scope))}
+          </SettingsGroup>
+        )
+      })}
       {groups.length === 0 && <p className="settings-muted">No matching shortcuts</p>}
     </section>
   )

@@ -1,12 +1,11 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
-import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import type {
   MousseSettings,
   MousseSettingsUpdate,
@@ -19,8 +18,9 @@ import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
-import { AccountSection } from './AccountSection'
-import { takePendingSettingsSection } from '../lib/settingsNavigation'
+import { ActivitySection } from './ActivitySection'
+import { accountSection, takePendingSettingsSection } from '../lib/settingsNavigation'
+import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
@@ -37,21 +37,23 @@ import '../styles/settings.css'
 const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['permission', 'runs', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
   { id: 'appearance', label: 'Appearance', icon: Palette, hue: 1, group: 'Settings', keywords: ['theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'math', 'latex', 'project colors', 'tint'] },
-  { id: 'account', label: 'Account', icon: UserCircle, hue: 5, group: 'Settings', keywords: ['mousse id', 'sign in', 'login', 'profile', 'name', 'avatar', 'environment', 'activity'] },
+  { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'Settings', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
-  { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
+  { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
 ] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
+/** Words that find Devices only when this build has Mousse ID, whose sign-in sits at its top. */
+const MOUSSE_ID_KEYWORDS = ['mousse id', 'sign in', 'login', 'account', 'phone']
+
 /** Section ids from before the redesign, still sent by links and other surfaces. */
 const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
-  profile: 'account',
   notifications: 'general',
   updates: 'general',
   context: 'agents',
@@ -60,9 +62,12 @@ const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
   skills: 'integrations'
 }
 
-const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
-  SETTINGS_SECTIONS.find((section) => section.id === value)?.id ??
-  (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
+const settingsSectionId = (value: unknown): SettingsSectionId | undefined => {
+  // The Account page is gone: its sign-in is on Devices and the rest is Activity.
+  if (value === 'account' || value === 'profile') return accountSection(mousseIdAvailable(useMousseIdStore.getState()))
+  return SETTINGS_SECTIONS.find((section) => section.id === value)?.id ??
+    (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
+}
 
 const CONTEXT_COMPACTION_HASH = '#settings-context-compaction'
 /** Where the old 'context' section and the compaction link land. */
@@ -70,6 +75,10 @@ const CONTEXT_COMPACTION_ANCHOR = 'agents-context-compaction'
 
 /** A setting to bring into view once its page shows it; `seq` makes picking the same result again count. */
 interface PendingAnchor { anchor: string; seq: number }
+
+/** The pages the search lists; Devices also answers to Mousse ID words when this build has the service. */
+const searchPages = (mousseId: boolean) => VISIBLE_SETTINGS_SECTIONS.map((section) =>
+  section.id === 'connections' && mousseId ? { ...section, keywords: [...section.keywords, ...MOUSSE_ID_KEYWORDS] } : section)
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -99,8 +108,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     initialRequest === 'context' ? { anchor: CONTEXT_COMPACTION_ANCHOR, seq: 0 } : null)
   /** Why a search result's setting is not on its page; `focus` when nothing else took focus. */
   const [anchorNote, setAnchorNote] = useState<{ text: string; focus: boolean } | null>(null)
-  // Account always exists: it shows Activity, plus Mousse ID when this build has the service.
   const activeSection: SettingsSectionId = selectedSection
+  const mousseId = useMousseIdAvailable()
   useEffect(() => {
     const openSection = (event: Event) => {
       const requested = (event as CustomEvent).detail
@@ -312,8 +321,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const openResult = (result: SettingsSearchResult) => goToSection(result.section, result.anchor)
   const reviewPending = useStorageReviewPending()
   const searching = navQuery.trim() !== ''
-  const mousseIdAvailable = useMousseIdAvailable()
-  const results = useMemo(() => searchSettings(navQuery, VISIBLE_SETTINGS_SECTIONS, searchIndex(mousseIdAvailable)), [navQuery, mousseIdAvailable])
+  const results = useMemo(() => searchSettings(navQuery, searchPages(mousseId), searchIndex(mousseId)), [navQuery, mousseId])
   const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
   const activeSectionInfo = sectionOf(activeSection)
   const activeSectionLabel = activeSectionInfo.label
@@ -464,9 +472,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onUpdate={updateSettings}
             />
           )}
-          {activeSection === 'account' && (
-          <section id="account" className="settings-section">
-            <AccountSection />
+          {activeSection === 'activity' && (
+          <section id="activity" className="settings-section">
+            <ActivitySection />
           </section>
           )}
 
