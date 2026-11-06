@@ -1,6 +1,7 @@
 import { Plus, Star, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AGENT_RUNTIME_KINDS } from '../../../shared/agents/types'
+import { DelayedLoader } from '../ui/DelayedLoader'
 import { EmptyState } from '../ui/EmptyState'
 import { SearchInput } from '../ui/SearchInput'
 import { AgentCard } from './AgentCard'
@@ -215,8 +216,8 @@ export function AgentsLibrary({
         </div>
       ) : null}
       {loading ? (
-        <div className="agent-defs--loading" role="status">
-          Loading agents…
+        <div className="agent-defs--loading">
+          <DelayedLoader label="Loading agents" />
         </div>
       ) : error ? (
         <div className="agent-defs--error" role="alert">
