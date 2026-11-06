@@ -1,14 +1,15 @@
-import { useState } from 'react'
+import { useId } from 'react'
 import type { StatusDescription } from '../../../shared/harness/status'
 import type { AddOptionMethod } from '../../../shared/harness/types'
-import { Check, Pencil, X } from '../../lib/icons'
+import { SecretRow } from '../settings/SecretRow'
 import { SettingsRow } from '../settings/SettingsRow'
 import { StatusLine, useAsyncAction } from './parts'
 
 /**
  * The Setup row of a model API: replace the key, sign in again, or the cloud credentials it reuses.
  * Removing the provider lives in the editor header. A pasted key goes through
- * `providers.instances.setSecret`; a sign-in or guided key through `providers.instances.signIn`.
+ * `providers.instances.setSecret` (in the shared secret row); a sign-in or guided key through
+ * `providers.instances.signIn`.
  */
 export function ApiSetupRow({
   label,
@@ -35,15 +36,7 @@ export function ApiSetupRow({
   onSignIn: () => Promise<void>
 }) {
   const { busy, error, run } = useAsyncAction()
-  const [editingKey, setEditingKey] = useState(false)
-  const [key, setKey] = useState('')
-
-  const saveKey = () =>
-    void run('key', async () => {
-      await onReplaceKey(key.trim())
-      setEditingKey(false)
-      setKey('')
-    })
+  const inputId = useId()
   const errorLine = error ? <span className="prov-error">{error}</span> : null
   const statusLine = <StatusLine status={status} />
 
@@ -71,46 +64,19 @@ export function ApiSetupRow({
   }
 
   return (
-    <SettingsRow
+    <SecretRow
       title="API key"
       anchor="providers-api-key"
-      description={errorLine ?? (editingKey ? 'Leave blank for guided setup' : statusLine)}
-      control={
-        editingKey ? (
-          <span className="settings-icon-actions">
-            <button type="button" className="settings-icon-btn" title="Cancel" aria-label="Cancel" disabled={busy !== null} onClick={() => setEditingKey(false)}>
-              <X size={14} />
-            </button>
-            <input
-              className="settings-input"
-              type="password"
-              value={key}
-              autoFocus
-              placeholder={`New ${label} key`}
-              aria-label={`New ${label} API key`}
-              onChange={(event) => setKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') saveKey()
-                if (event.key === 'Escape') setEditingKey(false)
-              }}
-            />
-            <button type="button" className="settings-icon-btn primary" title="Save key" aria-label="Save" disabled={busy !== null} onClick={saveKey}>
-              <Check size={14} />
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="settings-icon-btn primary"
-            title="Replace key"
-            aria-label="Replace key"
-            disabled={busy !== null}
-            onClick={() => (guidedKey ? void run('key', () => onReplaceKey('')) : setEditingKey(true))}
-          >
-            <Pencil size={14} />
-          </button>
-        )
-      }
+      inputId={`${inputId}-api-key`}
+      fieldLabel={`New ${label} API key`}
+      placeholder={`New ${label} key`}
+      configured
+      allowBlank
+      description={errorLine ?? statusLine}
+      editingHint="Leave blank for guided setup"
+      onReplace={guidedKey ? () => onReplaceKey('') : undefined}
+      onSave={onReplaceKey}
+      busy={busy !== null}
     />
   )
 }
