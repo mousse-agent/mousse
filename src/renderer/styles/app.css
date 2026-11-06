@@ -3510,16 +3510,17 @@ html[data-theme='high-contrast'] {
   position: relative;
 }
 
+/* One muted line and Restart shell, centred over the closed terminal. */
 .terminal-exited-overlay {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
   background: rgba(var(--surface-base-rgb), 0.85);
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
   z-index: 2;
 }
 
@@ -3531,6 +3532,11 @@ html[data-theme='high-contrast'] {
   padding: 6px 12px;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+}
+
+.terminal-remote-holder-error {
+  margin-left: auto;
+  color: var(--danger);
 }
 
 .browser-panel,
@@ -4012,26 +4018,36 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-row {
+/* A row is the entry button plus its "…" button; hover and selection fill the whole row. */
+.file-tree-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 4px 8px 4px 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: left;
   border-radius: 4px;
+  color: var(--text-secondary);
 }
 
-.file-tree-row:hover {
+.file-tree-item:hover,
+.file-tree-item.menu-open {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--text-primary);
 }
 
-.file-tree-row.selected {
+.file-tree-item.selected {
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--text-primary);
+}
+
+.file-tree-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 8px 4px 0;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  border-radius: 4px;
 }
 
 .file-tree-chevron,
@@ -4051,11 +4067,6 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   white-space: nowrap;
 }
 
-.file-tree-loading {
-  padding: 4px 16px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 
 .git-panel {
   flex-direction: row;
@@ -5226,64 +5237,42 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .document-panel-empty {
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--text-muted);
 }
 
-.document-tabs {
+/* Tabs come from the shared strip (styles/tab-bar.css); Copy Markdown sits at its end. */
+.document-toolbar {
   display: flex;
-  gap: 4px;
-  padding: 8px 8px 0;
-  overflow-x: auto;
   flex-shrink: 0;
-}
-
-.document-tab {
-  display: inline-flex;
   align-items: center;
-  gap: 2px;
-  border-radius: 8px 8px 0 0;
-  background: rgba(var(--surface-soft-rgb), 0.55);
-  max-width: 220px;
-}
-
-.document-tab.active {
-  background: rgba(var(--surface-muted-rgb), 0.85);
-}
-
-.document-tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 8px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
   min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.document-tab.active .document-tab-label {
-  color: var(--text-primary);
+.document-toolbar .ui-tabs {
+  flex: 1;
+  border-bottom: 0;
 }
 
-.document-tab-label span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.document-tab-icon {
+  flex: none;
+  opacity: 0.75;
 }
 
-.document-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
+.document-copy {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
   margin-right: 4px;
-  border-radius: 6px;
+  border-radius: var(--ui-control-radius, 6px);
   color: var(--text-secondary);
 }
 
-.document-tab-close:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+.document-copy:hover:not(:disabled) {
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
