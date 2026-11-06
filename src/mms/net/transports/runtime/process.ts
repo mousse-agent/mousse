@@ -35,6 +35,9 @@ export function cleanEnvironment(): NodeJS.ProcessEnv {
   )
 }
 
+/** A child that ran at least this long (the longest restart delay) before it ended starts a fresh restart budget. */
+const STABLE_RUN_MS = 60_000
+
 export class ProcessSupervisor {
   private child?: ChildProcess
   private stopped = false
@@ -56,6 +59,7 @@ export class ProcessSupervisor {
   start(): void {
     if (this.child || this.stopped) return
     this.options.state('provisioning')
+    const startedAt = this.options.clock.monotonic()
     const child = (this.child = spawn(this.options.binary, this.options.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -83,6 +87,7 @@ export class ProcessSupervisor {
       this.exitWaiters.clear()
       if (this.stopped) return
       this.options.state('degraded')
+      if (this.options.clock.monotonic() - startedAt >= STABLE_RUN_MS) this.restarts = 0
       if (++this.restarts > (this.options.maxRestarts ?? 6)) {
         this.options.state('failed')
         return

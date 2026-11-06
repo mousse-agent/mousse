@@ -13,7 +13,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
   try {
     await build({ entryPoints: [resolve('tests/fixtures/profile-footer/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.woff2': 'file' }, define: { 'process.env.NODE_ENV': '"development"' } })
     await build({ entryPoints: [resolve('tests/fixtures/profile-footer/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
-    writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>:root{--text-primary:#eee;--text-secondary:#aaa;--accent:#a99;--border:#333;--bg-secondary:#222;--titlebar-height:40px}body{margin:0;background:#111}#root{width:260px}.app{height:600px}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
+    writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>:root{--text-primary:#eee;--text-secondary:#aaa;--accent:#a99;--border:#333;--bg-secondary:#222;--titlebar-height:40px}body{margin:0;background:#111}#root{width:260px}.app{width:260px;height:600px}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
     const env = { ...process.env, MOUSSE_PROFILE_FOOTER_DIRECTORY: directory }; delete env.ELECTRON_RUN_AS_NODE
     child = spawn(electron as unknown as string, [join(directory, 'main.mjs')], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
@@ -32,7 +32,8 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.defaultActions).toEqual(['Rename', 'Colour'])
     expect(report.renameDialog).toMatchObject({ title: 'Edit profile', value: 'Adithya', maxLength: 64, submit: 'Save profile name', submitDisabled: true, archive: false, focus: 'Profile name' })
     expect(report.updates).toEqual([{ id: 'prf_alpha', displayName: 'Adithya local' }])
-    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Roster', 'Groups', 'Recent'])
+    // The fixture has no chats with an agent, so Recent stays hidden.
+    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Roster', 'Groups'])
     for (const heading of report.headings) expect(heading).toMatchObject({ transform: 'none', spacing: 'normal' })
     expect(report.fonts.ui).toMatch(/^Geist,/)
     expect(report.fonts.code).toMatch(/^"Geist Mono",/)
