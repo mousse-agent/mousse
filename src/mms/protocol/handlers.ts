@@ -160,10 +160,6 @@ export interface HandlerContext {
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
 }
 
-/**
- * A person at a Mousse window on this computer, or at another of the user's computers (a routed
- * call). Both are the user acting for themselves; the second keeps its computer in `bridgeCaller`.
- */
 /** A map keyed by thread id, without private threads unless the caller is on this computer. */
 function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T>): Record<string, T> {
   if (connectionIsLocal(ctx.connection)) return byThread
@@ -172,6 +168,10 @@ function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T
   return Object.fromEntries(Object.entries(byThread).filter(([threadId]) => !hidden.has(threadId)))
 }
 
+/**
+ * A person at a Mousse window on this computer, or at another of the user's computers (a routed
+ * call). Both are the user acting for themselves; the second keeps its computer in `bridgeCaller`.
+ */
 function isPerson(connection: HandlerContext['connection']): boolean {
   return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
 }
@@ -762,6 +762,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
     codeHost: ctx.mms.gitService.codeHost,
     projects: ctx.mms.projects,
     threads: ctx.mms.threads,
+    // Another device is never told a private thread works on a pull request.
+    ...(connectionIsLocal(ctx.connection) ? {} : { hidden: (thread: Thread) => isLocalOnlyThread(thread, ctx.mms.threads.listAllThreads()) }),
     // A failed start's thread goes through the one delete; with unpublished work it stays in Archived.
     trashThread: (threadId) => ctx.mms.deleteThreadForGood(threadId, { human: false, discard: false, internal: true }),
     // Like `threads.create`: a new thread starts on the model last used.
@@ -4017,7 +4019,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const store = ctx.mms.threads.lifecycleStore
       if (p.threadId === undefined) {
         // Another device is never told a private thread is in the trash.
-        const lifecycles = connectionIsLocal(ctx.connection) ? store.list() : store.list().filter((record) => !threadFolderIsLocalOnly(record.location))
+        const lifecycles = connectionIsLocal(ctx.connection) ? store.list() : store.list().filter((record) => !threadFolderIsLocalOnly(record.location, true))
         const taskNames: Record<string, string> = {}
         for (const record of lifecycles) {
           try {

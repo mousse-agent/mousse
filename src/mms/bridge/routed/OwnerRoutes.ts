@@ -858,7 +858,7 @@ export class OwnerRoutes {
       // A trashed thread is not listed, but its inventory can be read; a private one stays unknown.
       if (method !== 'threads.inventory') return false
       const record = services.threads.lifecycleStore?.get(id)
-      return Boolean(record) && !threadFolderIsLocalOnly(record!.location)
+      return Boolean(record) && !threadFolderIsLocalOnly(record!.location, true)
     }
     if (typeof threadId === 'string' && !known(threadId))
       throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })

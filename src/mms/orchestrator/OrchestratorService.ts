@@ -368,7 +368,6 @@ function formatQuestionAnswerValue(question: UserQuestion, value: string | strin
  * Render submitted question answers as transcript text (`Q:`/`A:` per question).
  * Option ids resolve to their labels; custom-typed answers pass through verbatim.
  */
-
 export function formatQuestionAnswersMessage(
   questions: UserQuestion[],
   answers: UserQuestionAnswers

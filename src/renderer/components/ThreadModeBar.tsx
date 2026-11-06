@@ -17,6 +17,11 @@ export function ThreadModeBarView({ localOnly }: { localOnly: boolean }) {
 
 /** Shown above the selected thread when it is private. */
 export function ThreadModeBar() {
-  const localOnly = useAppStore((state) => state.threads.find((entry) => entry.id === state.activeThreadId)?.localOnly === true)
+  const localOnly = useAppStore((state) => {
+    const thread = state.threads.find((entry) => entry.id === state.activeThreadId)
+    if (thread?.localOnly) return true
+    // A new chat with Private switched on is private before its thread exists.
+    return !thread?.startedAt && state.composerWorkspaceDrafts[state.activeThreadId ?? '__blank__']?.localOnly === true
+  })
   return <ThreadModeBarView localOnly={localOnly} />
 }
