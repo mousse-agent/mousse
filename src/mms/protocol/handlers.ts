@@ -90,7 +90,9 @@ import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from '.
 import { imageAt, messagesBefore, withoutImageBytes } from './transcriptPaging'
 import { ROUTED_MESSAGES_PAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
-import { listedProjectsFor, listedThreadsFor } from './threadVisibility'
+import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
+import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
 import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -162,6 +164,14 @@ export interface HandlerContext {
  * A person at a Mousse window on this computer, or at another of the user's computers (a routed
  * call). Both are the user acting for themselves; the second keeps its computer in `bridgeCaller`.
  */
+/** A map keyed by thread id, without private threads unless the caller is on this computer. */
+function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T>): Record<string, T> {
+  if (connectionIsLocal(ctx.connection)) return byThread
+  const hidden = localOnlyThreadIds(ctx.mms.threads.listAllThreads())
+  if (!hidden.size) return byThread
+  return Object.fromEntries(Object.entries(byThread).filter(([threadId]) => !hidden.has(threadId)))
+}
+
 function isPerson(connection: HandlerContext['connection']): boolean {
   return connection?.clientType === 'gui' || connection?.clientType === 'bridge'
 }
@@ -1425,6 +1435,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.projects,
         ctx.mms.getProfileHomeDir()
       )
+      // Another device never learns a private thread's name or project from a reference to it.
+      if (candidate.kind === 'thread' && !connectionIsLocal(ctx.connection) && candidate.threadId) {
+        const thread = ctx.mms.threads.getThread(candidate.threadId)
+        if (thread && isLocalOnlyThread(thread, ctx.mms.threads.listAllThreads())) return { reference: null }
+      }
       return { reference: resolver.resolve(candidate) }
     }
     case 'projects.open': {
@@ -1508,10 +1523,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const name = asString(p.name, 'name', 512)
       const projectId = asOptionalString(p.projectId, 256)
       const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled')
+      // A private thread is started on this computer only, from its own window or CLI.
+      const localOnly = asOptionalBoolean(p.localOnly, 'localOnly') === true
+      if (localOnly && !connectionIsLocal(ctx.connection))
+        throw new DomainRpcError('invalid_params', 'A private thread can only be started on its own computer')
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly })
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
@@ -1621,8 +1640,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // through its parent's Lineage, not as a result of its own.
       // A computer asked by another of the user's computers reads the transcripts of its newest threads only,
       // so a search typed on one computer is bounded work on the others.
+      const hidden = connectionIsLocal(ctx.connection) ? undefined : localOnlyThreadIds(ctx.mms.threads.listAllThreads())
       const results = ctx.mms.threads.searchThreads(query, limit, {
         hideSubagents: true,
+        ...(hidden?.size ? { allow: (thread: Thread) => !hidden.has(thread.id) } : {}),
         ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
@@ -1668,7 +1689,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         activeTurn: { active: turnActive, running: turnRunning },
         connectionFailed,
         turnState: ctx.mms.orchestrator.getTurnState(threadId),
-        turnSnapshot: ctx.mms.orchestrator.getTurnSnapshot(),
+        turnSnapshot: withoutLocalOnlyKeys(ctx, ctx.mms.orchestrator.getTurnSnapshot()),
         revision: ctx.globalSequence()
       }
     }
@@ -2402,7 +2423,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'activity.snapshot': {
-      const activity = ctx.mms.threadRuntimes.getActivitySnapshot()
+      const activity = withoutLocalOnlyKeys(ctx, ctx.mms.threadRuntimes.getActivitySnapshot())
       // A window also gets what the threads of the other computers are doing.
       const remote = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists?.activity() : undefined
       return { activity: remote ? { ...activity, ...remote } : activity }
@@ -3995,7 +4016,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
       if (p.threadId === undefined) {
-        const lifecycles = store.list(), taskNames: Record<string, string> = {}
+        // Another device is never told a private thread is in the trash.
+        const lifecycles = connectionIsLocal(ctx.connection) ? store.list() : store.list().filter((record) => !threadFolderIsLocalOnly(record.location))
+        const taskNames: Record<string, string> = {}
         for (const record of lifecycles) {
           try {
             const path = join(record.location, 'meta.json'); assertLifecyclePath(record.location, path)
@@ -4078,7 +4101,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     // A remote caller's params are validated to `{}`, so only a local client can force a rescan.
     case 'storage.usage': {
       const p = isObject(params) ? params : {}
-      return await ctx.mms.storageUsage.measure({ refresh: asOptionalBoolean(p.refresh, 'refresh') === true })
+      const usage = await ctx.mms.storageUsage.measure({ refresh: asOptionalBoolean(p.refresh, 'refresh') === true })
+      if (connectionIsLocal(ctx.connection)) return usage
+      // Another device sees a private thread's space only as unattributed, never its name.
+      const hidden = localOnlyThreadIds(ctx.mms.threads.listAllThreads())
+      if (!hidden.size) return usage
+      return {
+        ...usage,
+        entries: usage.entries.map((entry) => {
+          if (!entry.threadId || !hidden.has(entry.threadId)) return entry
+          const { threadId: _hidden, ...unattributed } = entry
+          return unattributed
+        }),
+        names: { ...usage.names, threads: Object.fromEntries(Object.entries(usage.names.threads).filter(([id]) => !hidden.has(id))) }
+      }
     }
     case 'daemon.shutdown': {
       // Owner-token fencing: connection hello already verified; write uses server token only.

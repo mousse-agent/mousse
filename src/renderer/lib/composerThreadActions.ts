@@ -7,7 +7,7 @@ import { useAppStore } from '../stores/appStore'
  */
 export function composerThreadActions() {
   return {
-    create: (projectId: string | undefined, opts: { worktreeEnabled: boolean }) =>
+    create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; localOnly?: boolean }) =>
       window.mousse.threads.create(undefined, projectId, opts),
     setWorktreeEnabled: (id: string, enabled: boolean) => window.mousse.threads.setWorktreeEnabled(id, enabled),
     update: (thread: Thread) => useAppStore.getState().upsertThread(thread),

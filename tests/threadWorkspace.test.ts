@@ -53,6 +53,18 @@ describe('ThreadWorkspaceManager', () => {
     }
   })
 
+  it('names a private thread\'s branch from its id, never from its first message', async () => {
+    const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
+    try {
+      writeFileSync(join(fixture.thread, 'meta.json'), JSON.stringify({ id: 'abcd1234-private', name: 'Taxes', localOnly: true }))
+      const metadata = await new ThreadWorkspaceManager(fixture.thread).provision('abcd1234-private', 'main', fixture.root, undefined, undefined, undefined, { nameFrom: 'My tax return numbers' })
+      expect(metadata.branch).toBe('mousse/private-abcd1234')
+      execFileSync('git', ['worktree', 'remove', '--force', metadata.worktreePath], { cwd: fixture.root })
+    } finally {
+      if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous
+    }
+  })
+
   it('provisions from committed primary HEAD while preserving human dirty files exclusively in primary', async () => {
     const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
     try {

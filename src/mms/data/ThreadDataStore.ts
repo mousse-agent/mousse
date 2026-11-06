@@ -69,6 +69,8 @@ interface ThreadMeta {
   sentFrom?: ThreadSentFrom
   /** See `Thread.runsOn`. */
   runsOn?: ThreadRunsOn
+  /** See `Thread.localOnly`. Written only with the first `meta.json`. */
+  localOnly?: true
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
@@ -318,6 +320,8 @@ export class ThreadDataStore extends EventEmitter {
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
+      /** See `Thread.localOnly`. */
+      localOnly?: boolean
     }
   ): Thread {
     const id = opts?.id ?? uuidv4()
@@ -343,6 +347,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
+    if (opts?.localOnly === true) meta.localOnly = true
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's
@@ -453,7 +458,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
-  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }): Thread {
+  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }, opts?: { localOnly?: boolean }): Thread {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
     if (projectId && !project) throw new Error('Execution project is unavailable')
     const id = executionThreadId(executionKey)
@@ -462,6 +467,7 @@ export class ThreadDataStore extends EventEmitter {
     }
     const now = new Date().toISOString()
     const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
+    if (opts?.localOnly === true) initial.localOnly = true
     const threadDir = this.resolveThreadDir(initial, project?.path)
     this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: ownership?.parentTaskId, creating: true })
     this.ensureThreadDir(threadDir)

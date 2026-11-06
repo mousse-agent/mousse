@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop, Server } from '../lib/icons'
+import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop, Lock, Server } from '../lib/icons'
 import type { NodeId } from '../../shared/net'
 import type { Project } from '../../shared/types'
 import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
@@ -26,12 +26,14 @@ export interface ComposerDeviceProps {
   onOpenRemoteProject: (path: string) => Promise<string | undefined>
 }
 
-export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device, onChange, onOpenProject, onError }: {
+export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device, onChange, onPrivateChange, onOpenProject, onError }: {
   projects: Project[]
   workspace: ComposerWorkspace
   disabled: boolean
   device?: ComposerDeviceProps
   onChange: (workspace: ComposerWorkspace) => void
+  /** Turns Private on or off for the new chat (`Thread.localOnly`). Without it the toggle is not shown. */
+  onPrivateChange?: (localOnly: boolean) => void
   onOpenProject: () => Promise<void>
   onError: (message: string) => void
 }) {
@@ -129,7 +131,8 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
                   onChange({
                     projectId: entry.id || undefined,
                     worktreeEnabled: Boolean(entry.id && workspace.worktreeEnabled),
-                    ...(workspace.node ? { node: workspace.node } : {})
+                    ...(workspace.node ? { node: workspace.node } : {}),
+                    ...(workspace.localOnly ? { localOnly: true } : {})
                   })
                   closeMenu()
                 }}
@@ -164,9 +167,16 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           </div>
         </FloatingPortal>
       )}
-      {device && canPickComputer(device.devices, workspace.node)
+      {device && !workspace.localOnly && canPickComputer(device.devices, workspace.node)
         ? <ComposerDeviceButton device={device} node={workspace.node} disabled={disabled || opening} />
-        : <span className="composer-workspace-device"><Laptop size={16} aria-hidden="true" />{device?.localName ?? 'This computer'}</span>}
+        : (
+          <span
+            className="composer-workspace-device"
+            title={workspace.localOnly ? 'Private threads run on this computer only' : undefined}
+          >
+            <Laptop size={16} aria-hidden="true" />{device?.localName ?? 'This computer'}
+          </span>
+        )}
       {remoteDialog && device && workspace.node && (
         <RemoteProjectDialog
           deviceName={runOnLabel(device.localName, device.devices, workspace.node)}
@@ -187,6 +197,21 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
       >
         <GitBranch size={16} strokeWidth={1.8} aria-hidden="true" />
       </button> : null}
+      {onPrivateChange && (
+        <button
+          type="button"
+          className={`composer-icon-btn composer-workspace-private${workspace.localOnly ? ' active' : ''}`}
+          title={workspace.localOnly
+            ? 'Private: this chat stays on this computer'
+            : 'Make private: keep this chat on this computer, away from your other devices'}
+          aria-label="Private chat"
+          aria-pressed={Boolean(workspace.localOnly)}
+          disabled={disabled || opening}
+          onClick={() => onPrivateChange(!workspace.localOnly)}
+        >
+          <Lock size={16} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+      )}
     </div>
   )
 }

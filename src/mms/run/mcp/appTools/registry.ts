@@ -87,6 +87,8 @@ export interface ToolAccessPolicy {
   /** The thread's project (or `projectId`) is in the profile's current project list; an empty list allows all. */
   projectAllowed(target: { threadId?: string; projectId?: string }): boolean
   threadExists(threadId: string): boolean
+  /** The thread is private (`Thread.localOnly`); absent: no thread is. */
+  localOnly?(threadId: string): boolean
 }
 
 export interface ToolRegistryOptions {
@@ -565,6 +567,16 @@ export class ToolRegistry {
     const manages = tool.access === 'managesOthers'
     const needed: AgentAccessLevel = manages ? 'manage' : 'read'
     const policy = this.options.access
+    // A private thread's content stays out of shared threads (their content reaches the user's other devices):
+    // a shared thread's agent never sees a private thread, and a private thread's agent never sends to or changes a shared one.
+    if (target.threadId !== undefined && policy?.localOnly) {
+      const callerPrivate = policy.localOnly(caller.threadId)
+      const targetPrivate = policy.localOnly(target.threadId)
+      if (targetPrivate && !callerPrivate)
+        throw new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to this credential.`)
+      if (callerPrivate && !targetPrivate && manages)
+        throw new McpToolError('mousse_scope_denied', 'This is a private thread: its agents cannot send to or change a thread that is shared with the user\'s other devices.')
+    }
     const effective = this.effectiveLevel(caller.accessLevel)
     const levelOk = levelAtLeast(effective, needed)
     const reachable = (): boolean => {

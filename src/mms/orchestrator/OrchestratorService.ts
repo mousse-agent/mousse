@@ -313,6 +313,10 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
+
+/** What an agent in a private thread is told when it asks for work on another computer. */
+const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
 interface SnapshotFolder {
@@ -364,6 +368,7 @@ function formatQuestionAnswerValue(question: UserQuestion, value: string | strin
  * Render submitted question answers as transcript text (`Q:`/`A:` per question).
  * Option ids resolve to their labels; custom-typed answers pass through verbatim.
  */
+
 export function formatQuestionAnswersMessage(
   questions: UserQuestion[],
   answers: UserQuestionAnswers
@@ -3554,6 +3559,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: narrowPermissionMode(profileMode, callerMode),
       accessCeiling: narrowAgentAccess(this.effectiveAccess(options.accessLevel), LAUNCHED_THREAD_ACCESS_CEILING) ?? 'lineage',
       createdByThreadId: options.actor.threadId,
+      // An agent in a private thread only ever starts private threads.
+      ...(this.isLocalOnly(options.actor.threadId) ? { localOnly: true as const } : {}),
       actor: options.actor,
       request: input,
       firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' }
@@ -3614,7 +3621,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: intent.permissionMode,
       // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
       createdByThreadId: intent.createdByThreadId,
-      accessCeiling: intent.accessCeiling
+      accessCeiling: intent.accessCeiling,
+      localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
     engine.store.appendEvent({
@@ -4927,6 +4935,13 @@ export class OrchestratorService extends EventEmitter {
     return path ? { path, parentThreadId } : null
   }
 
+  /** Whether `threadId` is a private thread or below one (`Thread.localOnly`). */
+  isLocalOnly(threadId: string): boolean {
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    return Boolean(thread && isLocalOnlyThread(thread, store!.listAllThreads()))
+  }
+
   /**
    * Engine host callback (before the delegation transaction; synchronous): the child thread gets the
    * parent's project and model selection, or the requested provider/model.
@@ -4940,6 +4955,8 @@ export class OrchestratorService extends EventEmitter {
     if (request.remote) {
       // A remote subagent's thread here is a stand-in: its agent, model and workspace are the other
       // computer's, so it gets none of its own, and nothing ever runs here (`sendOwned` refuses).
+      // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
+      if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
@@ -4976,7 +4993,9 @@ export class OrchestratorService extends EventEmitter {
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
       // delegated it, and it keeps that mode for its later turns and its own subagents.
       permissionMode: narrowPermissionMode(this.requestedPermissionMode(request.parentThreadId), this.runPermissionMode(request.parentRunId)),
-      ...(model ? { modelOverride: model } : {})
+      ...(model ? { modelOverride: model } : {}),
+      // A subagent of a private thread is private too.
+      localOnly: this.isLocalOnly(parentThread.id)
     })
     const session = this.getOrCreateSession(child.id)
     session.modelOverride = model ? structuredClone(model) : undefined
@@ -5105,7 +5124,9 @@ export class OrchestratorService extends EventEmitter {
     const accessCeiling = narrowAgentAccess(sourceCeiling ?? 'manage', creation.accessLevel === undefined ? undefined : this.effectiveAccess(creation.accessLevel)) ?? 'lineage'
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
       ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
-      accessCeiling
+      accessCeiling,
+      // A fork carries the conversation, so a private thread's fork is private too.
+      localOnly: this.isLocalOnly(sourceThread.id)
     })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
@@ -5579,6 +5600,8 @@ export class OrchestratorService extends EventEmitter {
   ) {
     const engine = this.requireRunEngine()
     const refuse = (code: string, message: string, extra: Record<string, unknown> = {}) => ({ started: false as const, code, message, ...extra })
+    if (this.isLocalOnly(parentThreadId))
+      return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     // A retry of an accepted call returns that task before anything else is checked.
     const requestKey = delegationRequestKey(parentThreadId, parentRunId, call.toolCallId)
     const prior = engine.store.getReceipt(requestKey)
@@ -5716,6 +5739,7 @@ export class OrchestratorService extends EventEmitter {
    * there now. The repository match is asked of each online computer that is allowed, in parallel.
    */
   private async listComputers(parentThreadId: string) {
+    if (this.isLocalOnly(parentThreadId)) return { computers: [], note: PRIVATE_THREAD_REMOTE_REFUSAL }
     if (!this.remoteSubagents || !this.remoteComputers)
       return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
     const access = this.agentAccessSettings()
@@ -5901,6 +5925,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const remote = this.remoteSubagents
     const refuse = (code: string, message: string) => ({ started: false as const, code, message, subagent: target.title, childThreadId: target.childThreadId })
+    if (this.isLocalOnly(parentThreadId)) return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     const bindings = engine.remoteSubagents.listForChildThread(target.childThreadId)
     const first = bindings.find((binding) => binding.remoteThreadId)
     const replay = engine.store.getReceipt(target.requestId)

@@ -22,10 +22,20 @@ export async function selectThread(threadId: string): Promise<void> {
   await window.mousse.threads.select(threadId)
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. */
+/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(visibleThreads(store.threads)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
+  store.upsertThread(thread)
+  await selectThread(thread.id)
+}
+
+/** Opens the newest empty private draft (`Thread.localOnly`), or creates one on this computer, and selects it. */
+export async function createAndSelectPrivateThread(): Promise<void> {
+  const store = useAppStore.getState()
+  const thread =
+    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
   await selectThread(thread.id)
 }

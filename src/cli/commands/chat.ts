@@ -129,7 +129,9 @@ export async function runChat(args: ParsedArgs): Promise<void> {
   let tid = threadId
   if (!tid) {
     const created = await client.request<{ thread: { id: string } }>('threads.create', {
-      name: 'CLI Chat'
+      name: 'CLI Chat',
+      // A private thread stays on this computer (`Thread.localOnly`).
+      ...(flagBool(args.flags, 'private') ? { localOnly: true } : {})
     })
     tid = created.thread.id
   }

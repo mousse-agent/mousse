@@ -24,8 +24,8 @@ export async function createComposerThread(deps: {
  */
 export async function prepareComposerThread(deps: {
   thread?: Thread
-  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId }
-  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId }) => Promise<Thread>
+  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean }
+  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean }) => Promise<Thread>
   setWorktreeEnabled: (id: string, enabled: boolean) => Promise<Thread>
   update: (thread: Thread) => void
   stillVisible: () => boolean
@@ -35,11 +35,21 @@ export async function prepareComposerThread(deps: {
   if (!deps.stillVisible()) return null
   const { thread, workspace } = deps
   const enabled = Boolean(workspace.projectId && workspace.worktreeEnabled)
-  // An empty thread is reused only where the chat is to run: the same computer, and the same project.
-  if (!thread || thread.projectId !== workspace.projectId || (thread.node ?? undefined) !== (workspace.node ?? undefined)) {
+  // An empty thread is reused only where the chat is to run: the same computer, the same project, and the
+  // same mode (Private is fixed when a thread is created).
+  if (
+    !thread ||
+    thread.projectId !== workspace.projectId ||
+    (thread.node ?? undefined) !== (workspace.node ?? undefined) ||
+    Boolean(thread.localOnly) !== Boolean(workspace.localOnly)
+  ) {
     return createComposerThread({
       ...deps,
-      create: () => deps.create(workspace.projectId, { worktreeEnabled: enabled, ...(workspace.node ? { node: workspace.node } : {}) })
+      create: () =>
+        deps.create(workspace.projectId, {
+          worktreeEnabled: enabled,
+          ...(workspace.localOnly ? { localOnly: true } : workspace.node ? { node: workspace.node } : {})
+        })
     })
   }
   // An unset choice is recorded too, so the thread keeps the one it was sent with.
