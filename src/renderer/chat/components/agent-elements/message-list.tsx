@@ -55,6 +55,7 @@ import {
   isV5ToolPart,
   partitionTurnSegments,
   settleFinishedTurn,
+  turnAnswerText,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptUndoButton } from "../../../components/PromptUndoControls";
@@ -496,6 +497,7 @@ function MessageToolbar({
   undoMessageId,
   metadata,
   speechKey,
+  speechText,
 }: {
   text?: string;
   timestamp?: string;
@@ -508,6 +510,8 @@ function MessageToolbar({
   metadata?: ResponseMetadata;
   /** Identifies the message for read aloud; the button shows only with text. */
   speechKey?: string;
+  /** What read aloud reads, when not all of `text` (a turn's answer, without its notes). */
+  speechText?: string;
 }) {
   const [metadataOpen, setMetadataOpen] = useState(false);
   const reading = useIsReadingAloud(speechKey);
@@ -530,7 +534,9 @@ function MessageToolbar({
     >
       {timestamp && <span>{timestamp}</span>}
       {undoMessageId && <PromptUndoButton messageId={undoMessageId} />}
-      {text && speechKey && <ReadAloudButton speechKey={speechKey} markdown={text} />}
+      {text && speechKey && (speechText ?? text) && (
+        <ReadAloudButton speechKey={speechKey} markdown={speechText ?? text} />
+      )}
       {text && <CopyButton text={text} onCopied={onCopied} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
@@ -1672,6 +1678,8 @@ export const MessageList = memo(function MessageList({
                         turnMetadata !== undefined);
                     const copyKey = `assistant-${turnKey}-all`;
                     const toolbarText = showCopyToolbar ? assistantText : "";
+                    // Read aloud reads the answer, not the notes the agent wrote while it worked.
+                    const speechText = turnAnswerText(turn.assistantMsgs);
 
                     const promptId = turn.userMsg?.id;
                     const workedMs = isTurnStreaming
@@ -1866,6 +1874,7 @@ export const MessageList = memo(function MessageList({
                             onCopied={() => markCopied(copyKey)}
                             metadata={turnMetadata}
                             speechKey={copyKey}
+                            speechText={speechText}
                           />
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
@@ -1877,6 +1886,7 @@ export const MessageList = memo(function MessageList({
                             onCopied={() => markCopied(copyKey)}
                             metadata={turnMetadata}
                             speechKey={copyKey}
+                            speechText={speechText}
                           />
                         ) : null}
                       </div>

@@ -174,6 +174,15 @@ function replyText(message: SettleTurnMessage): string {
 
 export type SettleTurnMessage = { id: string; role?: string; parts?: unknown[] };
 
+/** The text of a turn's answer: its last reply row, the one a finished turn draws last. */
+export function turnAnswerText(messages: SettleTurnMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = replyText(messages[index]!);
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * A finished turn as it reads once the work is done: its answer, the last reply row, comes last.
  * Activity after the answer moves above it, and reply rows before it that hold only text (the
