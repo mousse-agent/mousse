@@ -50,6 +50,27 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     delete process.env.MOUSSE_HOME
   })
 
+  it('a stop that arrives while start is still running leaves nothing listening', async () => {
+    await server.stop()
+    const late = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+    const starting = late.start()
+    try {
+      await late.stop()
+      await starting.catch(() => undefined)
+      const accepted = await new Promise<boolean>((resolve) => {
+        const socket = createConnection(endpoint)
+        socket.once('connect', () => {
+          socket.destroy()
+          resolve(true)
+        })
+        socket.once('error', () => resolve(false))
+      })
+      expect(accepted).toBe(false)
+    } finally {
+      await late.stop()
+    }
+  })
+
   it('rejects wrong owner token and protocol version', async () => {
     const badToken = new LocalMmsClient({
       homeDir: home,

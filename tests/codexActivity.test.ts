@@ -777,6 +777,67 @@ describe('Codex activity against a scripted app-server', () => {
     expect(completeOf(failedEvents, `helper:${HELPER}`)?.activity).toEqual({ status: 'failed' })
   })
 
+  describe("a helper's own helper (no thread listing)", () => {
+    const GRAND = 'grand-1'
+    const grandSpawn = () => itemFrame('completed', HELPER, 'h-turn-1', { type: 'subAgentActivity', id: 'h-sub-1', kind: 'started', agentThreadId: GRAND, agentPath: '/' })
+    const grandTurn = () => note('turn/started', { threadId: GRAND, turn: { id: 'g-turn-1', status: 'inProgress', error: null } })
+
+    for (const order of ['spawn first', 'turn first'] as const)
+      it(`keeps the run open until it ends (${order}), and shows none of its work`, async () => {
+        const events: ProviderToolEvent[] = []
+        const s = server({
+          onTurnStart: (send) =>
+            setImmediate(() => {
+              send(spawn())
+              send(helperTurn())
+              if (order === 'turn first') send(grandTurn())
+              send(grandSpawn())
+              if (order === 'spawn first') send(grandTurn())
+              send(itemFrame('started', GRAND, 'g-turn-1', cmd('gc1')))
+              send(turnDone(HELPER, 'h-turn-1'))
+              send(turnDone(PARENT, 'turn-1'))
+            })
+        })
+        let settled = false
+        const running = chat(create(s), events).finally(() => (settled = true))
+        await vi.waitFor(() => expect(completeOf(events, `helper:${HELPER}`)).toBeDefined())
+        await new Promise((done) => setTimeout(done, 60))
+        expect(settled).toBe(false)
+        s.emit(turnDone(GRAND, 'g-turn-1'))
+        await running
+        expect(events.some((event) => event.callId.includes(GRAND))).toBe(false)
+      })
+
+    for (const order of ['spawn first', 'turn first'] as const)
+      it(`is interrupted by Stop (${order})`, async () => {
+        const interrupted: Array<Record<string, unknown>> = []
+        const s = server({
+          onTurnStart: (send) =>
+            setImmediate(() => {
+              send(spawn())
+              send(helperTurn())
+              if (order === 'turn first') send(grandTurn())
+              send(grandSpawn())
+              if (order === 'spawn first') send(grandTurn())
+              send(turnDone(HELPER, 'h-turn-1'))
+              send(turnDone(PARENT, 'turn-1'))
+            }),
+          onInterrupt: (send, params) => {
+            interrupted.push(params)
+            if (params.threadId === GRAND) send(turnDone(GRAND, 'g-turn-1', 'interrupted'))
+          }
+        })
+        const events: ProviderToolEvent[] = []
+        const stop = new AbortController()
+        const running = chat(create(s), events, { signal: stop.signal })
+        running.catch(() => undefined)
+        await vi.waitFor(() => expect(completeOf(events, `helper:${HELPER}`)).toBeDefined())
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow('Stopped')
+        await vi.waitFor(() => expect(interrupted).toContainEqual(expect.objectContaining({ threadId: GRAND, turnId: 'g-turn-1' })))
+      })
+  })
+
   it('a Mousse delegation call never carries its prompt on any event', async () => {
     const events: ProviderToolEvent[] = []
     const call = { type: 'mcpToolCall', id: 'd1', server: 'mousse', tool: 'delegate_task', arguments: { title: 'Review', prompt: 'SECRET PROMPT TEXT'.repeat(2000) } }
