@@ -84,6 +84,7 @@ export function StorageUsageView(props: StorageUsageViewProps) {
     </th>
   }
   return <SettingsGroup
+    anchor="storage-usage"
     title="Disk usage"
     icon={Server}
     id="storage-usage"

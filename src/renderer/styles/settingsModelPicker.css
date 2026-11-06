@@ -1,5 +1,5 @@
-/* Settings model picker: the composer's model and effort menus joined into one
-   28px control (see the layout rules at the top of settings.css). */
+/* Settings model picker: one 28px control opening the composer's model menu, which also
+   holds the reasoning level and speed (see the layout rules at the top of settings.css). */
 
 .settings-model-picker {
   display: inline-flex;
@@ -12,13 +12,13 @@
   overflow: hidden;
 }
 
-.settings-model-btn,
-.settings-model-picker .composer-pill-btn {
+.settings-model-btn {
   display: inline-flex;
   align-items: center;
   gap: var(--space-8);
   height: 100%;
   min-width: 0;
+  max-width: 300px;
   padding: 0 var(--space-8);
   border: 0;
   border-radius: 0;
@@ -29,35 +29,22 @@
   white-space: nowrap;
 }
 
-.settings-model-btn {
-  max-width: 260px;
-}
-
 .settings-model-btn-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.settings-model-btn svg,
-.settings-model-picker .composer-pill-btn svg {
+.settings-model-btn svg {
   flex-shrink: 0;
 }
 
-.settings-model-btn > svg:last-child,
-.settings-model-picker .composer-pill-btn svg {
+.settings-model-btn > svg:last-child {
   color: var(--text-secondary);
 }
 
-.settings-model-picker .composer-effort-picker {
-  display: flex;
-  border-left: 1px solid var(--ui-line-strong);
-}
-
 .settings-model-btn:hover:not(:disabled),
-.settings-model-btn.open,
-.settings-model-picker .composer-pill-btn:hover:not(:disabled),
-.settings-model-picker .composer-pill-btn.open {
+.settings-model-btn.open {
   background: var(--ui-hover);
   border-color: transparent;
   color: var(--text-primary);

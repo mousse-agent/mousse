@@ -53,10 +53,12 @@
   gap: 6px;
 }
 
+/* Cancel and Stop are ghost buttons (text only, a neutral fill on hover) so Resume now, the
+   primary, leads the row. The transparent border keeps all three the same height. */
 .chat-run-paused-btn {
   min-height: 26px;
   padding: 3px 11px;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--text-primary);
@@ -76,17 +78,6 @@
 .chat-run-paused-btn:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
-}
-
-.chat-run-paused-btn-primary {
-  border-color: transparent;
-  background: var(--gradient-accent);
-  color: white;
-}
-
-.chat-run-paused-btn-primary:hover {
-  background: var(--gradient-accent);
-  filter: brightness(1.08);
 }
 
 .chat-run-paused-btn[aria-disabled="true"] {
