@@ -23,6 +23,14 @@
   pointer-events: none;
 }
 
+/* A tooltip that must not wrap, such as a project's "name · path"; its text is already shortened to fit. */
+.app-tooltip--one-line {
+  max-width: min(480px, calc(100vw - 16px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
 /* ---------- Tokens ---------- */
 :root {
   /* One gutter and one row inset: every sidebar label, row and heading starts
