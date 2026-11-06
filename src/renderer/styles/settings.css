@@ -1597,8 +1597,8 @@ html[data-theme='high-contrast'] .notification-channel.on {
 }
 
 .notification-channel:focus-visible {
-  outline: none;
-  box-shadow: var(--ui-focus-ring);
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 2px;
 }
 
 /* The column labels, on the heading line, over their columns (the rows' inset is --space-16). */
@@ -1627,7 +1627,12 @@ html[data-theme='high-contrast'] .notification-channel.on {
   color: var(--text-primary);
 }
 
-.settings-item:hover .notification-try,
+.settings-item:hover .notification-try {
+  opacity: 1;
+}
+
 .notification-try:focus-visible {
   opacity: 1;
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 0;
 }
