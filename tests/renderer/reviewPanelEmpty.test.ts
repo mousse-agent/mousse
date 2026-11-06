@@ -75,7 +75,8 @@ describe('Review panel with no changes', () => {
     let resolve: (value: ReviewFilesResult) => void = () => {}
     files = () => new Promise((done) => { resolve = done })
     await render()
-    expect(host.textContent).toContain('Loading…')
+    // The shared delayed loader holds the spot (no text); it is not the empty state.
+    expect(host.querySelector('.ui-loader-slot')).not.toBeNull()
     expect(host.textContent).not.toContain('No changes')
     expect(host.querySelector('.diff-stub')?.textContent).toBe('')
     await act(async () => resolve(result([])))
