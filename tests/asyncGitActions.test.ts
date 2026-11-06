@@ -171,8 +171,8 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     const other = mms.threads.createThread('Another thread', project.id)
     const started = slowRetirementStatus(worktree, 3)
     const begun = Date.now()
-    // Trash retires the thread's checkout in the same request; retirement's status read of it takes 3 seconds.
-    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: thread.id })
+    // The trash reads the checkout's status in the same step; that read takes 3 seconds.
+    const trashing = mms.trashThread(thread.id)
     await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
     expect(readFileSync(started, 'utf8')).toMatch(/ status --porcelain=v1 --untracked-files=all$/m)
     expect(await pending(trashing)).toBe(true)
@@ -182,7 +182,7 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     expect(Date.now() - begun).toBeLessThan(2500)
     expect(await pending(trashing)).toBe(true)
     // Once Git answers, the trash finishes as usual, and the checkout went to the trash.
-    await expect(trashing).resolves.toMatchObject({ ok: true })
+    await expect(trashing).resolves.toMatchObject({ state: 'trashed' })
     expect(existsSync(worktree)).toBe(false)
   }, 40_000)
 

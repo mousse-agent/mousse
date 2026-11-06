@@ -156,8 +156,8 @@ describe('the routed method table', () => {
     }
   }, 60_000)
 
-  it('keeps the direct save, the Files folder and permanent delete out of the table', () => {
-    for (const method of ['files.writeDirect', 'files.root', 'threads.purge']) {
+  it('keeps the direct save and the Files folder out of the table', () => {
+    for (const method of ['files.writeDirect', 'files.root']) {
       expect(ROUTED_METHODS[method]).toBeUndefined()
       expect(classifyRoutedMethod(method)).toMatchObject({ kind: 'local' })
     }

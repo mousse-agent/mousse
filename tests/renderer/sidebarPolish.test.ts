@@ -20,7 +20,6 @@ const actions = vi.hoisted(() => ({
   createAndSelectProjectThread: vi.fn(async () => undefined)
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 vi.mock('../../src/renderer/components/StartFromPullRequestDialog', () => ({ StartFromPullRequestDialog: () => null }))
 vi.mock('../../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
 vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))

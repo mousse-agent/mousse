@@ -1296,16 +1296,6 @@ export function registerGuiIpc(
   registerHandler('operations:recover', async (_e, threadId: string) =>
     guiMms.request('operations.recover', { threadId })
   )
-  registerStorageHandler('threads:restore', async (_e, threadId: string) =>
-    guiMms.request('threads.restore', { threadId })
-  )
-  registerStorageHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
-    guiMms.request('threads.purge', { ...options, threadId })
-  )
-  registerStorageHandler('threads:inventory', async (_e, threadId?: string, options?: { includeComputers?: boolean }) =>
-    guiMms.request('threads.inventory', { threadId, ...(options?.includeComputers === true ? { includeComputers: true } : {}) })
-  )
-  registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
   registerStorageHandler('storage:reviewDismiss', async () => guiMms.request('storage.reviewDismiss', {}))
   registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
@@ -1571,10 +1561,11 @@ export function registerGuiIpc(
     void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', res.threads), () => undefined)
   }
 
+  // Deletes an archived thread for good. The window asked first, so unpublished work goes with it.
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
-      { threadId }
+      { threadId, discard: true }
     )
     broadcast('threads:updated', res.threads)
     if (currentPresentation().getActiveThreadId() === threadId) {

@@ -13,7 +13,7 @@ export const LISTS_STREAM_THREAD_ID = 'mousse:lists'
 const LISTS_VERSION = 1
 /** Coalesces bursts (a send renames, reorders and starts a turn) into one published snapshot. */
 const SETTLE_MS = 40
-/** Catches changes that reach no event (for example a thread moved to the trash by another client). */
+/** Catches changes that reach no event (for example a thread another client deleted). */
 const RECONCILE_MS = 15_000
 const PREVIEW_CHARS = 280
 const ERROR_CHARS = 280
@@ -227,8 +227,8 @@ export class MmsListsSource {
 
   /**
    * A private snapshot grows with the number of threads. Above `PRIVATE_SOFT_LIMIT_BYTES`, archived threads
-   * that were settled more than 30 days ago leave it (with the subagents under them); the Archive and
-   * Recently deleted views of another computer ask for them with a read when they need them.
+   * that were archived more than 30 days ago leave it (with the subagents under them); the Archive view of
+   * another computer asks for them with a read when it needs them.
    */
   private trimmed(snapshot: ListsSnapshot, inventory: readonly Thread[]): ListsSnapshot {
     if (Buffer.byteLength(JSON.stringify(snapshot)) <= PRIVATE_SOFT_LIMIT_BYTES) return snapshot

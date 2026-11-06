@@ -9,6 +9,7 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import type { StorageCleanupReport, StoragePolicy } from '../src/shared/storage'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { archived } from './support/archived'
 
 const DAY = 86_400_000
 const inactivePolicy: StoragePolicy = { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false }, browser: { captureDays: null } }
@@ -149,38 +150,12 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     } finally { releaseExecutionLeaseHandle(lease) }
   }, 60_000)
 
-  it('deleting a thread keeps its checkout while the deleted-threads rule is off, and a later run retires it', async () => {
-    const project = mms.projects.openProject(f.repo)
-    const thread = mms.threads.createThread('Delete with the rule off', project.id)
-    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId: thread.id })
-    await gui.request('storage.configure', { policy: { ...inactivePolicy, worktrees: { ...inactivePolicy.worktrees, removeWithDeletedThreads: false } } })
-    try {
-      await gui.request('threads.delete', { threadId: thread.id })
-      expect(existsSync(metadata.worktreePath)).toBe(true)
-      await gui.request('storage.configure', { policy: inactivePolicy })
-      const report = (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
-      expect(report.items.find((entry) => entry.threadId === thread.id)).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' })
-      expect(existsSync(metadata.worktreePath)).toBe(false)
-    } finally { await gui.request('storage.configure', { policy: inactivePolicy }) }
-  }, 120_000)
-
-  it('deleting a thread retires its checkout at once while the rule is on, as before', async () => {
-    const project = mms.projects.openProject(f.repo)
-    const thread = mms.threads.createThread('Delete with the rule on', project.id)
-    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId: thread.id })
-    await gui.request('threads.delete', { threadId: thread.id })
-    expect(existsSync(metadata.worktreePath)).toBe(false)
-    // The removal went through the storage service, which records it.
-    const history = readFileSync(join(mms.threads.lifecycleStore.root, 'storage-cleanup-history.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-    expect(history).toEqual(expect.arrayContaining([expect.objectContaining({ trigger: 'trash', outcome: 'removed', rule: 'worktree-deleted', threadId: thread.id })]))
-  }, 60_000)
-
   it('a manual run over the protocol empties overdue trash: its own request does not make the profile look busy', async () => {
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Overdue in the trash', project.id)
-    await gui.request('threads.delete', { threadId: thread.id })
+    await mms.trashThread(thread.id)
     mms.threads.lifecycleStore.update(thread.id, (record) => { record.trashedAt = new Date(Date.now() - 40 * DAY).toISOString() })
-    await gui.request('threads.configureTrash', { graceDays: 30, automaticPurge: true })
+    await mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 30, automaticPurge: true }, true)
     mms.storageCleanup.setClockForTests(Date.now) // the trash guard refuses a clock a day ahead of its last sweep
     try {
       const report = (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
@@ -188,7 +163,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
       expect(mms.threads.lifecycleStore.require(thread.id).state).toBe('purged')
     } finally {
       mms.storageCleanup.setClockForTests(() => Date.now() + 40 * DAY)
-      await gui.request('threads.configureTrash', { graceDays: 30, automaticPurge: false })
+      await mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: 30, automaticPurge: false }, true)
     }
   }, 60_000)
 

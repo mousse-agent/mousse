@@ -16,8 +16,6 @@ vi.mock('../../src/renderer/lib/floatingLayer', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/renderer/lib/floatingLayer')>()),
   FloatingPortal: ({ children }: { children: unknown }) => children
 }))
-// Recently deleted reads the daemon and is not what these tests are about.
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 
 const at = '2026-10-25T10:00:00.000Z'
 const B ='nod_studio'

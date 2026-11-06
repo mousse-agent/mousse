@@ -17,6 +17,7 @@ import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../s
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
+import { ARCHIVE_BEFORE_DELETE } from '../lifecycle/threadDelete'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -751,7 +752,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
     codeHost: ctx.mms.gitService.codeHost,
     projects: ctx.mms.projects,
     threads: ctx.mms.threads,
-    trashThread: (threadId) => ctx.mms.trashThread(threadId),
+    // A failed start's thread goes through the one delete; with unpublished work it stays in Archived.
+    trashThread: (threadId) => ctx.mms.deleteThreadForGood(threadId, { human: false, discard: false, internal: true }),
     // Like `threads.create`: a new thread starts on the model last used.
     prepareThread: (thread) => {
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
@@ -1162,6 +1164,19 @@ function lifecycleExpectedGeneration(params: Record<string, unknown>): number | 
   return value as number
 }
 
+/**
+ * The rules of a delete that hold before anything moves: a listed thread must be archived (it, or the thread at the
+ * top of its subagent chain), and deleting is permanent, so it stays on the computer that runs the thread; another
+ * computer can archive it. A thread a delete left in the trash is not listed and goes on to be finished.
+ */
+function refuseDelete(ctx: HandlerContext, threadId: string): void {
+  const listed = ctx.mms.threads.getThread(threadId)
+  const root = listed?.lineage?.rootThreadId
+  if (listed && !listed.settledAt && !(root && root !== threadId && ctx.mms.threads.getThread(root)?.settledAt))
+    throw new DomainRpcError('thread_not_archived', ARCHIVE_BEFORE_DELETE, { threadId })
+  if (ctx.connection?.clientType === 'bridge') throw new DomainRpcError('not_available_remotely', 'Delete the thread on the computer that runs it.', { threadId })
+}
+
 export async function dispatchMethod(
   ctx: HandlerContext,
   method: string,
@@ -1257,7 +1272,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
   'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
-  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.purge', 'agents.spawn', 'tasks.create',
+  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
 ])
@@ -1334,7 +1349,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     if (routed) return routed.result
   }
   if (isObject(params) && typeof params.threadId === 'string' &&
-      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus',
+      !['threads.delete', 'threads.inventory', 'threads.focus',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
         'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
@@ -1507,12 +1522,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
-      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
-      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
-      const threads = ctx.mms.threads.listAllThreads()
-      ctx.emitEvent?.('threads.updated', { threads })
-      return { threads: listedThreadsFor(ctx, threads), lifecycle, operationResult }
+      // Archive first, then delete: only an archived thread is deleted, and for good. One a delete left in the trash is finished.
+      try {
+        refuseDelete(ctx, threadId)
+        const lifecycle = await ctx.mms.deleteThreadForGood(threadId, {
+          human: ctx.connection?.clientType === 'gui',
+          discard: asOptionalBoolean(p.discard, 'discard') === true,
+          operationId: asOptionalString(p.operationId, 256),
+          expectedGeneration: lifecycleExpectedGeneration(p)
+        })
+        const threads = ctx.mms.threads.listAllThreads()
+        return { threads: listedThreadsFor(ctx, threads), lifecycle }
+      } finally {
+        // Also after a refusal: a thread put back in Archived shows there again.
+        ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -3980,19 +4004,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
           } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
         }
-        // Recently deleted also lists what is in the trash of the user's other computers (each with a short
-        // deadline). Another caller of this method, such as Storage settings, asks about this computer alone.
-        const remote =
-          p.includeComputers === true && ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
-            ? await ctx.mms.remoteLists.inventory(ctx.connection.id)
-            : undefined
         return {
-          lifecycles: remote ? [...lifecycles, ...remote.lifecycles] : lifecycles,
-          taskNames: remote ? { ...taskNames, ...remote.taskNames } : taskNames,
+          lifecycles,
+          taskNames,
           migrationDiagnostics,
           trashPolicy: ctx.mms.lifecycle.cleanup.policy(),
-          trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus(),
-          ...(remote?.skipped.length ? { skipped: remote.skipped } : {})
+          trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus()
         }
       }
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -4004,37 +4021,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const lifecycle = store.require(threadId)
       return { lifecycle, inventory: await buildResourceInventory(store, lifecycle), migrationDiagnostics }
-    }
-    case 'threads.trash': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
-      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
-      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
-      return { ok: true, lifecycle, operationResult }
-    }
-    case 'threads.restore': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'restore', asOptionalString(p.operationId, 256))
-      const lifecycle = await ctx.mms.restoreThread(threadId, operationId, lifecycleExpectedGeneration(p))
-      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
-      return { thread: ctx.mms.threads.getThread(threadId), lifecycle, operationResult }
-    }
-    case 'threads.purge': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      if (p.preview === true) {
-        const preview = await ctx.mms.lifecycle.cleanup.preview(threadId)
-        // A display estimate beside the preview; it never enters the preview or its digest.
-        return { preview, reclaim: await ctx.mms.lifecycle.cleanup.reclaimEstimate(preview) }
-      }
-      const lifecycle = await ctx.mms.lifecycle.purge({ taskId: threadId, operationId: asString(p.operationId, 'operationId', 256), expectedGeneration: lifecycleExpectedGeneration(p), previewDigest: asOptionalString(p.previewDigest, 128), discard: asOptionalBoolean(p.discard, 'discard'), human: ctx.connection?.clientType === 'gui' })
-      return { ok: true, lifecycle }
-    }
-    case 'threads.configureTrash': {
-      const p = isObject(params) ? params : {}
-      return { policy: ctx.mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: asBoundedInt(p.graceDays, 'graceDays', { min: 1, max: 3650 }), automaticPurge: asBoolean(p.automaticPurge, 'automaticPurge') }, ctx.connection?.clientType === 'gui') }
     }
     case 'storage.policy': {
       const cleanup = ctx.mms.lifecycle.cleanup

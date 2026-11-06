@@ -12,8 +12,6 @@ import { needsMeThreads } from '../../src/renderer/lib/needsMe'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { Project, Thread, ThreadActivitySnapshot } from '../../src/shared/types'
 
-// Recently deleted reads the daemon and is not what these tests are about.
-vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 // The window buttons read the platform from the preload, which server rendering has none of.
 vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCaptionButtons: () => null }))
 

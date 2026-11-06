@@ -142,15 +142,14 @@ describe('round 2: the trash cancels bot work only when it is accepted', () => {
 })
 
 describe('round 2: deleting a bot through the real request path', () => {
-  it('trashes its home thread once; a home thread restored afterwards stays where the owner put it', async () => {
+  it('deletes its home thread for good, once', async () => {
     const { services, bots, activation, home, domains, profileId } = await withBot()
     registerPersonalBotMethods(domains, () => bots)
     await dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId, epoch: 1 }, capabilities: new Set() } } as never, 'bots.definitions.delete', { botId: 'review-bot' })
-    expect(services.threads.lifecycleStore.require(home).state).toBe('trashed')
+    expect(services.threads.lifecycleStore.require(home).state).toBe('purged')
     expect(bots.getActivation(activation.id).status).toBe('cancelled')
-    await services.restoreThread(home, 'owner-restore')
     await bots.finishDeletions()
-    expect(services.threads.lifecycleStore.require(home).state).toBe('active')
+    expect(services.threads.lifecycleStore.require(home).state).toBe('purged')
   }, 60_000)
 })
 

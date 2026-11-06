@@ -694,11 +694,6 @@
     "digest": "9779ecb28c4ca43c",
     "security": "ceacd93869361a7a"
   },
-  "threads.restore": {
-    "version": 1,
-    "digest": "d536a70a70cc7c8c",
-    "security": "ceacd93869361a7a"
-  },
   "threads.search": {
     "version": 1,
     "digest": "70c38e267069982a",
@@ -722,11 +717,6 @@
   "threads.setWorktreeEnabled": {
     "version": 1,
     "digest": "d45007f32a42eb40",
-    "security": "ceacd93869361a7a"
-  },
-  "threads.trash": {
-    "version": 1,
-    "digest": "d536a70a70cc7c8c",
     "security": "ceacd93869361a7a"
   },
   "workflowRuns.answer": {

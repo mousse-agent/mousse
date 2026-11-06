@@ -843,8 +843,8 @@ export class OwnerRoutes {
     const threadId = params[threadKey]
     const known = (id: string): boolean =>
       Boolean(services.threads.getThread(id)) ||
-      // A trashed thread is not listed but can be restored, and its inventory read.
-      ((method === 'threads.restore' || method === 'threads.inventory') &&
+      // A trashed thread is not listed, but its inventory can be read.
+      (method === 'threads.inventory' &&
         Boolean(services.threads.lifecycleStore?.get(id)))
     if (typeof threadId === 'string' && !known(threadId))
       throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
