@@ -318,6 +318,7 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     },
     removeInstall: (options) => installation.removeInstall(options),
     forgetConversation: (threadId) => codex.forgetConversation(threadId),
+    compactConversation: (request) => codex.compactConversation(request.threadId, request.history, request.instanceId, request.signal),
     stop: () => {
       // The gateway stops a runtime once its turns end, the newest one included (removal, shutdown).
       // It stays tracked until its last process has exited: a credential change meanwhile still

@@ -338,7 +338,7 @@ function restoreGate(
 async function localActionRun<T>(
   ctx: HandlerContext,
   threadId: string,
-  source: 'undo' | 'revert',
+  source: 'undo' | 'revert' | 'clear' | 'compact',
   action: () => Promise<T>,
   options: { gate?: () => RestoreReview | null; outcome?: RunOutcome } = {}
 ): Promise<{ runId: string; result: T } | { review: RestoreReview }> {
@@ -1523,6 +1523,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
     }
+    case 'threads.clearContext': {
+      // `/clear`: its own run, like an Undo, so no turn starts while the context is replaced.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      await localActionRun(ctx, threadId, 'clear', async () => ctx.mms.orchestrator.clearConversationContext(threadId))
+      return { ok: true }
+    }
+    case 'threads.compact': {
+      // `/compact`: its own run, so a message sent meanwhile waits in the queue instead of racing the compaction.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'focus'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const focus = asOptionalString(p.focus, 2000)?.trim() || undefined
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const ran = await localActionRun(ctx, threadId, 'compact', () => ctx.mms.orchestrator.compactConversationContext(threadId, focus))
+      return { outcome: 'result' in ran ? ran.result : 'unchanged' }
+    }
     case 'threads.pin': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -1763,10 +1782,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain'
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused'
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
+      // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
+      const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
@@ -1799,6 +1820,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
         ...(sentFrom ? { sentFrom } : {}),
+        ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }

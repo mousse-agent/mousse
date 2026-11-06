@@ -26,8 +26,8 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
   const cap = runs.usageLimitPauseCap
   const value = runs.resumeAfterUsageLimit ? String(cap) : OFF
   const tooltip = runs.resumeAfterUsageLimit
-    ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Resume now.`
-    : 'A run paused by a usage limit waits until you press Resume now.'
+    ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Try now.`
+    : 'A run paused by a usage limit waits until you press Try now.'
   return (
     <SettingsGroup title="Runs" icon={Pause}>
       <SettingsRow
