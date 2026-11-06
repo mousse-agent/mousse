@@ -118,45 +118,17 @@ html.platform-darwin .titlebar-left {
   padding-left: var(--titlebar-traffic-light-inset);
 }
 
+/* The logo sits centred over the rail. At least rail-wide, so with the word
+   hidden the actions start where the sidebar does. */
 .titlebar-brand {
   display: flex;
   align-items: center;
   gap: calc(var(--titlebar-height) * 0.11);
+  min-width: var(--navigation-rail-width);
+  box-sizing: border-box;
   padding-block: calc(var(--titlebar-height) * 0.18);
   padding-left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   flex-shrink: 0;
-  position: relative;
-}
-
-.titlebar-sidebar-toggle {
-  position: absolute;
-  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
-  top: 50%;
-  z-index: 1;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(var(--titlebar-height) * 0.64);
-  height: calc(var(--titlebar-height) * 0.64);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
-.titlebar-brand:hover .titlebar-sidebar-toggle,
-.titlebar-sidebar-toggle:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.titlebar-sidebar-toggle:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--text-primary);
 }
 
 .titlebar-logo-icon {
@@ -164,13 +136,6 @@ html.platform-darwin .titlebar-left {
   width: calc(var(--titlebar-height) * 0.64);
   height: calc(var(--titlebar-height) * 0.64);
   object-fit: contain;
-  transition: opacity 0.15s;
-}
-
-.titlebar-brand:hover .titlebar-logo-icon,
-.titlebar-brand:has(.titlebar-sidebar-toggle:focus-visible) .titlebar-logo-icon {
-  opacity: 0;
-  pointer-events: none;
 }
 
 .titlebar-title {
@@ -183,16 +148,50 @@ html.platform-darwin .titlebar-left {
   opacity: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin-left var(--ui-dur-slow) ease;
+  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin var(--ui-dur-slow) ease;
   margin-left: 0;
 }
 
+/* Shown while the sidebar is open; the right margin keeps the actions clear of it. */
 .titlebar-title.titlebar-title-visible {
   max-width: 10ch;
   opacity: 1;
   margin-left: calc(var(--titlebar-height) * 0.04);
+  margin-right: 8px;
   flex-shrink: 0;
   overflow: visible;
+}
+
+/* Only far below the 900px window minimum (high zoom): the actions keep their room. */
+@media (max-width: 560px) {
+  .titlebar-title.titlebar-title-visible {
+    max-width: 0;
+    opacity: 0;
+    margin: 0;
+  }
+}
+
+.titlebar-start-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* The open thread and its project while the sidebar is closed: centred in the drag area. */
+.titlebar-thread-label {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 12px;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 /* Overlay pages cover the real title bar. This strip uses the same height,
@@ -6360,3 +6359,9 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 
+/* Rename thread dialog (ThreadRenameDialog): one full-width field. */
+.thread-rename-input {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}

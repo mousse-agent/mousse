@@ -69,7 +69,8 @@
         "tests/slashCommandPopoverStyles.test.ts",
         "tests/subagentCardView.test.ts",
         "tests/subagentComposerBanner.test.ts",
-        "tests/titleBarLayout.test.ts"
+        "tests/titleBarLayout.test.ts",
+        "tests/titleBarThreadLabel.test.ts"
       ]
     },
     {

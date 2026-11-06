@@ -21,6 +21,7 @@ import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
+import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 
 import { openSurface } from './lib/surfaces'
 import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
@@ -519,11 +520,8 @@ export default function App() {
 
       <div className="app-content" ref={appContentRef}>
 
-        <NavigationRail
-          key={`${profileId}:${bootstrapAttempt}`}
-          onMouseEnter={!threadsSidebarOpen ? openThreadsPeek : undefined}
-          onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
-        />
+        {/* The closed sidebar peeks from its edge strip only; reaching for the rail moves nothing. */}
+        <NavigationRail key={`${profileId}:${bootstrapAttempt}`} />
 
         {profileReady && <ScheduledPage />}
         <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
@@ -629,6 +627,7 @@ export default function App() {
       </div>
 
       <CommandPalette />
+      <ThreadRenameDialog />
 
     </div>
 
