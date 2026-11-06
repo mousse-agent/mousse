@@ -766,3 +766,24 @@ html[data-theme="high-contrast"] .permission-request-btn-primary {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* A message the reader was taken to (search, the composer's approval cue): its background lights
+   up with the selection tint and fades out. A background only, never an edge bar. */
+.an-message-list .is-located {
+  border-radius: var(--ui-control-radius);
+  animation: chat-located 1.6s ease-out;
+}
+
+@keyframes chat-located {
+  0%,
+  30% {
+    background-color: var(--ui-selected);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .an-message-list .is-located {
+    animation: none;
+    background-color: var(--ui-selected);
+  }
+}
