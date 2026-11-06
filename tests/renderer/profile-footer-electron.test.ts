@@ -36,7 +36,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     for (const heading of report.headings) expect(heading).toMatchObject({ transform: 'none', spacing: 'normal' })
     expect(report.fonts.ui).toMatch(/^Geist,/)
     expect(report.fonts.code).toMatch(/^"Geist Mono",/)
-    expect(report.fonts.terminal).toMatch(/^"Geist Mono",/)
+    expect(report.fonts.terminal).toMatch(/^['"]Geist Mono['"],/)
     expect(report.fonts.faces).toHaveLength(4)
     for (const face of report.fonts.faces) expect(face).toMatchObject({ status: 'loaded', weight: '100 900' })
 

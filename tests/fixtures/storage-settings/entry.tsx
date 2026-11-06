@@ -208,7 +208,7 @@ async function customDays(testId: string, typed: string): Promise<{ typed: strin
 }
 
 async function run() {
-  await until(() => $(tid('storage-usage')) && valueOf('storage-inactive-select'), 'page loaded')
+  await until(() => $(tid('storage-usage-table')) && valueOf('storage-inactive-select'), 'page loaded')
   await settled()
   const evidence: Record<string, unknown> = {}
 
@@ -489,7 +489,7 @@ async function run() {
   return { ...evidence, failures, calls: calls.map((call) => call.method) }
 }
 
-Object.assign(window, { storageFixture: { run, ready: () => Boolean($(tid('storage-usage')) && $(tid('storage-cleanup-button'))) } })
+Object.assign(window, { storageFixture: { run, ready: () => Boolean($(tid('storage-usage-table')) && $(tid('storage-cleanup-button'))) } })
 // The theme tokens hang off the document's theme, and the page's spacing tokens off .settings-page.
 document.documentElement.dataset.theme = 'dark'
 Object.assign(document.body.style, { margin: '0', fontFamily: "'Segoe UI', system-ui, sans-serif", fontSize: '14px', background: 'var(--surface-base)', color: 'var(--text-primary)' })
