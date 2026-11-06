@@ -794,6 +794,12 @@ const api = {
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
+    /** `/clear`: the thread's next turn starts a fresh provider session with no earlier context. */
+    clearContext: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:clearContext', threadId),
+    /** `/compact`: summarizes the thread's context now; `focus` says what the summary keeps. */
+    compact: (threadId: string, focus?: string): Promise<void> => ipcRenderer.invoke('threads:compact', threadId, focus),
+    /** `/fork`: a new thread from the thread's latest finished turn, selected. */
+    fork: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }

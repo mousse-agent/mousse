@@ -305,8 +305,8 @@
     "security": "926c4af141d1208d"
   },
   "orchestrator.send": {
-    "version": 2,
-    "digest": "603f2c1520163ce5",
+    "version": 3,
+    "digest": "c3f9789b24c3fa13",
     "security": "1447c39a3cdfbf97"
   },
   "orchestrator.steer": {
@@ -642,6 +642,16 @@
   "threads.clearApprovalRules": {
     "version": 1,
     "digest": "e2af3a0680e25499",
+    "security": "926c4af141d1208d"
+  },
+  "threads.clearContext": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
+  },
+  "threads.compact": {
+    "version": 1,
+    "digest": "94dd6dadebc5f444",
     "security": "926c4af141d1208d"
   },
   "threads.create": {

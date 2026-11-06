@@ -833,6 +833,60 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = rest
     this.save()
   }
+  /**
+   * `/compact`: Claude Code's own compaction of the thread's saved session, outside a turn: the session is
+   * resumed with `/compact <focus>`. False when no saved session holds this history (the next turn starts a
+   * new one anyway) or Claude Code compacted nothing, so the caller compacts Mousse's copy instead. The
+   * session keeps its fingerprint: the next turn resumes the compacted session.
+   */
+  async compactConversation(threadId: string, history: string, instanceId: string | undefined, focus: string | undefined, signal: AbortSignal): Promise<boolean> {
+    const saved = this.settings.sessions?.[threadId]
+    if (!saved || !sessionBoundTo(saved, instanceId ?? CLAUDE_INSTANCE_ID) || saved.historyKey !== historyKey(history)) return false
+    if (this.activeThreads.has(threadId)) throw new Error('A Claude turn is already running for this thread')
+    if (this.checkDue()) await this.status()
+    if (!this.configured()) return false
+    // A live process holds the conversation as it was; it is closed so the next turn resumes the compacted one.
+    const live = this.live.get(threadId)
+    if (live && !live.dead) {
+      if (live.busy || live.pendingRuns > 0 || live.obligations.size > 0) throw new Error('Claude is still running background work on this thread.')
+      live.close('closed')
+      this.live.delete(threadId)
+    }
+    this.activeThreads.add(threadId)
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    const abort = (): void => controller.abort()
+    signal.addEventListener('abort', abort, { once: true })
+    let query: Query | undefined
+    try {
+      query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
+        ...this.options(saved.cwd, controller, this.finalEnv(this.environment())),
+        resume: saved.sessionId,
+        ...(saved.model ? { model: saved.model } : {}),
+        includePartialMessages: false,
+        // Compaction runs no tools.
+        canUseTool: async () => ({ behavior: 'deny', message: 'No tools run while compacting.' })
+      })
+      let compacted = false
+      for await (const message of query) {
+        if (message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
+        if (message.type !== 'result') continue
+        const failure = resultFailure(message)
+        if (failure) throw failure
+        if (message.session_id && message.session_id !== saved.sessionId) {
+          saved.sessionId = message.session_id
+          this.save()
+        }
+        break
+      }
+      return compacted
+    } finally {
+      query?.close()
+      signal.removeEventListener('abort', abort)
+      this.controllers.delete(controller)
+      this.activeThreads.delete(threadId)
+    }
+  }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const launch = this.launchTarget()
