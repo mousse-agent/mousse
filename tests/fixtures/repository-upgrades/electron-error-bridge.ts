@@ -40,7 +40,7 @@ async function run() {
         catch (error) { localValidation.push({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }) }
       }
       const storageErrors = [];
-      try { await window.mousse.threads.configureTrash({ graceDays: 0, automaticPurge: false }) }
+      try { await window.mousse.storage.configure({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 0, removeMerged: false }, browser: { captureDays: null } }) }
       catch (error) { storageErrors.push({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }) }
       // A Git mutation names its folder by scope; the daemon rejects an unknown project with a DomainRpcError.
       const gitErrors = [];
@@ -50,9 +50,9 @@ async function run() {
       const thread = await window.mousse.threads.create('Disposable not archived fixture');
       try { await window.mousse.threads.delete(thread.id) }
       catch (error) { storageErrors.push({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }) }
-      const inventory = await window.mousse.threads.inventory();
+      const listed = await window.mousse.threads.listAll();
       return { bridgeExposed: typeof window.mousse.orchestrator.sendToThread === 'function', chat, platform, localValidation, storageErrors, gitErrors,
-        storageStateAfterRefusedDelete: inventory.lifecycles.find(record => record.taskId === thread.id)?.state }
+        listedAfterRefusedDelete: listed.some(item => item.id === thread.id) }
     })()`)
     // Controlled GUI transport injection after the actual daemon requests above:
     // Node-style codes must not make arbitrary native exceptions publicly safe.

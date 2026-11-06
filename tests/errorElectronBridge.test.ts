@@ -60,7 +60,7 @@ describe('production Electron error bridge', () => {
         expect.objectContaining({ code: 'platform_params_too_large', message: 'Platform parameters exceed the size limit', errorInfo: { category: 'invalid', retryable: false } })
       ])
       expect(observed.storageErrors).toEqual([
-        expect.objectContaining({ code: 'invalid_params', message: 'graceDays must be between 1 and 3650', errorInfo: { category: 'invalid', retryable: false } }),
+        expect.objectContaining({ code: 'invalid_params', message: 'inactiveDays must be between 1 and 3650', errorInfo: { category: 'invalid', retryable: false } }),
         expect.objectContaining({ code: 'thread_not_archived', message: 'Archive the thread before deleting it.' })
       ])
       // A DomainRpcError thrown by a daemon handler keeps its code across the daemon socket, guiMms.request,
@@ -68,7 +68,7 @@ describe('production Electron error bridge', () => {
       expect(observed.gitErrors).toEqual([
         expect.objectContaining({ code: 'project_not_found', message: 'Project not found', details: { projectId: 'missing_fixture_project' } })
       ])
-      expect(observed.storageStateAfterRefusedDelete).toBe('active')
+      expect(observed.listedAfterRefusedDelete).toBe(true)
       expect(observed.controlledNativeFailure).toMatchObject({
         chat: { requestAcknowledged: false, error: { code: 'internal_error', errorInfo: { category: 'internal', retryable: false } } },
         platform: { code: 'platform_request_failed', errorInfo: { category: 'internal', retryable: false } }

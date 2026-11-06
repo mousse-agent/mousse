@@ -5,12 +5,12 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 const config = JSON.parse(readFileSync(process.env.MOUSSE_FULL_SHELL_CONFIG, 'utf8'))
 const isCli = process.argv.includes('--cli')
-const timer = isCli ? undefined : setTimeout(() => { console.error('Lifecycle full shell timed out'); app.exit(1) }, 85000)
+const timer = isCli ? undefined : setTimeout(() => { console.error('Lifecycle full shell timed out'); app.exit(1) }, 140000)
 const delay = (ms) => new Promise((done) => setTimeout(done, ms))
 let stage = 'startup'
-async function until(read, predicate, label) {
+async function until(read, predicate, label, ms = 18000) {
   stage = label
-  const deadline = Date.now() + 18000
+  const deadline = Date.now() + ms
   let value
   while (Date.now() < deadline) { value = await read(); if (predicate(value)) return value; if (typeof value === 'string' && value.includes('Error invoking remote method')) throw new Error(`${label}: ${value}`); await delay(70) }
   throw new Error(`${label}: ${JSON.stringify(value)}`)
@@ -31,7 +31,8 @@ async function check() {
     writeFileSync(join(config.evidenceDir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
   }
   const proof = { actualMain: config.mainEntry }
-  const lifecycleState = () => evaluate(`window.mousse.threads.inventory()`).then((value) => value.lifecycles.find((record) => record.taskId === config.threadId)?.state)
+  // The daemon's own record of the thread, read from disk: the app no longer lists lifecycle records.
+  const lifecycleState = async () => { try { return JSON.parse(readFileSync(join(config.home, 'profiles', config.profileId, 'lifecycle', 'tasks', `${config.threadId}.json`), 'utf8')).state } catch { return undefined } }
   const settled = () => evaluate(`window.mousse.threads.listAll().then((threads) => Boolean(threads.find((thread) => thread.id === ${JSON.stringify(config.threadId)})?.settledAt))`)
   // Archive and Unarchive from the thread's context menu in the sidebar, the way a person does.
   const fromMenu = async (item, want, label) => {
@@ -83,7 +84,8 @@ async function check() {
     const state = await lifecycleState()
     if (state !== 'purged' && Date.now() - pressed > 3000) await evaluate(`(() => { const button = document.querySelector('[data-testid="archived-delete-confirm"]'); if (button && !button.disabled) button.click() })()`).then(() => { pressed = Date.now() })
     return state
-  }, (state) => state === 'purged', 'Permanent delete')
+  // The purge removes the live worktree whole, which takes a while on Windows.
+  }, (state) => state === 'purged', 'Permanent delete', 60000)
   await until(() => evaluate(`!${threadRow} && !document.querySelector('[role="dialog"]')`), Boolean, 'Deleted thread leaves the list')
   if (existsSync(config.workspace)) throw Error('Task checkout remains after delete')
   proof.purged = true

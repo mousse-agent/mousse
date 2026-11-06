@@ -786,10 +786,6 @@ const api = {
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
     /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
-    /** This computer's thread lifecycle records. */
-    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
-    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>

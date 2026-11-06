@@ -65,10 +65,6 @@ const laptopUsage = () => ({
 })
 
 const device = (node: string, name: string, state: 'open' | 'closed', self = false) => ({ node, name, caps: ['read'], keyEpoch: 1, expiresAt: 0, self, revoked: false, state })
-const lifecycle = (taskId: string, state: string) => ({
-  schemaVersion: 1, minimumWriterVersion: 1, profileId: 'fixture', taskId, generation: 1, state, originalLocation: `/x/${taskId}`, location: `/x/${taskId}`, locations: [`/x/${taskId}`],
-  operations: [], createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', ...(state === 'trashed' ? { trashedAt: '2026-10-01T00:00:00.000Z' } : {})
-})
 
 const record = <A extends unknown[], R>(method: string, work: (...args: A) => R | Promise<R>) => async (...args: A): Promise<R> => {
   calls.push({ method, args: structuredClone(args) })
@@ -94,8 +90,6 @@ const report = () => ({
 Object.assign(window, {
   mousse: {
     threads: {
-      inventory: async () => ({ lifecycles: [lifecycle('t1', 'active'), lifecycle('t9', 'trashed')], taskNames: { t1: 'Fix storage', t9: 'Old experiment' }, trashPolicy: daemon.trash, trashSweepStatus: { suspended: false } }),
-      configureTrash: record('threads.configureTrash', (next: typeof daemon.trash) => { daemon.trash = { ...daemon.trash, ...next, schemaVersion: 1 } }),
       select: record('threads.select', async (_id: string) => undefined)
     },
     storage: {
