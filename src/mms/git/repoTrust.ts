@@ -13,7 +13,7 @@ import { getMousseHomeDir } from '../data/paths'
  * that can write the repository's config, for one) stays emptied, and writes through it are refused.
  *
  * Kept in Mousse's home, outside the repository, keyed by the repository's common Git folder, so a
- * thread's worktree shares it. The user records it again with "Trust Git settings again".
+ * thread's worktree shares it. The user records it again with "Trust this repository's Git settings".
  */
 export interface RepoTrustRecord {
   commonDir: string

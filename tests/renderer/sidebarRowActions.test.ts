@@ -11,8 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-// Row titles measure themselves; jsdom has no layout.
-globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
 const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
@@ -24,9 +22,6 @@ vi.mock('../../src/renderer/lib/threadActions', () => actions)
 vi.mock('../../src/renderer/components/sidebar/RecentlyDeletedSection', () => ({ RecentlyDeletedSection: () => null }))
 vi.mock('../../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
 vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))
-vi.mock('../../src/renderer/components/ThreadHoverCard', () => ({
-  ThreadHoverCard: ({ children }: { children: (props: object) => unknown }) => children({ anchorRef: { current: null }, onMouseEnter: () => {}, onMouseLeave: () => {} })
-}))
 
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { TitleBar } = await import('../../src/renderer/components/TitleBar')
@@ -120,16 +115,16 @@ describe('naming', () => {
     expect(shell).toContain('aria-label="New thread"')
     expect(shell).toContain('aria-label="Search threads"')
     expect(html).toContain('aria-label="Agents"')
-    expect(html).toContain('<span>No project</span>')
-    expect(html).toContain('<span>Archived</span>')
-    expect(html).toContain('aria-label="New thread in project"')
+    expect(html).toContain('<span>No project · 0</span>')
+    expect(html).toContain('<span>Archived · 0</span>')
+    expect(html).toContain('aria-label="New thread in Mousse"')
     expect(html).not.toMatch(/Settle|Recent chats|New chat/)
   })
 
   it('lists a thread whose project was removed under No project', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests', { projectId: 'gone' })], threadsSidebarView: 'projects', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    expect(html).toMatch(/<span>No project<\/span><span class="threads-sidebar-settled-count">1</)
+    expect(html).toContain('<span>No project · 1</span>')
   })
 })
 
@@ -211,7 +206,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['Pin', 'Rename', 'Trust Git settings again', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Git', 'Remove project…'])
   })
 })
 

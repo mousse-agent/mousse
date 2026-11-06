@@ -24,6 +24,7 @@ import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { startupAppearanceArgument } from '../shared/startupAppearance'
+import { homeFolderArgument } from '../shared/homeFolderArgument'
 import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
 import { MAC_VIBRANCY } from './windowMaterial'
@@ -230,7 +231,7 @@ function startGuiApp(): void {
         // SharedArrayBuffer for this window and its workers only: webview guests and other
         // windows do not inherit it, unlike the app-wide `enable-features` switch.
         enableBlinkFeatures: 'SharedArrayBuffer',
-        additionalArguments: [startupAppearanceArgument(appearance)]
+        additionalArguments: [startupAppearanceArgument(appearance), homeFolderArgument(homedir())]
       }
     })
 

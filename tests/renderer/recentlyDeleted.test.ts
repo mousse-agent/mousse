@@ -51,7 +51,7 @@ function record(
 const trashed = (taskId: string, daysAgo: number) =>
   record(taskId, 'trashed', { trashedAt: new Date(NOW - daysAgo * DAY).toISOString() })
 
-function view(state: Partial<TrashState>, options: { expanded?: boolean; hidden?: boolean } = {}) {
+function view(state: Partial<TrashState>, options: { expanded?: boolean; hidden?: boolean; nested?: boolean } = {}) {
   const full: TrashState = {
     loaded: true,
     records: [],
@@ -65,6 +65,7 @@ function view(state: Partial<TrashState>, options: { expanded?: boolean; hidden?
       state: full,
       expanded: options.expanded ?? true,
       hidden: options.hidden ?? false,
+      nested: options.nested ?? false,
       actions,
       now: NOW
     })
@@ -79,11 +80,17 @@ describe('Recently deleted section', () => {
     )
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('aria-label="Expand recently deleted threads"')
-    expect(html).toContain('<span>Recently deleted</span>')
-    expect(html).toMatch(/data-testid="sidebar-trash-count">2</)
+    expect(html).toContain('<span>Recently deleted · <span data-testid="sidebar-trash-count">2</span></span>')
     expect(html).not.toContain('sidebar-trash-row')
     expect(html).toContain('collapsed')
     expect(html).toContain('threads-sidebar-section-settled')
+  })
+
+  it('sits inside Archived as a sub-heading when nested', () => {
+    const html = view({ records: [trashed('a', 2)], taskNames: { a: 'A' } }, { expanded: false, nested: true })
+    expect(html).toContain('threads-sidebar-trash-nested')
+    expect(html).not.toContain('threads-sidebar-section-settled')
+    expect(html).toContain('<span>Recently deleted · <span data-testid="sidebar-trash-count">1</span></span>')
   })
 
   it('opens to a list wired to its toggle', () => {

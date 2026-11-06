@@ -28,6 +28,8 @@ export type CollapseProps = {
   className?: string
   style?: CSSProperties
   id?: string
+  /** ARIA role of the inner wrapper (`group` for a tree's children). */
+  role?: string
   /** Rows in the list. Above `COLLAPSE_LONG_LIST` the items do not stagger; the container still animates. */
   itemCount?: number
   /** False when the change was not the user's (a group revealed for the thread being opened): it applies at once. */
@@ -43,7 +45,7 @@ export type CollapseProps = {
  * it closes it is `inert` and hidden from screen readers. With reduced motion it opens and closes at once.
  * The trigger keeps its own `aria-expanded`.
  */
-export function Collapse({ open, children, as: Inner = 'div', className, style, id, itemCount, animate = true, 'data-testid': testId }: CollapseProps) {
+export function Collapse({ open, children, as: Inner = 'div', className, style, id, role, itemCount, animate = true, 'data-testid': testId }: CollapseProps) {
   const [phase, setPhase] = useState<Phase>(open ? 'open' : 'closed')
   const [shownOpen, setShownOpen] = useState(open)
   // React's "adjust state while rendering": the new phase applies in the same commit as the change of
@@ -76,7 +78,7 @@ export function Collapse({ open, children, as: Inner = 'div', className, style, 
       aria-hidden={closing || undefined}
     >
       <div className="ui-collapse-clip">
-        <Inner className={className} style={style} id={id} data-testid={testId}>
+        <Inner className={className} style={style} id={id} role={role} data-testid={testId}>
           {children}
         </Inner>
       </div>
