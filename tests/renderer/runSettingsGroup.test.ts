@@ -74,7 +74,7 @@ describe('Settings > General > Runs', () => {
     expect(host.querySelector('[role="switch"][aria-label="Resume after usage limits reset"]')).toBeNull()
     expect(host.textContent).not.toContain('Automatic resumes in a row')
     expect(host.textContent).toContain('Continues a paused run when the limit resets.')
-    expect(tooltips()).toContain('waits until you press Resume now')
+    expect(tooltips()).toContain('waits until you press Try now')
     expect(optionLabels()).toEqual(['Off', 'Once', 'Up to 3 times', 'Up to 5 times'])
   })
 
@@ -86,7 +86,7 @@ describe('Settings > General > Runs', () => {
     expect(resume().textContent).toContain('Up to 3 times')
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 3, worktreeByDefault: true })
     expect(tooltips()).toContain('at most 3 times in a row')
-    expect(tooltips()).toContain('Runs already paused are not resumed; press Resume now.')
+    expect(tooltips()).toContain('Runs already paused are not resumed; press Try now.')
   })
 
   it('Off keeps the saved count, so turning it back on offers the same one', () => {

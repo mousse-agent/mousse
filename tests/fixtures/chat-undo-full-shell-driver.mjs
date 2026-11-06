@@ -49,8 +49,8 @@ async function run() {
     await verify(true)
   }
   const redo = async () => {
-    await until(() => evaluate(`Boolean([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Redo last undo' && !button.disabled))`), Boolean, 'Projectless Redo unavailable')
-    await evaluate(`([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Redo last undo' && !button.disabled)).click()`)
+    await until(() => evaluate(`Boolean([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Redo' && !button.disabled))`), Boolean, 'Projectless Redo unavailable')
+    await evaluate(`([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Redo' && !button.disabled)).click()`)
     await verify(false)
   }
   if (config.phase === 'restart') {
