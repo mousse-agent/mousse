@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { BrowserViewerSnapshot } from '../src/shared/browser/viewer'
 import type { ChatResourceContext, ChatSharedTerminal, ChatTerminalOutput } from '../src/shared/chatResources'
 import { ChatResourceService, chatFileRevision, type ChatResourceHost } from '../src/mms/chats/resources/ChatResourceService'
@@ -159,6 +159,54 @@ describe('group shared resources', () => {
     removeMember()
     await expect(service.fileWrite(client('a'), 'file.txt', 'bad', chatFileRevision(''))).rejects.toThrow('Not a group member')
     expect(writes()).toBe(0)
+  })
+
+  describe('browser control returns to the agent when the person\'s lease ends', () => {
+    const controlCalls = (host: ChatResourceHost) => {
+      const calls: Array<'human' | 'agent'> = []
+      const control = host.browser.control
+      host.browser.control = async (binding, id, owner) => { calls.push(owner); return control(binding, id, owner) }
+      return calls
+    }
+
+    it('when the lease expires, with no later request', async () => {
+      const { service, host, setTime } = fixture()
+      const calls = controlCalls(host)
+      await service.browserOpen(client('a'), 'https://example.test')
+      await service.browserControl(client('a'), 'browser-a', true)
+      setTime(4001); service.prune()
+      await vi.waitFor(() => expect(calls).toEqual(['human', 'agent']))
+      const snapshot = await service.snapshot(client('b'))
+      expect(snapshot.browserControls).toEqual({})
+      expect(snapshot.browsers[0].controlOwner).toBe('agent')
+    })
+
+    it('when the holder leaves', async () => {
+      const { service, host } = fixture()
+      const calls = controlCalls(host)
+      await service.browserOpen(client('a'), 'https://example.test')
+      await service.browserControl(client('a'), 'browser-a', true)
+      service.disconnect('a')
+      await vi.waitFor(() => expect(calls).toEqual(['human', 'agent']))
+      expect((await service.snapshot(client('b'))).browsers[0].controlOwner).toBe('agent')
+      await service.browserControl(client('b'), 'browser-a', true)
+      await service.presenceLeave(client('b'))
+      await vi.waitFor(() => expect(calls).toEqual(['human', 'agent', 'human', 'agent']))
+    })
+
+    it('but not from under a person who took control after the lease expired', async () => {
+      const { service, host, setTime } = fixture()
+      const calls = controlCalls(host)
+      await service.browserOpen(client('a'), 'https://example.test')
+      await service.browserControl(client('a'), 'browser-a', true)
+      setTime(4001)
+      await service.browserControl(client('b'), 'browser-a', true)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(calls).toEqual(['human', 'human'])
+      const snapshot = await service.snapshot(client('a'))
+      expect(snapshot.browserControls['browser-a']?.clientId).toBe('b')
+      expect(snapshot.browsers[0].controlOwner).toBe('human')
+    })
   })
 
   it('keeps ownership until a dispatched file write settles during profile shutdown', async () => {
