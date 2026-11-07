@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotFace, BotFaceStill, normalizeFaceProps } from '../../src/renderer/components/bots/face/BotFace'
 import { FaceMotion, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
 import {
+  createWebGlGpu,
   FaceRenderer,
   faceDrawSide,
+  LOST_CONTEXT_TIMEOUT_MS,
   resetSharedFaceRenderer,
   SAMPLE_BUDGET,
   sharedFaceRendererStatus,
@@ -90,13 +92,17 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
   let id = 0
   let now = 1000
   const draws: { side: number; uniforms: FaceUniforms }[] = []
+  const lost = new Set<() => void>()
+  const restored = new Set<() => void>()
+  const timers = new Map<number, { at: number; callback: () => void }>()
   const gpu: FaceGpu = {
     canvas: document.createElement('canvas'),
     status: options.status ?? (() => 'ready'),
     ensureSize: vi.fn(),
     draw: (_x, _y, side, uniforms) => draws.push({ side, uniforms }),
     finish: vi.fn(),
-    onRestored: vi.fn(),
+    onRestored: (listener) => restored.add(listener),
+    onLost: (listener) => lost.add(listener),
     dispose: vi.fn()
   }
   const env: FaceRendererEnv = {
@@ -111,7 +117,12 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     pixelRatio: () => options.pixelRatio ?? 1,
     document,
     IntersectionObserver: options.observer ? (FakeObserver as unknown as typeof IntersectionObserver) : undefined,
-    random: () => 0.5
+    random: () => 0.5,
+    setTimer: (callback, ms) => {
+      const timer = ++id
+      timers.set(timer, { at: now + ms, callback })
+      return () => timers.delete(timer)
+    }
   }
   const tick = (ms = 1000 / 30) => {
     now += ms
@@ -119,9 +130,16 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     frames.clear()
     act(() => {
       for (const callback of due) callback(now)
+      for (const [timer, { at, callback }] of [...timers]) {
+        if (at > now) continue
+        timers.delete(timer)
+        callback()
+      }
     })
   }
-  return { env, gpu, draws, tick, pending: () => frames.size }
+  const lose = () => act(() => lost.forEach((listener) => listener()))
+  const restore = () => act(() => restored.forEach((listener) => listener()))
+  return { env, gpu, draws, tick, lose, restore, pending: () => frames.size, timers: () => timers.size }
 }
 
 const coral = { colour: 'coral', accessory: 'none' }
@@ -162,6 +180,44 @@ describe('BotFace fallback', () => {
     fake.tick()
     expect(host.querySelector('canvas')).toBeNull()
     expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+
+  it('is not ready while the context is lost, and switches to the still face when it does not come back', () => {
+    let status: ReturnType<FaceGpu['status']> = 'ready'
+    const fake = fakeEnv({ status: () => status })
+    resetSharedFaceRenderer(() => fake.env)
+    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', still: true }))
+    fake.tick()
+    expect(sharedFaceRendererStatus()).toBe('ready')
+    status = 'lost'
+    fake.lose()
+    expect(sharedFaceRendererStatus()).toBe('pending')
+    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+    fake.tick(LOST_CONTEXT_TIMEOUT_MS)
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    expect(host.querySelector('canvas')).toBeNull()
+    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
+  })
+
+  it('draws again when a lost context comes back in time', () => {
+    let status: ReturnType<FaceGpu['status']> = 'ready'
+    const fake = fakeEnv({ status: () => status })
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), spec())
+    fake.tick()
+    expect(fake.draws).toHaveLength(1)
+    status = 'lost'
+    fake.lose()
+    expect(renderer.status()).toBe('pending')
+    fake.tick()
+    expect(fake.draws).toHaveLength(1)
+    status = 'ready'
+    fake.restore()
+    expect(fake.timers()).toBe(0)
+    fake.tick(LOST_CONTEXT_TIMEOUT_MS)
+    expect(renderer.status()).toBe('ready')
+    expect(fake.draws).toHaveLength(2)
+    renderer.dispose()
   })
 
   it('draws the still face when a canvas has no 2D context', () => {
@@ -363,6 +419,34 @@ describe('software WebGL', () => {
     getExtension: (name: string) => (name === 'WEBGL_debug_renderer_info' && renderer !== null ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null),
     getParameter: () => renderer
   }) as unknown as WebGLRenderingContext
+  it('fails a context that comes back from a loss in software', () => {
+    let renderer = 'ANGLE (Intel, Mesa Intel(R) Graphics, OpenGL 4.6)'
+    const listeners = new Map<string, (event: Event) => void>()
+    const context = new Proxy({} as Record<string | symbol, unknown>, {
+      get: (target, key) => {
+        if (key === 'getExtension') return (name: string) => (name === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null)
+        if (key === 'getParameter') return (name: number) => (name === 0x9246 ? renderer : true)
+        if (key === 'getProgramParameter') return () => true
+        if (key === 'isContextLost') return () => false
+        if (typeof key === 'string' && /^[A-Z_]+$/.test(key)) return 1
+        return (target[key] ??= vi.fn(() => ({})))
+      }
+    })
+    const canvas = {
+      width: 1,
+      height: 1,
+      getContext: () => context,
+      addEventListener: (type: string, listener: (event: Event) => void) => listeners.set(type, listener)
+    }
+    const gpu = createWebGlGpu({ createElement: () => canvas } as unknown as Document)!
+    expect(gpu.status()).toBe('ready')
+    listeners.get('webglcontextlost')!({ preventDefault() {} } as Event)
+    expect(gpu.status()).toBe('lost')
+    renderer = 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)'
+    listeners.get('webglcontextrestored')!(new Event('webglcontextrestored'))
+    expect(gpu.status()).toBe('failed')
+  })
+
   it('counts as no WebGL, so faces stay still instead of burning the CPU', () => {
     expect(softwareWebGl(gl('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)'))).toBe(true)
     expect(softwareWebGl(gl('llvmpipe (LLVM 17.0.6, 256 bits)'))).toBe(true)

@@ -62,6 +62,8 @@ export interface FaceGpu {
   readonly timer?: { begin(): void; end(): void; poll(): number[] }
   /** Called once the context is back after a loss. */
   onRestored(listener: () => void): void
+  /** Called when the context is lost. */
+  onLost?(listener: () => void): void
   dispose(): void
 }
 
@@ -77,6 +79,8 @@ export interface FaceRendererEnv {
   document?: Document
   IntersectionObserver?: typeof IntersectionObserver
   random?: () => number
+  /** Calls `callback` after `ms`; returns a function that cancels it. Without it a lost context waits for its restore. */
+  setTimer?(callback: () => void, ms: number): () => void
 }
 
 export type FaceRendererStatus = 'pending' | 'ready' | 'failed'
@@ -107,6 +111,8 @@ const STILL_CACHE_LIMIT = 96
 export const SAMPLE_BUDGET = 48_000
 /** Seconds between drawing ticks at least. */
 const MIN_TICK = 1 / 62
+/** A lost context not back within this long fails: the faces draw the still fallback. */
+export const LOST_CONTEXT_TIMEOUT_MS = 5_000
 
 /** Seconds between frames, by state. */
 const FRAME_INTERVAL: Record<BotFaceState, number> = {
@@ -164,6 +170,8 @@ export class FaceRenderer {
   private frameId: number | null = null
   private failed = false
   private ready = false
+  /** Cancels the wait for a lost context to come back. */
+  private cancelLostTimer: (() => void) | null = null
   private readonly onVisibility = () => this.schedule()
   private stat = { ticks: 0, lastFaces: 0, averageMs: 0, maxMs: 0, gpuMs: 0, gpuMaxMs: 0 }
   private lastDraw = -Infinity
@@ -175,7 +183,10 @@ export class FaceRenderer {
     this.random = env.random ?? Math.random
     this.gpu = env.createGpu()
     if (!this.gpu) this.failed = true
+    this.gpu?.onLost?.(() => this.lost())
     this.gpu?.onRestored(() => {
+      this.cancelLostTimer?.()
+      this.cancelLostTimer = null
       for (const slot of this.slots.values()) slot.dirty = true
       this.schedule()
     })
@@ -258,6 +269,8 @@ export class FaceRenderer {
 
   dispose(): void {
     this.stop()
+    this.cancelLostTimer?.()
+    this.cancelLostTimer = null
     this.observer?.disconnect()
     this.env.document?.removeEventListener('visibilitychange', this.onVisibility)
     this.slots.clear()
@@ -317,6 +330,23 @@ export class FaceRenderer {
     for (const listener of [...this.listeners]) listener()
   }
 
+  /** The context is lost: not ready until it is back, and failed when it does not come back in time. */
+  private lost(): void {
+    if (this.failed) return
+    if (this.ready) {
+      this.ready = false
+      this.notify()
+    }
+    if (this.cancelLostTimer || !this.env.setTimer) return
+    this.cancelLostTimer = this.env.setTimer(() => {
+      this.cancelLostTimer = null
+      if (this.failed || this.gpu?.status() !== 'lost') return
+      this.failed = true
+      this.stop()
+      this.notify()
+    }, LOST_CONTEXT_TIMEOUT_MS)
+  }
+
   private tick(nowMs: number): void {
     this.frameId = null
     const gpu = this.gpu
@@ -330,6 +360,7 @@ export class FaceRenderer {
     if (gpuStatus !== 'ready') {
       // Compiling: check again next frame. Lost: wait for onRestored.
       if (gpuStatus === 'pending') this.schedule()
+      else this.lost()
       return
     }
     if (!this.ready) {
@@ -568,12 +599,16 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
     state = 'ready'
   }
 
+  const lost = new Set<() => void>()
   canvas.addEventListener('webglcontextlost', (event) => {
     event.preventDefault()
     state = 'lost'
+    for (const listener of lost) listener()
   })
   canvas.addEventListener('webglcontextrestored', () => {
-    setUp()
+    // The restored context may be a software one (Chromium falls back to SwiftShader): refused as at the start.
+    if (softwareWebGl(context)) state = 'failed'
+    else setUp()
     for (const listener of restored) listener()
   })
   setUp()
@@ -637,8 +672,12 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
     onRestored(listener) {
       restored.add(listener)
     },
+    onLost(listener) {
+      lost.add(listener)
+    },
     dispose() {
       restored.clear()
+      lost.clear()
       context.getExtension('WEBGL_lose_context')?.loseContext()
     }
   }
@@ -653,6 +692,10 @@ function browserEnv(): FaceRendererEnv | null {
     cancelFrame: (id) => window.cancelAnimationFrame(id),
     now: () => performance.now(),
     pixelRatio: () => window.devicePixelRatio,
+    setTimer: (callback, ms) => {
+      const handle = window.setTimeout(callback, ms)
+      return () => window.clearTimeout(handle)
+    },
     document,
     IntersectionObserver: typeof IntersectionObserver === 'undefined' ? undefined : IntersectionObserver
   }
