@@ -579,7 +579,8 @@ export class MmsProfileServices {
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
-        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership),
+        // Every thread the bot engine makes is the bot's: no thread list or search shows it.
+        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership, { botOwned: true }),
         threadState: (threadId) => {
           const record = this.threads.lifecycleStore.get(threadId)
           if (record && record.state !== 'active') return 'trashed'

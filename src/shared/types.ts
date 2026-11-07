@@ -1076,6 +1076,11 @@ export interface Thread {
    */
   localOnly?: true
   /**
+   * Set on a personal bot's home, run and context threads: the bot's chat in the Agents tab is how the
+   * owner sees them, so no client lists or searches them as threads.
+   */
+  botOwned?: true
+  /**
    * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
    * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.
    * Absent: the thread never expires. Set when the thread is created or later, extended or removed before then.

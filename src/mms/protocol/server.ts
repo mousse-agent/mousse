@@ -639,6 +639,8 @@ export class MmsProtocolServer {
 
     // Activity + agent/task registry fan-out from multi-tenant runtimes
     const runtimes = services.threadRuntimes
+    // A personal bot's threads are its chat (`Thread.botOwned`): their work is told by `bots.*`
+    // events, so no window counts them, toasts them or notifies about them as threads.
     onEmitter(
       runtimes,
       'activity',
@@ -647,10 +649,12 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
+        const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
         if (payload.activity) {
+          const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
-            this.ring.push('activity.snapshot', { activity: payload.activity }, undefined)
+            this.ring.push('activity.snapshot', { activity }, undefined)
           )
         }
       }

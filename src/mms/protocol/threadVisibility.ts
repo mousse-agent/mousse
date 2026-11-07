@@ -33,6 +33,11 @@ export function withoutLocalOnlyFor<T extends Pick<Thread, 'localOnly' | 'lineag
   return connectionIsLocal(connection) ? [...threads] : threads.filter((thread) => !isLocalOnlyThread(thread, inventory))
 }
 
+/** `threads` without a personal bot's threads (`Thread.botOwned`): no client lists them; the bot's chat shows them. */
+export function withoutBotThreads<T extends Pick<Thread, 'botOwned'>>(threads: readonly T[]): T[] {
+  return threads.filter((thread) => !thread.botOwned)
+}
+
 /**
  * `threads` as `connection` should see them. `inventory` is the complete list parents are looked up
  * in; give it whenever `threads` is a slice (one project), so a slice never makes a parent look
@@ -43,7 +48,7 @@ export function visibleThreadsFor(
   threads: readonly Thread[],
   inventory: readonly Thread[] = threads
 ): Thread[] {
-  const shared = withoutLocalOnlyFor(connection, threads, inventory)
+  const shared = withoutLocalOnlyFor(connection, withoutBotThreads(threads), inventory)
   return connectionSeesSubagents(connection) ? shared : visibleThreads(shared, inventory)
 }
 
@@ -116,6 +121,15 @@ function withRemoteLists(event: ProtocolEvent, remote: RemoteListsPort): Protoco
   }
 }
 
+/** A `threads.updated` event without a personal bot's threads, for every client; any other event as it is. */
+function withoutBotThreadRows(event: ProtocolEvent): ProtocolEvent {
+  if (event.type !== 'threads.updated') return event
+  const data = event.data
+  const rows = Array.isArray(data) ? (data as Thread[]) : (data as { threads?: unknown } | null)?.threads
+  if (!Array.isArray(rows) || !rows.some((thread: Thread) => thread.botOwned)) return event
+  return { ...event, data: Array.isArray(data) ? withoutBotThreads(rows) : { ...(data as object), threads: withoutBotThreads(rows) } }
+}
+
 /**
  * A pushed `threads.updated` event as one client should receive it. The event in the replay ring
  * carries the complete inventory of this computer; each client gets its own projection, applied when the
@@ -124,9 +138,10 @@ function withRemoteLists(event: ProtocolEvent, remote: RemoteListsPort): Protoco
  */
 export function projectEventFor(
   clientType: ProtocolClientType | undefined,
-  event: ProtocolEvent,
+  stored: ProtocolEvent,
   remote?: RemoteListsPort
 ): ProtocolEvent {
+  const event = withoutBotThreadRows(stored)
   if (clientType === 'gui' && remote) {
     const merged = withRemoteLists(event, remote)
     if (merged) return merged
