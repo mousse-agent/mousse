@@ -8,10 +8,12 @@ import {
   createWebGlGpu,
   FaceRenderer,
   faceDrawSide,
+  IDLE_LIVE_SECONDS,
   LOST_CONTEXT_TIMEOUT_MS,
   resetSharedFaceRenderer,
   SAMPLE_BUDGET,
   sharedFaceRendererStatus,
+  UNFOCUSED_LIVE_SECONDS,
   softwareWebGl,
   type FaceGpu,
   type FaceRendererEnv
@@ -87,7 +89,7 @@ class FakeObserver {
 }
 
 /** A renderer environment with a fake GPU and a manual frame clock. */
-function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGpu['status']>; pixelRatio?: number } = {}) {
+function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGpu['status']>; pixelRatio?: number; focus?: boolean } = {}) {
   const frames = new Map<number, (now: number) => void>()
   let id = 0
   let now = 1000
@@ -97,6 +99,8 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
   const timers = new Map<number, { at: number; callback: () => void }>()
   let ratio = options.pixelRatio ?? 1
   const ratioListeners = new Set<() => void>()
+  let focused = true
+  const focusListeners = new Set<() => void>()
   const gpu: FaceGpu = {
     canvas: document.createElement('canvas'),
     status: options.status ?? (() => 'ready'),
@@ -117,6 +121,15 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     cancelFrame: (frame) => frames.delete(frame),
     now: () => now,
     pixelRatio: () => ratio,
+    ...(options.focus
+      ? {
+          hasFocus: () => focused,
+          onFocusChange: (listener: () => void) => {
+            focusListeners.add(listener)
+            return () => focusListeners.delete(listener)
+          }
+        }
+      : {}),
     onPixelRatioChange: (listener) => {
       ratioListeners.add(listener)
       return () => ratioListeners.delete(listener)
@@ -149,7 +162,11 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     ratio = next
     act(() => ratioListeners.forEach((listener) => listener()))
   }
-  return { env, gpu, draws, tick, lose, restore, setRatio, pending: () => frames.size, timers: () => timers.size }
+  const setFocus = (next: boolean) => {
+    focused = next
+    act(() => focusListeners.forEach((listener) => listener()))
+  }
+  return { env, gpu, draws, tick, lose, restore, setRatio, setFocus, pending: () => frames.size, timers: () => timers.size }
 }
 
 const coral = { colour: 'coral', accessory: 'none' }
@@ -397,6 +414,42 @@ describe('the shared renderer', () => {
     fake.tick()
     expect(fake.draws).toHaveLength(1)
     expect(renderer.status()).toBe('ready')
+    renderer.dispose()
+  })
+
+  it('settles an idle face into its still pose a few seconds after its state changed, and moves it on a new state', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const handle = renderer.register(document.createElement('canvas'), spec())!
+    const ticks = Math.ceil((IDLE_LIVE_SECONDS * 1000) / 50) + 1
+    for (let i = 0; i < ticks; i++) fake.tick(50)
+    expect(renderer.running).toBe(false)
+    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('idle'), { view: 'head', size: 40, samples: 1 }))
+    const drawn = fake.draws.length
+    fake.tick(1000)
+    expect(fake.draws).toHaveLength(drawn)
+    handle.update(spec({ state: 'working' }))
+    expect(renderer.running).toBe(true)
+    for (let i = 0; i < 5; i++) fake.tick(50)
+    expect(fake.draws.length).toBeGreaterThan(drawn + 3)
+    renderer.dispose()
+  })
+
+  it('settles a busy face while the window has no focus, and moves it again with focus', () => {
+    const fake = fakeEnv({ focus: true })
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), spec({ state: 'working' }))
+    fake.tick()
+    fake.setFocus(false)
+    const ticks = Math.ceil((UNFOCUSED_LIVE_SECONDS * 1000) / 50) + 1
+    for (let i = 0; i < ticks; i++) fake.tick(50)
+    expect(renderer.running).toBe(false)
+    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('working'), { view: 'head', size: 40, samples: 1 }))
+    const drawn = fake.draws.length
+    fake.setFocus(true)
+    expect(renderer.running).toBe(true)
+    for (let i = 0; i < 5; i++) fake.tick(50)
+    expect(fake.draws.length).toBeGreaterThan(drawn + 3)
     renderer.dispose()
   })
 

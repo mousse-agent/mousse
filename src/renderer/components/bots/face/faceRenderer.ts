@@ -22,6 +22,9 @@ import { MICE_FRAGMENT_SHADER, MICE_UNIFORMS, MICE_VERTEX_SHADER, type MiceUnifo
  *   not the frame time.
  * - Still faces (reduced motion, `still`) draw once. Their frame is cached per look, state, view
  *   and pixel size, so a long list of the same still face costs one draw.
+ * - A live face settles into its still pose a few seconds after its state last changed when it is
+ *   idle or paused, and a few seconds after the window lost focus in any state; a busy face moves
+ *   again when the window has focus.
  *
  * To measure: `faceRendererStats()` (in development also `window.__mousseFaceStats(measureGpu?)`)
  * reports the time per drawing tick. With `measureGpu`, `gpuMs` is the GPU time of each tick's
@@ -76,6 +79,10 @@ export interface FaceRendererEnv {
   /** Milliseconds, on the same clock as `requestFrame`'s argument. */
   now(): number
   pixelRatio(): number
+  /** Whether the window has focus; without it the window counts as focused. */
+  hasFocus?(): boolean
+  /** Calls `listener` when the window gains or loses focus; returns a function that stops it. */
+  onFocusChange?(listener: () => void): () => void
   /** Calls `listener` when `pixelRatio()` changes (a zoom, another screen); returns a function that stops it. */
   onPixelRatioChange?(listener: () => void): () => void
   document?: Document
@@ -113,6 +120,9 @@ const STILL_CACHE_LIMIT = 96
 export const SAMPLE_BUDGET = 48_000
 /** Seconds between drawing ticks at least. */
 const MIN_TICK = 1 / 62
+/** Seconds an idle or paused face moves after its state changed, and any face after the window lost focus. */
+export const IDLE_LIVE_SECONDS = 6
+export const UNFOCUSED_LIVE_SECONDS = 3
 /** A lost context not back within this long fails: the faces draw the still fallback. */
 export const LOST_CONTEXT_TIMEOUT_MS = 5_000
 
@@ -151,6 +161,10 @@ interface Slot {
   px: number
   /** Side it is drawn at in the shared buffer. */
   drawPx: number
+  /** When its state last changed, in seconds. */
+  changedAt: number
+  /** Whether its last frame was the still pose. */
+  drawnStill: boolean
 }
 
 interface Job {
@@ -176,6 +190,10 @@ export class FaceRenderer {
   private cancelLostTimer: (() => void) | null = null
   private readonly onVisibility = () => this.schedule()
   private readonly stopRatioWatch: (() => void) | null
+  private readonly stopFocusWatch: (() => void) | null
+  private focused: boolean
+  /** When the window last lost focus, in seconds. */
+  private blurredAt = -Infinity
   private stat = { ticks: 0, lastFaces: 0, averageMs: 0, maxMs: 0, gpuMs: 0, gpuMaxMs: 0 }
   private lastDraw = -Infinity
   /** Wait for the GPU at the end of each tick, so the stats include the shader time. */
@@ -204,6 +222,14 @@ export class FaceRenderer {
         })
       : null
     env.document?.addEventListener('visibilitychange', this.onVisibility)
+    this.focused = env.hasFocus?.() ?? true
+    this.stopFocusWatch = env.onFocusChange?.(() => {
+      const focused = env.hasFocus?.() ?? true
+      if (focused === this.focused) return
+      this.focused = focused
+      if (!focused) this.blurredAt = env.now() / 1000
+      this.schedule()
+    }) ?? null
     // Faces off screen are sized when they next draw; a still face on screen draws again at the new ratio.
     this.stopRatioWatch = env.onPixelRatioChange?.(() => {
       for (const slot of this.slots.values()) if (slot.visible) this.sizeCanvas(slot)
@@ -243,7 +269,9 @@ export class FaceRenderer {
       nextAt: t + this.random() * FRAME_INTERVAL[spec.state],
       lastT: null,
       px: 0,
-      drawPx: 0
+      drawPx: 0,
+      changedAt: t,
+      drawnStill: spec.still
     }
     this.slots.set(canvas, slot)
     this.sizeCanvas(slot)
@@ -282,6 +310,7 @@ export class FaceRenderer {
     this.observer?.disconnect()
     this.env.document?.removeEventListener('visibilitychange', this.onVisibility)
     this.stopRatioWatch?.()
+    this.stopFocusWatch?.()
     this.slots.clear()
     this.cache.clear()
     this.gpu?.dispose()
@@ -296,7 +325,8 @@ export class FaceRenderer {
       prev.size === next.size && prev.view === next.view && prev.still === next.still
     ) return
     slot.spec = next
-    if (prev.state !== next.state) slot.motion.set(next.state, this.env.now() / 1000)
+    if (prev.state !== next.state || prev.still !== next.still) slot.changedAt = this.env.now() / 1000
+    if (prev.state !== next.state) slot.motion.set(next.state, slot.changedAt)
     slot.dirty = true
     this.sizeCanvas(slot)
     this.schedule()
@@ -317,10 +347,19 @@ export class FaceRenderer {
     return this.env.document?.visibilityState === 'hidden'
   }
 
+  /** Whether the face draws its still pose at `t`: asked to, or settled (see the cost notes above). */
+  private still(slot: Slot, t: number): boolean {
+    const { spec } = slot
+    if (spec.still) return true
+    if ((spec.state === 'idle' || spec.state === 'paused') && t - slot.changedAt >= IDLE_LIVE_SECONDS) return true
+    return !this.focused && t - Math.max(slot.changedAt, this.blurredAt) >= UNFOCUSED_LIVE_SECONDS
+  }
+
   /** Whether any face wants a frame, now or later. */
   private wanted(): boolean {
     if (this.failed || this.hidden()) return false
-    for (const slot of this.slots.values()) if (slot.visible && (slot.dirty || !slot.spec.still)) return true
+    const t = this.env.now() / 1000
+    for (const slot of this.slots.values()) if (slot.visible && (slot.dirty || !slot.drawnStill || !this.still(slot, t))) return true
     return false
   }
 
@@ -385,7 +424,11 @@ export class FaceRenderer {
     for (const slot of this.slots.values()) {
       if (!slot.visible) continue
       this.sizeCanvas(slot)
-      if (slot.spec.still ? slot.dirty : slot.dirty || t + FRAME_SLACK >= slot.nextAt) due.push({ slot, at: slot.dirty ? -Infinity : slot.nextAt })
+      const still = this.still(slot, t)
+      // A face that settles draws its still pose once.
+      if (still && !slot.drawnStill) slot.dirty = true
+      slot.drawnStill = still
+      if (still ? slot.dirty : slot.dirty || t + FRAME_SLACK >= slot.nextAt) due.push({ slot, at: slot.dirty ? -Infinity : slot.nextAt })
     }
     if (due.length === 0) return this.schedule()
     due.sort((a, b) => a.at - b.at)
@@ -394,7 +437,7 @@ export class FaceRenderer {
     for (const { slot } of due) {
       const { spec } = slot
       const view = { view: spec.view, size: spec.size, samples: 1 as const }
-      const cacheKey = spec.still ? `${spec.look.colour}|${spec.look.accessory}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
+      const cacheKey = slot.drawnStill ? `${spec.look.colour}|${spec.look.accessory}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
       if (cacheKey) {
         const cached = this.cache.get(cacheKey)
         if (cached) {
@@ -701,6 +744,15 @@ function browserEnv(): FaceRendererEnv | null {
     cancelFrame: (id) => window.cancelAnimationFrame(id),
     now: () => performance.now(),
     pixelRatio: () => window.devicePixelRatio,
+    hasFocus: () => document.hasFocus(),
+    onFocusChange: (listener) => {
+      window.addEventListener('focus', listener)
+      window.addEventListener('blur', listener)
+      return () => {
+        window.removeEventListener('focus', listener)
+        window.removeEventListener('blur', listener)
+      }
+    },
     // A resolution query matches the ratio it was made for only; each change makes the next one.
     onPixelRatioChange: (listener) => {
       let query: MediaQueryList | undefined

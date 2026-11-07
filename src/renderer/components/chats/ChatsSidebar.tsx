@@ -33,9 +33,9 @@ export function ChatsSidebar() {
     <span className="chat-list-text"><span className="chat-list-name">{chat.name}</span><span className="chat-list-preview">{chat.presentation === 'network' ? 'Space conversation' : chat.run?.state === 'running' ? 'Working…' : chat.lastMessage?.text || `${chat.participants.filter((p) => p.kind === 'agent').length} agent${chat.kind === 'group' ? 's' : ''}`}</span></span>
     {chat.run?.state === 'running' && <span className="chat-working-dot" aria-label="Working" />}
   </button>
-  // A bot's row says its state in words; the face shows it by motion.
+  // A bot's row says its state in words; its face holds the state's pose (the Bots row above moves).
   const botRow = (bot: BotSummary) => <button type="button" key={`bot:${bot.id}`} className={`chat-list-row${bot.id === activeBotId ? ' active' : ''}`} onClick={() => void openBot(bot.id)}>
-    <BotFace look={bot.look} state={botFaceState(bot, happy[bot.id])} size={40} view="head" />
+    <BotFace look={bot.look} state={botFaceState(bot, happy[bot.id])} size={40} view="head" still />
     <span className="chat-list-text"><span className="chat-list-name">{bot.name}</span><span className="chat-list-preview">{bot.stateText || bot.last?.text || bot.description}</span></span>
     {bot.unread > 0 && <span className="bot-unread" aria-label={`${bot.unread} unread`}>{bot.unread}</span>}
   </button>
