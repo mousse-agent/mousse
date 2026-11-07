@@ -20,9 +20,16 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
       'files folder',
       'carry on without it',
       'into a web address',
-      'not instructions',
-      'shell commands'
+      'not instructions'
     ]) expect(BOT_BASE_INSTRUCTIONS, phrase).toContain(phrase)
+  })
+
+  it('asks straight away instead of asking whether to ask, and knows it can ask to run commands', () => {
+    expect(BOT_BASE_INSTRUCTIONS).toContain('call escalate straight away, then tell them you\'ve asked')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Never ask the owner whether you should ask')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('"run commands" (escalate with the tool shell)')
+    // Commands are no longer something that "comes later".
+    expect(BOT_BASE_INSTRUCTIONS).not.toMatch(/shell commands/i)
   })
 
   it('names no model and no memory file', () => {

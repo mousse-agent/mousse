@@ -129,12 +129,14 @@ describe('paths Pi rewrites before it opens them (PR 6 review: `~` and `@`)', ()
 })
 
 describe('the built-ins a bot\'s turn offers', () => {
-  it('are its granted ones only, never shell: an ungranted call reaches no gate and asks nobody', async () => {
+  const ledger = () => ({ start: () => 'row', commit: () => {}, failed: () => {} })
+
+  it('are its granted ones only: an ungranted call (bash without "run commands") reaches no gate and asks nobody', async () => {
     const { engine, recorder, project } = await setup(cleanups, supervised)
     const root = realpathSync(project)
     const scratch = join(root, '..', 'scratch')
     mkdirSync(scratch, { recursive: true })
-    const base = bot(root, scratch, ['read', 'shell'])
+    const base = bot(root, scratch, ['read'])
     const checked: string[] = []
     const watching: BotAuthority = { ...base, check: (call) => { if (call.kind === 'builtin') checked.push(call.tool); return base.check(call) }, checkAny: undefined }
     recorder.respond(script([
@@ -142,13 +144,44 @@ describe('the built-ins a bot\'s turn offers', () => {
       { tool: { name: 'write', args: { path: join(scratch, 'x.md'), content: 'x' } } },
       { text: 'done' }
     ]))
-    const turn = harness(root, {}, { bot: watching })
+    const turn = harness(root, {}, { bot: watching, tools: { toolLedger: ledger() } })
     const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
     expect(results.map((event) => String(event.response))).toEqual(['Tool bash not found', 'Tool write not found'])
     expect(checked).toEqual([])
     expect(existsSync(join(scratch, 'x.md'))).toBe(false)
+  }, 120_000)
+
+  it('offer bash with "run commands": any command runs, from the bot\'s files folder, with no ask', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    const files = join(root, '..', 'files')
+    for (const dir of [scratch, files]) mkdirSync(dir, { recursive: true })
+    const base = createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: { tools: ['read', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch, files } },
+      waiting: () => false,
+      counters: new RunCounters(),
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
+      spend: null
+    })
+    const checked: string[] = []
+    const watching: BotAuthority = { ...base, check: (call) => { if (call.kind === 'builtin') checked.push(call.tool); return base.check(call) }, checkAny: undefined }
+    recorder.respond(script([
+      { tool: { name: 'bash', args: { command: 'pwd && echo made > made.txt' } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: watching, tools: { toolLedger: ledger() } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([false])
+    expect(String(results[0].response)).toContain(realpathSync(files))
+    expect(readFileSync(join(files, 'made.txt'), 'utf8')).toBe('made\n')
+    expect(checked).toEqual(['shell'])
   }, 120_000)
 })
 

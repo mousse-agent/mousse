@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { ClaudeLockedGate, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
-import { codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
@@ -32,7 +32,7 @@ const ledger: ToolLedger = { start: (call) => `row-${call.id}`, commit: () => {}
 
 /** Claude Code's grant gate on the owner's entry, over the dispatch's authority. */
 function claudeGate(authority: BotAuthority): ClaudeLockedGate {
-  const turn: ClaudeLockedTurn = { authority, ownerEntry: true, ledger, cwd: authority.workspace!.files!, shellContained: false, temps: [], systemPrompt: '' }
+  const turn: ClaudeLockedTurn = { authority, ownerEntry: true, ledger, cwd: authority.workspace!.files!, shellContained: false, shellOpen: true, temps: [], systemPrompt: '' }
   return new ClaudeLockedGate(turn, true)
 }
 
@@ -95,8 +95,23 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
     expect(codexBotFileChange(prepared.authority, { changes: [], cwd: prepared.authority.workspace!.files! })).toMatchObject({ decision: 'decline' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(f.store.activation(activation.id)!.status).toBe('running')
-    // A command (shell is never in a bot's grant yet) is declined, whatever the lane.
-    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: prepared.authority.workspace!.files! })).toMatchObject({ decision: 'decline' })
     await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('a command without "run commands" is declined with an ask; once allowed, Codex\'s commands are accepted by the grant, never outside its sandbox', async () => {
+    const first = await run('r1')
+    const files = first.prepared.authority.workspace!.files!
+    expect(codexBotCommand(first.prepared.authority, { command: 'ls', cwd: files })).toEqual({ decision: 'decline', reason: BOT_ASK_REFUSED_TEXT })
+    await finish(f, first.payload, 'completed', { text: 'Report: I could not run commands.' })
+    const ask = f.store.openAsks(botId)[0]!
+    expect(ask).toMatchObject({ title: 'run commands' })
+    await f.bots.service.answer(botId, ask.id, 'allow')
+    const second = await run('r2')
+    for (const command of ['ls', 'rm -rf build', 'npm test']) expect(codexBotCommand(second.prepared.authority, { command, cwd: files }), command).toEqual({ decision: 'accept' })
+    expect(codexBotCommand(second.prepared.authority, { command: 'ls', cwd: files, reason: 'command failed; retry without sandbox?' })).toEqual({ decision: 'decline', reason: CODEX_BOT_UNSANDBOXED_REFUSAL })
+    // Claude Code's Bash on the owner's entry goes through the same grant.
+    expect(claudeGate(second.prepared.authority).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
+    expect(f.store.openAsks(botId)).toEqual([])
+    await finish(f, second.payload, 'completed', { text: 'Done.' })
   })
 })

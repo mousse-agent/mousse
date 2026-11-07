@@ -16,6 +16,9 @@ import { CodexTurnFailure, createCodexProviderService, type CodexProviderService
 import { STOP_GRACE_MS } from '../../src/mms/harness/stopProcesses'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
+import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
@@ -1452,6 +1455,80 @@ describe('a bot turn on Codex', () => {
     await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     await adapter.startTurn(input({ prompt: 'two', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
     replay.assertDone()
+  })
+
+  /** A real bot authority over its files folder, a folder it may change and one it may read. */
+  function realBot(tools: NeutralTool[]) {
+    const files = join(home, 'files')
+    const docs = join(home, 'docs')
+    const ref = join(home, 'ref')
+    const scratch = join(home, 'scratch')
+    for (const dir of [files, docs, ref, scratch]) mkdirSync(dir, { recursive: true })
+    const bot = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools, appTools: [], mcp: [], skills: [], workspace: { roots: [docs, ref], access: 'read', writeRoots: [docs], scratch, files } },
+      waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    return { bot, files, docs, scratch }
+  }
+  const setupRead = (id: number) => [
+    out({ id, method: 'config/read', params: { includeLayers: true } }),
+    inn({ id, result: { config: { mcp_servers: {} }, layers: [] } })
+  ]
+  const command = (id: string, text: string, cwd: string, reason: string | null = null) =>
+    inn({ id, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason } })
+
+  it('with "run commands": workspace-write over exactly its own folders, every command allowed by the grant with no question, never a retry outside the sandbox', async () => {
+    const { bot, files, docs, scratch } = realBot(['read', 'shell'])
+    const writable = [docs, files, scratch]
+    const replay = transport([
+      ...handshake(),
+      ...setupRead(4),
+      ...threadStart(5, threadParams({
+        sandbox: 'workspace-write',
+        config: {
+          'sandbox_workspace_write.writable_roots': writable,
+          'sandbox_workspace_write.network_access': false,
+          'sandbox_workspace_write.exclude_tmpdir_env_var': true,
+          'sandbox_workspace_write.exclude_slash_tmp': true,
+          model_provider: 'openai'
+        }
+      })),
+      ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }),
+      command('srv-1', 'rm -rf build', files),
+      out({ id: 'srv-1', result: { decision: 'accept' } }),
+      command('srv-2', 'make test', '/somewhere/else'),
+      out({ id: 'srv-2', result: { decision: 'accept' } }),
+      command('srv-3', 'curl https://example.com', files, 'command failed; retry without sandbox?'),
+      out({ id: 'srv-3', result: { decision: 'decline' } }),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'allow' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go', cwd: scratch }), recordingSink(), control(), { ...host(), bot })
+    replay.assertDone()
+    expect(asked).toEqual([])
+  })
+
+  it('without "run commands": read-only, and a command is declined by the authority', async () => {
+    const { bot, files, scratch } = realBot(['read'])
+    const replay = transport([
+      ...handshake(),
+      ...setupRead(4),
+      ...threadStart(5),
+      ...turnStart(6, 'go'),
+      command('srv-1', 'ls', files),
+      out({ id: 'srv-1', result: { decision: 'decline' } }),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'allow' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go', cwd: scratch }), recordingSink(), control(), { ...host(), bot })
+    replay.assertDone()
+    expect(asked).toEqual([])
   })
 
   it('does not run while the user\'s MCP servers cannot be read', async () => {

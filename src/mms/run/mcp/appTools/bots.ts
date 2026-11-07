@@ -23,7 +23,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  */
 
 const PERMISSION = Type.Union([
-  Type.Object({ tool: Type.String({ description: 'A tool name, for example read, edit or web_fetch.' }) }),
+  Type.Object({ tool: Type.String({ description: 'A tool name, for example read, edit, web_fetch, or shell to run commands.' }) }),
   Type.Object({ path: Type.String({ description: 'An absolute folder path.' }), access: Type.Union([Type.Literal('read'), Type.Literal('write')]) }),
   Type.Object({ skill: Type.String({ description: 'A skill id.' }) }),
   Type.Object({ mcp: Type.Object({ serverId: Type.String(), tool: Type.String() }) }),
@@ -46,7 +46,7 @@ const SCOPE = Type.Union([Type.Literal('now'), Type.Literal('always')], { descri
 export const BOT_TOOLS: Tool[] = [
   {
     name: 'escalate',
-    description: 'Ask your owner for a permission you do not have, in one plain sentence. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
+    description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
     parameters: Type.Object({
       permission: PERMISSION,
       reason: Type.String({ description: 'Why you need it, in one or two sentences for the owner.' })

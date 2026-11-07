@@ -16,6 +16,7 @@ import {
   CLAUDE_BUILTIN_TOOLS,
   claudeLockedCaps,
   claudeLockedHoldsBots,
+  claudeLockedOptions,
   claudeManagedPolicyIn,
   ClaudeLockedGate,
   CLAUDE_MANAGED_POLICY_REFUSAL,
@@ -215,6 +216,67 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     expect(decisions.question).toMatchObject({ behavior: 'deny' })
     expect(decisions.preUnknown).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
     expect(questions).not.toHaveBeenCalled()
+  })
+})
+
+describe('"run commands" on the owner\'s own Claude Code entry', () => {
+  function ownerAuthority(tools: NeutralTool[], root: string, scratch: string, files: string) {
+    return createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools, appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', writeRoots: [], scratch, files } },
+      waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+  }
+
+  it('offers Bash only with the grant; with Claude Code\'s sandbox here, it runs in it, writing only the bot\'s own folders', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const files = temp('claude-owner-files-')
+    const decisions: Record<string, unknown> = {}
+    const { service, captured } = ownerService(async (options) => {
+      decisions.command = await pre(options, 'Bash', { command: 'rm -rf build && ls /etc' })
+      decisions.escape = await pre(options, 'Bash', { command: 'ls', dangerouslyDisableSandbox: true })
+    })
+    const service2 = { standaloneWorkspace: () => scratch, chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
+    const adapter = new ClaudeSubscriptionAdapter(() => service2 as never, () => null, undefined, () => true)
+    await adapter.startTurn(turnInput(root), sink(), control(), host({ bot: ownerAuthority(['read', 'shell'], root, scratch, files) }))
+    const turn = (service2.chat.mock.calls[0] as unknown as [{ locked: ClaudeLockedTurn }])[0].locked
+    expect(turn).toMatchObject({ ownerEntry: true, cwd: files, shellContained: true })
+    expect(turn).not.toHaveProperty('shellOpen')
+    await service.chat({ threadId: 'bot-thread', cwd: files, model: 'sonnet', prompt: 'go', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked: { ...turn, ledger: fakeLedger().ledger }, onText: vi.fn() })
+    const options = captured.find((entry) => entry.hooks)!
+    expect(options.tools).toEqual(['Bash', 'Read', 'ToolSearch'])
+    expect(options.disallowedTools).not.toContain('Bash')
+    // Writable: the files folder and scratch; the read-only folder is denied; the network is closed.
+    expect(options.sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [files, scratch], denyWrite: expect.arrayContaining([root]) }, network: { allowedDomains: [] } })
+    // Any command is allowed by the grant (it goes on to canUseTool, never the person); the sandbox is never left.
+    expect(decisions.command).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    expect(decisions.escape).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+
+    // Without the grant, Bash does not exist for the model, and a call to it is denied.
+    service2.chat.mockClear()
+    await adapter.startTurn(turnInput(root), sink(), control(), host({ bot: ownerAuthority(['read'], root, scratch, files) }))
+    const plain = (service2.chat.mock.calls[0] as unknown as [{ locked: ClaudeLockedTurn }])[0].locked
+    expect(claudeLockedTools(plain, false).tools).toEqual(['Read'])
+    expect(new ClaudeLockedGate(plain, false).preToolUse('Bash', { command: 'ls' })).toMatchObject({ ok: false })
+  })
+
+  it('without the sandbox here, a granted Bash still runs, outside any sandbox', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const files = temp('claude-owner-files-')
+    const service2 = { standaloneWorkspace: () => scratch, chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
+    // No sandbox fact at all reads as no sandbox.
+    for (const adapter of [new ClaudeSubscriptionAdapter(() => service2 as never, () => null, undefined, () => false), new ClaudeSubscriptionAdapter(() => service2 as never, () => null)]) {
+      service2.chat.mockClear()
+      await adapter.startTurn(turnInput(root), sink(), control(), host({ bot: ownerAuthority(['read', 'shell'], root, scratch, files) }))
+      const turn = (service2.chat.mock.calls[0] as unknown as [{ locked: ClaudeLockedTurn }])[0].locked
+      expect(turn).toMatchObject({ ownerEntry: true, shellContained: false, shellOpen: true })
+      expect(claudeLockedTools(turn, false).tools).toEqual(['Bash', 'Read'])
+      expect(new ClaudeLockedGate({ ...turn, ledger: fakeLedger().ledger }, false).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
+      expect(claudeLockedOptions(turn, { env: {}, mcpServers: {}, mousseTools: false })).not.toHaveProperty('sandbox')
+    }
   })
 })
 
@@ -697,7 +759,7 @@ describe('locked Claude Code: shell (item 15)', () => {
     expect(claudeSandboxFact('linux', () => true)).toBe('available')
   })
 
-  it('a shell grant without a proven sandbox is neither offered nor allowed', () => {
+  it('on a locked entry, a shell grant without a proven sandbox is neither offered nor allowed', () => {
     const root = temp('claude-locked-root-')
     const scratch = temp('claude-locked-scratch-')
     const authority = authorityFor(['read', 'shell'], { root, scratch })

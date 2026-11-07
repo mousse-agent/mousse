@@ -327,3 +327,74 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
     expect(f.store.activation(queued.id)).toMatchObject({ status: 'done' })
   })
 })
+
+describe('"run commands": one permission, asked for once and remembered', () => {
+  const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
+  const shellFingerprint = askFingerprintOf({ tool: 'shell' })
+
+  it('in the chat a command is a wall with one card; Allow puts it in the grant, and every later command runs with no new ask', async () => {
+    const { activation, payload, prepared } = await chat('Count the lines in my notes', 'm1')
+    expect(prepared.authority.check(command('wc -l *.md'))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'run commands' } })
+    await finish(f, payload, 'interrupted', { text: 'I need to run a command for that.', outcome: { interruptedBy: 'bot_wall' } })
+    const reply = chatOf(f, botId).at(-1)!
+    expect(reply.ask).toMatchObject({ status: 'open', title: 'run commands' })
+    expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint }])
+    await f.bots.service.answer(botId, reply.ask!.askId, 'allow')
+    expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+    expect(f.host.definitions.get(botId)!.published!.permissions.tools).toContain('shell')
+    const continued = await start(f, activation.id, 2)
+    // Any command, wherever it says it runs: no per-command ask.
+    for (const text of ['wc -l *.md', 'rm -rf build', 'git status']) expect(continued.prepared.authority.check(command(text)), text).toEqual({ ok: true })
+    expect(continued.prepared.authority.check({ kind: 'builtin', tool: 'shell', nativeName: 'shell', args: { command: 'ls', cwd: invoices } })).toEqual({ ok: true })
+    await finish(f, continued.payload, 'completed', { text: 'Done.' })
+    // A later chat and a later run run commands too, and nothing new is asked.
+    const later = await chat('And again', 'm2')
+    expect(later.prepared.authority.check(command('ls'))).toEqual({ ok: true })
+    await finish(f, later.payload, 'completed', { text: 'Done.' })
+    const runLater = await run('r1')
+    expect(runLater.prepared.authority.check(command('ls'))).toEqual({ ok: true })
+    await finish(f, runLater.payload, 'completed', { text: 'Report.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+    expect(chatOf(f, botId).filter((row) => row.ask)).toHaveLength(1)
+  })
+
+  it('the bot can ask for it itself (escalate), as on runtimes where an ungranted shell does not exist', async () => {
+    const { prepared, payload } = await chat('Run the tests in my project', 'm1')
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run your tests.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    await finish(f, payload, 'completed', { text: 'I\'ve asked to run commands.' })
+    expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint, title: 'run commands' }])
+  })
+
+  it('a run asks once, is refused, and carries on; Not now grants nothing', async () => {
+    const { activation, payload, prepared } = await run('r1')
+    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    expect(prepared.authority.check(command('pwd'))).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })
+    expect(f.store.activation(activation.id)!.status).toBe('running')
+    await finish(f, payload, 'completed', { text: 'Report: I could not run commands.' })
+    expect(f.store.openAsks(botId)).toMatchObject([{ mode: 'ask', fingerprint: shellFingerprint, title: 'run commands' }])
+    const { message } = await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'not_now')
+    expect(message.ask).toMatchObject({ status: 'not_now' })
+    expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
+    const next = await run('r2')
+    expect(next.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    await finish(f, next.payload, 'completed', { text: 'Skipped.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+  })
+
+  it('About lists it with Remove; Remove takes it away again', async () => {
+    const { payload, prepared } = await chat('Count my files', 'm1')
+    prepared.authority.check(command('ls | wc -l'))
+    await finish(f, payload, 'interrupted', { text: 'May I?', outcome: { interruptedBy: 'bot_wall' } })
+    await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'allow')
+    const detail = f.bots.service.get(botId)
+    expect(detail.permissions).toMatchObject([{ id: shellFingerprint, title: 'run commands', note: expect.stringContaining('Any command') }])
+    expect(f.bots.service.revokePermission(botId, shellFingerprint).permissions).toEqual([])
+    expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
+    expect(f.host.definitions.get(botId)!.published!.permissions.tools).not.toContain('shell')
+    // The next run is refused again, and asks again.
+    const after = await run('r1')
+    expect(after.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    await finish(f, after.payload, 'completed', { text: 'Skipped.' })
+    expect(f.store.openAsks(botId)).toMatchObject([{ fingerprint: shellFingerprint }])
+  })
+})

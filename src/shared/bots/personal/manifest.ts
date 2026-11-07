@@ -206,7 +206,7 @@ const TOOL_WORDS: Record<NeutralTool, string> = {
   search: 'Search files',
   edit: 'Edit files',
   write: 'Create and overwrite files',
-  shell: 'Run shell commands in a sandbox',
+  shell: 'Run commands',
   web_fetch: 'Fetch web pages',
   web_search: 'Search the web'
 }
@@ -215,7 +215,8 @@ const TOOL_WORDS: Record<NeutralTool, string> = {
 const WRITING_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['edit', 'write'])
 
 function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPermissionLine {
-  if (!workspace || tool === 'web_fetch' || tool === 'web_search') return { kind: 'tool', text: TOOL_WORDS[tool] }
+  // Commands are granted as a whole, not per folder.
+  if (!workspace || tool === 'web_fetch' || tool === 'web_search' || tool === 'shell') return { kind: 'tool', text: TOOL_WORDS[tool] }
   // Per folder: a writing tool names only the folders it may change.
   const folders = foldersOf(workspace).filter(([, access]) => !WRITING_TOOLS.has(tool) || access === 'write').map(([root]) => root)
   if (!folders.length) return { kind: 'tool', text: `${TOOL_WORDS[tool]} (no folder allows it)` }

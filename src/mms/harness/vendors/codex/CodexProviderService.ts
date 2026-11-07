@@ -71,7 +71,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLim
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { codexTurnPolicy } from './childPolicy'
+import { codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from './childPolicy'
 import { STOP_GRACE_MS, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -372,8 +372,9 @@ export type CodexChatInput = {
    * A bot's turn: it runs in Codex's asking mode (`codexTurnPolicy` for Ask, whatever
    * `permissionMode` says), with the user's own MCP servers switched off, and every approval Codex
    * raises is answered by this authority (`botApprovals.ts`). Questions to the user are refused.
+   * Its `tools` and `workspace` set the sandbox: a bot with "run commands" writes in its own folders.
    */
-  bot?: Pick<BotAuthority, 'check'>
+  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace'>>
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -1887,7 +1888,7 @@ export class CodexProviderService {
         // A bot's turn: its authority answers, never a person.
         if (run.bot) {
           const asked = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
-          const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd })
+          const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
           return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
         }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
@@ -2411,17 +2412,20 @@ export class CodexProviderService {
       signal.throwIfAborted()
       if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })
     }
+    const botSandbox = input.bot ? codexBotSandbox(input.bot) : undefined
     const overrides = {
       ...botOverrides,
+      ...(botSandbox ? codexBotSandboxConfig(botSandbox) : {}),
       ...codexMcpConfigOverrides(input.mcp),
       ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
     } as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode)
-    // The policy a loaded thread was opened with: a change of child policy, permission mode or compaction
-    // threshold reopens it (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}`
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
+    // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
+    // and ignores them on a loaded one).
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
@@ -2532,7 +2536,7 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, input.bot ? codexBotSandbox(input.bot) : undefined)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,

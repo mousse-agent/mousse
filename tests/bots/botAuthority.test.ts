@@ -95,9 +95,11 @@ describe('compileBotThread', () => {
     expect(compiled.permissions.workspace).toEqual({ roots: [root], access: 'write', writeRoots: [root], scratch: realpathSync(scratch) })
   })
 
-  it('refuses shell: no runtime has a proven sandbox here', () => {
+  it('compiles "run commands" (shell) like any tool: the runtime\'s shell is on the allowlist', () => {
     const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
-    expect(compiled).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'] } })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    expect(compiled.policy.tools?.allow).toContain('bash')
+    expect(compiled.permissions.tools).toEqual(['read', 'shell'])
   })
 
   it('refuses a write root inside a temporary folder, and roots overlapping Mousse data or scratch', () => {
@@ -175,6 +177,15 @@ describe('host approvals in checkPolicy', () => {
       expect(checkPolicy(approvalOnly, { ...policy(), permissionMode: mode }, 'codex', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] }), mode).toMatchObject({ ok: false, error: { missing: ['toolControl'], reason: BOT_ASKING_MODE_REQUIRED } })
   })
 
+  it('a shell grant holds wherever a bot holds: Pi exactly, Claude Code and Codex through their approvals', () => {
+    const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    const shell: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    expect(checkPolicy(exact, shell, 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
+    const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
+    for (const instance of ['claude', 'codex']) expect(checkPolicy(approvalOnly, { ...shell, permissionMode: 'ask' }, instance, undefined, { hostApprovals: true, botApprovals: true }), instance).toEqual({ ok: true })
+  })
+
   it('still needs hard budgets for count limits', () => {
     const observed = { ...exact, budgets: 'observed' } as HarnessCaps
     expect(checkPolicy(observed, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
@@ -195,6 +206,18 @@ describe('host approvals in checkPolicy', () => {
 describe('BotAuthority.check', () => {
   const read = (path: string) => ({ kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path } })
   const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path } })
+
+  it('"run commands" is granted as a whole: any command, wherever it says it runs; without it, a wall on the tool', () => {
+    const command = (args: Record<string, unknown>) => ({ kind: 'builtin' as const, tool: 'shell' as const, nativeName: 'bash', args })
+    const granted = authorityFor(manifest({ tools: ['read', 'shell'] }))
+    for (const args of [{ command: 'ls -la' }, { command: 'rm -rf build', cwd: join(base, 'elsewhere') }, { command: 'cat ~/.profile', cwd: '~' }])
+      expect(granted.check(command(args)), JSON.stringify(args)).toEqual({ ok: true })
+    // A bot with no folder at all still runs commands once it holds them.
+    expect(authorityFor(manifest({ tools: ['shell'], workspace: null })).check(command({ command: 'date' }))).toEqual({ ok: true })
+    expect(authorityFor().check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'tool', tool: 'bash' } })
+    // Waiting for the owner still stops it.
+    expect(authorityFor(manifest({ tools: ['shell'] }), true).check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'waiting' } })
+  })
 
   it('allows granted tools inside a root and inside scratch', () => {
     const bot = authorityFor()

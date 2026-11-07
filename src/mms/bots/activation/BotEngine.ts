@@ -615,7 +615,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether a thread can hold `grant` at all: it compiles (no shell, no MCP, no folder that
+   * Whether a thread can hold `grant` at all: it compiles (no MCP, no folder that
    * overlaps Mousse's data). Which runtime holds it is decided per activation, from the providers
    * that can (`BotModelResolver`), and checked again at each dispatch.
    */

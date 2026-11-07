@@ -5,14 +5,15 @@ import type { NativeToolTable } from '../../../../shared/harness/tools'
 import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/mcp/attachment'
 
 /**
- * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, the
- * read-only sandbox with no network), and every approval it raises is answered by the bot's
- * authority, the same check (and the same walls and asks) as Pi's gate. Nobody is asked.
+ * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, no
+ * network), and every approval it raises is answered by the bot's authority, the same check (and
+ * the same walls and asks) as Pi's gate. Nobody is asked. Its sandbox is read-only, or, for a bot
+ * with "run commands", `workspaceWrite` over the bot's own folders (`codexTurnPolicy`).
  *
  * What Codex runs without asking is not checked here: the read-only commands it trusts (it reads
- * files with them) and its web search. Its sandbox keeps those from changing anything or reaching
- * the network. Shell commands it asks about are `shell` calls, file changes are `write` (a new file)
- * or `edit` calls, each on its own path.
+ * files with them) and its web search. Its sandbox keeps those inside it. Shell commands it asks
+ * about are `shell` calls, allowed whenever the bot holds "run commands"; file changes are `write`
+ * (a new file) or `edit` calls, each on its own path. A retry outside the sandbox is never allowed.
  */
 
 /**
@@ -36,8 +37,16 @@ export type CodexBotDecision = { decision: 'accept' } | { decision: 'decline'; r
 
 const decided = (check: BotCheck): CodexBotDecision => (check.ok ? { decision: 'accept' } : { decision: 'decline', reason: checkMessage(check) })
 
-/** A command Codex asks to run (`item/commandExecution/requestApproval`): a `shell` call in its folder. */
-export function codexBotCommand(bot: Pick<BotAuthority, 'check'>, request: { command: string | undefined; cwd: string }): CodexBotDecision {
+/** Why a bot's command never runs outside Codex's sandbox. */
+export const CODEX_BOT_UNSANDBOXED_REFUSAL = 'This bot\'s commands run only in its sandbox. Try another way.'
+
+/**
+ * A command Codex asks to run (`item/commandExecution/requestApproval`): a `shell` call in its
+ * folder. Codex asks again to run a command that failed in its sandbox without it ("retry without
+ * sandbox"): that is declined, whatever the bot holds.
+ */
+export function codexBotCommand(bot: Pick<BotAuthority, 'check'>, request: { command: string | undefined; cwd: string; reason?: string | null }): CodexBotDecision {
+  if (request.reason && /without (the )?sandbox/i.test(request.reason)) return { decision: 'decline', reason: CODEX_BOT_UNSANDBOXED_REFUSAL }
   const call: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'shell', args: { ...(request.command !== undefined ? { command: request.command } : {}), cwd: request.cwd } }
   return decided(bot.check(call))
 }

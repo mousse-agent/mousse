@@ -136,8 +136,16 @@ export interface ClaudeLockedTurn {
    * files folder on the owner's entry. A relative path a call names is checked against it.
    */
   cwd: string
-  /** A `shell` grant may run: the sandbox is available and has evidence for this CLI and platform. */
+  /**
+   * A `shell` grant runs in Claude Code's sandbox: it is available here (and, on a locked entry, has
+   * evidence for this CLI and platform).
+   */
   shellContained: boolean
+  /**
+   * The owner's entry where the sandbox is not available: a `shell` grant still runs, outside any
+   * sandbox, since the owner allowed "run commands" as a whole. Never set on a locked entry.
+   */
+  shellOpen?: true
   /** The system temporary folders (`systemTempDirs`), closed to sandboxed writes. */
   temps: readonly string[]
   /** The bot's instructions, which replace Claude Code's own system prompt. */
@@ -152,11 +160,11 @@ export interface ClaudeLockedTurn {
 }
 
 /** The built-ins a locked turn offers, and every other built-in, turned off. */
-export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'shellContained'>, mousseTools: boolean): { tools: string[]; disallowedTools: string[] } {
+export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'shellContained' | 'shellOpen'>, mousseTools: boolean): { tools: string[]; disallowedTools: string[] } {
   const offered = new Set<string>()
   for (const tool of turn.authority.tools) {
-    // Shell runs only in a proven sandbox; without one it is never offered.
-    if (tool === 'shell' && !turn.shellContained) continue
+    // A locked entry runs shell only in a proven sandbox; the owner's entry also without one.
+    if (tool === 'shell' && !turn.shellContained && !turn.shellOpen) continue
     for (const name of CLAUDE_NATIVE_TOOLS[tool] ?? []) offered.add(name)
   }
   // ToolSearch only loads the Mousse tools' schemas; each call is still gated.
@@ -208,7 +216,8 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
   home?: string
 }): Partial<Options> {
   const { tools, disallowedTools } = claudeLockedTools(turn, input.mousseTools)
-  const shell = tools.includes('Bash') && turn.authority.workspace
+  // Bash runs in the sandbox whenever it can; only the owner's entry without one runs it open.
+  const shell = tools.includes('Bash') && turn.shellContained && turn.authority.workspace
   return {
     cwd: turn.cwd,
     env: input.env,
@@ -315,8 +324,8 @@ export class ClaudeLockedGate {
       }
       case 'builtin': {
         if (classified.neutral.includes('shell')) {
-          if (!this.turn.shellContained) return { ok: false, reason: wallMessage({ kind: 'policy_unenforceable', tool: toolName, missing: ['containment'] }) }
-          if (args.dangerouslyDisableSandbox === true) return { ok: false, reason: 'Commands always run in the sandbox here. Run it again without dangerouslyDisableSandbox.' }
+          if (!this.turn.shellContained && !this.turn.shellOpen) return { ok: false, reason: wallMessage({ kind: 'policy_unenforceable', tool: toolName, missing: ['containment'] }) }
+          if (this.turn.shellContained && args.dangerouslyDisableSandbox === true) return { ok: false, reason: 'Commands always run in the sandbox here. Run it again without dangerouslyDisableSandbox.' }
         }
         // Glob's pattern and Grep's glob name files too: one that leaves the folder it searches is refused.
         if (patternEscapes(toolName === 'Glob' ? args.pattern : toolName === 'Grep' ? args.glob : undefined))

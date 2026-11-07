@@ -47,7 +47,7 @@ export function cleanBotName(answer: string): string | undefined {
 /** The input of a new bot's first chat activation (§5.3.1, step 6). `nameIt`: its name was made from the description, so it picks its own. */
 export function firstMessagePrompt(description: string, nameIt = false): string {
   const naming = nameIt ? ' The owner gave you no name: pick a short one (two or three words) and set it with set_profile before you answer.' : ''
-  return `[Mousse] The owner just created you. Their description: "${description}".${naming} In one or two sentences say what you understood. If you will need a permission, ask for the first one now (escalate). If the description is unclear, ask one question instead.`
+  return `[Mousse] The owner just created you. Their description: "${description}".${naming} In one or two sentences say what you understood. If you will need a permission, ask for the first one now with escalate; don't ask whether to ask. If the description is unclear, ask one question instead.`
 }
 
 /** A chat message as the bot's input: the owner's text, and the files attached to it. */

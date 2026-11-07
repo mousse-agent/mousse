@@ -74,7 +74,12 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     /** The user's Mousse MCP servers and skills; read per turn, like the service. */
     private readonly integrations: () => ClaudeIntegrationSource | null = () => null,
     /** Set for a locked instance, which runs bot turns only. */
-    private readonly locked?: ClaudeLockedProfile
+    private readonly locked?: ClaudeLockedProfile,
+    /**
+     * On the owner's own entry: whether Claude Code's sandbox can run here now (`claudeSandboxFact`).
+     * Read as each bot turn starts. Absent: it cannot, and a `shell` grant runs outside it.
+     */
+    private readonly ownerSandbox?: () => boolean
   ) {}
 
   /**
@@ -93,8 +98,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
         ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
         // The bot's files folder: what Claude Code would touch without asking stays the bot's own.
         cwd: bot.workspace?.files ?? bot.workspace?.scratch ?? service.standaloneWorkspace(input.threadId),
-        // Shell is never granted to a bot yet; without the locked sandbox it would never be offered.
-        shellContained: false,
+        // "Run commands" is granted as a whole: Bash runs in Claude Code's sandbox where it can run
+        // here (over the bot's folders, so only with a workspace), and outside it where it cannot.
+        ...(this.ownerSandbox?.() === true && bot.workspace ? { shellContained: true } : { shellContained: false, shellOpen: true as const }),
         temps: systemTempDirs(),
         systemPrompt: host.bridge?.sessionInstructions ?? ''
       }

@@ -30,7 +30,7 @@ const TOOL_TEXT: Record<string, AskText> = {
   search: { title: 'search in files', note: 'Only in folders you allow.' },
   edit: { title: 'edit files', note: 'Only in folders you allow for changes.' },
   write: { title: 'create files', note: 'Only in folders you allow for changes.' },
-  shell: { title: 'run commands', note: 'In a sandbox, only in folders you allow.' },
+  shell: { title: 'run commands', note: 'Any command, started in its files folder. Commands can reach files outside the folders you allow.' },
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' }
 }

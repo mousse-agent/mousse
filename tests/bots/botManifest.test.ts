@@ -217,6 +217,14 @@ describe('round 2: per-folder access survives every answer and narrowing', () =>
     expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
   })
 
+  it('"run commands" is one line, not tied to a folder, and an Allow adds only it', () => {
+    const authored = two({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
+    const after = withPermission(authored, { tool: 'shell' })
+    expect(after.tools).toContain('shell')
+    expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+    expect(describeManifest(after).map((line) => line.text)).toContain('Run commands')
+  })
+
   it('a thread\'s narrowing keeps its read-only folders read-only, through compilation and the call check', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-narrow-')))
     const site = join(base, 'site')

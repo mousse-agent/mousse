@@ -95,6 +95,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
 
   function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
+    // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
+    // can reach is the runtime's sandbox, where it has one, not a path check here.
+    if (tool === 'shell') return { ok: true }
     if (NETWORK_TOOLS.has(tool)) return { ok: true }
     const writes = WRITE_TOOLS.has(tool)
     const access = writes ? 'write' : 'read'

@@ -558,7 +558,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             policyAppeared: () => Boolean(context.env.home) && remoteSettingsHoldPolicy(context.env.home!),
             ...(options.onLockedProcess ? { onProcess: options.onLockedProcess } : {})
           }
-        : undefined)
+        : undefined,
+      // The owner's entry: a bot's Bash runs in Claude Code's sandbox when bubblewrap and socat (Linux)
+      // or Seatbelt (macOS) are here, read as each bot turn starts.
+      lockedEntry ? undefined : () => claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available')
       const runtime: DriverRuntime = {
         adapter,
         configured: () => service.configured(),

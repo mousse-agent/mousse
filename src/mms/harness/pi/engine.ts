@@ -1363,7 +1363,10 @@ export class PiRpcEngine implements ProviderAdapter {
     key: string, ref: ProviderRef, starting: StartingTurn, startedAt: number,
     input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost
   ): Promise<TurnResult> {
-    const cwd = input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
+    // A bot's turn works in its files folder, as on Claude Code and Codex: its commands start there,
+    // and the gate resolves every relative path against it (`gate`).
+    const files = host.bot && !host.definition ? host.bot.workspace?.files : undefined
+    const cwd = files ?? input.cwd ?? join(this.options.stateDir, 'chats', fingerprint(input.threadId).slice(0, 16))
     mkdirSync(cwd, { recursive: true })
     let bot: PiBotProcess | undefined
     if (host.bot && !host.definition) {
@@ -1423,10 +1426,10 @@ export class PiRpcEngine implements ProviderAdapter {
       tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
     }
     // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
-    // as on the locked Claude turn (`escalate` is how it asks). Shell has no proven sandbox on Pi, so
-    // it is never offered.
+    // as on the locked Claude turn (`escalate` is how it asks). `bash` comes with "run commands",
+    // granted as a whole; it runs in the locked environment, from the bot's files folder.
     if (host.bot) {
-      const granted = new Set([...host.bot.tools].filter((tool) => tool !== 'shell').flatMap((tool) => PI_NATIVE_TOOLS[tool] ?? []))
+      const granted = new Set([...host.bot.tools].flatMap((tool) => PI_NATIVE_TOOLS[tool] ?? []))
       builtins = builtins.filter((name) => granted.has(name))
     }
     const turn = new PiTurn(key, host.bridge?.turnToken ?? key, input, sink, ctl, host, tools, builtins)

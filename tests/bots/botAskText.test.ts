@@ -14,6 +14,8 @@ describe('askText', () => {
     expect(askText({ tool: 'web_fetch' }).title).toBe('read web pages')
     expect(askText({ tool: 'read' }).title).toBe('read files')
     expect(askText({ tool: 'shell' }).title).toBe('run commands')
+    // One permission for any command: the note says where they start and that they are not held to the folders.
+    expect(askText({ tool: 'shell' }).note).toBe('Any command, started in its files folder. Commands can reach files outside the folders you allow.')
     expect(askText({ tool: 'some_tool' }).title).toBe('use the some tool tool')
     expect(askText({ skill: 'release-notes' })).toEqual({ title: 'use the release-notes skill', note: '' })
     expect(askText({ mcp: { serverId: 'github', tool: 'create_issue' } }).title).toBe('use create_issue from github')

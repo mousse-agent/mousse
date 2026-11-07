@@ -198,10 +198,11 @@ describe('approval', () => {
     expect(refreshed).toEqual(['pi:openrouter', 'pi:openrouter'])
   })
 
-  it('shell is never approvable on this build', () => {
+  it('"run commands" (shell) is approvable like any other tool', () => {
     publish({ tools: ['read', 'shell'] })
-    expect(bots.approval('site-editor').threads[0]).toMatchObject({ ok: false, reason: expect.stringContaining('sandbox') })
-    expect(() => approve()).toThrow(expect.objectContaining({ code: 'policy_unenforceable' }))
+    expect(bots.approval('site-editor').threads[0]).toMatchObject({ ok: true })
+    approve()
+    expect(store.activeGrant('site-editor')!.manifest.tools).toContain('shell')
   })
 })
 

@@ -111,9 +111,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
   // The user's MCP tools do not reach Pi's RPC engine yet, so a grant naming one cannot be held as approved.
   if (manifest.mcp.length) return unenforceable('Your MCP tools are not available to bots yet.', ['mcp'])
-  // Shell needs a proven sandbox on this runtime and platform; no runtime has that evidence yet.
-  if (manifest.tools.includes('shell'))
-    return unenforceable('Shell commands need a proven sandbox, and this runtime has none here.', ['containment'])
+  // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
+  // from the bot's files folder, in its own sandbox where it has one (bot-architecture.md §3.5).
   const scratch = real(input.scratch)
   const profile = real(input.profileHome)
   const files = input.filesFolder !== undefined ? real(input.filesFolder) : undefined
