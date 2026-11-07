@@ -122,7 +122,7 @@ describe('BotProcessRegistry', () => {
   })
 
   it('settled: a group still there after the grace is ended (SIGTERM, then SIGKILL)', async () => {
-    const s = setup()
+    const s = setup({ tokens: { 4242: 'proc:1' } })
     const registry = s.make()
     s.groups.groups.set(4242, { alive: true, ignoresTerm: true })
     registry.arm({ dispatchId: 'act-1:d1', activationId: 'act-1', deadlineAt: 2_000_000 })
@@ -147,7 +147,7 @@ describe('BotProcessRegistry', () => {
   })
 
   it('settled: a group that cannot be ended leaves exit_at empty and the supervisor running', async () => {
-    const s = setup()
+    const s = setup({ tokens: { 4242: 'proc:1' } })
     const registry = s.make()
     s.groups.groups.set(4242, { alive: true, unkillable: true })
     registry.arm({ dispatchId: 'act-1:d1', activationId: 'act-1', deadlineAt: 2_000_000 })
@@ -155,6 +155,27 @@ describe('BotProcessRegistry', () => {
     expect(await registry.settled('act-1:d1')).toEqual({ stillAlive: true })
     expect(s.row('act-1:d1')?.exit_at).toBeNull()
     expect(s.stopped).toEqual([])
+  })
+
+  it('settled: a group still there is never signalled when its leader is another program now, or was never verified', async () => {
+    const s = setup({ tokens: { 4242: 'proc:1' } })
+    const registry = s.make()
+    s.groups.groups.set(4242, { alive: true })
+    registry.arm({ dispatchId: 'act-1:d1', activationId: 'act-1', deadlineAt: 2_000_000 })
+    registry.attach('act-1:d1', { pid: 4242, pgid: 4242 })
+    // The pid was reused: the recorded group is gone.
+    s.tokens[4242] = 'proc:999'
+    expect(await registry.settled('act-1:d1')).toHaveProperty('exitAt')
+    expect(s.row('act-1:d1')?.exit_at).toBe(s.groups.now())
+    // No start time was recorded (as on Windows): its supervisor keeps the deadline.
+    s.groups.groups.set(5151, { alive: true })
+    registry.arm({ dispatchId: 'act-1:d2', activationId: 'act-1', deadlineAt: 2_000_000 })
+    registry.attach('act-1:d2', { pid: 5151, pgid: 5151 })
+    expect(s.row('act-1:d2')?.child_token).toBeNull()
+    expect(await registry.settled('act-1:d2')).toEqual({ stillAlive: true })
+    expect(s.row('act-1:d2')?.exit_at).toBeNull()
+    expect(s.groups.signals).toEqual([])
+    expect(s.stopped).toEqual(['act-1:d1:4242'])
   })
 
   it('settled: every process a dispatch served is waited for; exit_at is the last exit', async () => {

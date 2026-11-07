@@ -835,13 +835,13 @@ export class OwnerRoutes {
   }
 
   /**
-   * A listed thread another of the user's computers may reach: never a private one (`Thread.localOnly`),
-   * which answers as if it did not exist.
+   * A listed thread another of the user's computers may reach: never a private one (`Thread.localOnly`)
+   * or a personal bot's (`Thread.botOwned`), which answer as if they did not exist.
    */
   private sharedThread(threadId: string): boolean {
     const { threads } = this.options.services
     const thread = threads.getThread(threadId)
-    return Boolean(thread) && !isLocalOnlyThread(thread!, threads.listAllThreads())
+    return Boolean(thread) && !thread!.botOwned && !isLocalOnlyThread(thread!, threads.listAllThreads())
   }
 
   /** The thread, project and secondary ids the call names are this profile's, and the thread's. */

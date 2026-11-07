@@ -510,6 +510,26 @@ export class ThreadDataStore extends EventEmitter {
     }))
   }
 
+  /**
+   * Marks each of `threadIds` that is still listed as a personal bot's (`Thread.botOwned`), without
+   * touching it: a bot's thread made by an earlier build, or by a bot that never runs again, leaves the
+   * lists once its bots.db opens. Returns how many it marked.
+   */
+  markBotOwned(threadIds: Iterable<string>): number {
+    let marked = 0
+    for (const id of new Set(threadIds)) {
+      const thread = this.getThread(id)
+      if (!thread || thread.botOwned) continue
+      const updated: Thread = { ...thread, botOwned: true }
+      this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+      if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+      this.patchListCache(updated)
+      this.emit('updated', updated)
+      marked += 1
+    }
+    return marked
+  }
+
   /** Projects owning grouped threads, in the same order as the desktop sidebar. */
   listProjects(): Project[] {
     return this.projectManager.listProjects()

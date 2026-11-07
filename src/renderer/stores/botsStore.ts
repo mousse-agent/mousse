@@ -43,6 +43,8 @@ interface BotsState {
   drafts: Record<string, string>
   attachments: Record<string, BotChatAttachment[]>
   error: string | null
+  /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
+  errorBotId: string | null
   busy: boolean
   newBotOpen: boolean
   aboutOpen: boolean
@@ -81,6 +83,8 @@ let unsubscribe: Array<() => void> = []
 const pendingSends = new Map<string, { text: string; clientRequestId: string }>()
 let pendingCreate: { key: string; clientRequestId: string } | undefined
 const readSeq = new Map<string, number>()
+/** Bots deleted in this profile: a list that was on its way when one was deleted never brings it back. */
+const removed = new Set<string>()
 const happyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const bySeq = (a: BotChatMessage, b: BotChatMessage) => a.seq - b.seq
@@ -91,7 +95,7 @@ function upsert(messages: BotChatMessage[], incoming: BotChatMessage[]): BotChat
   return [...byId.values()].sort(bySeq)
 }
 const replaceBot = (list: BotSummary[], bot: BotSummary) =>
-  list.some((entry) => entry.id === bot.id) ? list.map((entry) => (entry.id === bot.id ? bot : entry)) : [...list, bot]
+  removed.has(bot.id) ? list : list.some((entry) => entry.id === bot.id) ? list.map((entry) => (entry.id === bot.id ? bot : entry)) : [...list, bot]
 
 /** The face a bot shows now: its state, or "done" for a moment after it finished well. */
 export function botFaceState(bot: BotSummary, happyUntil: number | undefined, now = Date.now()): BotFaceState {
@@ -99,9 +103,10 @@ export function botFaceState(bot: BotSummary, happyUntil: number | undefined, no
 }
 
 export const useBotsStore = create<BotsState>((set, get) => {
-  const fail = (owner: number, cause: unknown) => { if (owner === epoch) set({ error: errorText(cause), busy: false }) }
+  const fail = (owner: number, cause: unknown, botId: string | null = null) => { if (owner === epoch) set({ error: errorText(cause), errorBotId: botId, busy: false }) }
   const cacheOf = (botId: string): BotChatCache => get().chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
   const putMessages = (botId: string, incoming: BotChatMessage[]) => set((state) => {
+    if (removed.has(botId)) return {}
     const cache = state.chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
     const owned = incoming.filter((message) => message.author === 'owner').map((message) => message.text)
     const pending = (state.pending[botId] ?? []).filter((message) => !owned.includes(message.text))
@@ -143,7 +148,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
-    error: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null,
+    error: null, errorBotId: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -152,8 +157,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
       pendingSends.clear()
       pendingCreate = undefined
       readSeq.clear()
+      removed.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
-        error: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null })
+        error: null, errorBotId: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null })
       subscribe()
     },
 
@@ -162,7 +168,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const owner = epoch
       const operation = (async () => {
         try {
-          const list = await bots().list()
+          const list = (await bots().list()).filter((bot) => !removed.has(bot.id))
           if (owner !== epoch) return
           set((state) => {
             // A live chip lasts while its bot works.
@@ -184,14 +190,18 @@ export const useBotsStore = create<BotsState>((set, get) => {
         const page = await bots().messages(botId, { limit: BOT_CHAT_PAGE })
         if (owner !== epoch) return
         set((state) => {
-          const held = state.chats[botId]?.messages ?? []
+          if (removed.has(botId)) return {}
+          // A full page that does not reach what is held leaves a gap (rows were missed): it starts the chat over.
+          const first = Math.min(...page.messages.map((message) => message.seq))
+          const gap = page.messages.length >= BOT_CHAT_PAGE && !(state.chats[botId]?.messages ?? []).some((message) => message.seq === first)
+          const held = (state.chats[botId]?.messages ?? []).filter((message) => !gap || message.seq > first)
           const { [botId]: _old, ...live } = state.live
           return {
             chats: { ...state.chats, [botId]: { messages: upsert(held, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } },
             live: page.live ? { ...live, [botId]: page.live } : live
           }
         })
-      } catch (cause) { fail(owner, cause) }
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async loadOlder(botId) {
@@ -207,7 +217,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           return { chats: { ...state.chats, [botId]: { messages: upsert(current.messages, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } } }
         })
       } catch (cause) {
-        if (owner === epoch) set((state) => ({ error: errorText(cause), chats: { ...state.chats, [botId]: { ...cacheOf(botId), loadingOlder: false } } }))
+        if (owner === epoch) set((state) => ({ error: errorText(cause), errorBotId: botId, chats: { ...state.chats, [botId]: { ...cacheOf(botId), loadingOlder: false } } }))
       }
     },
 
@@ -252,6 +262,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
         // Nothing was sent: the words go back into the composer.
         set((state) => ({
           error: errorText(cause),
+          errorBotId: botId,
           drafts: { ...state.drafts, [botId]: state.drafts[botId] || text },
           attachments: { ...state.attachments, [botId]: state.attachments[botId]?.length ? state.attachments[botId]! : attachments },
           pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) }
@@ -261,7 +272,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async stop(botId) {
       const owner = epoch
-      try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause) }
+      try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
     },
 
     async answer(botId, askId, answer) {
@@ -272,7 +283,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
         if (owner !== epoch) return
         putMessages(botId, [message])
         void get().refresh()
-      } catch (cause) { fail(owner, cause) }
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async exportMemory(botId, askId) {
@@ -286,7 +297,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
         if (owner !== epoch) return
         const message = await bots().answer(botId, askId, 'allow')
         if (owner === epoch) putMessages(botId, [message])
-      } catch (cause) { fail(owner, cause) }
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async create(input) {
@@ -312,17 +323,17 @@ export const useBotsStore = create<BotsState>((set, get) => {
         putBot(bot)
         set({ busy: false })
         return true
-      } catch (cause) { fail(owner, cause); return false }
+      } catch (cause) { fail(owner, cause, botId); return false }
     },
 
     async pause(botId) {
       const owner = epoch
-      try { const bot = await bots().pause(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause) }
+      try { const bot = await bots().pause(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
     },
 
     async resume(botId) {
       const owner = epoch
-      try { const bot = await bots().resume(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause) }
+      try { const bot = await bots().resume(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
     },
 
     async remove(botId) {
@@ -331,21 +342,24 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         await bots().remove(botId)
         if (owner !== epoch) return false
+        removed.add(botId)
         set((state) => {
           const { [botId]: _chat, ...chats } = state.chats
           const { [botId]: _detail, ...details } = state.details
-          return { bots: state.bots.filter((bot) => bot.id !== botId), chats, details, busy: false, dialog: null, aboutOpen: false }
+          const { [botId]: _live, ...live } = state.live
+          const { [botId]: _pending, ...pending } = state.pending
+          return { bots: state.bots.filter((bot) => bot.id !== botId), chats, details, live, pending, busy: false, dialog: null, aboutOpen: false }
         })
         return true
-      } catch (cause) { fail(owner, cause); return false }
+      } catch (cause) { fail(owner, cause, botId); return false }
     },
 
     async loadDetail(botId) {
       const owner = epoch
       try {
         const detail = await bots().get(botId)
-        if (owner === epoch) set((state) => ({ details: { ...state.details, [botId]: detail }, bots: replaceBot(state.bots, detail.summary) }))
-      } catch (cause) { fail(owner, cause) }
+        if (owner === epoch && !removed.has(botId)) set((state) => ({ details: { ...state.details, [botId]: detail }, bots: replaceBot(state.bots, detail.summary) }))
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async revokePermission(botId, permissionId) {
@@ -353,7 +367,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         const detail = await bots().revokePermission(botId, permissionId)
         if (owner === epoch) set((state) => ({ details: { ...state.details, [botId]: detail } }))
-      } catch (cause) { fail(owner, cause) }
+      } catch (cause) { fail(owner, cause, botId) }
     },
 
     async removeSchedule(botId, scheduleId) {
@@ -361,7 +375,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         const detail = await bots().removeSchedule(botId, scheduleId)
         if (owner === epoch) set((state) => ({ details: { ...state.details, [botId]: detail } }))
-      } catch (cause) { fail(owner, cause) }
+      } catch (cause) { fail(owner, cause, botId) }
     }
   }
 })

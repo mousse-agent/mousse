@@ -266,3 +266,46 @@ describe('the menu', () => {
     expect(host.querySelector('.bot-conversation')).toBeNull()
   })
 })
+
+describe('the store behind the chats', () => {
+  it('never brings back a deleted bot from a list that was on its way, and keeps a bot’s error in its own chat', async () => {
+    const other = summary('garden', { name: 'Garden' })
+    await open(inbox)
+    fake.bots = [inbox, other]
+    // A list asked for before the delete answers after it, with the bot still in it.
+    let answer: (list: typeof fake.bots) => void = () => {}
+    vi.mocked(fake.client.list).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
+    const listed = [...fake.bots]
+    let refreshing!: Promise<void>
+    await act(async () => { refreshing = useBotsStore.getState().refresh() })
+    await act(async () => { await useBotsStore.getState().remove('inbox') })
+    await act(async () => { answer(listed); await refreshing })
+    expect(useBotsStore.getState().bots.map((bot) => bot.id)).toEqual(['garden'])
+    await act(async () => { await useBotsStore.getState().loadDetail('inbox').catch(() => undefined) })
+    expect(useBotsStore.getState().bots.map((bot) => bot.id)).toEqual(['garden'])
+    // A pause of Garden that fails while Mail's chat is open is Garden's error: Mail's composer does not show it.
+    fake.bots = [other, summary('mail', { name: 'Mail' })]
+    await act(async () => { await useBotsStore.getState().refresh() })
+    await act(async () => useChatsStore.getState().openBot('mail'))
+    vi.mocked(fake.client.pause).mockRejectedValueOnce(new Error('Garden could not pause'))
+    await act(async () => { await useBotsStore.getState().pause('garden') })
+    expect(useBotsStore.getState()).toMatchObject({ error: 'Garden could not pause', errorBotId: 'garden' })
+    expect(host.querySelector('.chat-composer-error')).toBeNull()
+    vi.mocked(fake.client.pause).mockRejectedValueOnce(new Error('Mail could not pause'))
+    await act(async () => { await useBotsStore.getState().pause('mail') })
+    expect(host.querySelector('.chat-composer-error')?.textContent).toBe('Mail could not pause')
+  })
+
+  it('starts the chat over when more rows arrived than a page while events were missed', async () => {
+    fake.chats.inbox = Array.from({ length: 10 }, (_, index) => message(index + 1))
+    await open()
+    expect(transcript().querySelectorAll('article')).toHaveLength(10)
+    fake.chats.inbox = Array.from({ length: 80 }, (_, index) => message(index + 1))
+    await act(async () => { await useBotsStore.getState().loadChat('inbox') })
+    const held = useBotsStore.getState().chats.inbox!
+    expect(held.messages.map((row) => row.seq)).toEqual(Array.from({ length: 50 }, (_, index) => index + 31))
+    expect(held.hasMore).toBe(true)
+    await act(async () => { await useBotsStore.getState().loadOlder('inbox') })
+    expect(useBotsStore.getState().chats.inbox!.messages.map((row) => row.seq)).toEqual(Array.from({ length: 80 }, (_, index) => index + 1))
+  })
+})

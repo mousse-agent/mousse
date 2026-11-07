@@ -69,7 +69,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const draft = useBotsStore((s) => s.drafts[bot.id] ?? '')
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
-  const error = useBotsStore((s) => s.error)
+  // Another bot's error stays with that bot's chat.
+  const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
   const transcript = useRef<HTMLDivElement>(null)
   const messages = chat?.messages ?? EMPTY
