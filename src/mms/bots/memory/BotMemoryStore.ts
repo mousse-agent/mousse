@@ -30,6 +30,7 @@ import {
   type BotMemoryWrittenIn
 } from '../../../shared/bots/personal/memory'
 import type { BotJournalInput, BotStoreTx } from '../seams'
+import { type ChatSummaryState, foldChatSummary } from './chatSummary'
 import { guardMemoryText, relativeDateRefusal } from './guard'
 import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
 
@@ -651,8 +652,8 @@ export class BotMemoryStore {
    * Forget (bot-context.md §8): the entry becomes a tombstone (text gone, hash kept, so it is not
    * learned again); cited journal rows, and rows of exactly the same text, are redacted with their
    * FTS rows; memory versions citing a redacted row are tombstoned; the mirrored `bot_messages` text
-   * is blanked; the entry's `memory_op` rows are redacted. The reason is not stored: it often
-   * restates what was forgotten.
+   * is blanked; the entry's `memory_op` rows are redacted; the chat summary and the frozen packs
+   * lose it too. The reason is not stored: it often restates what was forgotten.
    */
   forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string } {
     const ids = new Set<string>()
@@ -671,12 +672,16 @@ export class BotMemoryStore {
       const at = this.now()
       const tombstone = `[removed at your request · ${dayLabel(at, this.zone())}]`
       const redacted: string[] = []
+      const redactedSeqs = new Set<number>()
       const redact = (row: BotJournalRow) => {
-        if (row.redactedAt || redacted.includes(`j${row.seq}`)) return
+        if (row.redactedAt || redactedSeqs.has(row.seq)) return
         this.run("UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = ? WHERE seq = ?", tombstone, at, row.seq)
         if (row.sourceKey.startsWith('bm:')) this.redactMessage(this.db, botId, row.sourceKey.slice(3), tombstone)
         redacted.push(`j${row.seq}`)
+        redactedSeqs.add(row.seq)
       }
+      // The cited rows and their copies first: a memory citing any of them goes too.
+      const cited = new Set(seqs)
       for (const seq of seqs) {
         const row = this.journalRow(botId, seq)!
         // Copies of the same words (the owner's message as the thread's prompt row); short texts like "yes" are not copies.
@@ -684,13 +689,16 @@ export class BotMemoryStore {
           : this.all('SELECT * FROM bot_journal WHERE bot_id = ? AND text = ? AND seq <> ? AND redacted_at IS NULL', botId, row.text, seq).map(journalRowOf)
         redact(row)
         copies.forEach(redact)
-        for (const cited of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(cited.id as string)
+        for (const copy of copies) cited.add(copy.seq)
       }
+      for (const seq of cited)
+        for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
       for (const id of ids) {
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
       }
+      this.dropForgotten(botId, redactedSeqs)
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
       const removed = [...memIds, ...redacted]
       this.appendInTx(this.db, {
@@ -705,6 +713,23 @@ export class BotMemoryStore {
       }, at)
       return { ...(memIds.length ? { forgotten: memIds.join(', ') } : {}), redacted }
     })
+  }
+
+  /**
+   * After a forget, in its transaction: the chat summary is folded again from the rows left when
+   * one of its lines came from a redacted row, and every frozen pack is dropped (each may carry a
+   * forgotten entry or row), so the activation's next dispatch builds its pack from what is left.
+   */
+  private dropForgotten(botId: string, redacted: ReadonlySet<number>): void {
+    const summary = this.getState<ChatSummaryState>(botId, 'chat_summary')
+    const sources = summary?.sources
+    // A line of unknown source (a summary from before sources were kept) may come from any folded row.
+    const stale = summary && [...redacted].some((seq) => seq <= summary.throughSeq && (!sources || sources.includes(seq) || sources.includes(0)))
+    if (summary && stale) {
+      const folded = this.windowRows(botId, 0).filter((row) => row.seq <= summary.throughSeq)
+      this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, undefined, this.zone(), this.now()), throughSeq: summary.throughSeq })
+    }
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 5) = 'pack:'", botId)
   }
 
   // -- State -----------------------------------------------------------------------------------

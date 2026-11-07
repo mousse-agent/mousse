@@ -42,7 +42,7 @@ describe('bots.chat.send', () => {
     // Cleared while preparing, before the turn starts.
     expect(f.cleared).toEqual([home()])
     expect(prepared).toMatchObject({ history: 'cleared', lane: 'chat', preamble: `<bot_memory>chat pack ${activation.id}</bot_memory>` })
-    expect(f.packs.filter((pack) => pack.activationId === activation.id)).toEqual([{ lane: 'chat', activationId: activation.id }])
+    expect(f.packs.filter((pack) => pack.activationId === activation.id)).toContainEqual({ lane: 'chat', activationId: activation.id })
     await finish(f, payload, 'completed', { text: 'Two invoices and a meeting.' })
     expect(chatOf(f, botId).slice(-2)).toMatchObject([{ author: 'owner', text: 'What came in today?' }, { author: 'bot', kind: 'text', text: 'Two invoices and a meeting.', activationId: activation.id }])
     // The next chat activation clears again.
@@ -70,9 +70,8 @@ describe('bots.chat.send', () => {
     const continuation = f.store.dispatch(activation.id, 2)!
     expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: `[Mousse] The owner allowed: read files in ${docs}. Continue.` } })
     const next = await start(f, activation.id, 2)
+    // Read again for the continuation: the provider keeps it frozen (a forget drops it).
     expect(next.prepared).toMatchObject({ history: 'thread', preamble: prepared.preamble })
-    // The pack was built once for the activation.
-    expect(f.packs.filter((pack) => pack.activationId === activation.id)).toHaveLength(1)
     expect(next.prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(docs, 'a.md') } })).toEqual({ ok: true })
   })
 

@@ -217,6 +217,18 @@ describe('forget', () => {
     expect(store.checkIndexes()).toEqual([])
   })
 
+  it('forgets a memory that cites an identical copy of the forgotten row', () => {
+    const fx = memoryFixture()
+    const { store } = fx
+    const first = fx.message({ botId: 'ada', id: 'msg-1', author: 'owner', text: 'My sister Ana lives in Porto now.' })
+    fx.message({ botId: 'ada', id: 'msg-2', author: 'owner', text: 'My sister Ana lives in Porto now.' })
+    // The save cites the latest owner message, msg-2.
+    ok(store.save('ada', { lane: 'chat', kind: 'owner', text: 'The owner has a sister, Ana, in Porto.' }))
+    expect(store.forget('ada', { refs: [`j${first}`], by: 'chat' })).toMatchObject({ forgotten: 'm1' })
+    expect(store.active('ada')).toEqual([])
+    expect(store.search('ada', { query: 'Porto' })).toEqual([])
+  })
+
   it('refuses unknown refs without changing anything', () => {
     const { store } = memoryFixture()
     ok(store.save('ada', { lane: 'chat', kind: 'note', text: 'Keep this.' }))

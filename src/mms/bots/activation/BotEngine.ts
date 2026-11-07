@@ -226,7 +226,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly service: BotChatService
-  /** Each activation's context pack, frozen for it (bot-context.md §5). */
+  /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
   private readonly packs = new Map<string, string>()
   /** Replies whose final message the executor still delivers, by `<activationId>:<n>`. */
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
@@ -998,7 +998,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       })
       if (!saved) return false
     }
-    if (!this.packs.has(row.id) && this.host.context) {
+    // Read at each main dispatch: the provider freezes the pack per activation, and a forget drops it.
+    if (this.host.context) {
       try {
         const pack = row.lane === 'chat'
           ? await this.host.context.chatPreamble({ botId: row.botId, activationId: row.id })

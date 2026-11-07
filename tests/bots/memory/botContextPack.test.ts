@@ -157,6 +157,34 @@ describe('the chat pack', () => {
     expect(pack).not.toContain('vegetarian')
   })
 
+  it('a forgotten row leaves the chat summary and every frozen pack', async () => {
+    const fx = memoryFixture()
+    const { packs } = provider(fx)
+    const said = fx.message({ botId: 'ada', id: 'o0', author: 'owner', text: 'My cat is called Biscuit and she is nine.', activationId: 'act-0' })
+    for (let n = 1; fx.store.getState('ada', 'window_start_seq') === undefined; n++) {
+      chat(fx, n, 200)
+      packs.moveWindow('ada')
+    }
+    const before = fx.store.getState<{ text: string; lines: string[]; sources: number[]; throughSeq: number }>('ada', 'chat_summary')!
+    expect(before.text).toContain('Biscuit')
+    expect(before.sources).toContain(said)
+    const frozen = await packs.chatPreamble({ botId: 'ada', activationId: 'act-open' })
+    await packs.runPreamble({ botId: 'ada', activationId: 'run-open', input: 'Go' })
+    expect(frozen).toContain('Biscuit')
+    fx.store.forget('ada', { refs: [`j${said}`], by: 'chat' })
+    const after = fx.store.getState<{ text: string; lines: string[]; sources: number[]; throughSeq: number }>('ada', 'chat_summary')!
+    expect(after.text).not.toContain('Biscuit')
+    expect(after.sources).not.toContain(said)
+    expect(after.lines).toEqual(before.lines.filter((line) => !line.includes('Biscuit')))
+    expect(after.throughSeq).toBe(before.throughSeq)
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'act-open' })).not.toContain('Biscuit')
+    expect(fx.store.getState('ada', 'pack:run-open')).toBeUndefined()
+    // Later folds keep it out.
+    for (let n = 100; n < 120; n++) chat(fx, n, 200)
+    packs.moveWindow('ada')
+    expect(fx.store.getState<{ text: string }>('ada', 'chat_summary')!.text).not.toContain('Biscuit')
+  })
+
   it('afterDispatch captures the dispatch’s thread, and a journal failure is bot_journal_failed', async () => {
     const fx = memoryFixture()
     const { thread, packs } = provider(fx)

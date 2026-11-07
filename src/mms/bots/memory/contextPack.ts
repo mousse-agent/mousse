@@ -9,7 +9,8 @@ import {
 import type { BotContextProvider, BotJournal } from '../seams'
 import { BotJournalError, type BotJournalRow, type BotMemoryStore } from './BotMemoryStore'
 import { guardPackText } from './guard'
-import { agoLabel, cut, dayLabel, renderMemoryBlocks, timeLabel } from './render'
+import { type ChatSummaryState, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
+import { agoLabel, cut, renderMemoryBlocks, timeLabel } from './render'
 
 /**
  * The context packs (docs/plans/bot-context.md §5): Mousse builds every bot turn from `bots.db`, so
@@ -60,52 +61,6 @@ export const BOT_MEMORY_PROTOCOL = [
 
 const RUN_PROTOCOL_LINE = '- In a run, memory_save keeps run notes only, and only the owner can make you forget something, in the chat.'
 
-type Who = 'Owner' | 'Me' | 'My run report'
-
-function speaker(row: BotJournalRow): Who {
-  return row.kind === 'owner_msg' ? 'Owner' : row.kind === 'run_report' ? 'My run report' : 'Me'
-}
-
-/** A journal row's text as it may enter a pack: held back when the guard refuses it. */
-function packText(row: BotJournalRow): string {
-  if (row.redactedAt) return row.text
-  const guard = guardPackText(row.text, row.who)
-  return guard.ok ? row.text : `(held back: ${guard.message.toLowerCase().replace(/\.$/, '')}. memory_read j${row.seq} shows it.)`
-}
-
-function firstLine(text: string): string {
-  return text.trim().split(/\n+/)[0] ?? ''
-}
-
-function firstSentence(text: string): string {
-  const line = firstLine(text)
-  const match = /^(.+?[.!?])(\s|$)/u.exec(line)
-  return match ? match[1]! : line
-}
-
-/** Joins lines into at most `budget` tokens, in order; lines that do not fit are left out. */
-function withinBudget(lines: readonly string[], budget: number): string[] {
-  const kept: string[] = []
-  let used = 0
-  for (const line of lines) {
-    const tokens = estimateTokens(line) + 1
-    if (used + tokens > budget) break
-    kept.push(line)
-    used += tokens
-  }
-  return kept
-}
-
-interface ChatSummaryState {
-  text: string
-  /** Newest first. */
-  lines: string[]
-  throughSeq: number
-  at: string
-}
-
-const SUMMARY_HEADER = 'Chat summary (older chat, newest first; memory_search finds the full rows):'
-
 export function createBotContextProvider(options: BotContextPackOptions): BotContextProvider & {
   /** Moves the verbatim window when it passed its budget; true when it moved. */
   moveWindow(botId: string): boolean
@@ -114,15 +69,6 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   const zone = () => options.timeZone?.() ?? store.zone()
 
   const windowLine = (row: BotJournalRow) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${speaker(row)}: ${packText(row)}`
-
-  /** The summary line a dropped row folds into, or undefined (a Mousse-made prompt, an empty row). */
-  const summaryLine = (row: BotJournalRow): string | undefined => {
-    if (row.redactedAt) return undefined
-    const text = packText(row)
-    if (!text.trim() || (row.kind === 'owner_msg' && text.startsWith('[Mousse '))) return undefined
-    const body = row.kind === 'owner_msg' ? cut(text, 300) : row.kind === 'run_report' ? cut(firstLine(text), 300) : cut(firstSentence(text), 300)
-    return `- ${dayLabel(row.at, zone())} · ${speaker(row)}: ${body}`
-  }
 
   const summary = (botId: string) => store.getState<ChatSummaryState>(botId, 'chat_summary')
 
@@ -140,19 +86,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     let drop = 0
     while (drop < rows.length && total > BOT_CHAT_WINDOW_KEEP_TOKENS) total -= sizes[drop++]!
     const dropped = rows.slice(0, drop)
-    const previous = summary(botId)
-    const fresh = dropped.map(summaryLine).filter((line): line is string => Boolean(line)).reverse()
-    const seen = new Set<string>()
-    const lines = withinBudget([...fresh, ...(previous?.lines ?? [])].filter((line) => !seen.has(line) && Boolean(seen.add(line))),
-      BOT_CHAT_PACK_BUDGET.summary - estimateTokens(SUMMARY_HEADER) - 1)
     const next = rows[drop]?.seq ?? dropped[dropped.length - 1]!.seq + 1
     store.write(() => {
-      store.setState(botId, 'chat_summary', {
-        text: [SUMMARY_HEADER, ...lines].join('\n'),
-        lines,
-        throughSeq: dropped[dropped.length - 1]!.seq,
-        at: store.now()
-      } satisfies ChatSummaryState)
+      store.setState(botId, 'chat_summary', foldChatSummary(dropped, summary(botId), zone(), store.now()))
       store.setState(botId, 'window_start_seq', next)
     })
     return true
