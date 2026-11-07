@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The Agents tab's Bots section (bot-ui §4.1): Bots where Roster was, + opens New bot, each bot by
+ * The Chats tab's Bots section (bot-ui §4.1): Bots where Roster was, + opens New bot, each bot by
  * its face, and Recent with bot chats and direct chats together, saying each bot's state in words.
  */
 import { act, createElement } from 'react'

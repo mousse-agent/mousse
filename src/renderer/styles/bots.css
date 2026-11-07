@@ -1,4 +1,4 @@
-/* Bots in the Agents tab (bot-ui §4). Only the app's own tokens; the rest is the Chats surface's CSS (chats.css). */
+/* Bots in the Chats tab (bot-ui §4). Only the app's own tokens; the rest is the Chats surface's CSS (chats.css). */
 
 /* The Bots row and Recent. The face stands on its own: no tile behind it. */
 .chats-sidebar-content .bot-roster { padding-top: 6px; }

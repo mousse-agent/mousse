@@ -8,7 +8,7 @@ Companion plan: [`bot-ui.md`](bot-ui.md), revision 3, finalized by the founders.
 
 **What changed since revision 1.** Revision 1 planned a rich Bot Mode: an Automations page with a timeline and event log, a model side card, bot servers first, and one merged scheduler. The finalized Bot UI is deliberately simple:
 
-- bots live in the Agents tab;
+- bots live in the Chats tab (labelled Agents until #710);
 - a bot is made from a look and one sentence;
 - the owner talks to the bot in its chat;
 - the model is never shown;
@@ -28,7 +28,7 @@ Quotes are from the founders' notes (17 Oct and 29 Oct 2026) and from `bot-ui.md
 |---|---|---|
 | G1 | **Bots run on this computer.** The three items in `BOT_RUNTIME_GAPS` are closed, so a bot's turns actually run within its grant. | Prerequisite. Nothing below works without it. |
 | G2 | **Create from a look and a sentence.** `bots.create {look, name?, description}`. With no name, the bot names itself. Its first message is produced at once. | "Creating a bot: name and icon, then chat"; bot-ui §4.2, C1 |
-| G3 | **Chat with the bot** in its own chat in the Agents tab. Activity shows as short chips, never as tool rows. | bot-ui §4.4, C2, C3 |
+| G3 | **Chat with the bot** in its own chat in the Chats tab. Activity shows as short chips, never as tool rows. | bot-ui §4.4, C2, C3 |
 | G4 | **Ask cards.** A missing permission becomes one card with Allow and Not now. The answer is remembered per bot and listed in About, where it can be removed. There is one open ask per permission. Scheduled runs skip that step while the ask waits. | "it requests permissions over time and becomes more automatic"; bot-ui §4.5, C4 |
 | G5 | **Schedules by asking.** The bot adds and removes its own schedules and confirms each with a chip. About lists them, with Remove. | bot-ui §4.6, C5 |
 | G6 | **Hidden automatic model.** The model is picked from the providers the owner is signed in to. "Think harder" and "be quicker" change the depth. No model name ever reaches the UI. | **Decision:** "Bot model is auto-selected by default, changed by asking the bot rather than a slash command"; bot-ui rule 3, §4.7, C6 |
@@ -1579,7 +1579,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 ## 13. Proposed glossary terms
 
 To add with the PR:
-- **Bot chat:** a bot's conversation with its owner, in the Agents tab. It shows the owner's messages, the bot's replies, its run reports and its asks.
+- **Bot chat:** a bot's conversation with its owner, in the Chats tab. It shows the owner's messages, the bot's replies, its run reports and its asks.
 - **Ask:** a bot's request for a permission, shown as a card with Allow and Not now. It is a wall when the owner is chatting; in a run, the bot carries on without the permission.
 - **Run report:** the message a bot posts in its chat when a scheduled or manual run ends.
 - **Look:** a bot's face: one of 8 colours and one of 12 accessories.

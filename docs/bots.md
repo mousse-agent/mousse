@@ -4,7 +4,7 @@ How personal bots work as of Bot Mode Phase 1, for developers. The design and it
 
 ## What a bot is
 
-A bot is an agent a person makes from a **look** and one sentence ("What should it do?"). It lives in the Agents tab, in the Bots section. Its owner talks to it in its **bot chat**, and it also works on its own schedules. Everything else is set by asking it: permissions, schedules, its name, how much time it takes. The UI never shows a model, a tool row or a form.
+A bot is an agent a person makes from a **look** and one sentence ("What should it do?"). It lives in the Chats tab, in the Bots section. Its owner talks to it in its **bot chat**, and it also works on its own schedules. Everything else is set by asking it: permissions, schedules, its name, how much time it takes. The UI never shows a model, a tool row or a form.
 
 - The definition is format 2 (`src/shared/bots/personal/definition.ts`): name, description, look, role, the main thread spec with its model choice, and the grant (`permissions`). `owner` and `placement` are reserved for Teams and bot servers. Format 1 files are upgraded on read.
 - `bots.create` names the bot with one short model call (5 seconds at most). When that fails, a name made from the description is used, and the bot picks its own in its first turn. The bot's first message is produced at once, as a chat activation.
