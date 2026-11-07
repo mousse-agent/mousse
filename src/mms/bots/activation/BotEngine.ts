@@ -244,7 +244,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.chat = new BotChatProjection({
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
-      emit: (event) => this.events.emit('message', event)
+      // The bot's name rides along: a notification for a new bot's first row comes before any list names it.
+      emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId) })
     })
     this.service = new BotChatService(this, { store: host.store, ...(host.memory ? { memory: host.memory } : {}), now: () => this.now() })
     try {
@@ -3107,6 +3108,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   definitionOf(botId: string): BotDefinition {
     const entry = this.entry(botId)
     return entry.published ?? entry.draft
+  }
+
+  /** `{ botName }` for a `bots.message` event, or nothing for a bot that is gone. */
+  private nameFor(botId: string): { botName?: string } {
+    try {
+      return { botName: this.definitionOf(botId).name }
+    } catch {
+      return {}
+    }
   }
 
   /**

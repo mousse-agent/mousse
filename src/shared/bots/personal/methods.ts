@@ -110,8 +110,8 @@ export type BotsPersonalV2Event = (typeof BOTS_PERSONAL_V2_EVENTS)[number]
 export interface BotsPersonalV2EventData {
   /** The list and the bot's state need refreshing. */
   'bots.changed': { botId: string }
-  /** A new or changed chat row: chat push and notifications. */
-  'bots.message': { botId: string; message: BotChatMessage }
+  /** A new or changed chat row: chat push and notifications (titled with `botName`, absent on older daemons). */
+  'bots.message': { botId: string; message: BotChatMessage; botName?: string }
   /** The live chip of a working activation; null clears it. */
   'bots.activity': { botId: string; activationId: string; chip: BotChip | null }
 }

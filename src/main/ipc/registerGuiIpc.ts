@@ -554,7 +554,7 @@ export function registerGuiIpc(
    * yet, so the system notification stands in for it. A click opens the bot's chat.
    */
   const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
-    const { botId, message } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage }
+    const { botId, message, botName } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown }
     if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
     const kind = botNotificationKind(message)
     if (!kind || !botNotifications.first(profileId, message.id)) return
@@ -572,7 +572,7 @@ export function registerGuiIpc(
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       ...content,
-      ...botNotificationContent(botNotifications.name(profileId, botId), message),
+      ...botNotificationContent(typeof botName === 'string' ? botName : botNotifications.name(profileId, botId), message),
       silent: useWindowsCompletionSound ? true : content.silent
     })
     notification.on('click', () => {

@@ -168,6 +168,8 @@ describe('a bot through the v2 methods', () => {
     expect(summary).toMatchObject({ id: bot.id, state: 'stuck', error: { action: { kind: 'sign_in', instanceId: 'claude:bots' } } })
     const messages = (await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId: bot.id })).messages
     expect(messages).toMatchObject([{ kind: 'error', error: { action: { kind: 'sign_in', instanceId: 'claude:bots' } } }])
+    // The error row came while bots.create was still running: its event names the bot for the notification.
+    expect(seen).toContainEqual({ event: 'message', payload: expect.objectContaining({ botId: bot.id, botName: 'Penny', message: expect.objectContaining({ kind: 'error' }) }) })
     // Remove the one allowed id: nothing else names a model or an instance.
     const scrub = (value: unknown): unknown => JSON.parse(JSON.stringify(value).replaceAll('"instanceId":"claude:bots"', '"signIn":true'))
     expectNoModel(seen.map(scrub))
