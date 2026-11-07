@@ -95,6 +95,8 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
   const lost = new Set<() => void>()
   const restored = new Set<() => void>()
   const timers = new Map<number, { at: number; callback: () => void }>()
+  let ratio = options.pixelRatio ?? 1
+  const ratioListeners = new Set<() => void>()
   const gpu: FaceGpu = {
     canvas: document.createElement('canvas'),
     status: options.status ?? (() => 'ready'),
@@ -114,7 +116,11 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     },
     cancelFrame: (frame) => frames.delete(frame),
     now: () => now,
-    pixelRatio: () => options.pixelRatio ?? 1,
+    pixelRatio: () => ratio,
+    onPixelRatioChange: (listener) => {
+      ratioListeners.add(listener)
+      return () => ratioListeners.delete(listener)
+    },
     document,
     IntersectionObserver: options.observer ? (FakeObserver as unknown as typeof IntersectionObserver) : undefined,
     random: () => 0.5,
@@ -139,7 +145,11 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
   }
   const lose = () => act(() => lost.forEach((listener) => listener()))
   const restore = () => act(() => restored.forEach((listener) => listener()))
-  return { env, gpu, draws, tick, lose, restore, pending: () => frames.size, timers: () => timers.size }
+  const setRatio = (next: number) => {
+    ratio = next
+    act(() => ratioListeners.forEach((listener) => listener()))
+  }
+  return { env, gpu, draws, tick, lose, restore, setRatio, pending: () => frames.size, timers: () => timers.size }
 }
 
 const coral = { colour: 'coral', accessory: 'none' }
@@ -286,6 +296,25 @@ describe('reduced motion', () => {
     expect(fake.draws).toHaveLength(2)
     expect(fake.draws[0]!.uniforms).toEqual(faceUniforms({ colour: 'yellow', accessory: 'beret' }, stillPose('stuck'), { view: 'head', size: 40, samples: 1 }))
     expect(fake.pending()).toBe(0)
+  })
+
+  it('draws a still face again at a new pixel ratio', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const canvas = document.createElement('canvas')
+    renderer.register(canvas, spec({ size: 104, view: 'full', still: true }))
+    fake.tick()
+    expect(fake.draws.map((draw) => draw.side)).toEqual([104])
+    expect(renderer.running).toBe(false)
+    fake.setRatio(2)
+    expect(canvas.width).toBe(208)
+    fake.tick()
+    expect(fake.draws.map((draw) => draw.side)).toEqual([104, 208])
+    // Past the cap of 2 nothing changes, so nothing is drawn.
+    fake.setRatio(3)
+    fake.tick()
+    expect(fake.draws).toHaveLength(2)
+    renderer.dispose()
   })
 
   it('draws a still face again when its state changes', () => {

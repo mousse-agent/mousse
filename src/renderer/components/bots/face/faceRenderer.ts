@@ -76,6 +76,8 @@ export interface FaceRendererEnv {
   /** Milliseconds, on the same clock as `requestFrame`'s argument. */
   now(): number
   pixelRatio(): number
+  /** Calls `listener` when `pixelRatio()` changes (a zoom, another screen); returns a function that stops it. */
+  onPixelRatioChange?(listener: () => void): () => void
   document?: Document
   IntersectionObserver?: typeof IntersectionObserver
   random?: () => number
@@ -173,6 +175,7 @@ export class FaceRenderer {
   /** Cancels the wait for a lost context to come back. */
   private cancelLostTimer: (() => void) | null = null
   private readonly onVisibility = () => this.schedule()
+  private readonly stopRatioWatch: (() => void) | null
   private stat = { ticks: 0, lastFaces: 0, averageMs: 0, maxMs: 0, gpuMs: 0, gpuMaxMs: 0 }
   private lastDraw = -Infinity
   /** Wait for the GPU at the end of each tick, so the stats include the shader time. */
@@ -201,6 +204,11 @@ export class FaceRenderer {
         })
       : null
     env.document?.addEventListener('visibilitychange', this.onVisibility)
+    // Faces off screen are sized when they next draw; a still face on screen draws again at the new ratio.
+    this.stopRatioWatch = env.onPixelRatioChange?.(() => {
+      for (const slot of this.slots.values()) if (slot.visible) this.sizeCanvas(slot)
+      this.schedule()
+    }) ?? null
   }
 
   status(): FaceRendererStatus {
@@ -273,6 +281,7 @@ export class FaceRenderer {
     this.cancelLostTimer = null
     this.observer?.disconnect()
     this.env.document?.removeEventListener('visibilitychange', this.onVisibility)
+    this.stopRatioWatch?.()
     this.slots.clear()
     this.cache.clear()
     this.gpu?.dispose()
@@ -692,6 +701,21 @@ function browserEnv(): FaceRendererEnv | null {
     cancelFrame: (id) => window.cancelAnimationFrame(id),
     now: () => performance.now(),
     pixelRatio: () => window.devicePixelRatio,
+    // A resolution query matches the ratio it was made for only; each change makes the next one.
+    onPixelRatioChange: (listener) => {
+      let query: MediaQueryList | undefined
+      const changed = () => {
+        watch()
+        listener()
+      }
+      const watch = () => {
+        query?.removeEventListener('change', changed)
+        query = window.matchMedia?.(`(resolution: ${window.devicePixelRatio}dppx)`)
+        query?.addEventListener('change', changed)
+      }
+      watch()
+      return () => query?.removeEventListener('change', changed)
+    },
     setTimer: (callback, ms) => {
       const handle = window.setTimeout(callback, ms)
       return () => window.clearTimeout(handle)
