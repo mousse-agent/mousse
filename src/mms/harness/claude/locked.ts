@@ -1,6 +1,6 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { homedir } from 'node:os'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
@@ -15,9 +15,13 @@ import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvid
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /**
- * The locked Claude Code profile (PR 6 §3): how a bot's turn runs on Claude Code. An instance with
- * `config.profile: 'locked'` runs in a home of its own and only bot turns; every interactive
- * instance keeps the user's own setup, untouched.
+ * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
+ * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
+ *   entry's environment, as one query that is never kept warm, and its process is the turn's own:
+ *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
+ * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
+ *   turns, in the locked environment, with its process group under the bot supervisor.
+ * Every interactive turn keeps the user's own setup, untouched.
  *
  * A locked turn loads no settings, plugins or MCP servers but Mousse's own, runs in the activation's
  * private scratch folder, offers exactly the granted built-ins (`tools`) and turns every other one
@@ -28,8 +32,6 @@ import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /** The instance profile that runs bots. */
 export const CLAUDE_LOCKED_PROFILE = 'locked'
-
-export { CLAUDE_BOT_RUNNER_ID, CLAUDE_BOT_RUNNER_NAME, CLAUDE_BOT_RUNNER_SLUG } from '../../../shared/harness/botRunner'
 
 /** One `query` is one dispatch: a backstop on its model turns, not a policy claim. */
 export const CLAUDE_LOCKED_MAX_TURNS = 100
@@ -118,12 +120,21 @@ export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
   web_search: ['WebSearch']
 })
 
-/** What a locked turn runs with, from the turn's bot authority and the runtime's facts. */
+/** What a bot turn runs with, from the turn's bot authority and the runtime's facts. */
 export interface ClaudeLockedTurn {
   authority: BotAuthority
+  /**
+   * The turn runs on the owner's own entry, not a locked one: their environment and sign-in, the
+   * SDK's own process handling, and no organisation-policy reading. Every call still goes through
+   * the grant gate, and Claude Code runs in its asking mode with none of the user's settings files.
+   */
+  ownerEntry?: true
   /** The run's tool ledger; without it no built-in runs. */
   ledger?: ToolLedger
-  /** The activation's private scratch folder: the turn's working directory. */
+  /**
+   * The turn's working directory: the activation's scratch folder on a locked entry, the bot's
+   * files folder on the owner's entry. A relative path a call names is checked against it.
+   */
   cwd: string
   /** A `shell` grant may run: the sandbox is available and has evidence for this CLI and platform. */
   shellContained: boolean
@@ -239,6 +250,24 @@ function patternEscapes(value: unknown): boolean {
   return isAbsolute(value) || /^[A-Za-z]:/.test(value) || runtimeExpandedPath(value) || value.includes('..')
 }
 
+/**
+ * A call's path arguments as Claude Code opens them: a relative one under the turn's working
+ * directory, when that is not the scratch folder the authority resolves against. A path the runtime
+ * expands itself (`~`, a variable) is left as it is, for the authority to refuse.
+ */
+function inFolder(args: Record<string, unknown>, cwd: string, scratch: string | undefined): Record<string, unknown> {
+  if (scratch === undefined || resolve(cwd) === resolve(scratch)) return args
+  const out: Record<string, unknown> = { ...args }
+  for (const key of CLAUDE_PATH_ARGUMENTS) {
+    const value = out[key]
+    if (typeof value === 'string' && value !== '' && !isAbsolute(value) && !runtimeExpandedPath(value)) out[key] = resolve(cwd, value)
+  }
+  return out
+}
+
+/** The arguments of Claude Code's built-ins that name a path (`botAuthority`'s `PATH_ARGUMENTS`). */
+const CLAUDE_PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
+
 /** What the model is told when the gate itself fails: the call does not run. */
 const GATE_FAILED = 'This call could not be checked against the bot\'s permissions, so it does not run.'
 
@@ -292,7 +321,7 @@ export class ClaudeLockedGate {
         // Glob's pattern and Grep's glob name files too: one that leaves the folder it searches is refused.
         if (patternEscapes(toolName === 'Glob' ? args.pattern : toolName === 'Grep' ? args.glob : undefined))
           return { ok: false, reason: `This bot searches only inside its folders: give ${toolName} a relative pattern and a path.` }
-        const decided = checkBuiltinCall(authority, CLAUDE_NATIVE_TOOLS, toolName, args)
+        const decided = checkBuiltinCall(authority, CLAUDE_NATIVE_TOOLS, toolName, inFolder(args, this.turn.cwd, authority.workspace?.scratch))
         return decided.ok ? { ok: true, classified } : { ok: false, reason: checkMessage(decided) }
       }
     }

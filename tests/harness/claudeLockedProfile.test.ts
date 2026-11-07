@@ -118,6 +118,106 @@ const pre = (options: Options, tool: string, input: Record<string, unknown>, id 
 const canUse = (options: Options, tool: string, input: Record<string, unknown>, id = 'tu') =>
   options.canUseTool!(tool, input, { signal: new AbortController().signal, toolUseID: id, requestId: 'r' } as never)
 
+/** The owner's own entry's service: their sign-in and environment, no locked environment. */
+function ownerService(probe: Probe) {
+  const home = temp('claude-owner-profile-')
+  const binary = join(home, 'claude')
+  writeFileSync(binary, 'fixture')
+  chmodSync(binary, 0o755)
+  const directory = join(home, 'providers', 'claude-subscription')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+  const captured: Options[] = []
+  const query = ({ options }: { options: Options }): Query => {
+    captured.push(options)
+    const generator = (async function* () {
+      await probe(options)
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'owner-session' }
+    })()
+    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+  }
+  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    query,
+    // A live process would be kept warm: a bot turn never takes one.
+    live: true,
+    runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+    launchConfig: () => ({ binaryPath: binary, env: { USER_VARIABLE: 'from-settings' } })
+  })
+  return { service, captured }
+}
+
+describe('a bot on the owner\'s own Claude Code entry', () => {
+  it('runs one query in Claude Code\'s asking mode with the owner\'s environment, none of their settings files, and no process of its own to supervise', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
+    const options = captured.find((entry) => entry.hooks)!
+    expect(options).toMatchObject({ cwd: root, settingSources: [], strictMcpConfig: true, plugins: [], permissionMode: 'default', tools: ['Read', 'ToolSearch'] })
+    for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume', 'spawnClaudeCodeProcess']) expect(options, name).not.toHaveProperty(name)
+    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mousse'])
+    // The owner's own sign-in: their entry's environment, not a locked one.
+    expect(options.env?.USER_VARIABLE).toBe('from-settings')
+    expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
+    // One query per turn: no live process is kept for the bot's thread.
+    expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
+  })
+
+  it('a chat activation\'s cleared context starts a new Claude session; a continuation in the activation resumes its own', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    const turn = (history: string) => service.chat({ threadId: 'bot-home', cwd: root, model: 'sonnet', prompt: 'go', history, locked, onText: vi.fn() })
+    await turn('')
+    service.commitConversation('bot-home', 'H1')
+    // The next dispatch of the same activation (a wall's answer) carries the thread: it resumes.
+    await turn('H1')
+    service.commitConversation('bot-home', 'H2')
+    // The next chat activation cleared the context: nothing is sent, and nothing is resumed.
+    await turn('')
+    const turns = captured.filter((entry) => entry.hooks)
+    expect(turns.map((entry) => entry.resume)).toEqual([undefined, 'owner-session', undefined])
+  })
+
+  it('every approval is answered by the bot\'s authority, never the person: allowed, a wall, and a refusal', async () => {
+    const root = temp('claude-owner-root-')
+    const scratch = temp('claude-owner-scratch-')
+    const outside = temp('claude-owner-outside-')
+    const questions = vi.spyOn(UserQuestionService.prototype, 'requestAnswers')
+    const seen: unknown[] = []
+    const check = vi.fn((call: { kind: string; args?: Record<string, unknown> }) => {
+      seen.push(call)
+      const path = String(call.args?.file_path ?? call.args?.path ?? '')
+      if (path.startsWith(root)) return { ok: true as const }
+      if (path.startsWith(outside)) return { ok: false as const, refused: { text: 'The owner has not allowed this yet.', askId: 'ask-1' } }
+      return { ok: false as const, wall: { kind: 'escalated' as const, permission: 'read files' } }
+    })
+    const authority = { ...authorityFor(['read'], { root, scratch }), check, checkAny: undefined }
+    const decisions: Record<string, unknown> = {}
+    const { service } = ownerService(async (options) => {
+      decisions.allowed = await canUse(options, 'Read', { file_path: join(root, 'a.txt') }, 'tu-1')
+      decisions.refused = await canUse(options, 'Read', { file_path: join(outside, 'a.txt') }, 'tu-2')
+      decisions.wall = await canUse(options, 'Read', { file_path: '/etc/passwd' }, 'tu-3')
+      decisions.relative = await canUse(options, 'Read', { file_path: 'notes.md' }, 'tu-4')
+      decisions.question = await canUse(options, 'AskUserQuestion', { questions: [{ question: 'ok?' }] }, 'tu-5')
+      decisions.preUnknown = await pre(options, 'TodoWrite', { todos: [] })
+    })
+    const locked: ClaudeLockedTurn = { authority, ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    expect(decisions.allowed).toMatchObject({ behavior: 'allow' })
+    expect(decisions.refused).toMatchObject({ behavior: 'deny', message: 'The owner has not allowed this yet.' })
+    expect(decisions.wall).toMatchObject({ behavior: 'deny', message: expect.stringContaining('Paused: waiting for the owner') })
+    // A relative path is the one Claude Code opens: under the turn's folder.
+    expect(decisions.relative).toMatchObject({ behavior: 'allow' })
+    expect(seen).toContainEqual(expect.objectContaining({ args: expect.objectContaining({ file_path: join(root, 'notes.md') }) }))
+    expect(decisions.question).toMatchObject({ behavior: 'deny' })
+    expect(decisions.preUnknown).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+    expect(questions).not.toHaveBeenCalled()
+  })
+})
+
 describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
   it('loads nothing of the user\'s setup, runs in scratch, and offers exactly the granted built-ins', async () => {
     vi.stubEnv('SOME_USER_TOKEN', 'secret-from-parent')
@@ -258,12 +358,31 @@ describe('locked Claude Code: the grant gate (items 5, 7)', () => {
 })
 
 describe('locked Claude Code: who runs bots', () => {
-  it('a bot on an interactive entry, and a plain turn on a locked one, are refused before anything starts', async () => {
+  it('a bot on the owner\'s own entry runs through the grant gate in its files folder and in Ask; a plain turn on a locked one is refused', async () => {
     const root = temp('claude-locked-root-')
     const scratch = temp('claude-locked-scratch-')
+    const files = temp('claude-owner-files-')
     const service = { standaloneWorkspace: () => scratch, chat: vi.fn(async () => 'done'), commitConversation: vi.fn(), configured: () => true }
-    const interactive = new ClaudeSubscriptionAdapter(() => service as never)
-    await expect(interactive.startTurn(turnInput(root), sink(), control(), host({ bot: authorityFor(['read'], { root, scratch }) }))).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    const integrations = { resolve: vi.fn(async () => ({ mcpServers: { github: {} }, warnings: [] })) }
+    const owner = new ClaudeSubscriptionAdapter(() => service as never, () => integrations as never)
+    const bot = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch, files } },
+      waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    // The thread asked for Full access: a bot turn asks all the same.
+    await owner.startTurn(turnInput(root), sink(), control(), host({ bot }))
+    const input = (service.chat.mock.calls[0] as unknown as [{ cwd: string; permissionMode: string; locked: ClaudeLockedTurn; integrations?: unknown; systemPromptAppend?: string }])[0]
+    expect(input.permissionMode).toBe('ask')
+    expect(input.locked).toMatchObject({ ownerEntry: true, cwd: files, shellContained: false, systemPrompt: 'Mousse instructions' })
+    expect(input.locked.authority).toBe(bot)
+    expect(input.locked).not.toHaveProperty('onProcess')
+    expect(input.cwd).toBe(files)
+    // None of the user's MCP servers or skills.
+    expect(input.integrations).toBeUndefined()
+    expect(integrations.resolve).not.toHaveBeenCalled()
+    service.chat.mockClear()
     const locked = new ClaudeSubscriptionAdapter(() => service as never, () => null, { admit: async () => ({ ok: true as const, shellContained: false }) })
     await expect(locked.startTurn(turnInput(root), sink(), control(), host({}))).rejects.toMatchObject({ code: 'policy_unenforceable' })
     expect(service.chat).not.toHaveBeenCalled()
@@ -306,9 +425,14 @@ describe('locked Claude Code: who runs bots', () => {
     ])
     for (const platform of ['linux', 'darwin', 'win32'] as const) {
       const driver = claudeCodeDriver({ platform, managedPolicy: () => false })
-      // Only Linux has a record: a locked entry there holds a bot; nowhere does an unlocked one.
+      // Only Linux has a record: a locked entry there holds a bot exactly. The owner's own entries
+      // hold one everywhere, through Claude Code's approvals (approval-only tool control).
       expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(platform === 'linux')
-      expect(driver.botAuthority!({ home: 'private' }), platform).toBe(false)
+      expect(driver.botAuthority!({ home: 'private' }), platform).toBe(true)
+      expect(driver.botAuthority!({ home: 'default' }), platform).toBe(true)
+      // Only the owner's entries hold it through approvals; a locked one holds it exactly or not at all.
+      expect(driver.botApprovals!({ home: 'default' }), platform).toBe(true)
+      expect(driver.botApprovals!({ home: 'private', profile: 'locked' }), platform).toBe(false)
       // A version with no record (one Claude Code updated itself to) gets no exact tool control, anywhere.
       expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.0')).toMatchObject({ toolControl: 'approval_only', containment: 'weak', budgets: 'unsupported', spendLimits: 'unsupported', childPolicy: 'enforced' })
       expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.307').toolControl, platform).toBe('approval_only')

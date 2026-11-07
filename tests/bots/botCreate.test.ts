@@ -61,17 +61,9 @@ describe('bots.create', () => {
     expect(f.bots.definitionOf(long.botId).name).toBe('Watch Prices Flights')
   })
 
-  it('adds the bot runner entry before the bot\'s model is chosen; a failure to add it never stops the bot (§5.9 item 7)', async () => {
-    const order: string[] = []
-    f.host.botRunner = async () => { order.push('runner') }
-    const naming = f.host.oneShot!
-    f.host.oneShot = (input) => { order.push('naming'); return naming(input) }
-    await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, description: 'Check my inbox.', clientRequestId: 'r1' })
-    expect(order).toEqual(['runner', 'naming'])
-    // A repeat of the request adds nothing.
-    await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, description: 'Check my inbox.', clientRequestId: 'r1' })
-    expect(order).toEqual(['runner', 'naming'])
-    f.host.botRunner = async () => { throw new Error('config is read-only') }
+  it('adds no provider entry of its own: the bot runs on the owner\'s entries', async () => {
+    const host = f.host as Record<string, unknown>
+    expect(host.botRunner).toBeUndefined()
     const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Penny', description: 'Track my spending.', clientRequestId: 'r2' })
     expect(bot.name).toBe('Penny')
   })

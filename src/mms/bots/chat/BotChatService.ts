@@ -98,8 +98,6 @@ export class BotChatService {
     const key = `create:${input.clientRequestId}`
     const made = this.store.activationByKey(key)
     if (made) return { bot: this.summaryOf(made.botId) }
-    // The first bot of an owner with a Claude subscription adds "Claude for bots" (§5.9 item 7).
-    await this.engine.prepareBotRunner()
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
     const named = given ? { name: given, chosen: true } : await this.nameFor(botId, description)
     const name = named.name
@@ -127,7 +125,7 @@ export class BotChatService {
 
   /**
    * The bot names itself on its own model (`harness.oneShot`); on a failure or after 5 seconds (a
-   * runtime with no single requests, like Claude for bots) the description names it for now, and
+   * runtime with no single requests) the description names it for now, and
    * the bot picks its own name in its first turn (`chosen: false`).
    */
   private async nameFor(botId: string, description: string): Promise<{ name: string; chosen: boolean }> {

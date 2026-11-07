@@ -8,8 +8,8 @@ import type { BotPermissions } from '../grants/compile'
 
 /**
  * A bot activation's authority over one turn (PR 6 §4), checked on every call by each check point:
- * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools (and the
- * locked Claude gate, 6b). It asks nobody: a call outside the grant stops at a wall. The bot's
+ * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
+ * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
  * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
  * reported to `onAllowed`, the source of activity chips (§5.8).
  */
@@ -57,7 +57,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
-    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch } : null,
+    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch, ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}) } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,

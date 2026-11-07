@@ -565,6 +565,8 @@ export class MmsProfileServices {
     // A `bots.db` that cannot be opened (corrupt, newer schema) fails closed for bots only: the
     // profile opens, its other threads work, and bot methods report bots unavailable.
     const harness = this.harnessImpl
+    // Bots run on the owner's own entries: the separate entry an earlier build added for them goes.
+    void harness.removeRetiredBotRunner().catch((error) => console.warn('[bots] could not remove the old bot runner entry', { error: error instanceof Error ? error.message : String(error) }))
     // The bots' hidden model (§5.6): the ready providers in this device's scope that can hold the bot.
     const botModels = createBotModelResolver({
       snapshots: () => harness.instances.snapshots({ kind: 'device' }),
@@ -615,8 +617,6 @@ export class MmsProfileServices {
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
-      // "Claude for bots" (§5.9 item 7): added at a bot's creation when the owner's Claude subscription is signed in.
-      botRunner: () => harness.ensureBotRunner(),
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
         selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },

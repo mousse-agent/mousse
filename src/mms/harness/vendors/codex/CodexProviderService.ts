@@ -88,6 +88,8 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import type { BotAuthority } from '../../../../shared/bots/personal/authority'
+import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
 
@@ -366,6 +368,12 @@ export type CodexChatInput = {
    * the user refused, without asking (`RunPolicy.approvals`).
    */
   approvals?: 'never'
+  /**
+   * A bot's turn: it runs in Codex's asking mode (`codexTurnPolicy` for Ask, whatever
+   * `permissionMode` says), with the user's own MCP servers switched off, and every approval Codex
+   * raises is answered by this authority (`botApprovals.ts`). Questions to the user are refused.
+   */
+  bot?: Pick<BotAuthority, 'check'>
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -590,9 +598,14 @@ class TurnRun {
     return this.input.approvals === 'never'
   }
 
-  /** The thread's permission mode this turn runs in. */
+  /** The thread's permission mode this turn runs in; a bot's turn always asks. */
   get permissionMode(): PermissionMode {
-    return normalizePermissionMode(this.input.permissionMode)
+    return this.input.bot ? 'ask' : normalizePermissionMode(this.input.permissionMode)
+  }
+
+  /** A bot's turn: its approvals are answered by the bot's authority (`CodexChatInput.bot`). */
+  get bot(): CodexChatInput['bot'] {
+    return this.input.bot
   }
 
   get text(): string {
@@ -1871,6 +1884,12 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
+        // A bot's turn: its authority answers, never a person.
+        if (run.bot) {
+          const asked = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+          const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd })
+          return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
+        }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
@@ -1899,6 +1918,15 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.bot) {
+          const listed = (run.item(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
+          const answer = codexBotFileChange(run.bot, {
+            changes: listed.map((change) => ({ path: change.path, kind: change.kind?.type ?? 'update', ...(change.kind?.move_path ? { movePath: change.kind.move_path } : {}) })),
+            cwd: run.cwd,
+            grantRoot: approval.grantRoot ?? null
+          })
+          return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/fileChange/requestApproval'>
+        }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
@@ -1923,8 +1951,8 @@ export class CodexProviderService {
       case 'item/tool/requestUserInput': {
         const input = request.params as CodexServerRequestMap['item/tool/requestUserInput']['params']
         if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
-        // Nobody answers a run whose approvals are `never`.
-        if (run.refusesApprovals) throw new Error(QUESTIONS_REFUSED_MESSAGE)
+        // Nobody answers a run whose approvals are `never`, or a bot's turn.
+        if (run.refusesApprovals || run.bot) throw new Error(QUESTIONS_REFUSED_MESSAGE)
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,
@@ -2376,16 +2404,24 @@ export class CodexProviderService {
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
     const compactLimit = input.autoCompactTokens !== undefined && Number.isFinite(input.autoCompactTokens) && input.autoCompactTokens > 0
       ? Math.round(input.autoCompactTokens) : undefined
+    // A bot's turn gets none of the user's own MCP servers: Codex would run their tools without asking.
+    let botOverrides: Record<string, boolean> | undefined
+    if (input.bot) {
+      botOverrides = codexBotMcpOverrides((await readCodexUserSetup(conn, cwd)).mcpServers)
+      signal.throwIfAborted()
+      if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })
+    }
     const overrides = {
+      ...botOverrides,
       ...codexMcpConfigOverrides(input.mcp),
       ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
     } as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
-    const permissionMode = normalizePermissionMode(input.permissionMode)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.child, permissionMode)
+    const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode)
     // The policy a loaded thread was opened with: a change of child policy, permission mode or compaction
     // threshold reopens it (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}`
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
@@ -2496,7 +2532,7 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.child, current.permissionMode)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,

@@ -23,6 +23,8 @@ export interface BotModelCandidate {
   released?: string
   /** ISO time until which the instance is at its usage limit. */
   limitedUntil?: string
+  /** Where its entry lists the model (0 first): between models of one entry with no release date, the earlier wins. */
+  listed?: number
   /**
    * Other words that name this model, for `named` choices: the catalog id and route ids, its full
    * and short names and its family ("opus"). Lower case.
@@ -60,12 +62,13 @@ export function effortFor(depth: BotDepth, candidate: Pick<BotModelCandidate, 'e
   return candidate.defaultEffort && candidate.efforts.includes(candidate.defaultEffort) ? candidate.defaultEffort : undefined
 }
 
-/** Subscriptions first, then newer releases, then a stable id order. */
+/** Subscriptions first, then newer releases, then the entry's own order, then a stable id order. */
 function compareCandidates(a: BotModelCandidate, b: BotModelCandidate): number {
   const subscription = Number(b.credential === 'subscription') - Number(a.credential === 'subscription')
   if (subscription) return subscription
   const released = (b.released ?? '').localeCompare(a.released ?? '')
   if (released) return released
+  if (a.instanceId === b.instanceId && a.listed !== undefined && b.listed !== undefined && a.listed !== b.listed) return a.listed - b.listed
   return a.instanceId.localeCompare(b.instanceId) || a.model.localeCompare(b.model)
 }
 

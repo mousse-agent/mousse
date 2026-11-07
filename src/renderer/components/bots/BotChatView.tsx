@@ -100,7 +100,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   useEffect(() => { anchor.current = { height: 0, atEnd: true } }, [bot.id])
 
   const act = (action: NonNullable<BotError['action']>) => {
-    // Sign in opens that entry's card (the bot runner, "Claude for bots"); Set up opens the list.
+    // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
     else void store().resume(bot.id)

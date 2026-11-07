@@ -149,7 +149,9 @@ export class CodexAdapter implements ProviderAdapter {
     const startedAt = Date.now()
     let providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
-    const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
+    const bot = host.bot
+    // A bot's turn works in its files folder: what Codex runs there without asking stays the bot's own.
+    const cwd = (bot ? bot.workspace?.files ?? bot.workspace?.scratch : undefined) ?? input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
@@ -165,8 +167,9 @@ export class CodexAdapter implements ProviderAdapter {
     const mousseCalls = new Map<string, boolean>()
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
-      permissionMode: input.permissionMode,
-      child: input.child,
+      // A bot's turn runs in Codex's asking mode, and its authority answers every approval.
+      permissionMode: bot ? 'ask' : input.permissionMode,
+      ...(bot ? { bot } : { child: input.child }),
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,

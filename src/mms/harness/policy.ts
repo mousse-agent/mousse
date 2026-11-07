@@ -142,7 +142,11 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  *   `spendLimits` with a `reason`;
  * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
  * - a host authority (a definition's or a bot's grants, roots and rules) needs `exact` tool
- *   control: only a runtime whose every tool call Mousse decides can be held to it;
+ *   control: only a runtime whose every tool call Mousse decides can be held to it. A bot's is
+ *   also held by an `approval_only` runtime whose driver answers every approval the runtime raises
+ *   in a bot turn with the bot's authority, in the runtime's asking mode (`options.botApprovals`,
+ *   `HarnessDriver.botApprovals`: Claude Code, Codex); what such a runtime runs without asking
+ *   (reads in the turn's folder, sandboxed read-only commands) is not checked;
  * - pre-granted or no approvals need at least `approval_only` (pre-granted under Full access is what
  *   an uncontrolled instance does anyway);
  * - approvals answered by the host (`approve: 'host'`) need a bot authority and a runtime that
@@ -154,9 +158,17 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
 /** Why a policy with `approve: 'host'` is refused where the host cannot answer its approvals. */
 export const HOST_APPROVALS_UNAVAILABLE = 'This runtime cannot hold a bot to its permissions, so nothing would answer its approvals.'
 
+/** Why a bot policy bound in a mode other than Ask is refused. */
+export const BOT_ASKING_MODE_REQUIRED = 'A bot turn runs only in Ask mode, where every call its permissions do not cover is asked about.'
+
 export interface CheckPolicyOptions {
-  /** The runtime holds every call of a bot turn to its bot authority (`HarnessDriver.botAuthority`). */
+  /** The runtime holds a bot turn to its bot authority (`HarnessDriver.botAuthority`). */
   hostApprovals?: boolean
+  /**
+   * It does so through its approvals (`HarnessDriver.botApprovals`): an `approval_only` runtime
+   * whose every approval in a bot turn the authority answers. Without it a bot needs `exact`.
+   */
+  botApprovals?: boolean
   /** What bot runtimes still lack (default `BOT_RUNTIME_GAPS`); only tests pass another list. */
   botRuntimeGaps?: readonly string[]
 }
@@ -181,7 +193,9 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   const missing: Array<keyof HarnessCaps> = []
   const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
-  const needsExact = Boolean(policy.tools) || Boolean(policy.authority)
+  // A bot's authority on a runtime that answers every approval with it: asking is enough there.
+  const botHeld = policy.authority?.kind === 'bot' && options.hostApprovals === true && options.botApprovals === true && control === 'approval_only'
+  const needsExact = !botHeld && (Boolean(policy.tools) || Boolean(policy.authority))
   const budget = policy.budget ?? {}
   const needsSpend = hasSpendLimit(policy)
   const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
@@ -202,6 +216,12 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   }
   if (hostApprovals) {
     reason = [reason, HOST_APPROVALS_UNAVAILABLE].filter(Boolean).join(' ')
+    if (!missing.includes('toolControl')) missing.push('toolControl')
+  }
+  // A bot turn runs in the runtime's asking mode, whatever the thread's or entry's default: in any
+  // other mode the runtime would run calls without raising the approvals the bot's authority answers.
+  if (policy.authority?.kind === 'bot' && policy.permissionMode !== undefined && policy.permissionMode !== 'ask') {
+    reason = [reason, BOT_ASKING_MODE_REQUIRED].filter(Boolean).join(' ')
     if (!missing.includes('toolControl')) missing.push('toolControl')
   }
   // Fail closed: no runtime runs a bot until every piece bots rely on exists.

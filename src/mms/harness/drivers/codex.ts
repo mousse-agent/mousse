@@ -19,6 +19,7 @@ import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, ty
 import { recordHarnessSpawn, runHarness } from '../spawn'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
+import { CODEX_NATIVE_TOOLS } from '../vendors/codex/botApprovals'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
@@ -257,6 +258,11 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     telemetryOff: () => ({ args: ['-c', 'analytics.enabled=false'] }),
     decodeConfig: decodeCodexConfig,
     caps: () => CODEX_CAPS,
+    // Every entry holds a bot to its grant through Codex's approvals: its turn runs in Codex's asking
+    // mode, and each approval is answered by the bot's authority (`vendors/codex/botApprovals.ts`).
+    botAuthority: () => true,
+    botApprovals: () => true,
+    nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'
       if (owner === 'brew') return 'brew upgrade codex'

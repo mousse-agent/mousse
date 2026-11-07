@@ -197,13 +197,11 @@ export interface HarnessGateway {
    */
   canHoldBot(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /**
-   * The bot runner entry (Bot Phase 1 §5.9 item 7, `HarnessDriver.botRunner`), at a bot's creation:
-   * when an enabled entry of such a driver is signed in on a subscription and none of its entries is
-   * locked, adds one (`claude:bots`, "Claude for bots": locked, a home of its own, the same program).
-   * It starts signed out and signs in through its own card; nothing of the owner's sign-in is
-   * copied. Nothing is added when the owner removed it before. Returns the id of the entry added now.
+   * Removes the "Claude for bots" entry an earlier build of Bot Phase 1 added at a bot's creation
+   * (`claude:bots`, locked, under that name): bots run on the owner's own entries now. An entry the
+   * owner renamed is left alone. True when one was removed.
    */
-  ensureBotRunner(): Promise<string | undefined>
+  removeRetiredBotRunner(): Promise<boolean>
   /**
    * Reads again, now, what the instance's bot checks depend on beyond its config
    * (`HarnessDriver.readPolicyFacts`: a locked Claude entry's organisation policy). The bot engine
@@ -352,9 +350,6 @@ export interface ResolvedSelection {
   driver: HarnessDriverKind
   caps: HarnessCaps
 }
-
-/** How long adding the bot runner waits for its first check (`ensureBotRunner`). */
-const BOT_RUNNER_CHECK_WAIT_MS = 5_000
 
 /**
  * Instance management behind `providers.snapshots` and `providers.instances.*`. Mutations return
@@ -543,6 +538,9 @@ export interface TurnHandle {
 
 /** Probes refresh at most this often, and only when a client asks (page open, recheck, turn). */
 export const PROBE_TTL_MS = 10 * 60_000
+
+/** The bot runner entry earlier builds of Bot Phase 1 added (`removeRetiredBotRunner`). */
+const RETIRED_BOT_RUNNER = { id: 'claude:bots', name: 'Claude for bots' } as const
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
 /** Every enabled, signed-in instance's model list is refreshed this often (`startModelRefreshSchedule`). */
@@ -817,8 +815,6 @@ export class Harness implements HarnessGateway {
    * entry added back is never deleted by the removal before it.
    */
   private readonly removing = new Map<string, Promise<void>>()
-  /** The bot runner being added (`ensureBotRunner`). */
-  private botRunnerAdding?: Promise<string | undefined>
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
@@ -1214,43 +1210,18 @@ export class Harness implements HarnessGateway {
     return this.checkPolicy(instanceId, policy, model)
   }
 
-  ensureBotRunner(): Promise<string | undefined> {
-    // Two bots created at once add one entry.
-    this.botRunnerAdding ??= this.addBotRunner().finally(() => { this.botRunnerAdding = undefined })
-    return this.botRunnerAdding
-  }
-
-  private async addBotRunner(): Promise<string | undefined> {
-    const entries = this.instanceMap.list()
-    for (const driver of this.drivers.values()) {
-      if (!driver.botRunner) continue
-      const instanceId = `${driver.kind}:${driver.botRunner.slug}`
-      const own = Object.keys(entries).filter((id) => entries[id].driver === driver.kind)
-      // One locked entry is enough; a runner the owner removed is not brought back.
-      if (own.some((id) => driver.decodeConfig(entries[id].config ?? {}, id).profile === 'locked') || this.instanceMap.isRemoved(instanceId)) continue
-      const owner = own.find((id) => {
-        const snapshot = this.snapshot(id, { kind: 'device' })
-        return snapshot.enabled.effective && snapshot.auth.state === 'signed_in' && snapshot.auth.credential === 'subscription'
-      })
-      if (!owner) continue
-      // The same program as the owner's entry: its executable when one is set, else the one on PATH.
-      const binaryPath = entries[owner].config?.binaryPath
-      const { snapshot } = await this.add(
-        { driver: driver.kind, slug: driver.botRunner.slug, config: { displayName: driver.botRunner.displayName, ...(typeof binaryPath === 'string' && binaryPath ? { binaryPath } : {}) } },
-        { profile: 'locked' }
-      )
-      // Its first check, briefly: the bot's model is chosen next, and a signed-out runner is what
-      // its Sign in opens.
-      const probing = this.probes.get(snapshot.instanceId)?.probing
-      if (probing) await Promise.race([probing.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, BOT_RUNNER_CHECK_WAIT_MS).unref?.())])
-      return snapshot.instanceId
-    }
-    return undefined
+  async removeRetiredBotRunner(): Promise<boolean> {
+    const entry = this.instanceMap.list()[RETIRED_BOT_RUNNER.id]
+    const config = entry?.config as Record<string, unknown> | undefined
+    if (!entry || entry.driver !== 'claude' || config?.profile !== 'locked' || config.displayName !== RETIRED_BOT_RUNNER.name) return false
+    await this.remove(RETIRED_BOT_RUNNER.id)
+    return true
   }
 
   private policyOptions(record: InstanceRecord): CheckPolicyOptions {
     return {
       hostApprovals: record.driver.botAuthority?.(record.config, record.instanceId) === true,
+      botApprovals: record.driver.botApprovals?.(record.config) === true,
       ...(this.options.botRuntimeGaps ? { botRuntimeGaps: this.options.botRuntimeGaps } : {})
     }
   }
@@ -2196,7 +2167,7 @@ export class Harness implements HarnessGateway {
     for (const [instanceId, entry] of Object.entries(entries)) {
       if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
       const record = this.listedRecord(instanceId)
-      // A locked entry ("Claude for bots") runs bot turns only: no picker offers it for a thread.
+      // A locked entry runs bot turns only: no picker offers it for a thread.
       if (record?.config.profile === 'locked') continue
       // A runtime lists nothing while it cannot run (a model API without its credential).
       const option = record && this.named(record, record.runtime.llmProvider?.())

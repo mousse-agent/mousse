@@ -1,6 +1,6 @@
 # Bot Mode: architecture plan
 
-Plan slug: `bot-architecture`. **Revision 3 (7 Nov 2026): final for implementation of Phase 1.** Revision 3 integrates the context council's result, [`bot-context.md`](bot-context.md), as WP6 (§3.4).
+Plan slug: `bot-architecture`. **Revision 3 (7 Nov 2026): final for implementation of Phase 1.** Revision 3 integrates the context council's result, [`bot-context.md`](bot-context.md), as WP6 (§3.4). **Revision 4 (8 Nov 2026), the owner's decision:** bots run on the owner's own provider entries, and on Claude Code and Codex the runtime's approvals are answered by the bot's permissions (§3.5). Where this plan still describes the separate "Claude for bots" entry, §3.5 replaces it.
 
 Status: planning only. No product code, issues or PRs. Checked against `origin/master` at `a6e46bbe`, read from the clean worktree `mousse-wt/personal-bots`. Revision 1 was checked at `e2015a41`. `origin/master` was still `a6e46bbe` when revision 3 was written.
 
@@ -123,12 +123,10 @@ The bot engine (grants, walls, crash-safe dispatch, spend ledgers) is built. Fiv
    - **Unattended runs**: the call is refused, one open ask is recorded per permission, and the run finishes without that step. Later runs that hit the same permission get the same refusal and create no new ask.
    - **Budget walls** (time, turns, spend) still end the dispatch.
    - Asks never expire.
-4. **Phase 1 runtimes:**
-   - **Pi RPC** on Linux, macOS and Windows (on Windows without shell; shell is refused everywhere in Phase 1 anyway).
-   - **Locked Claude Code on Linux**, after this PR records its Linux tools evidence.
-   - Mousse creates a locked bot-runner entry (`claude:bots`) when the owner has a Claude subscription entry. It signs in once through the existing private-home sign-in.
-   - macOS and Windows locked-Claude records follow when someone runs the same test there.
-   - Codex can't hold a bot (it has no bot gate) and waits for Phase 3.
+4. **Phase 1 runtimes** (revision 4, §3.5): bots run on the owner's own provider entries, the same ones their chats use.
+   - **Pi RPC** on Linux, macOS and Windows (on Windows without shell; shell is refused everywhere in Phase 1 anyway), holding every call exactly.
+   - **Claude Code and Codex**, on every platform, on the owner's own sign-ins: every approval the runtime raises in a bot turn is answered by the bot's permissions.
+   - A **locked Claude Code entry** still holds bots exactly on Linux, after this PR records its Linux tools evidence. Mousse no longer creates one.
 5. **Close the gaps with a small supervisor outside the daemon.**
    - It is a plain Node entry, started detached. It takes `{dispatchId, pgid, deadlineAt, journalPath}`.
    - At the deadline it kills the group, confirms the exit and writes a journal line. The daemon folds that into `exit_at`.
@@ -180,6 +178,20 @@ This plan follows the Bot UI:
 The usage-window reserve is deferred to Phase 2, and a computer other than this one to Phase 3.
 
 **Action for the orchestrating thread:** update #673's "Done when" to match, or reopen the UI decision. This plan writes nothing to GitHub.
+
+### 3.5 Changed in revision 4: the owner's own providers
+
+The owner installed the build, signed in to Claude Code and Codex, and their first bot ran on Pi with an xAI key and failed. Their decision: requiring a separate entry for bots was the wrong design; bots use the same providers. So:
+
+| Revision 3 | Revision 4 | Where |
+|---|---|---|
+| Codex can't hold a bot; Claude Code only as a locked entry | Every Claude Code, Codex and Pi entry of the owner's can hold a bot, with the sign-in it already has. Runtimes that approve tools themselves (Cursor, generic ACP) still can't. | `candidates.ts`, `HarnessDriver.botAuthority` |
+| "Claude for bots" (`claude:bots`) added at a bot's creation, with its own sign-in | Removed: no runner, no `ensureBotRunner`. An entry an earlier build added is removed at startup (`removeRetiredBotRunner`). Sign in opens the owner's own entry. | §5.9 item 7 |
+| A bot policy needs `exact` tool control | `approval_only` is enough where the driver answers every approval of a bot turn with the bot's authority (`HarnessDriver.botApprovals`, `CheckPolicyOptions.botApprovals`). The same `BotCheck` as Pi: allowed runs; a chat-lane wall waits for the owner; a run's missing permission is refused with an ask; the rest is refused. Never a normal approval prompt. | `policy.ts`, §5.9 item 8 |
+| — | A bot turn always runs in the runtime's asking mode (Claude Code `default`, Codex `untrusted` with the read-only sandbox); a bot policy bound in another mode is refused. Its working directory is the bot's files folder. | `checkPolicy`, the Claude and Codex adapters |
+| The supervisor ends every bot process group | Only processes a bot turn owns alone (Pi's ephemeral turns, a locked entry). Claude Code and Codex on the owner's entries report no process; their deadline interrupts the turn through the runtime's own stop. Codex's app-server, which serves other chats, is never registered or killed. | §5.9 item 8 |
+
+What these runtimes run without asking is accepted as it is: Codex reads files with the commands it trusts and searches the web without asking; its sandbox blocks writes and the network but not reads outside the bot's folders.
 
 ### 3.4 Changed in revision 3 (context council)
 
@@ -616,9 +628,10 @@ export function chooseBotModel(choice: BotModelChoice, candidates: BotModelCandi
   "Maybe not Haiku" holds: small is used only for `quick` when no standard model exists.
 - **Rank:**
   1. tier match;
-  2. `credential = subscription` (Codex instances count as subscription);
+  2. `credential = subscription` (Codex instances count as subscription), so a signed-in Claude or ChatGPT plan wins over an API key;
   3. newer `released`;
-  4. a stable id order.
+  4. the entry's own order (Codex lists its default first; Codex's `default` is standard);
+  5. a stable id order.
 
   Candidates that are limited now are dropped.
 - **`named`.** It matches a catalog id or the instance's model id, or a family word ("opus", "sonnet", "grok"). If that model isn't among the candidates, the result is `named_unavailable`. The bot says "I can't use that model here" and stays on auto. The owner's own words may be repeated; nothing else names a model.
@@ -676,7 +689,7 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
 
   | Failure | Action |
   |---|---|
-  | No provider, or sign-in needed on `claude:bots` | `sign_in` with `instanceId`, or `open_providers` |
+  | No provider, or sign-in needed on one of the owner's entries | `sign_in` with `instanceId`, or `open_providers` |
   | Model unavailable | `retry` |
 
   It is cleared by the next activation that ends `done`, or by `bots.resume`.
@@ -747,11 +760,12 @@ use_model({ model: string /* as the owner said it */, scope: 'now' | 'always' })
    - Running it on Linux, on the developer machine with Claude Code 2.1.306 and bwrap/socat present, gives tools items 1–5 and 7. Those go into a `{driver:'claude', kind:'tools', platform:'linux', cliVersion}` record in `CONTAINMENT_EVIDENCE`.
    - macOS and Windows records are added when the test is run there. Until then, bots on those platforms use Pi only.
 6. **`BOT_RUNTIME_GAPS`.** Each item is removed by the change that builds it. The list is empty when 1–4 land.
-7. **Bot runner entry.**
-   - When the owner has a signed-in Claude instance with a subscription credential and no locked entry exists, Mousse creates `claude:bots` (`profile:'locked'`, private home, the same program) at the first bot creation.
-   - Its card in Settings → Providers reads "Claude for bots".
-   - Until it is signed in, auto-selection skips it. If no other candidate exists, the bot is stuck with the action `sign_in {instanceId:'claude:bots'}`, which opens that card.
-   - The owner's `~/.claude` sign-in is **not** copied. Copying it would break refresh-token rotation and the isolation that the private home provides.
+7. **No bot runner entry (revision 4).** Bots run on the owner's own entries. If no candidate exists and one of the owner's entries could hold the bot once signed in, the bot is stuck with `sign_in {instanceId}`, which opens that entry's card. An earlier build's `claude:bots` ("Claude for bots") is removed at startup.
+8. **Approval-based runtimes (revision 4).** On Claude Code and Codex the bot's authority answers the runtime's approvals:
+   - **Claude Code:** the locked profile's options (`claudeLockedOptions`: asking mode, no settings files, plugins or user MCP servers, the granted built-ins only) and its grant gate (`ClaudeLockedGate`, in `PreToolUse` and `canUseTool`), in the owner's own environment (`ClaudeLockedTurn.ownerEntry`), as one query never kept warm. A relative path is checked under the turn's folder.
+   - **Codex:** `untrusted` approvals and the read-only sandbox. `item/commandExecution/requestApproval` is a `shell` call, `item/fileChange/requestApproval` a `write` or `edit` call per path (`vendors/codex/botApprovals.ts`); a change it does not describe or one with `grantRoot` is declined; `requestUserInput` is refused. The owner's own Codex MCP servers are switched off in the thread's config, and the turn is refused when they can't be read.
+   - The turn's working directory is the bot's files folder. No process is reported to the supervisor; the deadline ends the turn through its signal (`turn/interrupt`, closing the query).
+   - A cleared chat context starts a new native session on both, since each resumes only while the history it saved matches.
 
 ### 5.10 Bot instructions and tools
 
@@ -1119,7 +1133,7 @@ They are type-checked, with no behaviour.
   - [ ] Locked Claude reports pid and pgid through `onLockedProcess`.
   - [ ] A `refused` result reaches the model as a tool error on Pi, locked Claude and app tools, and the dispatch keeps running.
   - [ ] `tests/harness/claudeLockedProcess.test.ts` passes on Linux with the Linux binary, and the Linux record is added.
-  - [ ] `BOT_RUNTIME_GAPS` is empty. `checkPolicy` admits a bot policy on Pi (Linux, macOS, Windows without shell) and on locked Claude on Linux, and refuses it on Codex.
+  - [ ] `BOT_RUNTIME_GAPS` is empty. `checkPolicy` admits a bot policy on Pi (Linux, macOS, Windows without shell), on locked Claude on Linux, and (revision 4) on the owner's Claude Code and Codex entries through their approvals, in Ask only.
 - **Tests (new):**
   - `tests/bots/botSupervisor.test.ts`
   - `tests/bots/botProcessRegistry.test.ts`
@@ -1189,7 +1203,7 @@ They are type-checked, with no behaviour.
     | the same, after a usage limit on Claude | normal | Pi |
 
     A named unavailable model returns `named_unavailable`.
-  - [ ] Candidates exclude Codex and every instance that `canHoldBot` refuses.
+  - [ ] Candidates include the owner's signed-in Claude Code and Codex entries (revision 4) and exclude every instance that `canHoldBot` refuses.
   - [ ] `bot_schedule_add` with a weekday 09:00 cron returns the label "every weekday · 09:00", writes through `BotToolHost`, and produces an outcome chip. Nine schedules are refused.
   - [ ] `set_depth({scope:'now'})` leads to a reload with the new effort or tier. `always` changes `main.model` without re-approval.
   - [ ] Chips: allowed calls give live attempt chips. The rolled-up chips for 3 searches and 2 page reads are "searched the web · 3" and "read 2 pages · example.com".
@@ -1513,7 +1527,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 |---|---|
 | WP1 slips, and every bot says "can't run yet" | Gap items are removed one by one. The minimum slice is Pi only (§7.2). |
 | Prompt injection through web pages makes the bot read an allowed folder and send it out with `web_fetch` | Folders are only read when the owner allowed them. The Phase 2 domain grant closes this; until then, `BOT_BASE_INSTRUCTIONS` (§5.10) tells the bot never to fetch URLs built from file contents. **Accepted for Phase 1, and stated in the PR.** |
-| A one-time "Claude for bots" sign-in surprises owners | The bot says it in plain words with one Sign in button. Pi users see nothing. |
+| A bot on Codex reads outside its folders with commands Codex runs without asking | Accepted by the owner (revision 4): Codex's sandbox blocks writes and the network. Exact control for Codex stays an open question (§12.3). |
 | Hidden models hide cost on metered Pi keys | Subscription first. Depth defaults to normal. The 15-minute active-time budget applies to each run. |
 | Faces cost GPU | One shared context, observers, a frame cap, and the still fallback. WP5's frame-time check. |
 | Two lanes save memory at the same time | Writes go through `BotMemoryStore` in `bots.db` transactions. `replaces` must name the current version or gets `stale`, so concurrent edits can't overwrite each other (bot-context.md §7). |
@@ -1524,7 +1538,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 ### 12.3 Open questions
 
 1. **Provider terms.** Is unattended use of a personal Claude or ChatGPT subscription by the owner's own bots on the owner's computer within the terms? Phase 1 is personal and local. Servers (Phase 3) need an answer before they reuse subscriptions.
-2. **macOS and Windows locked-Claude evidence:** who runs the test there, and when? Until then, those platforms run bots on Pi only. A Mac owner with only a Claude subscription can't run bots in Phase 1. This is the biggest product gap of Phase 1.
+2. **macOS and Windows locked-Claude evidence:** who runs the test there, and when? Since revision 4 this no longer blocks bots there: they run on the owner's own Claude Code through its approvals.
 3. **Codex bots:** give Codex exact tool control (per-command approvals and `apply_patch` interception) in Phase 2, rather than wait for Phase 3's machine-bounded tier?
 4. **#673:** accept the Bot UI's "no pickers" as final?
 
@@ -1539,7 +1553,6 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 - Not now on a run ask: no new ask for 24 hours.
 - Pause stops schedules only. Chat works while paused.
 - Three failed runs pause schedules. Chat failures, refused asks and usage-limit pauses don't count.
-- The `claude:bots` entry is created only when the owner already has a Claude subscription entry.
 - Old Automations → Bots drafts are migrated, not deleted.
 
 ---
@@ -1555,7 +1568,6 @@ To add with the PR:
 - **Bot journal:** Mousse's complete record of what a bot did and was told, kept in `bots.db`. A bot's memory and search are built from it.
 - **Bot memory:** the short, dated facts and notes a bot keeps and sees in every turn. It is managed by asking the bot.
 - **Files folder:** the folder where a bot keeps documents it makes.
-- **Bot runner entry:** the locked Claude Code entry (`claude:bots`) that runs bots on the owner's Claude subscription. It has its own sign-in.
 
 ---
 

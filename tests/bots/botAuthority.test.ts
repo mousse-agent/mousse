@@ -9,7 +9,7 @@ import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
-import { BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
+import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
@@ -153,9 +153,29 @@ describe('host approvals in checkPolicy', () => {
     expect(checkPolicy(exact, { ...policy(), authority: { kind: 'definition', digest: 'd' } }, 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false })
   })
 
-  it('still needs exact tool control and hard budgets', () => {
+  it('holds on an approval-based runtime only where the bot authority answers its approvals, and never on one that approves tools itself', () => {
     const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
-    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // Claude Code and Codex: every approval they raise in a bot turn is answered by the authority.
+    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toEqual({ ok: true })
+    // Without the driver answering them, nothing would: refused.
+    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A runtime that holds bots only exactly (a locked entry on a version with no record) is refused there.
+    expect(checkPolicy(approvalOnly, policy(), 'claude:locked', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A runtime that approves tools itself never holds a bot, whatever its driver claims.
+    const uncontrolled = { ...exact, toolControl: 'uncontrolled' } as HarnessCaps
+    expect(checkPolicy(uncontrolled, policy(), 'cursor', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A definition's authority still needs exact control there.
+    expect(checkPolicy(approvalOnly, { ...policy(), authority: { kind: 'definition', digest: 'd' }, approve: undefined }, 'claude', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+  })
+
+  it('runs a bot turn only in the asking mode, never a mode that runs calls without asking', () => {
+    const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
+    expect(checkPolicy(approvalOnly, { ...policy(), permissionMode: 'ask' }, 'codex', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toEqual({ ok: true })
+    for (const mode of ['accept_edits', 'auto', 'full'] as const)
+      expect(checkPolicy(approvalOnly, { ...policy(), permissionMode: mode }, 'codex', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] }), mode).toMatchObject({ ok: false, error: { missing: ['toolControl'], reason: BOT_ASKING_MODE_REQUIRED } })
+  })
+
+  it('still needs hard budgets for count limits', () => {
     const observed = { ...exact, budgets: 'observed' } as HarnessCaps
     expect(checkPolicy(observed, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
   })

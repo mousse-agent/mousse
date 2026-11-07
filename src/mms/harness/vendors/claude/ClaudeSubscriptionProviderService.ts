@@ -155,9 +155,11 @@ export type ClaudeSubscriptionChatInput = {
   /** The MCP servers and skills the user enabled in Mousse; absent attaches none. */
   integrations?: ClaudeTurnIntegrations
   /**
-   * A bot's turn on a locked instance (PR 6 §3): it runs under the locked profile
-   * (`claudeLockedOptions`) with Mousse's grant gate on every call, and nothing of the user's own
-   * Claude Code setup. Integrations, live processes and the permission mode do not apply.
+   * A bot's turn (PR 6 §3): it runs under the locked profile's options (`claudeLockedOptions`:
+   * Claude Code's asking mode, no settings files, plugins or user MCP servers) with Mousse's grant
+   * gate on every call, as one query that is never kept warm. On a locked instance it also runs in
+   * the locked environment; on the owner's own entry (`ownerEntry`) in that entry's environment,
+   * with their sign-in. Integrations, live processes and the thread's permission mode do not apply.
    */
   locked?: ClaudeLockedTurn
   /**
@@ -2017,7 +2019,7 @@ export class ClaudeSubscriptionProviderService {
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     const locked = input.locked
-    if (locked && (!this.dependencies.lockedEnv || input.continuation))
+    if (locked && (input.continuation || (!locked.ownerEntry && !this.dependencies.lockedEnv)))
       throw new AppError({
         code: 'policy_unenforceable',
         message: input.continuation ? 'A bot turn never continues work Claude Code started itself.' : 'This Claude Code entry is not locked, so it cannot run a bot.',
@@ -2031,7 +2033,9 @@ export class ClaudeSubscriptionProviderService {
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
     const compaction = claudeAutoCompactEnv(input.autoCompactTokens)
-    const env = locked
+    // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
+    // the variables of the user's MCP servers, which it never gets.
+    const env = locked && !locked.ownerEntry
       ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
       : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
@@ -2132,7 +2136,8 @@ export class ClaudeSubscriptionProviderService {
     // mode when the user's settings forbid it; reading them again here keeps a settings edit made
     // since then from ever starting a bypass Claude Code would refuse.
     const bypassDisabled = claudeBypassDisabled(this.environment(), { cwd: input.cwd })
-    const requestedMode = normalizePermissionMode(input.permissionMode)
+    // A bot turn asks about every call, whatever the input says: its grant gate answers.
+    const requestedMode = locked ? 'ask' : normalizePermissionMode(input.permissionMode)
     // The same for auto mode: settings that turned it off since admission make the turn Auto-accept edits.
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
@@ -2237,7 +2242,8 @@ export class ClaudeSubscriptionProviderService {
             // A bot's turn never attaches the MCP relay: its grant gate knows only Mousse's own tools.
             mcpServers: claudeMcpServers(input.mcp ? { url: input.mcp.url, token: input.mcp.token } : null),
             mousseTools: Boolean(input.mcp),
-            spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {})
+            // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
+            ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
           })
         }
         for (const name of CLAUDE_LOCKED_REMOVED_OPTIONS) delete options[name]

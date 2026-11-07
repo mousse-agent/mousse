@@ -89,7 +89,18 @@ export interface BotAuthority {
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
   /** The roots the bot may touch and how, and the activation's private scratch folder; null without file access. */
-  workspace: { roots: readonly string[]; access: 'read' | 'write'; scratch: string; /** The roots it may change (per folder); absent: every root when `access` is `write`. */ writeRoots?: readonly string[] } | null
+  workspace: {
+    roots: readonly string[]
+    access: 'read' | 'write'
+    scratch: string
+    /** The roots it may change (per folder); absent: every root when `access` is `write`. */
+    writeRoots?: readonly string[]
+    /**
+     * The bot's files folder, also one of `roots` and `writeRoots`: the working directory of a turn
+     * on a runtime that asks before calls (Claude Code, Codex on the owner's entries).
+     */
+    files?: string
+  } | null
   /** True while the activation waits for the owner's answer to a wall (`waiting_grant`). */
   waiting(): boolean
   /** Allowlist, path containment across the roots (real paths), skill and MCP identity, and the wait. */

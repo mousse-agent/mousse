@@ -28,7 +28,7 @@ import {
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
-import { CLAUDE_BOT_RUNNER_NAME, CLAUDE_BOT_RUNNER_SLUG, CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
@@ -294,11 +294,13 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     privateHomeFor: (config) => (claudeRunsOnApiKey(config) || config.profile === CLAUDE_LOCKED_PROFILE ? 'required' : 'allowed'),
     caps: (config, installedVersion, _facts, instanceId) =>
       claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : claudeCodeCaps(installedVersion),
-    // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
-    // this platform (`CONTAINMENT_EVIDENCE`: Linux so far) and no organisation policy applies.
-    botAuthority: (config, instanceId) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
-    // "Claude for bots" (`claude:bots`): added when the owner's Claude subscription is signed in.
-    botRunner: { slug: CLAUDE_BOT_RUNNER_SLUG, displayName: CLAUDE_BOT_RUNNER_NAME },
+    // Every entry holds a bot to its grant: the owner's own entries through Claude Code's approvals
+    // (every call goes through the grant gate in its hooks and `canUseTool`, in its asking mode); a
+    // locked entry exactly, once its gate and ledger have evidence on this platform
+    // (`CONTAINMENT_EVIDENCE`: Linux so far) and no organisation policy applies.
+    botAuthority: (config, instanceId) => !claudeLocked(config) || claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
+    // A locked entry holds it only exactly: on a version with no record it holds none.
+    botApprovals: (config) => !claudeLocked(config),
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },

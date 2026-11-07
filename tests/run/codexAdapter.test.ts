@@ -1360,3 +1360,109 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'retry').map(([, attempt]) => attempt)).toEqual([1])
   })
 })
+
+describe('a bot turn on Codex', () => {
+  /** A bot whose authority allows changes in its files folder, refuses (with an ask) a command, and walls anything else. */
+  function botIn(files: string) {
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
+    const bot = {
+      workspace: { roots: [files], access: 'write', writeRoots: [files], scratch: join(home, 'scratch'), files },
+      check: (call: { kind: string; tool: string; args: Record<string, unknown> }) => {
+        calls.push({ tool: call.tool, args: call.args })
+        if (call.tool === 'shell') return { ok: false, refused: { text: 'The owner has not allowed this yet.', askId: 'ask-1' } }
+        return String(call.args.path ?? '').startsWith(`${files}/`) ? { ok: true } : { ok: false, wall: { kind: 'escalated', permission: 'change files' } }
+      }
+    }
+    return { bot, calls }
+  }
+
+  it('runs in Ask with the user\'s MCP servers off, in its files folder; its authority answers every approval and nobody is asked', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot, calls } = botIn(files)
+    const replay = transport([
+      ...handshake(),
+      // The user's own MCP servers, read on the turn's connection and switched off for the thread.
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, off: { enabled: false } } }, layers: [{ disabledReason: null, config: { mcp_servers: { linear: {} } } }] } }),
+      ...threadStart(5, threadParams({ config: { 'mcp_servers.github.enabled': false, 'mcp_servers.linear.enabled': false, model_provider: 'openai' } })),
+      // Full access asked for by the thread: the bot's turn still runs in Ask (untrusted, read-only).
+      ...turnStart(6, 'go'),
+      inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf ~', cwd: files, reason: null } }),
+      out({ id: 'srv-1', result: { decision: 'decline' } }),
+      note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path: 'notes/a.md', kind: { type: 'add' }, diff: 'hi' }], status: 'inProgress' } }),
+      inn({ id: 'srv-2', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-1', startedAtMs: 0, reason: null } }),
+      out({ id: 'srv-2', result: { decision: 'accept' } }),
+      note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-2', changes: [{ path: join(files, 'b.md'), kind: { type: 'update', move_path: '/etc/b.md' }, diff: '' }], status: 'inProgress' } }),
+      inn({ id: 'srv-3', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-2', startedAtMs: 0, reason: null } }),
+      out({ id: 'srv-3', result: { decision: 'decline' } }),
+      // A change Codex did not describe, and one that would widen its write roots: declined unchecked.
+      inn({ id: 'srv-4', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-x', startedAtMs: 0, reason: null } }),
+      out({ id: 'srv-4', result: { decision: 'decline' } }),
+      note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-3', changes: [{ path: join(files, 'c.md'), kind: { type: 'add' }, diff: '' }], status: 'inProgress' } }),
+      inn({ id: 'srv-5', method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: 'patch-3', startedAtMs: 0, reason: null, grantRoot: '/' } }),
+      out({ id: 'srv-5', result: { decision: 'decline' } }),
+      inn({ id: 'srv-6', method: 'item/tool/requestUserInput', params: { threadId: T, turnId: 'turn-1', itemId: 'ask-1', isBlocking: true, autoResolutionMs: null, questions: [{ id: 'q1', header: 'Scope', question: 'Which?', isOther: true, isSecret: false, options: null }] } }),
+      out({ id: 'srv-6', error: { code: -32603, message: 'Nobody can answer questions here. Continue without asking.' } }),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    const asked = answerQuestions(() => ({ permission: 'allow' }))
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go', permissionMode: 'full', cwd: join(home, 'scratch') }), recordingSink(), control(), { ...host(), bot: bot as never })
+    replay.assertDone()
+    expect(asked).toEqual([])
+    expect(calls).toEqual([
+      { tool: 'shell', args: { command: 'rm -rf ~', cwd: files } },
+      // A relative path is the one Codex writes: under the turn's folder.
+      { tool: 'write', args: { path: join(files, 'notes', 'a.md') } },
+      { tool: 'edit', args: { path: join(files, 'b.md') } },
+      { tool: 'write', args: { path: '/etc/b.md' } }
+    ])
+    const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { cwd: string }> }
+    expect(saved.threads['thread-1'].cwd).toBe(files)
+  })
+
+  it('a chat activation\'s cleared context starts a new Codex thread', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const setup = (id: number) => [
+      out({ id, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id, result: { config: { mcp_servers: {} }, layers: [] } })
+    ]
+    const replay = transport([
+      ...handshake(),
+      ...setup(4),
+      ...threadStart(5),
+      ...turnStart(6, 'one'),
+      ...message('msg-1', ['one']),
+      completed('completed'),
+      // Cleared: the saved thread holds another history, so a new one starts.
+      ...setup(7),
+      out({ id: 8, method: 'thread/start', params: threadParams() }),
+      inn({ id: 8, result: threadResult('thr-2') }),
+      out({ id: 9, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      inn({ id: 9, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    await adapter.startTurn(input({ prompt: 'one', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
+    await adapter.startTurn(input({ prompt: 'two', nativeHistory: '' }), recordingSink(), control(), { ...host(), bot: bot as never })
+    replay.assertDone()
+  })
+
+  it('does not run while the user\'s MCP servers cannot be read', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, error: { code: -32603, message: 'unreadable' } })
+    ])
+    const codex = service(replay)
+    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: botIn(files).bot as never })).rejects.toMatchObject({ code: 'policy_unenforceable' })
+  })
+})

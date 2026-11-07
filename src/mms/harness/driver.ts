@@ -498,11 +498,12 @@ export interface HarnessDriver {
    */
   botAuthority?(config: InstanceConfig, instanceId?: string): boolean
   /**
-   * The driver's bot runner entry (Bot Phase 1 §5.9 item 7): a `locked` entry the gateway adds at a
-   * bot's creation (`ensureBotRunner`), under `<driver>:<slug>` and this name, when an entry of the
-   * driver is signed in on a subscription and none of its entries is locked yet.
+   * The runtime holds a bot turn through its approvals (`toolControl: 'approval_only'`): the turn
+   * runs in its asking mode, and every approval it raises is answered by the bot's authority, never
+   * a person (Claude Code's grant gate, Codex's approval requests). What it runs without asking is
+   * not checked. Absent or false: a bot policy there needs `exact` tool control.
    */
-  botRunner?: { slug: string; displayName: string }
+  botApprovals?(config: InstanceConfig): boolean
   /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
