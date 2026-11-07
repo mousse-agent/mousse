@@ -51,7 +51,7 @@ export function firstMessagePrompt(description: string, nameIt = false): string 
 }
 
 /** A chat message as the bot's input: the owner's text, and the files attached to it. */
-function chatInput(text: string, attachments: readonly BotChatAttachment[] | undefined): string {
+export function chatInput(text: string, attachments: readonly BotChatAttachment[] | undefined): string {
   if (!attachments?.length) return text
   return `${text}\n\nAttached files:\n${attachments.map((file) => `- ${file.name}: ${file.path}`).join('\n')}`
 }
@@ -171,7 +171,9 @@ export class BotChatService {
   /**
    * `bots.chat.send` (§5.3.2): the owner's row and its journal row first, in one transaction
    * (idempotent on `clientRequestId`); then a chat waiting at a wall continues with this message
-   * (its asks count as Not now), or a chat activation is queued behind the lane.
+   * (its asks count as Not now), or the chat activation queued with the message (in the same
+   * transaction) starts behind the lane. Sending the same request again answers a wall the first
+   * one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
@@ -180,22 +182,30 @@ export class BotChatService {
     const existing = this.store.messageByRequest(input.clientRequestId)
     if (existing) {
       if (existing.botId !== input.botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
-      return { message: this.engine.chat.toMessage(existing) }
+      await this.engine.admitWallMessage(existing)
+      return { message: this.engine.chat.toMessage(this.store.message(existing.id) ?? existing) }
     }
     // The activation this message belongs to: its row and journal row say so (the chat pack then
     // leaves it out, as it is the request).
     const target = this.engine.chatActivationFor(input.botId)
+    const prompt = chatInput(text, input.attachments)
+    const key = `chat:${input.clientRequestId}`
     let message: BotChatMessage
+    let refused: BotEngineError | undefined
     try {
-      message = this.engine.chat.post({
-        botId: input.botId,
-        author: 'owner',
-        kind: 'text',
-        text,
-        ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
-        clientRequestId: input.clientRequestId,
-        activationId: target.activationId,
-        lane: 'chat'
+      message = this.store.db.transaction(() => {
+        const posted = this.engine.chat.post({
+          botId: input.botId,
+          author: 'owner',
+          kind: 'text',
+          text,
+          ...(input.attachments?.length ? { attachments: input.attachments.map((file) => ({ name: file.name, path: file.path })) } : {}),
+          clientRequestId: input.clientRequestId,
+          activationId: target.activationId,
+          lane: 'chat'
+        })
+        if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId)
+        return posted
       })
     } catch (error) {
       // The message and its journal row are written together or not at all: the bot never runs unrecorded.
@@ -204,11 +214,16 @@ export class BotChatService {
       this.engine.journalFailedFor(input.botId)
       throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
     }
-    const prompt = chatInput(text, input.attachments)
     try {
-      if (await this.engine.continueChatWith(input.botId, prompt)) return { message }
-      this.engine.approveStarterIfNeeded(definition.id)
-      await this.engine.enqueueChat(input.botId, `chat:${input.clientRequestId}`, prompt, target.continues ? undefined : target.activationId)
+      // A limit answered Not now ends its walled turn first; the queued activation then starts.
+      const continued = await this.engine.continueChatWith(input.botId, prompt)
+      if (target.continues) {
+        if (continued) return { message }
+        // The wall was answered meanwhile: the message starts a chat of its own.
+        this.engine.approveStarterIfNeeded(definition.id)
+        await this.engine.enqueueChat(input.botId, key, prompt)
+      } else if (refused) throw refused
+      else await this.engine.startQueuedChat(input.botId, target.activationId)
     } catch (error) {
       // The message is kept; the chat says why nothing answered it.
       if (!(error instanceof BotEngineError)) throw error

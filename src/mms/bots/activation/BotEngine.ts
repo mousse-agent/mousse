@@ -50,14 +50,14 @@ import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
 import { createBotAuthority } from '../authority/botAuthority'
-import { BotChatService } from '../chat/BotChatService'
+import { BotChatService, chatInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelProblem, BotModelResolver, BotProcessSupervision, BotToolHost } from '../seams'
-import type { BotActivationRow, BotDispatchRow, BotEscalationRow, BotStore, BotStoredError } from '../store/BotStore'
+import type { BotActivationRow, BotDispatchRow, BotEscalationRow, BotMessageRow, BotStore, BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { firstOccurrence, nextOccurrence, scheduleProblem, scheduleSpec } from '../triggers/scheduler'
 import { BotReloadAbort, BotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
@@ -661,24 +661,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (existing.botId !== botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
       return this.activationSummary(existing)
     }
-    const { published, grant } = this.admissible(botId)
+    const admitted = this.admissible(botId)
     const id = presetId && !this.store.activation(presetId) ? presetId : newActivationId()
     const dropped = this.store.db.transaction(() => {
       // A duplicate of the same request in flight at the same time (a chat message delivered twice)
       // finds the activation the other one inserted, and gets that one instead of an error.
       if (this.store.activationByKey(key)) return undefined
-      this.store.insertActivation({
-        id,
-        botId,
-        revision: published.revision!,
-        grantDigest: grant.digest,
-        trigger,
-        idempotencyKey: key,
-        status: 'queued',
-        createdAt: this.store.now(),
-        lane
-      }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
-      return this.dropOverQueue(botId, lane)
+      return this.insertQueued(botId, id, key, trigger, lane, admitted)
     })
     if (dropped === undefined) {
       const raced = this.store.activationByKey(key)!
@@ -689,6 +678,49 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.pump(botId)
     this.changed({ botId, activationId: id })
     return this.activationSummary(this.store.activation(id)!)
+  }
+
+  /** Inserts a queued activation (inside a transaction) and drops what waits beyond the queue; how many were dropped. */
+  private insertQueued(botId: string, id: string, key: string, trigger: BotActivationTrigger, lane: BotLane, admitted: ReturnType<BotEngine['admissible']>): number {
+    const { published, grant } = admitted
+    this.store.insertActivation({
+      id,
+      botId,
+      revision: published.revision!,
+      grantDigest: grant.digest,
+      trigger,
+      idempotencyKey: key,
+      status: 'queued',
+      createdAt: this.store.now(),
+      lane
+    }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
+    return this.dropOverQueue(botId, lane)
+  }
+
+  /**
+   * Queues the chat activation of the owner's message inside the caller's `bots.db` transaction,
+   * the one that writes the message (§5.3.2): a kept message always has the turn that answers it.
+   * Why the bot cannot run is returned, not thrown, so the message is still kept; `startQueuedChat`
+   * starts the activation after the commit.
+   */
+  queueChatInTx(botId: string, key: string, input: string, activationId: string): BotEngineError | undefined {
+    if (this.store.activationByKey(key)) return undefined
+    let admitted: ReturnType<BotEngine['admissible']>
+    try {
+      this.approveStarterIfNeeded(botId)
+      admitted = this.admissible(botId)
+    } catch (error) {
+      if (error instanceof BotEngineError) return error
+      throw error
+    }
+    if (this.insertQueued(botId, activationId, key, { kind: 'manual', input }, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
+    return undefined
+  }
+
+  /** After `queueChatInTx`'s commit: the chat lane starts what waits. */
+  async startQueuedChat(botId: string, activationId: string): Promise<void> {
+    await this.pump(botId)
+    this.changed({ botId, activationId })
   }
 
   /** The published revision and the grant that covers it; throws when the bot cannot run now. */
@@ -714,7 +746,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.store.activeGrant(botId)) return
     if (!manifestSubset(published.permissions, starterManifest())) return
     this.store.approve(botId, botManifestDigest(published.permissions), published.permissions)
-    this.changed({ botId })
+    this.store.db.afterCommit(() => this.changed({ botId }))
   }
 
   /** Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. */
@@ -1941,6 +1973,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return true
   }
 
+  /**
+   * The owner's message written while the chat waited at a wall, whose answer to the wall never ran
+   * (Mousse stopped between the two): the walls count as Not now and the turn continues with it,
+   * as `continueChatWith` would have. At startup, and when the owner sends the same message again.
+   */
+  async admitWallMessage(message: BotMessageRow): Promise<void> {
+    if (message.author !== 'owner' || message.kind !== 'text' || !message.activationId) return
+    const walled = this.openChatWalls(message.botId).some((wall) => wall.activationId === message.activationId && wall.createdAt <= message.at)
+    if (walled) await this.continueChatWith(message.botId, chatInput(message.text, message.attachments ?? undefined))
+  }
+
   /** Why an answer cannot grant `permission`: the result would not be a valid manifest. */
   private answerProblem(row: BotActivationRow, permission: BotPermissionRequest, amount: number | undefined): string | undefined {
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -2856,6 +2899,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (current && !ENDED_ACTIVATION_STATUSES.has(current.status) && current.status !== 'queued')
           this.store.moveActivation(row.id, [current.status], 'paused', { endReason: 'reconcile_failed' })
       }
+    }
+    // An owner's message that answered a chat's wall, written just before Mousse stopped.
+    for (const row of this.store.activationsWith(['waiting_grant']).filter((activation) => activation.lane === 'chat')) {
+      const latest = this.store.get("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' ORDER BY seq DESC LIMIT 1", row.id)
+      const message = latest ? this.store.message(latest.id as string) : undefined
+      if (message) await this.admitWallMessage(message).catch((error: unknown) => {
+        console.warn('an owner message could not be answered at startup', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      })
     }
     for (const botId of new Set(this.store.activationsWith(['queued']).map((row) => row.botId))) this.pumpLater(botId)
   }

@@ -8,7 +8,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
+import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { botFixture, chatOf, createBot, finish, flush, payloadOf, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -89,6 +90,48 @@ describe('bots.chat.send', () => {
     // No new activation: the walled one goes on with the owner's message as its input.
     expect(f.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).map((row) => row.id)).toEqual([activation.id])
     expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: read files in .*\n\nNever mind, just say hi$/)
+  })
+
+  it('a message saved just before Mousse stops is still answered: its activation is queued with it', async () => {
+    const continueChatWith = f.bots.continueChatWith.bind(f.bots)
+    f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
+    await expect(f.bots.service.chatSend({ botId, text: 'What came in today?', clientRequestId: 'm1' })).rejects.toThrow('Mousse stopped')
+    f.bots.continueChatWith = continueChatWith
+    const queued = f.store.activationByKey('chat:m1')!
+    expect(queued).toMatchObject({ lane: 'chat', status: 'queued', trigger: { input: 'What came in today?' } })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'owner', text: 'What came in today?', activationId: queued.id })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    expect(f.store.activation(queued.id)?.status).toBe('running')
+  })
+
+  it('a message that answered a wall just before Mousse stopped continues the walled turn at startup, or when sent again', async () => {
+    for (const recover of ['startup', 'resend'] as const) {
+      await send('Read my notes', `${recover}-1`)
+      const activation = chatActivation()
+      const { payload, prepared } = await start(f, activation.id)
+      prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+      await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
+      const continueChatWith = f.bots.continueChatWith.bind(f.bots)
+      f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
+      const attachments = [{ name: 'list.txt', path: join(f.base, 'list.txt') }]
+      await expect(f.bots.service.chatSend({ botId, text: 'Use this list instead', attachments, clientRequestId: `${recover}-2` })).rejects.toThrow('Mousse stopped')
+      f.bots.continueChatWith = continueChatWith
+      expect(f.store.activation(activation.id)?.status).toBe('waiting_grant')
+      if (recover === 'startup') {
+        f.bots.close()
+        f.bots = new BotEngine(f.host)
+        await f.bots.reconcileOnStartup()
+      } else await f.bots.service.chatSend({ botId, text: 'Use this list instead', attachments, clientRequestId: `${recover}-2` })
+      await flush()
+      expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: .*\n\nUse this list instead\n\nAttached files:\n- list\.txt: /)
+      // Once answered, the same request changes nothing.
+      await f.bots.service.chatSend({ botId, text: 'Use this list instead', attachments, clientRequestId: `${recover}-2` })
+      expect(f.store.dispatch(activation.id, 3)).toBeUndefined()
+      await finish(f, payloadOf(f, activation.id, 2), 'completed', { text: 'Done.' })
+    }
   })
 
   it('each chat row and its journal row share one transaction; the owner\'s row is journaled before any dispatch starts', async () => {
