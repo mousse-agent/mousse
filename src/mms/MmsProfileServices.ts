@@ -634,7 +634,7 @@ export class MmsProfileServices {
       const journal = createBotJournal({
         store: memory,
         readThread: (threadId) => this.threads.loadThreadData(threadId),
-        listThreads: () => botThreadsForCatchUp(store.allThreads())
+        listThreads: () => botThreadsForCatchUp(store.captureThreads())
       })
       const context = createBotContextProvider({
         store: memory,

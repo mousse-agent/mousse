@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { BotJournalError, BotMemoryStore, boundText, ftsTerms } from '../../../src/mms/bots/memory/BotMemoryStore'
+import { shortChipText } from '../../../src/shared/bots/personal/chips'
 import { DAY, disposeFixtures, later, memoryFixture } from './memoryFixture'
 
 /**
@@ -227,6 +228,42 @@ describe('forget', () => {
     expect(store.forget('ada', { refs: [`j${first}`], by: 'chat' })).toMatchObject({ forgotten: 'm1' })
     expect(store.active('ada')).toEqual([])
     expect(store.search('ada', { query: 'Porto' })).toEqual([])
+  })
+
+  it('forgetting an entry removes its words wherever they were copied: old memory calls, rows that hold them, its chip', () => {
+    const fx = memoryFixture()
+    const { store, db } = fx
+    db.statement("ALTER TABLE bot_messages ADD COLUMN chips_json TEXT NOT NULL DEFAULT '[]'").run()
+    const text = "The owner's sister is called Maria Lopez."
+    ok(store.save('ada', { lane: 'chat', kind: 'owner', text, activationId: 'act-1' }))
+    ok(store.save('ada', { lane: 'chat', kind: 'note', text: 'Likes mint tea.', activationId: 'act-1' }))
+    // An older build captured memory calls with their input; a prompt row holds the words; the reply has the save chip.
+    store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', sourceKey: 'home:c1', who: 'bot', text: `memory_save ${JSON.stringify({ text, kind: 'owner' })}`, json: { tool: 'mcp__mousse__memory_save', input: { text, kind: 'owner' } } })
+    store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', sourceKey: 'home:c2', who: 'bot', text: 'memory_save {"text":"likes mint tea"}', json: { tool: 'memory_save', input: { text: 'likes mint tea' } } })
+    store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', sourceKey: 'home:c3', who: 'bot', text: 'memory_forget {"id":"m2","reason":"tea"}', json: { tool: 'memory_forget', input: { id: 'm2', reason: 'tea' } } })
+    store.append({ botId: 'ada', kind: 'notice', lane: 'chat', sourceKey: 'home:u1', who: 'mousse', text: `Note this: ${text}\n\nAttached files:\n- a.txt: /tmp/a.txt` })
+    const chips = [{ icon: 'memory', text: 'remembered', highlight: shortChipText(text) }, { icon: 'memory', text: 'remembered', highlight: 'Likes mint tea.' }]
+    db.statement("INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json) VALUES('b1', 'ada', 'x', 'bot', 'text', 'Saved.', ?)").run(JSON.stringify(chips))
+    store.append({ botId: 'ada', kind: 'bot_msg', lane: 'chat', sourceKey: 'bm:b1', who: 'bot', text: 'Saved.', json: { kind: 'text', chips } })
+    const kept = store.append({ botId: 'ada', kind: 'bot_msg', lane: 'chat', sourceKey: 'home:a9', who: 'bot', text: 'Something else entirely, long enough to count.' })!
+    expect(store.forget('ada', { id: 'm1', by: 'chat' })).toMatchObject({ forgotten: 'm1' })
+    expect(store.forget('ada', { id: 'm2', by: 'chat' })).toMatchObject({ forgotten: 'm2' })
+    expect(JSON.stringify(store.journal('ada'))).not.toMatch(/Maria|mint tea/i)
+    expect(JSON.stringify(db.statement("SELECT chips_json FROM bot_messages WHERE id = 'b1'").get())).not.toMatch(/Maria|mint/i)
+    expect(JSON.parse((db.statement("SELECT chips_json FROM bot_messages WHERE id = 'b1'").get() as { chips_json: string }).chips_json))
+      .toEqual([{ icon: 'memory', text: 'remembered something' }, { icon: 'memory', text: 'remembered something' }])
+    expect(store.journal('ada').find((row) => row.sourceKey === 'bm:b1')).toMatchObject({ text: 'Saved.', json: { chips: [{ text: 'remembered something' }, { text: 'remembered something' }] } })
+    expect(store.journalRow('ada', kept)).toMatchObject({ redactedAt: null })
+  })
+
+  it('a forgotten row\'s copy is found inside a longer row: a prompt with its attached files or a run\'s report line', () => {
+    const fx = memoryFixture()
+    const { store } = fx
+    const said = fx.message({ botId: 'ada', id: 'msg-1', author: 'owner', text: 'Check the lease for flat 4B on Elm Street' })
+    store.append({ botId: 'ada', kind: 'notice', lane: 'chat', sourceKey: 'home:u1', who: 'mousse', text: 'Check the lease for flat 4B on Elm Street\n\nAttached files:\n- lease.pdf: /tmp/lease.pdf' })
+    store.append({ botId: 'ada', kind: 'notice', lane: 'run', sourceKey: 'run:u1', who: 'mousse', text: 'Check the lease for flat 4B on Elm Street\n\nYour last message is your report.' })
+    expect(store.forget('ada', { refs: [`j${said}`], by: 'chat' })).toMatchObject({ redacted: ['j1', 'j2', 'j3'] })
+    expect(store.search('ada', { query: 'Elm' })).toEqual([])
   })
 
   it('refuses unknown refs without changing anything', () => {

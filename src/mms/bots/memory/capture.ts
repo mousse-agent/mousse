@@ -1,4 +1,5 @@
 import type { BotLane } from '../../../shared/bots/personal/definition'
+import { memoryToolOf } from '../../../shared/bots/personal/memory'
 import type { ChatMessage, ThreadData } from '../../../shared/types'
 import type { BotJournal, BotJournalInput, BotStoreTx } from '../seams'
 import { BotJournalError, type BotMemoryStore } from './BotMemoryStore'
@@ -55,6 +56,14 @@ function safeJson(value: unknown): string {
   }
 }
 
+/** The refs a memory call names (`m12`, `m12v2`, `j123`), never its free text. */
+function memoryRefsOf(input: unknown): string[] {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return []
+  const args = input as Record<string, unknown>
+  const values = [args.id, args.replaces, args.ref, ...(Array.isArray(args.refs) ? args.refs : [])]
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && /^[mj]\d{1,15}(?:v\d{1,9})?$/.test(value.trim())).map((value) => value.trim()))].slice(0, 100)
+}
+
 /** A row still being written when it was read: a tool call that had not returned. */
 export function unsettled(message: ChatMessage): boolean {
   return message.toolCall?.status === 'processing' || message.activity?.status === 'running'
@@ -81,6 +90,13 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedR
     const activity = message.activity
     const tool = message.toolCall?.toolName ?? activity?.toolName ?? message.toolCall?.title ?? 'tool'
     const input = message.toolCall?.input ?? (activity && 'input' in activity ? activity.input : undefined)
+    const memory = memoryToolOf(tool)
+    if (memory) {
+      // A memory call is kept by its refs alone: its text, query or reason restates what a forget
+      // removes, and its result repeats rows the journal already holds.
+      const refs = memoryRefsOf(input)
+      return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: [memory, ...refs].join(' '), json: { tool: memory, ...(refs.length ? { refs } : {}) } }]
+    }
     const inputText = input === undefined ? '' : safeJson(input)
     const rows: CapturedRow[] = [{
       ...base,
@@ -97,6 +113,7 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedR
   }
   if (RESULT_KINDS.has(kind)) {
     const tool = message.toolCall?.toolName ?? message.toolCall?.title ?? 'tool'
+    if (memoryToolOf(tool)) return []
     const text = message.toolCall?.response ?? message.content
     return text ? [{ ...base, kind: 'tool_result', sourceKey: key, who: 'tool', external: true, text, json: { tool } }] : []
   }
@@ -107,9 +124,19 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedR
   return [{ ...base, kind: 'notice', sourceKey: key, who: 'mousse', text }]
 }
 
-/** The lane of a `BotStore.allThreads()` row: the home thread is the chat; activation and context threads are runs. */
-export function botThreadsForCatchUp(threads: ReadonlyArray<{ threadId: string; botId: string; role: string; activationId: string | null }>): BotThreadRef[] {
-  return threads.map((thread) => ({ botId: thread.botId, threadId: thread.threadId, lane: thread.role === 'home' ? 'chat' : 'run', activationId: thread.activationId }))
+/**
+ * The refs of `BotStore.captureThreads()` rows: a run's thread is its activation's; a home or
+ * context thread serves many activations, so its new rows belong to the latest dispatch that ran
+ * there (a consult inside a chat is the chat's). Without one, the home thread is the chat and a
+ * context thread a run.
+ */
+export function botThreadsForCatchUp(threads: ReadonlyArray<{ threadId: string; botId: string; role: string; activationId: string | null; lastActivation?: { id: string; lane: BotLane } | null }>): BotThreadRef[] {
+  return threads.map((thread) => {
+    if (thread.role === 'activation' && thread.activationId) return { botId: thread.botId, threadId: thread.threadId, lane: 'run', activationId: thread.activationId }
+    const last = thread.lastActivation
+    if (last) return { botId: thread.botId, threadId: thread.threadId, lane: last.lane, activationId: last.id }
+    return { botId: thread.botId, threadId: thread.threadId, lane: thread.role === 'home' ? 'chat' : 'run', activationId: thread.activationId }
+  })
 }
 
 export type BotJournalCapture = BotJournal & {
@@ -166,7 +193,19 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       } catch (error) {
         throw new BotJournalError(error)
       }
-      for (const thread of threads) syncNow(thread)
+      // One thread that cannot be copied never stops the others; a bot whose journal cannot be
+      // written is returned, so the engine marks it stuck.
+      const failedBots = new Set<string>()
+      for (const thread of threads) {
+        if (failedBots.has(thread.botId)) continue
+        try {
+          syncNow(thread)
+        } catch (error) {
+          log(`bot memory: thread ${thread.threadId} could not be caught up`, error)
+          if (error instanceof BotJournalError) failedBots.add(thread.botId)
+        }
+      }
+      return { failedBots: [...failedBots] }
     },
     syncNow
   }

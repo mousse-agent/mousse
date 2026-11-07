@@ -8,6 +8,12 @@
 export const BOT_MEMORY_TOOLS = ['memory_search', 'memory_read', 'memory_list', 'memory_save', 'memory_forget'] as const
 export type BotMemoryTool = (typeof BOT_MEMORY_TOOLS)[number]
 
+/** The memory tool a call names, bare or as Mousse's MCP tool (`mcp__mousse__memory_save`); undefined for any other. */
+export function memoryToolOf(tool: string): BotMemoryTool | undefined {
+  const name = /(?:^|__)(memory_[a-z]+)$/.exec(tool)?.[1]
+  return name && (BOT_MEMORY_TOOLS as readonly string[]).includes(name) ? name as BotMemoryTool : undefined
+}
+
 /** Kinds of `bot_journal` rows (bot-context.md §3). */
 export const BOT_JOURNAL_KINDS = [
   'owner_msg', 'bot_msg', 'run_start', 'run_report', 'run_end', 'tool_call', 'tool_result',

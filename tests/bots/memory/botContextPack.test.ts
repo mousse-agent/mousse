@@ -53,6 +53,23 @@ describe('the chat pack', () => {
     expect(pack).toContain('Schedules: every weekday · 09:00 (next Mon 9 Nov 2026, 09:00).')
   })
 
+  it('leaves out owner messages queued after its own: their turns answer them', async () => {
+    const fx = memoryFixture()
+    const { packs } = provider(fx)
+    chat(fx, 1, 10)
+    // Two messages arrive while act-1 answers: each queues a chat turn of its own.
+    fx.message({ botId: 'ada', id: 'o2', author: 'owner', text: 'Second question', activationId: 'act-2' })
+    fx.message({ botId: 'ada', id: 'o3', author: 'owner', text: 'Third question', activationId: 'act-3' })
+    const second = await packs.chatPreamble({ botId: 'ada', activationId: 'act-2' })
+    expect(second).toContain('Question 1.')
+    expect(second).toContain('Answer 1 first sentence.')
+    expect(second).not.toContain('Second question')
+    expect(second).not.toContain('Third question')
+    const third = await packs.chatPreamble({ botId: 'ada', activationId: 'act-3' })
+    expect(third).toContain('Second question')
+    expect(third).not.toContain('Third question')
+  })
+
   it('stays within its budget after 300 messages, the window jumping from 8k to 4k into the summary', async () => {
     const fx = memoryFixture()
     const { packs } = provider(fx)
