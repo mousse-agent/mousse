@@ -298,7 +298,7 @@ import {
 import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
+import { AppError, errorCauseText, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   clearNativeContext,
   compactMessagesAtSafeBoundary,
@@ -10347,7 +10347,12 @@ export class OrchestratorService extends EventEmitter {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
       handoffs?.settle('failed', err instanceof Error ? err.message : String(err))
-      if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
+      if (!isAbort) {
+        failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
+        // A bot's failure reaches its owner only as a fixed line: the daemon log keeps what the provider said (redacted).
+        const cause = opts?.bot ? errorCauseText(normalized) : undefined
+        if (cause) failureDiagnostic = { ...failureDiagnostic, cause }
+      }
       if (isAbort) {
         aborted = true
         assistantText = ''

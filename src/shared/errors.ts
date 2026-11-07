@@ -130,6 +130,45 @@ export function safeErrorDetails(value: unknown): unknown {
   return visit(value, 0)
 }
 
+/** How many links of an error's `cause` chain `errorCauseText` reads, and how much of each. */
+const CAUSE_DEPTH = 4
+const CAUSE_CHARS = 400
+
+/**
+ * The messages behind an error, for a local log line only (never a client payload): each link of
+ * its `cause` chain whose message is not the public one, as `Name: message`, bounded and redacted
+ * (`redactSecrets`, plus any long token mixing letters and digits, such as a provider key
+ * `xai-…`). Undefined when no cause says anything more.
+ */
+export function errorCauseText(error: unknown): string | undefined {
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  const publicMessage = error instanceof Error ? error.message : undefined
+  let link: unknown = error instanceof Error ? error.cause : undefined
+  for (let depth = 0; depth < CAUSE_DEPTH && link !== undefined && link !== null && !seen.has(link); depth += 1) {
+    seen.add(link)
+    let name = 'Cause'
+    let message = ''
+    try {
+      if (link instanceof Error) {
+        name = link.name || 'Error'
+        message = link.message
+      } else if (typeof link === 'string') message = link
+      else if (typeof link === 'object' && typeof (link as { message?: unknown }).message === 'string') message = (link as { message: string }).message
+    } catch {
+      message = ''
+    }
+    const text = redactSecrets(message)
+      .replace(/(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])/g, '[redacted]')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, CAUSE_CHARS)
+    if (text && text !== publicMessage && !parts.some((part) => part.endsWith(`: ${text}`))) parts.push(`${name.slice(0, 64)}: ${text}`)
+    link = link instanceof Error ? link.cause : undefined
+  }
+  return parts.length ? parts.join(' <- ') : undefined
+}
+
 /** Bounded diagnostic record: correlate public references without dumping causes. */
 export function errorDiagnostic(error: AppErrorShape, operation: string): Record<string, unknown> {
   const details = safeErrorDetails(error.details) as Record<string, unknown> | undefined
