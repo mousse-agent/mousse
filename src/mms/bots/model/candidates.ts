@@ -2,7 +2,7 @@ import { botModelTier, catalogEntryFor } from '../../../shared/bots/personal/mod
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, RunPolicy } from '../../../shared/harness/types'
 import type { ModelCatalog } from '../../../shared/modelCatalog'
-import { CLAUDE_BOT_RUNNER_ID } from '../../harness/claude/locked'
+import { CLAUDE_BOT_RUNNER_ID } from '../../../shared/harness/botRunner'
 import type { BotRuntimeHold } from '../seams'
 import type { BotModelCandidate } from './chooseModel'
 

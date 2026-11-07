@@ -29,14 +29,7 @@ import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 /** The instance profile that runs bots. */
 export const CLAUDE_LOCKED_PROFILE = 'locked'
 
-/**
- * The bot runner entry (Bot Phase 1 §5.9 item 7): the locked entry Mousse adds at the first bot
- * creation when the owner has a Claude subscription and no locked entry. It signs in once, in its
- * own home; the owner's `~/.claude` sign-in is never copied into it.
- */
-export const CLAUDE_BOT_RUNNER_SLUG = 'bots'
-export const CLAUDE_BOT_RUNNER_ID = `claude:${CLAUDE_BOT_RUNNER_SLUG}`
-export const CLAUDE_BOT_RUNNER_NAME = 'Claude for bots'
+export { CLAUDE_BOT_RUNNER_ID, CLAUDE_BOT_RUNNER_NAME, CLAUDE_BOT_RUNNER_SLUG } from '../../../shared/harness/botRunner'
 
 /** One `query` is one dispatch: a backstop on its model turns, not a policy claim. */
 export const CLAUDE_LOCKED_MAX_TURNS = 100
