@@ -121,6 +121,13 @@ describe('set_depth and use_model', () => {
     expect(bots.models).toEqual([{ scope: 'now', choice: { depth: 'deep' } }])
   })
 
+  it('a run never switches its model, for now or for good', async () => {
+    const bots = fakeBots('run')
+    for (const scope of ['now', 'always'])
+      expect(await bots.call('use_model', { model: 'Opus', scope })).toMatchObject({ isError: true, text: expect.stringContaining('Only the owner') })
+    expect(bots.models).toEqual([])
+  })
+
   it('use_model takes a model the owner named when it is there, and says plainly when it is not', async () => {
     const bots = fakeBots()
     expect((await bots.call('use_model', { model: 'Opus', scope: 'always' })).value).toEqual({ ok: true })

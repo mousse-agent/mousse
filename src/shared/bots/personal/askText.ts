@@ -37,6 +37,8 @@ const TOOL_TEXT: Record<string, AskText> = {
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
+/** "400,000 tokens". */
+const tokens = (count: number) => `${Math.round(count).toLocaleString('en-US')} tokens`
 
 function budgetText(key: string, amount: number | undefined, budget: BotBudget | undefined): AskText {
   const held = budget?.[key as keyof BotBudget]
@@ -49,8 +51,9 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
     case 'maxToolCalls':
       return total !== undefined ? { title: `use tools up to ${plural(Math.round(total), 'time')} per run`, note: '' } : { title: 'use its tools more on each run', note: '' }
     case 'maxInputTokens':
+      return total !== undefined ? { title: `read up to ${tokens(total)} per run`, note: '' } : { title: 'read and write more on each run', note: '' }
     case 'maxOutputTokens':
-      return { title: 'read and write more on each run', note: '' }
+      return total !== undefined ? { title: `write up to ${tokens(total)} per run`, note: '' } : { title: 'read and write more on each run', note: '' }
     case 'maxUsd':
       return total !== undefined ? { title: `spend up to $${Number(total.toFixed(2))} per run`, note: '' } : { title: 'spend more on each run', note: '' }
     default:

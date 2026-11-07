@@ -106,6 +106,39 @@ describe('the 30-day purge', () => {
     expect(f.store.deletedRegistry()).toEqual([])
   })
 
+  it('a purge that stops at its threads leaves the memory: capture never copies a half-purged bot back in', async () => {
+    const { botId } = await workedBot()
+    await f.bots.service.delete(botId)
+    const trash = f.host.trashThread!
+    f.host.trashThread = async () => { throw new Error('busy') }
+    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([])
+    expect(f.purged).toEqual([])
+    // Catch-up copies no thread of a deleted bot.
+    expect(f.store.captureThreads().filter((thread) => thread.botId === botId)).toEqual([])
+    f.host.trashThread = trash
+    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([botId])
+    expect(f.purged).toEqual([botId])
+  })
+
+  it('two sweeps at once purge a bot once', async () => {
+    const { botId } = await workedBot()
+    await f.bots.service.delete(botId)
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const trash = f.host.trashThread!
+    f.host.trashThread = async (threadId) => {
+      await held
+      return trash(threadId)
+    }
+    const first = f.bots.sweepDeleted(f.clock.now + 31 * DAY)
+    const second = f.bots.sweepDeleted(f.clock.now + 31 * DAY)
+    release()
+    expect(await first).toEqual([botId])
+    expect(await second).toEqual([botId])
+    expect(f.purged).toEqual([botId])
+    expect(f.trashed).toHaveLength(1)
+  })
+
   it('a purge is finished only once its definition and files are gone', async () => {
     const { botId } = await workedBot()
     await f.bots.service.delete(botId)

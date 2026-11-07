@@ -297,3 +297,123 @@ describe('the final message after capture (review)', () => {
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'done', result: 'Two new invoices.' })
   })
 })
+
+describe('chat turns at their edges (review round 2)', () => {
+  /** A chat turn that hit a wall; its run ended, and capture is held until `release`. */
+  async function walledWhileCapturing(text: string, id: string) {
+    await send(text, id)
+    const activation = chatActivation()
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const capture = f.host.context!.afterDispatch
+    f.host.context!.afterDispatch = async (event) => {
+      await held
+      return capture(event)
+    }
+    f.runs.markTerminal(payload.runId, 'interrupted', { interruptedBy: 'bot_wall' })
+    f.bots.settle(payload, { text: 'I need your notes first.' })
+    return { activation, release: async () => { release(); await flush() } }
+  }
+
+  it('a message sent while the walled turn is still being recorded keeps that turn\'s reply', async () => {
+    const { activation, release } = await walledWhileCapturing('Read my notes', 'm1')
+    await f.bots.service.chatSend({ botId, text: 'Never mind, just say hi', clientRequestId: 'm2' })
+    expect(f.store.dispatch(activation.id, 2)).toBeUndefined()
+    await release()
+    expect(chatOf(f, botId).filter((message) => message.activationId === activation.id && message.author === 'bot')).toMatchObject([{ kind: 'text', text: 'I need your notes first.' }])
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/\n\nNever mind, just say hi$/)
+  })
+
+  it('that message still continues the turn after a restart', async () => {
+    const { activation } = await walledWhileCapturing('Read my notes', 'm1')
+    await f.bots.service.chatSend({ botId, text: 'Never mind, just say hi', clientRequestId: 'm2' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: .*\n\nNever mind, just say hi$/)
+  })
+
+  it('a chat message dropped from a full queue says so in the chat', async () => {
+    await send('First', 'q0')
+    const first = chatActivation()
+    for (let n = 1; n <= 21; n += 1) {
+      f.clock.now += 1
+      await f.bots.service.chatSend({ botId, text: `Message ${n}`, clientRequestId: `q${n}` })
+    }
+    const dropped = f.store.activationByKey('chat:q1')!
+    expect(dropped).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(chatOf(f, botId).filter((message) => message.kind === 'error')).toMatchObject([
+      { activationId: dropped.id, error: { text: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.' } }
+    ])
+    expect(f.store.activation(first.id)!.status).toBe('running')
+  })
+
+  it('a failed turn\'s provider error is never posted as the bot\'s message', async () => {
+    await send('What came in?', 'm1')
+    const activation = chatActivation()
+    const { payload } = await start(f, activation.id)
+    f.runs.tools.start({ invocationId: 'inv-edit', runId: payload.runId, attemptId: f.runs.getRun(payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'd', now: 'n', idempotent: false })
+    await finish(f, payload, 'failed', { text: '[provider_error] 401 from claude-x', outcome: { error: 'provider_error' } })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
+    expect(JSON.stringify(chatOf(f, botId))).not.toContain('provider_error')
+    expect(f.store.activation(activation.id)!.result ?? '').toBe('')
+  })
+
+  it('a depth change on a turn that finishes first ends the turn: no extra Continue', async () => {
+    await send('Think hard about this', 'm1')
+    const activation = chatActivation()
+    await runDispatch(f, activation.id, 1, { text: 'Here is my answer.', during: () => f.bots.tools.setModel(botId, activation.id, 'now', { depth: 'deep' }) })
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })
+    expect(f.store.dispatch(activation.id, 2)).toBeUndefined()
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'Here is my answer.' })
+  })
+
+  it('a turn the depth change stopped continues on the new depth', async () => {
+    await send('Think hard about this', 'm1')
+    const activation = chatActivation()
+    const { payload, prepared } = await start(f, activation.id)
+    f.bots.tools.setModel(botId, activation.id, 'now', { depth: 'deep' })
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'x') } })).toMatchObject({ ok: false })
+    await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toBe('[Mousse] You now have more time to think. Continue where you left off.')
+  })
+
+  it('a run is copied into the journal again after its last write, and at the next tick until a copy works', async () => {
+    await f.bots.reconcileOnStartup()
+    const synced: string[] = []
+    let fail = true
+    f.host.journal!.syncThread = async (ref) => {
+      if (fail) throw new Error('thread not readable yet')
+      synced.push(`${ref.threadId}:${ref.lane}:${ref.activationId}`)
+    }
+    const activation = await f.bots.activate({ botId, input: 'Report', clientRequestId: 'r1' })
+    const { payload } = await start(f, activation.id)
+    await finish(f, payload, 'completed', { text: 'Report.' })
+    // The executor's settle (after the thread's last write) copies the thread once more.
+    f.bots.settle(payload, { text: 'Report.' })
+    await flush()
+    expect(synced).toEqual([])
+    fail = false
+    await f.bots.tickSchedules(new Date(f.clock.now))
+    await flush()
+    const thread = f.store.activation(activation.id)!.threadId!
+    expect(synced).toContain(`${thread}:run:${activation.id}`)
+    const copies = synced.length
+    await f.bots.tickSchedules(new Date(f.clock.now))
+    await flush()
+    expect(synced).toHaveLength(copies)
+  })
+
+  it('a bot whose journal cannot be caught up at startup is stuck; the others go on', async () => {
+    const other = await createBot(f, { name: 'Other', reply: 'Hi.' })
+    f.host.journal!.catchUp = async () => ({ failedBots: [botId] })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    expect(f.store.registry(botId)!.error).toMatchObject({ code: 'bot_journal_failed' })
+    expect(f.store.registry(other.botId)!.error).toBeNull()
+  })
+})

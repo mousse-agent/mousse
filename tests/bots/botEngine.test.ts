@@ -161,7 +161,8 @@ describe('approval', () => {
     approve()
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'policy_unenforceable', refused: 'Codex can\'t limit tools to this list.' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'policy_unenforceable' })
+    // Nobody waits on a run: it ends failed (and counts toward the failure pause).
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'policy_unenforceable' })
   })
 
   it('a narrower revision runs without asking; a wider one waits for the owner', async () => {
@@ -270,14 +271,15 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
-  it('refuses a dispatch whose grant changed under it, and blocks the activation', async () => {
+  it('refuses a dispatch whose grant changed under it, and ends the run failed', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     // The grant row changes without the engine (another process): prepare still refuses.
     store.revoke('site-editor')
     const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
     expect(bots.prepare(payload)).toMatchObject({ code: 'bot_grant_revoked' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', endReason: 'bot_grant_revoked' })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'bot_grant_revoked' })
     expect(store.counters(activation.id).activeMs).toBe(0)
+    expect(store.registry('site-editor')).toMatchObject({ failureStreak: 1 })
   })
 
   it('revoking the grant stops a running dispatch, and its authority refuses the next call', async () => {
@@ -369,7 +371,7 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     check = () => ({ ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['budgets'], reason: 'This provider cannot count requests.' } })
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'policy_unenforceable' })
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'blocked', counters: { activeMs: 0 } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', counters: { activeMs: 0 } })
   })
 
   it('with less than one 15-second slice of work time left, nothing is dispatched', async () => {

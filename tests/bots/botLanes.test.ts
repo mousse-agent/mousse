@@ -83,13 +83,18 @@ describe('the run lane', () => {
     const run = await f.bots.activate({ botId, input: 'go', clientRequestId: 'r1' })
     await send('hi', 'm1')
     const [chat] = lane('chat', ['running'])
-    expect(f.bots.tools.activationOf(`thread:bot:${botId}`)).toMatchObject({ botId, activationId: chat!.id, lane: 'chat' })
-    expect(f.bots.tools.activationOf(run.threadId!)).toMatchObject({ botId, activationId: run.id, lane: 'run' })
+    expect(f.bots.tools.activationOf(`thread:bot:${botId}`)).toMatchObject({ botId, activationId: chat!.id, lane: 'chat', role: 'home' })
+    expect(f.bots.tools.activationOf(run.threadId!)).toMatchObject({ botId, activationId: run.id, lane: 'run', role: 'activation' })
     expect(f.bots.tools.activationOf('thread:someone-else')).toBeUndefined()
     const prepared = await runDispatch(f, run.id, 1, { text: 'done' })
     expect(existsSync(prepared.scratch)).toBe(false)
     expect(f.bots.tools.activationOf(run.threadId!)).toBeUndefined()
     await runDispatch(f, chat!.id, 1, { text: 'hello' })
     expect(f.bots.tools.activationOf(`thread:bot:${botId}`)).toBeUndefined()
+    // Startup capture gives each thread's new rows to the latest activation that ran there.
+    expect(f.store.captureThreads().filter((thread) => thread.botId === botId).map((thread) => [thread.role, thread.lastActivation])).toEqual(expect.arrayContaining([
+      ['home', { id: chat!.id, lane: 'chat' }],
+      ['activation', { id: run.id, lane: 'run' }]
+    ]))
   })
 })

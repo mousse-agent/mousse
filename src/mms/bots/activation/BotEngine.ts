@@ -154,12 +154,25 @@ export interface BotEngineHost {
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
   providerLabel?(instanceId: string): string
+  /**
+   * Whether the skill or MCP tool an ask names exists here: a run never asks the owner for one that
+   * does not (the card would show the bot's own words). Absent: every name is taken as it is.
+   */
+  knownAsk?(permission: { skill: string } | { mcp: { serverId: string; tool: string } }): boolean
 }
 
 export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
 
 /** What a run-lane call is refused with when its permission waits for the owner (§5.4). */
 export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped.'
+/** What a run's call or `escalate` is refused with once its asks reached their cap: no new ask is written. */
+export const BOT_ASK_ENOUGH_TEXT = 'You have asked the owner enough for now. Carry on without it and say in your report what you skipped.'
+/** What a run's ask for a skill or MCP tool that is not here is refused with. */
+export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
+/** New asks one run may write; later ones are refused without asking. */
+export const MAX_RUN_ASKS = 5
+/** New asks a bot's runs may write in a day. */
+export const MAX_BOT_ASKS_PER_DAY = 10
 /** What `escalate` returns in a chat turn: the cards show together under the turn's message. */
 export const BOT_ASK_DEFERRED_TEXT = 'Asked; the owner will answer after this message. Finish your message now.'
 /** The stuck error after the journal could not be written (bot-context.md §4). */
@@ -236,6 +249,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly lateTexts = new Map<string, string>()
   /** The owner's message that answered a wall while its turn was still ending: the continuation's input. */
   private readonly ownerTexts = new Map<string, string>()
+  /** Activations whose main dispatch settled and whose `advance` has not run yet (capture is copying it). */
+  private readonly settling = new Set<string>()
+  /**
+   * Bot threads whose capture ran when their run ended, perhaps before the thread's last write (a
+   * failed turn is saved after its run ends): copied again by the executor's settle, else at the next tick.
+   */
+  private readonly needsSync = new Map<string, { botId: string; threadId: string; lane: BotLane; activationId: string }>()
+  /** The 30-day sweep that is running, so a tick and the daily timer never purge at once. */
+  private sweeping: Promise<string[]> | undefined
   /** The rolled-up chips of each settled main dispatch, until its message is posted. */
   private readonly drained = new Map<string, BotChip[]>()
   private lastSweep = 0
@@ -389,7 +411,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * are not purged by this build; the log says so rather than claim they are gone. Each bot is
    * purged on its own: a failure is retried at the next sweep.
    */
-  async sweepDeleted(now: number = this.now()): Promise<string[]> {
+  sweepDeleted(now: number = this.now()): Promise<string[]> {
+    // One sweep at a time: a second caller gets the one that runs.
+    if (this.sweeping) return this.sweeping
+    const sweep = this.sweepOnce(now).finally(() => {
+      if (this.sweeping === sweep) this.sweeping = undefined
+    })
+    this.sweeping = sweep
+    return sweep
+  }
+
+  private async sweepOnce(now: number): Promise<string[]> {
     this.lastSweep = now
     const purged: string[] = []
     for (const entry of this.store.deletedRegistry(new Date(now - BOT_DELETE_PURGE_MS).toISOString())) {
@@ -405,10 +437,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private async purge(botId: string): Promise<void> {
     if (this.store.activationsIn(botId, [...NOT_ENDED]).length) throw new Error('its last run is still stopping')
-    await this.host.memory?.purge(botId)
     const threads = this.store.botThreads(botId)
+    for (const thread of threads) this.needsSync.delete(thread.threadId)
     const home = threads.find((thread) => thread.role === 'home')
-    // The home thread owns the bot's run and context threads: they go with it.
+    // The home thread owns the bot's run and context threads: they go with it. The threads go
+    // before the memory, so a purge that stops between them never has capture copy them back in.
     const own = home ? [home] : threads
     if (this.host.trashThread) {
       for (const thread of own) {
@@ -416,6 +449,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         await this.host.trashThread(thread.threadId)
       }
     }
+    await this.host.memory?.purge(botId)
     // Its definition and files first: a failure leaves the purge unfinished, and the next sweep tries again.
     this.host.definitions.remove(botId)
     rmSync(this.filesFolder(botId), { recursive: true, force: true })
@@ -750,7 +784,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private dropOverQueue(botId: string, lane: BotLane = 'run'): number {
     const queued = this.store.laneActivations(botId, lane, ['queued'])
     const over = queued.slice(0, Math.max(0, queued.length - MAX_QUEUED_ACTIVATIONS))
-    for (const activation of over) this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })
+    for (const activation of over) {
+      if (!this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })) continue
+      // The owner's message is never dropped without a word: its chat says so.
+      if (lane === 'chat')
+        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
+    }
     return over.length
   }
 
@@ -786,6 +825,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a bot\'s queued activation could not start; the next tick tries again', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    for (const ref of [...this.needsSync.values()]) this.resync(ref)
     if (now.getTime() - this.lastSweep >= SWEEP_EVERY_MS) await this.sweepDeleted(now.getTime()).catch(() => [])
     return { inserted }
   }
@@ -797,7 +837,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A usage-limit pause ends at its reset time: the bot's schedules run again.
     if (registry.pausedReason === 'usage_limit' && registry.pausedUntil && Date.parse(registry.pausedUntil) <= now.getTime()) {
       this.store.db.transaction(() => {
-        this.store.setPaused(botId, null)
+        // Only the usage pause ends: the failure streak is not the reset's to clear.
+        this.store.setPaused(botId, null, undefined, { keepStreak: true })
         if (registry.error?.code === 'usage_limit') this.store.setError(botId, null)
       })
       this.changed({ botId })
@@ -1082,8 +1123,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const ended = this.recorded(row, () => {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: 'usage_limit' })) return false
       this.store.closeEscalations(row.id, 'cancelled')
-      this.store.setPaused(row.botId, 'usage_limit', until)
-      this.store.setError(row.botId, { code: 'usage_limit', error })
+      // The owner's pause, or one after failed runs, stays: the reset never lifts it.
+      const paused = this.store.registry(row.botId)?.pausedReason
+      if (!paused || paused === 'usage_limit') {
+        this.store.setPaused(row.botId, 'usage_limit', until)
+        this.store.setError(row.botId, { code: 'usage_limit', error })
+      }
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_limit` })
       this.journalEnd(row, 'usage_limit')
       return true
@@ -1518,7 +1563,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const reason = request.reason.trim() || 'The bot did not say why.'
         if (row.lane === 'run') {
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
-          return 'refused' in refused ? 'Asked the owner. Carry on without it and say in your report what you skipped.' : checkMessage(refused as BotCheckDenied)
+          if (!('refused' in refused)) return checkMessage(refused as BotCheckDenied)
+          return refused.refused.askId ? 'Asked the owner. Carry on without it and say in your report what you skipped.' : refused.refused.text
         }
         return this.deferWall(row.id, { dispatchN: input.mainN, permission: asked, reason, ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}) })
       },
@@ -1628,10 +1674,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const fingerprint = askFingerprintOf(input.permission)
         const open = this.store.openAsk(row.botId, fingerprint) ?? this.store.coolingAsk(row.botId, fingerprint, this.store.now())
         if (!open) {
-          const text = this.askCardText(row, input.permission)
+          const permission = this.limitAsk(row.botId, input.permission)
+          const text = this.askCardText(row, permission)
           const id = `esc_${randomUUID()}`
           this.store.insertEscalation({
-            id, botId: row.botId, activationId: row.id, dispatchN: input.dispatchN, toolCallId: null, kind: 'budget', permission: input.permission, reason: input.reason.slice(0, 2000),
+            id, botId: row.botId, activationId: row.id, dispatchN: input.dispatchN, toolCallId: null, kind: 'budget', permission, reason: input.reason.slice(0, 2000),
             createdAt: this.store.now(), expiresAt: null, mode: 'ask', fingerprint, title: text.title, note: text.note, messageId: null
           })
           this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `I ran out of room on this run. ${name} wants to ${text.title}.`, askId: id, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
@@ -1660,6 +1707,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return askFingerprintOf(permission)
   }
 
+  /**
+   * A limit ask as its card shows it and Allow grants it: the amount the bot asked for, else the
+   * current limit, and never more than the current limit (Allow at most doubles a limit).
+   */
+  private limitAsk<T extends BotAskRequest>(botId: string, permission: T): T {
+    if (!('budget' in permission)) return permission
+    const held = this.store.activeGrant(botId)?.manifest.budget[permission.budget.key]
+    if (held === undefined) return permission
+    return { budget: { key: permission.budget.key, amount: Math.min(permission.budget.amount ?? held, held) } } as T
+  }
+
+  /** Whether a run may ask for `permission`: a skill or MCP tool must exist here (`knownAsk`). */
+  private askable(permission: BotAskRequest): boolean {
+    if (!('skill' in permission) && !('mcp' in permission)) return true
+    try {
+      return this.host.knownAsk?.(permission) ?? true
+    } catch {
+      return false
+    }
+  }
+
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
   private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
@@ -1667,7 +1735,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
+    const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
     if (open) {
@@ -1755,15 +1824,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * otherwise one is written, with a notice row carrying its card ("<name> wants to …"), unless the
    * owner said Not now to it in the last 24 hours. Later runs get the same refusal and no new ask.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, permission: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
+    const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
-    let raised: { askId: string; created: boolean }
+    let raised: { askId: string; created: boolean } | { refused: string }
     try {
       raised = this.store.db.transaction(() => {
         const open = this.store.openAsk(row.botId, fingerprint)
         if (open) return { askId: open.id, created: false }
         const cooling = this.store.coolingAsk(row.botId, fingerprint, this.store.now())
         if (cooling) return { askId: cooling.id, created: false }
+        // Nobody watches a run: its asks are few, and never for a skill or MCP tool that is not here.
+        if (!this.askable(permission)) return { refused: BOT_ASK_UNKNOWN_TEXT }
+        if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
+          this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
+          return { refused: BOT_ASK_ENOUGH_TEXT }
         const text = this.askCardText(row, permission)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
@@ -1781,6 +1856,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       throw error
     }
+    // No ask was written: the call is refused, and no card waits for the owner.
+    if ('refused' in raised) return { ok: false, refused: { text: raised.refused, askId: '' } }
     if (raised.created) this.changed({ botId: row.botId, activationId: row.id })
     return { ok: false, refused: { text: BOT_ASK_REFUSED_TEXT, askId: raised.askId } }
   }
@@ -1893,7 +1970,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let amount: number | undefined
     if (answer === 'allow' && !special) {
       const permission = escalation.permission as BotPermissionRequest
-      amount = 'budget' in permission ? permission.budget.amount ?? this.store.activeGrant(botId)?.manifest.budget[permission.budget.key] : undefined
+      // A limit grows by what the card said, at most doubling (the limit may have changed since it was asked).
+      amount = 'budget' in permission ? this.limitAsk(botId, permission).budget.amount : undefined
       if ('budget' in permission && amount === undefined) throw new BotEngineError('invalid_answer', 'This limit cannot be raised.')
       this.allowForBot(botId, permission, amount)
     }
@@ -1960,8 +2038,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const row = this.store.activation(activationId)
     if (!row || row.status !== 'waiting_grant') return true
-    // The walled turn is still letting go: its continuation, with this message, follows when it has.
-    if (!this.allRunsEnded(row)) {
+    // The walled turn is still letting go, or its end is still being recorded (its message not
+    // written yet): its continuation, with this message, follows when it has.
+    if (!this.allRunsEnded(row) || this.store.lastMainDispatch(row.id)?.endedAt == null || this.settling.has(row.id)) {
       this.ownerTexts.set(activationId, text)
       return true
     }
@@ -1979,6 +2058,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (message.author !== 'owner' || message.kind !== 'text' || !message.activationId) return
     const walled = this.openChatWalls(message.botId).some((wall) => wall.activationId === message.activationId && wall.createdAt <= message.at)
     if (walled) await this.continueChatWith(message.botId, chatInput(message.text, message.attachments ?? undefined))
+  }
+
+  /**
+   * The owner's message that answered a chat's wall by being sent (`continueChatWith`), read from
+   * its rows, for when the copy kept in memory is gone (a restart): the newest owner row of the
+   * activation, other than the one that started it, written while one of the denied `answers` was open.
+   */
+  private wallReplyOf(row: BotActivationRow, answers: readonly BotEscalationRow[]): string | undefined {
+    if (row.lane !== 'chat') return undefined
+    const denied = answers.filter((answer) => answer.status === 'denied' && answer.answeredAt)
+    if (!denied.length) return undefined
+    const owned = this.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' AND kind = 'text' ORDER BY seq", row.id)
+      .map((entry) => this.store.message(entry.id as string)).filter((message): message is BotMessageRow => message !== undefined)
+    const input = (message: BotMessageRow) => chatInput(message.text, message.attachments ?? undefined)
+    if (owned[0] && input(owned[0]) === row.trigger.input) owned.shift()
+    // A message an earlier continuation already carried is not sent twice.
+    const sent = this.store.dispatches(row.id).filter((dispatch) => dispatch.kind === 'continue').map((dispatch) => dispatch.prompt.text)
+    const reply = owned.reverse().find((message) => !sent.some((prompt) => prompt.endsWith(`\n\n${input(message)}`)) &&
+      denied.some((answer) => answer.createdAt <= message.at && message.at <= answer.answeredAt!))
+    return reply ? input(reply) : undefined
   }
 
   /** Why an answer cannot grant `permission`: the result would not be a valid manifest. */
@@ -2096,7 +2195,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return this.usagePause(row, limitUntil, row.selection.instanceId)
       }
-      const reload = row.reloadPending && (run.status === 'completed' || (run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'))
+      // Only a turn the reload stopped continues on the new model; one that finished first is done.
+      const reload = row.reloadPending && run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
       if (run.status === 'failed' || (run.status !== 'completed' && run.status !== 'uncertain' && !reload)) {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (!unknown) {
@@ -2147,7 +2247,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Every card of the wall answered: the continuation carries all the answers.
       if (this.store.escalations({ activationId: row.id, status: 'open' }).some((ask) => ask.mode === 'wall')) return
       const answers = this.store.pendingAnswers(row.id)
-      const ownerText = this.ownerTexts.get(row.id)
+      const ownerText = this.ownerTexts.get(row.id) ?? this.wallReplyOf(row, answers)
       this.ownerTexts.delete(row.id)
       if (answers.length) await this.continueWith(row.id, ['waiting_grant'], { answers, ...(ownerText !== undefined ? { ownerText } : {}) })
       return
@@ -2281,10 +2381,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const uncertain = previousRun?.status === 'uncertain'
     const effective = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest) : undefined
     const answers = input.answers ?? []
-    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' } | { kind: 'sent'; dispatch: BotDispatchRow } => {
+    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
       if (!definition || !grant || !effective || grant.digest !== current.grantDigest) {
+        // A run going on by itself ends failed (after this transaction): nobody waits to continue it.
+        if (current.lane === 'run' && current.status === 'running') return { kind: 'fail', reason: 'bot_grant_revoked' }
         this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'bot_grant_revoked' })
         return { kind: 'blocked' }
       }
@@ -2331,6 +2433,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     if (decided.kind === 'budget') {
       this.budgetEnd(this.store.activation(row.id) ?? row, this.timeWall(previous?.n ?? 0, effective!))
+      return 'none'
+    }
+    if (decided.kind === 'fail') {
+      this.failActivation(this.store.activation(row.id) ?? row, decided.reason)
       return 'none'
     }
     if (decided.kind === 'wall') {
@@ -2567,14 +2673,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || !dispatch) return
     if (dispatch.kind === 'consult') return this.settleConsult(row, dispatch, run, outcome, true)
     const key = `${row.id}:${dispatch.n}`
+    // A failed turn's final message is the provider's error, never the bot's words: it is not a reply.
+    const text = run.status === 'failed' ? undefined : outcome.text
     if (dispatch.endedAt !== null) {
       // Settled from the run's terminal event first: the executor's final message still lands.
-      if (outcome.text !== undefined) {
-        this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused', 'waiting_grant') AND (result IS NULL OR result = '')", outcome.text, row.id)
+      if (text !== undefined) {
+        this.store.run("UPDATE bot_activations SET result = ? WHERE id = ? AND status IN ('done', 'paused', 'waiting_grant') AND (result IS NULL OR result = '')", text, row.id)
         // Capture may still be running for this dispatch: its reply takes this text when it is written.
-        if (!this.pendingReplies.has(key) && !this.store.message(`bm_${row.id}_d${dispatch.n}`)) this.lateTexts.set(key, outcome.text)
+        if (!this.pendingReplies.has(key) && !this.store.message(`bm_${row.id}_d${dispatch.n}`)) this.lateTexts.set(key, text)
       }
-      this.pendingReplies.get(key)?.post(outcome.text)
+      this.pendingReplies.get(key)?.post(text)
+      // The executor settles after the thread's last write: capture copies what the first pass missed.
+      this.resync({ botId: row.botId, threadId: dispatch.threadId, lane: row.lane, activationId: row.id })
       return
     }
     const live = this.live.get(row.id)?.n === dispatch.n ? this.live.get(row.id) : undefined
@@ -2604,15 +2714,41 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.drainChips(row, key, dispatch.clientRequestId)
     this.settleProcesses(dispatch)
     // The executor's final message is on its way when this process ran the dispatch.
-    const expectText = live !== undefined && outcome.text === undefined
-    const moveOn = (): Promise<void> => this.advance(row.id, outcome.text, { expectText })
-    const failed = (error: unknown): void => console.warn('bot activation could not move on', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    const expectText = live !== undefined && text === undefined
+    // Capture below may run before the thread's last write: the thread is copied once more later.
+    if (this.host.journal) this.needsSync.set(dispatch.threadId, { botId: row.botId, threadId: dispatch.threadId, lane: row.lane, activationId: row.id })
+    this.settling.add(row.id)
+    const moveOn = (): Promise<void> => {
+      this.settling.delete(row.id)
+      return this.advance(row.id, text, { expectText })
+    }
+    const failed = (error: unknown): void => {
+      this.settling.delete(row.id)
+      console.warn('bot activation could not move on', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
     if (!this.host.context) {
       void moveOn().catch(failed)
       return
     }
     const endedBy = this.endedBy(this.store.activation(row.id) ?? row, run)
-    void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, endedBy).then((ok) => (ok ? moveOn() : undefined)).catch(failed)
+    void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, endedBy).then((ok) => {
+      if (ok) return moveOn()
+      this.settling.delete(row.id)
+      return undefined
+    }).catch(failed)
+  }
+
+  /** Copies a bot thread into the journal again (`needsSync`); it stays listed until a copy succeeds. */
+  private resync(ref: { botId: string; threadId: string; lane: BotLane; activationId: string }): void {
+    const journal = this.host.journal
+    if (!journal) return
+    this.needsSync.set(ref.threadId, ref)
+    void journal.syncThread(ref).then(() => {
+      if (this.needsSync.get(ref.threadId) === ref) this.needsSync.delete(ref.threadId)
+    }, (error: unknown) => {
+      console.warn('a bot thread could not be copied into the journal; the next tick tries again', { threadId: ref.threadId, error: error instanceof Error ? error.message : String(error) })
+      if (isJournalFailure(error)) this.journalFailedFor(ref.botId)
+    })
   }
 
   /** The dispatch's processes are confirmed gone (`exit_at`), outside the turn's own end. */
@@ -2623,7 +2759,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** How a main dispatch ended, for capture. */
   private endedBy(row: BotActivationRow, run: RunRecord): BotDispatchEnd {
-    if (run.status === 'completed') return row.reloadPending ? 'reload' : 'settled'
+    if (run.status === 'completed') return 'settled'
     if (run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall') return row.status === 'waiting_grant' || !row.reloadPending ? 'wall' : 'reload'
     if (run.status === 'failed') return 'failed'
     return 'stopped'
@@ -2696,6 +2832,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.consultWaiters.delete(key)
     waiter?.resolve(run.status === 'completed' ? outcome.text ?? '' : `The consult ended without an answer (${run.status}).`)
     this.settleProcesses(dispatch)
+    if (!fromExecutor && this.host.journal) this.needsSync.set(dispatch.threadId, { botId: row.botId, threadId: dispatch.threadId, lane: row.lane, activationId: row.id })
     if (this.host.context) void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, run.status === 'completed' ? 'settled' : run.status === 'failed' ? 'failed' : 'stopped').catch(() => false)
     void this.advance(row.id).catch(() => {})
   }
@@ -2751,12 +2888,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * chat says so in plain words (a runtime that cannot hold the bot is the bot's stuck error).
    */
   private block(row: BotActivationRow, code: string, reason: string): { refused: string; code: string } {
+    const stuck: BotStoredError | undefined = code === 'policy_unenforceable'
+      ? { code, error: { text: 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
+      : undefined
+    // Nobody waits on a run to continue it: it ends failed, and counts toward the failure pause.
+    if (row.lane === 'run') {
+      this.failActivation(row, code, stuck)
+      return { code, refused: reason }
+    }
     try {
       this.store.db.transaction(() => {
         if (!this.store.moveActivation(row.id, ['running'], 'blocked', { endReason: code })) return
-        const stuck: BotStoredError | undefined = code === 'policy_unenforceable'
-          ? { code, error: { text: 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
-          : undefined
         if (stuck) this.store.setError(row.botId, stuck)
         this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: stuck?.error ?? { text: failureText(code) }, activationId: row.id, lane: row.lane, id: `bm_${row.id}_blocked_${this.store.nextDispatchN(row.id)}` })
       })
@@ -2867,7 +3009,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
       try {
-        await this.host.journal?.catchUp()
+        const caught = await this.host.journal?.catchUp()
+        // A bot whose journal cannot be written is stuck until the owner tries again; the others go on.
+        for (const botId of caught?.failedBots ?? []) this.journalFailedFor(botId)
       } catch (error) {
         console.warn('bot threads could not be caught up into the journal', { error: error instanceof Error ? error.message : String(error) })
       }
@@ -3028,7 +3172,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // unknown-call gate (every run ended at boot).
       const answers = this.store.pendingAnswers(row.id)
       if (answers.length) {
-        await this.continueWith(row.id, ['waiting_grant'], { answers })
+        // The owner's message that answered it goes on as the next input, as before the restart.
+        const ownerText = this.wallReplyOf(row, answers)
+        await this.continueWith(row.id, ['waiting_grant'], { answers, ...(ownerText !== undefined ? { ownerText } : {}) })
         return
       }
       // Neither an open wall nor an answer: the owner decides.
@@ -3283,7 +3429,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- The bot app tools' host (BotToolHost, §7.1) ----------------------------------------------
 
   /** What the bot app tools (WP3, WP6) reach the engine through. Lane and bot come from the thread, never from arguments. */
-  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; dispatchId?: string }) | undefined } = {
+  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
     activationOf: (threadId) => this.activationOf(threadId),
     schedules: {
       add: (botId, schedule) => this.addSchedule(botId, schedule, 'bot'),
@@ -3294,8 +3440,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice)
   }
 
-  /** The activation a thread's turn belongs to: the chat's on the home thread, a run's on its own, a consult's on a context thread. */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; dispatchId?: string } | undefined {
+  /**
+   * The activation a thread's turn belongs to: the chat's on the home thread, a run's on its own, a
+   * consult's on a context thread (`role` says which thread called).
+   */
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string } | undefined {
     try {
       const thread = this.store.get('SELECT bot_id, role, activation_id FROM bot_threads WHERE thread_id = ?', threadId)
       if (!thread) return undefined
@@ -3309,7 +3458,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if (!row || row.botId !== botId || ENDED_ACTIVATION_STATUSES.has(row.status)) return undefined
       const dispatchId = this.live.get(row.id)?.dispatchId
-      return { botId, activationId: row.id, lane: row.lane, ...(dispatchId ? { dispatchId } : {}) }
+      const role = thread.role === 'home' ? 'home' : thread.role === 'activation' ? 'activation' : 'context'
+      return { botId, activationId: row.id, lane: row.lane, role, ...(dispatchId ? { dispatchId } : {}) }
     } catch {
       return undefined
     }
@@ -3411,6 +3561,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (!row || row.botId !== botId || ENDED_ACTIVATION_STATUSES.has(row.status)) throw new BotEngineError('activation_not_found', 'This work has ended.')
+    // A run may change its depth, never its model: only the owner names one, in the chat.
+    if (row.lane === 'run' && choice.mode === 'named') throw new BotEngineError('invalid_model', 'Only the owner can change this, in your chat.')
     this.store.setModelOverride(activationId, merged)
   }
 
@@ -3608,6 +3760,7 @@ function failureText(reason: string): string {
     case 'unknown_calls':
     case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
+    case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }
 }

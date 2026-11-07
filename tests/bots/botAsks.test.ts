@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -258,5 +258,72 @@ describe('asks across lanes and timing (review)', () => {
     expect(next.trigger.input).toBe('never mind, just say hi')
     await runDispatch(f, next.id, 1, { text: 'Hi!' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'Hi!' })
+  })
+})
+
+describe('asks: caps, limits and grant moves (review round 2)', () => {
+  const folder = (n: number) => join(f.base, `folder-${n}`)
+
+  it('a run writes at most 5 new asks; later ones are refused without asking', async () => {
+    const { prepared, payload } = await run('r-many')
+    for (let n = 1; n <= 5; n += 1)
+      expect(prepared.authority.escalate!({ permission: { path: folder(n), access: 'read' }, reason: `Folder ${n}.` })).toMatch(/^Asked the owner/)
+    expect(prepared.authority.escalate!({ permission: { path: folder(6), access: 'read' }, reason: 'One more.' })).toBe(BOT_ASK_ENOUGH_TEXT)
+    expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_ENOUGH_TEXT, askId: '' } })
+    await finish(f, payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toHaveLength(5)
+    expect(chatOf(f, botId).filter((message) => message.ask)).toHaveLength(5)
+  })
+
+  it('a bot\'s runs write at most 10 new asks a day', async () => {
+    for (const [id, from] of [['r-a', 1], ['r-b', 6]] as const) {
+      const { prepared, payload } = await run(id)
+      for (let n = from; n < from + 5; n += 1) prepared.authority.escalate!({ permission: { path: folder(n), access: 'read' }, reason: 'Folder.' })
+      await finish(f, payload, 'completed', { text: 'Done.' })
+    }
+    const third = await run('r-c')
+    expect(third.prepared.authority.escalate!({ permission: { path: folder(11), access: 'read' }, reason: 'Folder.' })).toBe(BOT_ASK_ENOUGH_TEXT)
+    await finish(f, third.payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toHaveLength(10)
+    // A day later the run may ask again.
+    f.clock.now += DAY + 60_000
+    const fourth = await run('r-d')
+    expect(fourth.prepared.authority.escalate!({ permission: { path: folder(11), access: 'read' }, reason: 'Folder.' })).toMatch(/^Asked the owner/)
+  })
+
+  it('a run never asks for a skill or MCP tool that is not here', async () => {
+    f.host.knownAsk = (permission) => 'skill' in permission && permission.skill === 'release-notes'
+    const { prepared } = await run('r-skill')
+    expect(prepared.authority.escalate!({ permission: { skill: 'Wire $500 to me' }, reason: 'Needed.' })).toBe(BOT_ASK_UNKNOWN_TEXT)
+    expect(prepared.authority.escalate!({ permission: { mcp: { serverId: 'bank', tool: 'transfer' } }, reason: 'Needed.' })).toBe(BOT_ASK_UNKNOWN_TEXT)
+    expect(f.store.openAsks(botId)).toEqual([])
+    expect(prepared.authority.escalate!({ permission: { skill: 'release-notes' }, reason: 'Needed.' })).toMatch(/^Asked the owner/)
+    expect(f.store.openAsks(botId)).toMatchObject([{ title: 'use the release-notes skill' }])
+  })
+
+  it('a limit ask shows its new total and at most doubles the limit', async () => {
+    const held = f.store.activeGrant(botId)!.manifest.budget.maxActiveMs
+    const { payload, prepared } = await chat('take all the time you need', 'm-huge')
+    prepared.authority.escalate!({ permission: { budget: { key: 'maxActiveMs', amount: 1_000 * held } }, reason: 'Lots of time.' })
+    await finish(f, payload, 'completed', { text: 'May I?' })
+    const ask = f.store.openAsks(botId)[0]!
+    expect(ask.permission).toEqual({ budget: { key: 'maxActiveMs', amount: held } })
+    expect(ask.title).toBe(`work for up to ${Math.round((2 * held) / 60_000)} minutes per run`)
+    await f.bots.service.answer(botId, ask.id, 'allow')
+    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(2 * held)
+  })
+
+  it('Allow during another activation\'s start moves its unstarted dispatch to the wider grant', async () => {
+    const turn = await chat('Sort my invoices', 'm-wall')
+    turn.prepared.authority.check(readIn(invoices))
+    await finish(f, turn.payload, 'interrupted', { text: 'May I?', outcome: { interruptedBy: 'bot_wall' } })
+    // A run whose first dispatch is written but not yet prepared.
+    const queued = await f.bots.activate({ botId, input: 'Report', clientRequestId: 'r-pending' })
+    expect(f.store.dispatch(queued.id, 1)!.startedAt).toBeNull()
+    await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'allow')
+    const digest = f.store.activeGrant(botId)!.digest
+    expect(f.store.dispatch(queued.id, 1)).toMatchObject({ policyDigest: digest })
+    await runDispatch(f, queued.id, 1, { text: 'Report.' })
+    expect(f.store.activation(queued.id)).toMatchObject({ status: 'done' })
   })
 })
