@@ -258,6 +258,8 @@ export class MmsProfileServices {
   readonly mcpRegistry: McpRegistry
   readonly mcpManager: McpManager
   readonly skillsRegistry: SkillsRegistry
+  /** Skill ids a bot's ask may name; refreshed when bots open. Unknown until the first discovery. */
+  private botKnownSkills: Set<string> | undefined
   readonly fileService: FileService
   readonly gitService: GitService
   readonly lineEditStats: LineEditStatsStore
@@ -626,7 +628,9 @@ export class MmsProfileServices {
       })).text,
       instructions: (bot) => botInstructions(bot),
       scheduleLabel: (when) => botScheduleLabel(when),
-      providerLabel: (instanceId) => this.botProviderLabel(instanceId)
+      providerLabel: (instanceId) => this.botProviderLabel(instanceId),
+      // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
+      knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true)
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
       const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
@@ -662,6 +666,11 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    if (this.personalBots) {
+      void this.skillsRegistry.discover()
+        .then((snapshot) => { this.botKnownSkills = new Set(snapshot.skills.map((skill) => skill.id)) })
+        .catch(() => undefined)
+    }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
