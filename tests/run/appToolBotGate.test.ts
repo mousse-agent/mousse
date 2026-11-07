@@ -8,6 +8,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import type { BotToolHost } from '../../src/mms/bots/seams'
 import { RunCounters } from '../../src/mms/harness/budget'
 import { BOT_DEFAULT_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
+import { botTurnOffers } from '../../src/shared/bots/personal/walls'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -38,6 +39,15 @@ describe('app tools under a bot’s authority (MCP)', () => {
     expect(await registry.call('ask_user', { questions: [] }, ctx())).toEqual({ text: 'This bot is not allowed to use ask_user.', isError: true })
     expect(fake.host.askUser).not.toHaveBeenCalled()
     expect((await registry.call('create_task', { description: 'fine' }, ctx())).isError).toBe(false)
+  })
+
+  it('a bot turn is told only its granted app tools are usable; a thread\'s turn every one', () => {
+    const granted = bot([...BOT_DEFAULT_APP_TOOLS])
+    expect(botTurnOffers(granted, 'escalate')).toBe(true)
+    expect(botTurnOffers(granted, 'memory_save')).toBe(true)
+    expect(botTurnOffers(granted, 'delegate_task')).toBe(false)
+    expect(botTurnOffers(granted, 'thread_read')).toBe(false)
+    expect(botTurnOffers(undefined, 'delegate_task')).toBe(true)
   })
 })
 

@@ -98,6 +98,7 @@ import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnP
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
+import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
@@ -3097,7 +3098,9 @@ export class OrchestratorService extends EventEmitter {
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
-    const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
+    // A bot's turn runs on its own instructions (`botInstructions`, in the preamble): Mousse's
+    // orchestration and applet guidance would point it at tools its grant never holds.
+    const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     return {
@@ -3110,7 +3113,7 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        sessionInstructions: turn.bot ? '' : sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
@@ -3142,6 +3145,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A bot turn may use only its granted app tools; every other one is refused if called.
+      .filter((tool) => botTurnOffers(turn.bot, tool.name))
       // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
       .filter((tool) => !unattendedRefusal(tool, turn))
       // A screenshot is refused when it cannot reach the model; the preamble does not offer it.

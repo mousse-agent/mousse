@@ -181,15 +181,17 @@ describe('bot turn setup', () => {
     const internals = orch as unknown as {
       getOrCreateSession(threadId: string): unknown
       registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: { approvals?: string; bot?: unknown } }
-      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { turnPreamble: string } }>
+      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { sessionInstructions: string; turnPreamble: string } }>
       appToolTurns: { get(runId: string): { approvals?: string } | undefined }
     }
-    const authority = { skills: new Set<string>(), time: { signal: new AbortController().signal } }
+    const authority = { skills: new Set<string>(), appTools: new Set(['escalate', 'memory_save']), time: { signal: new AbortController().signal } }
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { promptRuntime: false, userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
     expect(app.bot).toBe(authority)
     expect(app.instructions(true).turnPreamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.')).toBe(true)
     expect(internals.appToolTurns.get('run-bot')?.approvals).toBe('never')
+    // Its own instructions only: no orchestration or applet guidance about tools its grant never holds.
+    expect(app.instructions(true).sessionInstructions).toBe('')
   })
 
   it('the context pack follows the role in the turn preamble, ahead of Mousse\'s own text (Bot Phase 1 §5.3.2)', async () => {
@@ -198,7 +200,7 @@ describe('bot turn setup', () => {
       registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: unknown }
       completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ instructions(mcp: boolean): { turnPreamble: string } }>
     }
-    const authority = { skills: new Set<string>(), time: { signal: new AbortController().signal } }
+    const authority = { skills: new Set<string>(), appTools: new Set<string>(), time: { signal: new AbortController().signal } }
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-pack', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.', botPreamble: '<bot_memory>PACK-4411</bot_memory>' })
     const preamble = app.instructions(true).turnPreamble

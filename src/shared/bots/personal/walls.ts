@@ -47,6 +47,14 @@ export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, 
 const SKILL_TOOLS: ReadonlySet<string> = new Set(['list_skills', 'load_skill'])
 
 /**
+ * Whether a turn's "usable now" note may name the Mousse app tool `name`: any tool on a thread's
+ * turn, and only the granted ones (with escalate, memory and skill tools) on a bot's.
+ */
+export function botTurnOffers(bot: Pick<BotAuthority, 'appTools'> | undefined, name: string): boolean {
+  return !bot || bot.appTools.has(name)
+}
+
+/**
  * Why a bot may not run the Mousse app tool `name` with `args` (its wall in plain words), or
  * undefined when its grant holds the call. The registry checks this on every call of a bot turn.
  */
