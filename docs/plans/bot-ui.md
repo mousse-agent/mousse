@@ -13,13 +13,13 @@ The bot chat layout follows a reference image the owner shared, which matches th
 
 ## Mockups
 
-[`docs/plans/mockups/bot-ui/`](mockups/bot-ui/). Each screen is the real Mousse desktop app, built from `origin/master` at `a6e46bbe` (Mousse dark). It was captured live from the Agents tab (the former Chats tab) of an isolated copy, then edited with the Chats surface's own markup and CSS. Each file is self-contained HTML with no network use. [`source/README.md`](mockups/bot-ui/source/README.md) explains how they are made.
+Mockups 01–03 are frozen copies of the real Mousse desktop app, built from `origin/master` at `a6e46bbe` (Mousse dark). Each was captured live from the Agents tab (the former Chats tab) of an isolated copy, then edited with the Chats surface's own markup and CSS. They are generated, self-contained HTML files of about 1 MB each, so they stay with the planning thread and are not committed. The app now implements these screens. Mockup 04 and the mouse shader reference (`mockups/bot-ui/source/mice3d/`) are committed.
 
 | # | Mockup | States |
 |---|---|---|
-| 01 | [Bots in the Agents tab](mockups/bot-ui/01-bots-in-chats.html) | no bots yet; a few bots, one working |
-| 02 | [New bot](mockups/bot-ui/02-new-bot.html) | pick a look (colour, accessory, Shuffle); an optional name; write what it should do; created, and it asks for its first permission |
-| 03 | [Talking to a bot](mockups/bot-ui/03-bot-chat.html) | working; asks for something new; schedule and trigger set by asking; error; the bot menu; About this bot |
+| 01 | Bots in the Agents tab (not committed) | no bots yet; a few bots, one working |
+| 02 | New bot (not committed) | pick a look (colour, accessory, Shuffle); an optional name; write what it should do; created, and it asks for its first permission |
+| 03 | Talking to a bot (not committed) | working; asks for something new; schedule and trigger set by asking; error; the bot menu; About this bot |
 | 04 | [Bot faces](mockups/bot-ui/04-bot-faces.html) | live 3D: the New bot picker with avatars at 40 and 34 px; the six feelings; the 12 accessories |
 
 ---
@@ -116,7 +116,7 @@ Checked open PRs, issues created since 3 Nov, and PRs merged since 4 Nov (5 Nov 
 
 ## 4. Design
 
-### 4.1 Where bots live ([mockup 01](mockups/bot-ui/01-bots-in-chats.html))
+### 4.1 Where bots live (mockup 01)
 
 - The Agents tab's **Roster** section is renamed **Bots**. On master the tab is labelled Agents and Roster lists agent definitions; this plan keeps the tab name and lists the owner's bots by the face each owner picked (§4.3).
 - **+** next to Bots opens New bot (§4.2). It no longer opens Automations.
@@ -126,7 +126,7 @@ Checked open PRs, issues created since 3 Nov, and PRs merged since 4 Nov (5 Nov 
 - **Groups** stays as it is. Bots can be added to a group later (Teams UI).
 - **Agent definitions** no longer appear in this row. They stay in Automations → Agents for subagents and advanced use.
 
-### 4.2 New bot ([mockup 02](mockups/bot-ui/02-new-bot.html))
+### 4.2 New bot (mockup 02)
 
 One small dialog in the Chats dialog style (`chat-dialog`):
 
@@ -178,7 +178,7 @@ Messages in the transcript keep the idle mouse. With reduced motion turned on, t
 
 **Rendering.** The app draws the mice with one WebGL fragment shader (signed distance fields, about 20 KB, no library): one shared canvas for all visible avatars, each drawn into its own viewport, with a cache of frames per look and state so long lists cost little. Off-screen mice don't animate. The mockups use frames baked from the same shader; `source/mice3d/mice.html` is the working reference and a live demo (the same file is mockup 04).
 
-### 4.4 The bot's chat ([mockup 03](mockups/bot-ui/03-bot-chat.html))
+### 4.4 The bot's chat (mockup 03)
 
 The Chats layout, as in the reference image:
 
