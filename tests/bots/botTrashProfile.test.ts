@@ -26,9 +26,9 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
 })
 
-function profile(domains = new DomainHandlerRegistry(), profileId = randomUUID()): MmsProfileServices {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-trash-')))
-  cleanup.push(() => rmSync(home, { recursive: true, force: true }))
+function profile(domains = new DomainHandlerRegistry(), profileId = randomUUID(), at?: string): MmsProfileServices {
+  const home = at ?? realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-trash-')))
+  if (!at) cleanup.push(() => rmSync(home, { recursive: true, force: true }))
   const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
   cleanup.push(() => auth.stop())
   const services = new MmsProfileServices(
@@ -41,6 +41,29 @@ function profile(domains = new DomainHandlerRegistry(), profileId = randomUUID()
   cleanup.push(() => services.stop())
   return services
 }
+
+describe('a bot\'s threads from an earlier build', () => {
+  it('leave the thread lists once bots.db opens, though the bot never runs again', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-marks-')))
+    cleanup.push(() => rmSync(home, { recursive: true, force: true }))
+    const profileId = randomUUID()
+    const first = profile(undefined, profileId, home)
+    const store = (first as unknown as { botStore: BotStore }).botStore
+    // Made before threads were marked: listed like any other thread.
+    const thread = first.threads.ensureExecutionThread('bot:old-helper', 'Old helper')
+    const other = first.threads.createThread('Mine', undefined, undefined, { started: true })
+    expect(first.threads.getThread(thread.id)?.botOwned).toBeUndefined()
+    store.ensureRegistry('old-helper')
+    store.setHomeThread('old-helper', thread.id)
+    store.putThread({ threadId: thread.id, botId: 'old-helper', role: 'home', key: 'home' })
+    const updatedAt = first.threads.getThread(thread.id)!.updatedAt
+    await first.stop()
+    const reopened = profile(undefined, profileId, home)
+    expect(reopened.threads.getThread(thread.id)).toMatchObject({ botOwned: true, updatedAt })
+    expect(reopened.threads.getThread(other.id)?.botOwned).toBeUndefined()
+    expect(reopened.threads.listThreads().find((entry) => entry.id === thread.id)?.botOwned).toBe(true)
+  }, 60_000)
+})
 
 describe('trashing a working bot\'s thread through the profile', () => {
   it('ends the activation, stops its run, and moves the thread to the trash', async () => {

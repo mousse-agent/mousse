@@ -653,6 +653,14 @@ export class MmsProfileServices {
       return { journal, context, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
+    if (opened) {
+      try {
+        this.threads.markBotOwned(opened.store.allThreads().map((thread) => thread.threadId))
+      } catch (error) {
+        console.warn('bot threads could not be marked', error instanceof Error ? error.message : String(error))
+      }
+    }
     this.personalBots = opened?.engine ?? null
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
