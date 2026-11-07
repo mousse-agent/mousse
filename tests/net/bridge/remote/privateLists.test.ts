@@ -3,6 +3,7 @@
  * above 256 KiB, and that it is a document the display stream can carry.
  */
 import { describe, expect, it } from 'vitest'
+import { MmsRemoteBackend } from '../../../../src/mms/bridge/remote/MmsBackend'
 import { MmsListsSource } from '../../../../src/mms/bridge/remote/MmsListsSource'
 import { REMOTE_LISTS_CACHE_MAX_BYTES } from '../../../../src/mms/net/store/remoteLists'
 import {
@@ -108,6 +109,29 @@ describe('the snapshot an owner sends', () => {
     // A small list is never cut, however old its archive.
     const small = new MmsListsSource(services(threads.slice(0, 50)), undefined, { private: true })
     expect(small.snapshot().threads).toHaveLength(50)
+  })
+
+  it('lists no personal bot thread, nor its state, for a phone or another computer, and reads none', async () => {
+    const shown = row(1)
+    const bot = row(2, { botOwned: true, name: 'Alpha bot' })
+    const fake = {
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => [shown, bot] },
+      orchestrator: { getTurnSnapshot: () => ({}), getTurnState: () => ({}), getMessages: () => [], listQueue: () => [], isTurnActive: () => false, isActiveTurnRunning: () => false },
+      threadRuntimes: { getActivitySnapshot: () => ({ [shown.id]: 'processing', [bot.id]: 'processing' }) },
+      questions: { listPendingForThread: () => [] },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
+    } as never
+    for (const options of [{}, { private: true }]) {
+      const snapshot = new MmsListsSource(fake, undefined, options).snapshot()
+      expect(snapshot.threads.map((thread) => thread.id)).toEqual([shown.id])
+      expect(Object.keys(snapshot.status)).toEqual([shown.id])
+    }
+    const backend = new MmsRemoteBackend(fake)
+    expect(backend.snapshot(shown.id)).toMatchObject({ thread: { id: shown.id } })
+    expect(() => backend.snapshot(bot.id)).toThrow(expect.objectContaining({ code: 'stream_unknown' }))
+    await expect(backend.execute('threads.get', { threadId: bot.id })).rejects.toMatchObject({ code: 'stream_unknown' })
+    await expect(backend.stop(bot.id)).rejects.toMatchObject({ code: 'stream_unknown' })
   })
 
   it('keeps a phone’s lists within the wire bound as before: a phone is not known to parse more', () => {
