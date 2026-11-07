@@ -416,6 +416,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         await this.host.trashThread(thread.threadId)
       }
     }
+    // Its definition and files first: a failure leaves the purge unfinished, and the next sweep tries again.
+    this.host.definitions.remove(botId)
+    rmSync(this.filesFolder(botId), { recursive: true, force: true })
     this.store.db.transaction(() => {
       this.store.deleteMessages(botId)
       this.store.deleteSchedules(botId)
@@ -425,12 +428,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.markCleaned(botId)
     })
     for (const thread of threads) this.known.delete(thread.threadId)
-    try {
-      this.host.definitions.remove(botId)
-    } catch (error) {
-      console.warn('a deleted bot\'s definition could not be removed', { botId, error: error instanceof Error ? error.message : String(error) })
-    }
-    rmSync(this.filesFolder(botId), { recursive: true, force: true })
     console.info('a deleted bot was purged; its run history and runtime session files are kept by their own stores', { botId })
   }
 

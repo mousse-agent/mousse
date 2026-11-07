@@ -106,6 +106,20 @@ describe('the 30-day purge', () => {
     expect(f.store.deletedRegistry()).toEqual([])
   })
 
+  it('a purge is finished only once its definition and files are gone', async () => {
+    const { botId } = await workedBot()
+    await f.bots.service.delete(botId)
+    const remove = f.host.definitions.remove.bind(f.host.definitions)
+    f.host.definitions.remove = () => { throw new Error('busy') }
+    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([])
+    expect(f.store.deletedRegistry().map((row) => row.botId)).toEqual([botId])
+    f.host.definitions.remove = remove
+    expect(await f.bots.sweepDeleted(f.clock.now + 31 * DAY)).toEqual([botId])
+    expect(f.store.deletedRegistry()).toEqual([])
+    expect(f.host.definitions.get(botId)).toBeUndefined()
+    expect(existsSync(f.bots.filesFolder(botId))).toBe(false)
+  })
+
   it('the sweep runs from the scheduler tick, once a day', async () => {
     await f.bots.reconcileOnStartup()
     const t1 = f.clock.now
