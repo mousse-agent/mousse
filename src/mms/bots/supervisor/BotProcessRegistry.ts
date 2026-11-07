@@ -247,7 +247,7 @@ export class BotProcessRegistry implements BotProcessSupervision {
       if (journal?.exitAt !== undefined) ended = { exitAt: journal.exitAt }
       // Its runtime ends the group as the turn settles; what is still there after the grace is ended here.
       else if (await waitGone(proc.pgid, this.now() + (this.options.settleGraceMs ?? 2_000), scope)) ended = { exitAt: this.now() }
-      else ended = await endGroup(proc.pgid, scope)
+      else ended = await this.endVerified(proc, scope)
       if ('stillAlive' in ended) {
         // Its supervisor keeps its deadline; `exit_at` stays empty, and the next start tries again.
         stillAlive = true
@@ -261,6 +261,19 @@ export class BotProcessRegistry implements BotProcessSupervision {
     const at = exitAt || this.now()
     this.options.records.setExit(dispatchId, at)
     return { exitAt: new Date(at).toISOString() }
+  }
+
+  /**
+   * Ends the group of `proc` only when it is verified as the one recorded, as `reconcile` does. The
+   * leader's pid now running another program means the recorded group is gone (a pid is not reused
+   * while its group has members). Without a recorded start time (Windows records none) nothing is
+   * signalled by number alone: the dispatch stays unfinished and its supervisor keeps the deadline.
+   */
+  private async endVerified(proc: SupervisedProcess, scope: EndGroupOptions): Promise<{ exitAt: number } | { stillAlive: true }> {
+    if (!proc.token) return { stillAlive: true }
+    const current = (this.options.token ?? readStartTime)(proc.pid)
+    if (current !== undefined && current !== proc.token) return { exitAt: this.now() }
+    return endGroup(proc.pgid, scope)
   }
 
   async reconcile(): Promise<Array<{ dispatchId: string; exitAt?: string }>> {
