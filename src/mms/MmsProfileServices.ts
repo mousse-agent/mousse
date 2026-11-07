@@ -567,7 +567,8 @@ export class MmsProfileServices {
     const botModels = createBotModelResolver({
       snapshots: () => harness.instances.snapshots({ kind: 'device' }),
       models: (instanceId) => harness.catalog.models(instanceId, { kind: 'device' }),
-      hold: { canHoldBot: (instanceId, policy, model) => harness.canHoldBot(instanceId, policy, model) }
+      hold: { canHoldBot: (instanceId, policy, model) => harness.canHoldBot(instanceId, policy, model) },
+      refresh: (instanceId) => harness.refreshPolicyFacts(instanceId)
     })
     // Activity chips (§5.8): live as `bots.activity` through the engine, rolled up into each message.
     const botActivity = createBotActivitySink({

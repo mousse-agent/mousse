@@ -122,4 +122,21 @@ describe('BotModelResolver', () => {
     expect(await resolver(out).resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ problem: 'no_provider', instanceId: 'claude:bots' })
     expect(await resolver([]).resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toEqual({ problem: 'no_provider' })
   })
+
+  it('reads the enabled instances\' policy facts again before the hold checks', async () => {
+    // A locked entry holds the bot only on a fresh reading, as `canHoldBot` does with a stale one.
+    const fresh = new Set<string>()
+    const freshHold: BotRuntimeHold = { canHoldBot: (instanceId) => (fresh.has(instanceId) ? { ok: true } : { ok: false, error: { code: 'policy_unenforceable', message: 'stale', missing: ['toolControl'] } }) }
+    const refreshed: string[] = []
+    const chooser = createBotModelResolver({
+      snapshots: async () => [snapshot('claude:bots', { driver: 'claude', auth: { credential: 'subscription' } }), snapshot('pi:off', { enabled: false })],
+      models: (id) => MODELS[id] ?? [],
+      hold: freshHold,
+      refresh: async (instanceId) => { refreshed.push(instanceId); fresh.add(instanceId) },
+      catalog: () => catalog,
+      now: () => clock
+    })
+    expect(await chooser.resolve({ botId: 'b1', choice: { mode: 'auto', depth: 'normal' }, policy })).toMatchObject({ selection: { instanceId: 'claude:bots' } })
+    expect(refreshed).toEqual(['claude:bots'])
+  })
 })

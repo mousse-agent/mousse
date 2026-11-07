@@ -20,6 +20,12 @@ export interface BotModelResolverDeps {
   models(instanceId: string): readonly InstanceModel[]
   /** `gateway.canHoldBot` (WP1). */
   hold: BotRuntimeHold
+  /**
+   * Reads an instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). A locked Claude
+   * entry trusts its last "no organisation policy" reading only briefly, so without a fresh reading
+   * `canHoldBot` refuses it and a signed-in runner is skipped.
+   */
+  refresh?(instanceId: string): Promise<void>
   /** Default: the bundled catalog for this Mousse (`modelCatalog()`). */
   catalog?(): ModelCatalog
   now?(): Date
@@ -33,6 +39,9 @@ export class BotModelChooser implements BotModelResolver {
   async resolve(input: { botId: string; choice: BotModelChoice; override?: BotModelChoice; policy: RunPolicy }): Promise<BotModelChoiceResult> {
     const now = this.now()
     const snapshots = await this.deps.snapshots()
+    // The hold checks below decide on the instances' policy facts: read them now, as every other bot check point does.
+    const refresh = this.deps.refresh
+    if (refresh) await Promise.all(snapshots.filter((snapshot) => snapshot.enabled.effective).map((snapshot) => refresh(snapshot.instanceId).catch(() => undefined)))
     const candidates = botModelCandidates({
       snapshots,
       models: (instanceId) => this.deps.models(instanceId),
