@@ -327,11 +327,12 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
+        // Only the owner names a model, in the chat: a run never switches on its own.
+        if (call.lane !== 'chat') return error(OWNER_ONLY)
         const model = typeof args.model === 'string' ? args.model.trim().slice(0, 100) : ''
         if (!model) return error('use_model needs the model, as the owner said it.')
         const scope = args.scope === 'always' ? 'always' : args.scope === 'now' ? 'now' : undefined
         if (!scope) return error('scope is now or always.')
-        if (scope === 'always' && call.lane !== 'chat') return error(OWNER_ONLY)
         const available = call.deps.models ? await call.deps.models.namedAvailable(model) : false
         if (!available) return json({ ok: false, reason: 'That model is not available here. You stay on automatic; tell the owner plainly, without naming other models.' })
         try {

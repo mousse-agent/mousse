@@ -13,6 +13,7 @@ import {
   estimateTokens,
   memoryGauge,
   memoryRef,
+  memoryToolOf,
   parseMemoryRef,
   type BotJournalKind,
   type BotJournalWho,
@@ -31,6 +32,7 @@ import {
 } from '../../../shared/bots/personal/memory'
 import type { BotJournalInput, BotStoreTx } from '../seams'
 import { type ChatSummaryState, foldChatSummary } from './chatSummary'
+import { shortChipText } from '../../../shared/bots/personal/chips'
 import { guardMemoryText, relativeDateRefusal } from './guard'
 import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
 
@@ -680,13 +682,16 @@ export class BotMemoryStore {
         redacted.push(`j${row.seq}`)
         redactedSeqs.add(row.seq)
       }
+      // Rows that hold `text`: the same words inside another row (the owner's message in the thread's
+      // prompt row, with its attached files or a run's report line). Short texts like "yes" are not copies.
+      const copiesOf = (text: string, except?: number): BotJournalRow[] => text.trim().length < MIN_COPY_CHARS ? []
+        : this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND seq <> ? AND redacted_at IS NULL AND kind <> 'redaction' AND instr(text, ?) > 0`, botId, except ?? 0, text.trim())
+          .map(journalRowOf)
       // The cited rows and their copies first: a memory citing any of them goes too.
       const cited = new Set(seqs)
       for (const seq of seqs) {
         const row = this.journalRow(botId, seq)!
-        // Copies of the same words (the owner's message as the thread's prompt row); short texts like "yes" are not copies.
-        const copies = row.redactedAt || row.text.trim().length < MIN_COPY_CHARS ? []
-          : this.all('SELECT * FROM bot_journal WHERE bot_id = ? AND text = ? AND seq <> ? AND redacted_at IS NULL', botId, row.text, seq).map(journalRowOf)
+        const copies = row.redactedAt ? [] : copiesOf(row.text, seq)
         redact(row)
         copies.forEach(redact)
         for (const copy of copies) cited.add(copy.seq)
@@ -694,9 +699,17 @@ export class BotMemoryStore {
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
       for (const id of ids) {
+        // Every version's words go from wherever they were copied: rows that hold them (a memory call
+        // captured with its text by an older build) and the chip of the message that saved them.
+        const texts = this.all('SELECT text FROM bot_memories WHERE bot_id = ? AND id = ? AND text IS NOT NULL', botId, id).map((row) => row.text as string)
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
+        for (const text of texts) {
+          copiesOf(text).forEach(redact)
+          this.memoryCallsOf(botId, id, text).forEach(redact)
+          this.dropChip(botId, shortChipText(text))
+        }
       }
       this.dropForgotten(botId, redactedSeqs)
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
@@ -713,6 +726,47 @@ export class BotMemoryStore {
       }, at)
       return { ...(memIds.length ? { forgotten: memIds.join(', ') } : {}), redacted }
     })
+  }
+
+  /**
+   * Captured memory calls about a forgotten entry: a save of its text, or a call naming it
+   * (`replaces`, `id`). Capture keeps only the refs of a memory call now; an older build kept its input.
+   */
+  private memoryCallsOf(botId: string, id: string, text: string): BotJournalRow[] {
+    const hash = memoryTextHash(text)
+    const named = (value: unknown) => typeof value === 'string' && parseMemoryRef(value)?.id === id
+    return this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'tool_call' AND redacted_at IS NULL AND text LIKE '%memory\\_%' ESCAPE '\\'", botId)
+      .map(journalRowOf)
+      .filter((row) => {
+        if (!memoryToolOf(typeof row.json?.tool === 'string' ? row.json.tool : '')) return false
+        const input = row.json?.input && typeof row.json.input === 'object' ? row.json.input as Record<string, unknown> : {}
+        if (typeof input.text === 'string' && memoryTextHash(input.text) === hash) return true
+        return named(input.replaces) || named(input.id) || (Array.isArray(input.refs) && input.refs.some(named))
+      })
+  }
+
+  /**
+   * The "remembered · <text>" chip of a forgotten entry becomes "remembered something", on its chat
+   * row (`bot_messages.chips_json`) and on that row's journal copy (`bm:<id>`).
+   */
+  private dropChip(botId: string, highlight: string): void {
+    const scrub = (chips: unknown): unknown[] | undefined => {
+      if (!Array.isArray(chips)) return undefined
+      let changed = false
+      const next = chips.map((chip) => {
+        const value = chip as { icon?: unknown; highlight?: unknown }
+        if (value?.icon !== 'memory' || value.highlight !== highlight) return chip
+        changed = true
+        return { icon: 'memory', text: 'remembered something' }
+      })
+      return changed ? next : undefined
+    }
+    for (const row of this.all("SELECT seq, json FROM bot_journal WHERE bot_id = ? AND source_key LIKE 'bm:%' AND json LIKE '%\"memory\"%'", botId)) {
+      const json = parseJson(row.json)
+      const chips = scrub(json?.chips)
+      if (json && chips) this.run('UPDATE bot_journal SET json = ? WHERE seq = ?', JSON.stringify({ ...json, chips }), num(row.seq)!)
+    }
+    scrubMessageChips(this.db, botId, scrub)
   }
 
   /**
@@ -838,6 +892,21 @@ export class BotMemoryStore {
   /** Every memory version of a bot, in write order (export). */
   allVersions(botId: string): BotMemoryVersion[] {
     return this.all('SELECT * FROM bot_memories WHERE bot_id = ? ORDER BY row_id', botId).map(versionOf)
+  }
+}
+
+/** Rewrites the chips of a bot's chat rows that `scrub` changes (when `bot_messages` exists). */
+function scrubMessageChips(tx: BotStoreTx, botId: string, scrub: (chips: unknown) => unknown[] | undefined): void {
+  if (!tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'chips_json'").get()) return
+  for (const row of tx.statement("SELECT id, chips_json FROM bot_messages WHERE bot_id = ? AND chips_json LIKE '%\"memory\"%'").all(botId) as Row[]) {
+    let chips: unknown
+    try {
+      chips = JSON.parse(row.chips_json as string)
+    } catch {
+      continue
+    }
+    const next = scrub(chips)
+    if (next) tx.statement('UPDATE bot_messages SET chips_json = ? WHERE id = ? AND bot_id = ?').run(JSON.stringify(next), row.id as string, botId)
   }
 }
 

@@ -621,9 +621,10 @@ export class BotStore {
       : this.all('SELECT * FROM bot_registry WHERE deleted_at IS NOT NULL AND cleaned_at IS NULL AND deleted_at <= ? ORDER BY deleted_at, bot_id', before)).map(registryOf)
   }
 
-  /** Pause (`reason`) or resume (null) a bot's schedules; a resume also clears the failure streak. */
-  setPaused(botId: string, reason: BotPauseReason | null, until?: string): void {
-    if (reason === null) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL, failure_streak = 0 WHERE bot_id = ?', botId)
+  /** Pause (`reason`) or resume (null) a bot's schedules; a resume also clears the failure streak, unless `keepStreak`. */
+  setPaused(botId: string, reason: BotPauseReason | null, until?: string, options: { keepStreak?: boolean } = {}): void {
+    if (reason === null && options.keepStreak) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL WHERE bot_id = ?', botId)
+    else if (reason === null) this.run('UPDATE bot_registry SET paused_reason = NULL, paused_until = NULL, failure_streak = 0 WHERE bot_id = ?', botId)
     else this.run('UPDATE bot_registry SET paused_reason = ?, paused_until = ? WHERE bot_id = ?', reason, until ?? null, botId)
   }
 
@@ -912,6 +913,12 @@ export class BotStore {
   }
 
   /** The walls an activation hit (a run's refused asks never count: they don't stop it). */
+  /** The run asks (`mode = 'ask'`) a bot wrote: of one activation, or since a time. */
+  countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
+      botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
+  }
+
   countEscalations(activationId: string): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
   }
@@ -1027,6 +1034,24 @@ export class BotStore {
     return this.all('SELECT * FROM bot_threads').map((row) => ({ threadId: row.thread_id as string, botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole, key: row.key as string, activationId: str(row.activation_id) }))
   }
 
+  /**
+   * The threads capture copies at startup (bot-context.md §4): those of bots not deleted (a
+   * deleted bot's memory is not added to, and a purge may have removed it), each with the
+   * activation and lane of the latest dispatch that ran on it (a home or context thread serves many).
+   */
+  captureThreads(): Array<{ threadId: string; botId: string; role: 'home' | BotThreadRole; activationId: string | null; lastActivation: { id: string; lane: BotLane } | null }> {
+    return this.all(`SELECT t.*, a.id AS last_id, a.lane AS last_lane FROM bot_threads t
+      JOIN bot_registry r ON r.bot_id = t.bot_id AND r.deleted_at IS NULL
+      LEFT JOIN bot_activations a ON a.id = (SELECT d.activation_id FROM bot_dispatches d WHERE d.thread_id = t.thread_id ORDER BY d.rowid DESC LIMIT 1)`)
+      .map((row) => ({
+        threadId: row.thread_id as string,
+        botId: row.bot_id as string,
+        role: row.role as 'home' | BotThreadRole,
+        activationId: str(row.activation_id),
+        lastActivation: typeof row.last_id === 'string' ? { id: row.last_id, lane: row.last_lane === 'chat' ? 'chat' : 'run' } : null
+      }))
+  }
+
   dropThread(threadId: string): void {
     this.run('DELETE FROM bot_threads WHERE thread_id = ?', threadId)
   }
@@ -1109,6 +1134,9 @@ export class BotStore {
 
   /** Moves a bot's unfinished activations from one grant to its wider successor ("Allow for this bot"). */
   regrant(botId: string, fromDigest: string, toDigest: string, revision: string): void {
+    // Their dispatches that have not started move too: `prepare` checks the dispatch's digest.
+    this.run(`UPDATE bot_dispatches SET policy_digest = ? WHERE policy_digest = ? AND started_at IS NULL AND activation_id IN
+      (SELECT id FROM bot_activations WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled'))`, toDigest, fromDigest, botId, fromDigest)
     this.run("UPDATE bot_activations SET grant_digest = ?, revision = ? WHERE bot_id = ? AND grant_digest = ? AND status NOT IN ('done', 'failed', 'cancelled')", toDigest, revision, botId, fromDigest)
   }
 

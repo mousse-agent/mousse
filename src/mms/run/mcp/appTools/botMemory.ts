@@ -114,7 +114,8 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
     const activation = host.activationOf(ctx.caller.threadId)
     if (!activation) return 'Only a bot has a memory.'
     if (ctx.turn.bot && ctx.turn.bot.activationId !== activation.activationId) return 'This turn does not belong to that bot.'
-    return activation
+    // A consult (a context thread) has a run's memory rights, even inside a chat: run notes only, no forget.
+    return { botId: activation.botId, activationId: activation.activationId, lane: activation.role === 'context' ? 'run' : activation.lane }
   }
 
   const report = (ctx: ToolCallContext, activation: { botId: string; activationId: string }, tool: BotMemoryTool, result: unknown) => {

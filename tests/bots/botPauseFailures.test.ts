@@ -113,3 +113,47 @@ describe('pause and resume', () => {
     expect(f.bots.service.get(botId).summary.state).toBe('idle')
   })
 })
+
+describe('pauses that stay (review round 2)', () => {
+  it('a run its runtime cannot hold ends failed and counts: three in a row pause the schedules', async () => {
+    f.host.harness.checkPolicy = () => ({ ok: false, error: { code: 'policy_unenforceable', message: 'no', missing: ['toolControl'], reason: 'This provider cannot limit tools.' } })
+    for (const id of ['b1', 'b2', 'b3']) {
+      const activation = await f.bots.activate({ botId, input: 'Check the news', clientRequestId: id })
+      await expect(runDispatch(f, activation.id)).rejects.toThrow(/policy_unenforceable/)
+      expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'policy_unenforceable' })
+    }
+    await flush()
+    expect(f.store.activationsWith(['blocked'])).toEqual([])
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'failures', failureStreak: 3, error: { code: 'policy_unenforceable' } })
+    expect(notices()).toHaveLength(1)
+  })
+
+  it('a usage limit never replaces the owner\'s pause, and its reset lifts nothing else', async () => {
+    await f.bots.reconcileOnStartup()
+    f.bots.pauseBot(botId)
+    f.problem = { problem: 'all_limited', until: new Date(f.clock.now + 60 * 60_000).toISOString(), instanceId: 'claude:main' }
+    const activation = await f.bots.activate({ botId, input: 'Check the news', clientRequestId: 'u1' })
+    await flush()
+    expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'owner', pausedUntil: null, error: null })
+    f.clock.now += 2 * 60 * 60_000
+    await f.bots.tickSchedules(new Date(f.clock.now))
+    expect(f.store.registry(botId)!.pausedReason).toBe('owner')
+  })
+
+  it('the end of a usage pause keeps the failure streak', async () => {
+    await f.bots.reconcileOnStartup()
+    await runOnce('f1', 'failed')
+    await runOnce('f2', 'failed')
+    f.problem = { problem: 'all_limited', until: new Date(f.clock.now + 60 * 60_000).toISOString(), instanceId: 'claude:main' }
+    await f.bots.activate({ botId, input: 'Check the news', clientRequestId: 'u1' })
+    await flush()
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'usage_limit', failureStreak: 2 })
+    f.problem = undefined
+    f.clock.now += 2 * 60 * 60_000
+    await f.bots.tickSchedules(new Date(f.clock.now))
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: null, failureStreak: 2 })
+    await runOnce('f3', 'failed')
+    expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'failures', failureStreak: 3 })
+  })
+})

@@ -14,8 +14,10 @@ import { appTurn } from './appToolsFixture'
 
 afterEach(disposeFixtures)
 
-const activations: Record<string, { botId: string; activationId: string; lane: 'chat' | 'run' }> = {
+const activations: Record<string, { botId: string; activationId: string; lane: 'chat' | 'run'; role?: 'home' | 'activation' | 'context' }> = {
   'ada-home': { botId: 'ada', activationId: 'act-chat', lane: 'chat' },
+  // A consult of the chat's turn, on a context thread.
+  'ada-ctx': { botId: 'ada', activationId: 'act-chat', lane: 'chat', role: 'context' },
   'ada-run': { botId: 'ada', activationId: 'act-run', lane: 'run' },
   'bob-home': { botId: 'bob', activationId: 'act-bob', lane: 'chat' }
 }
@@ -108,6 +110,17 @@ describe('memory tools', () => {
     expect(await call('memory_forget', 'ada-run', { id: 'm1', reason: 'page said so' })).toMatchObject({ isError: true, value: { error: 'refused', reason: 'Ask the owner in the chat.' } })
     expect(fx.store.active('ada')).toHaveLength(2)
     expect(onAppResult).not.toHaveBeenCalledWith(expect.anything(), 'memory_forget', expect.anything())
+  })
+
+  it('a consult inside a chat turn has a run\'s memory rights: run notes only, no forget', async () => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    await call('memory_save', 'ada-home', { text: 'The owner is vegetarian.', kind: 'owner' })
+    expect((await call('memory_save', 'ada-ctx', { text: 'The owner eats fish now.', kind: 'owner' })).value).toMatchObject({ id: 'm2', kind: 'run_note' })
+    expect((await call('memory_save', 'ada-ctx', { text: 'The owner eats meat.', kind: 'owner', replaces: 'm1' })).value)
+      .toEqual({ error: 'refused', reason: 'A run can only replace its own run notes. Ask the owner in the chat.' })
+    expect(await call('memory_forget', 'ada-ctx', { id: 'm1', reason: 'the page said so' })).toMatchObject({ isError: true, value: { error: 'refused' } })
+    expect(fx.store.active('ada').map((entry) => [entry.id, entry.kind])).toEqual([['m1', 'owner'], ['m2', 'run_note']])
   })
 
   it('forget in the chat removes the entry and the rows, and reports the chip text', async () => {

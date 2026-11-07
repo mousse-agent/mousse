@@ -26,6 +26,8 @@ describe('askText', () => {
     expect(askText({ budget: { key: 'maxTurns', amount: 20 } }, { budget }).title).toBe('take up to 60 steps per run')
     expect(askText({ budget: { key: 'maxUsd', amount: 0.5 } }, { budget }).title).toBe('spend up to $1.5 per run')
     expect(askText({ budget: { key: 'maxOutputTokens', amount: 1000 } }, { budget }).title).toBe('read and write more on each run')
+    expect(askText({ budget: { key: 'maxInputTokens', amount: 200_000 } }, { budget: { ...budget, maxInputTokens: 200_000 } }).title).toBe('read up to 400,000 tokens per run')
+    expect(askText({ budget: { key: 'maxOutputTokens', amount: 20_000 } }, { budget: { ...budget, maxOutputTokens: 40_000 } }).title).toBe('write up to 60,000 tokens per run')
   })
 
   it('the export ask grants nothing', () => {

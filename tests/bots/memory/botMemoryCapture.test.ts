@@ -181,3 +181,66 @@ describe('crash catch-up', () => {
     expect(fx.store.search('ada', { query: 'deeper' })).toEqual([])
   })
 })
+
+describe('review round 2', () => {
+  it('a memory call is copied by its refs only: no saved text, query or reason, and no result', async () => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    t.data.set('home', [
+      toolCall('c1', 'mcp__mousse__memory_save', { text: 'The owner\'s sister is called Maria Lopez.', kind: 'owner', replaces: 'm3v2' }, '{"id":"m3","version":3}'),
+      toolCall('c2', 'memory_forget', { id: 'm4', refs: ['j12', 'not a ref'], reason: 'Forget that Maria Lopez is my sister' }, '{"forgotten":"m4"}'),
+      toolCall('c3', 'memory_search', { query: 'Maria Lopez sister' }, '{"hits":[{"snippet":"Maria Lopez"}]}')
+    ])
+    await journal.syncThread({ botId: 'ada', threadId: 'home', lane: 'chat', activationId: 'act-1' })
+    expect(kinds(fx)).toEqual([
+      ['tool_call', 'bot', 'memory_save m3v2'],
+      ['tool_call', 'bot', 'memory_forget m4 j12'],
+      ['tool_call', 'bot', 'memory_search']
+    ])
+    expect(JSON.stringify(fx.store.journal('ada'))).not.toContain('Maria')
+  })
+
+  it('catch-up goes on past a thread it cannot copy, and returns the bots whose journal failed', async () => {
+    const fx = memoryFixture()
+    const full = new BotMemoryStore({
+      db: {
+        inTransaction: false,
+        transaction: (work) => fx.db.transaction(work),
+        statement: (sql) => {
+          if (sql.startsWith('INSERT INTO bot_journal(') && full.failing) throw new Error('database or disk is full')
+          return fx.db.statement(sql)
+        }
+      },
+      checkIndexes: false
+    }) as BotMemoryStore & { failing?: boolean }
+    const logged: string[] = []
+    const data: Record<string, ChatMessage[]> = { 'ada-home': [assistant('a1', 'Ada here')], 'bob-home': [assistant('b1', 'Bob here')] }
+    const journal = createBotJournal({
+      store: full,
+      readThread: (threadId) => {
+        full.failing = threadId === 'ada-home'
+        return { messages: data[threadId] ?? [] }
+      },
+      listThreads: () => [{ botId: 'ada', threadId: 'ada-home', lane: 'chat' }, { botId: 'bob', threadId: 'bob-home', lane: 'chat' }],
+      log: (message) => logged.push(message)
+    })
+    await expect(journal.catchUp()).resolves.toEqual({ failedBots: ['ada'] })
+    expect(kinds(fx, 'bob')).toEqual([['bot_msg', 'bot', 'Bob here']])
+    expect(kinds(fx, 'ada')).toEqual([])
+    expect(logged).toEqual(['bot memory: thread ada-home could not be caught up'])
+  })
+
+  it('a home or context thread\'s new rows belong to the latest dispatch that ran there', () => {
+    expect(botThreadsForCatchUp([
+      { threadId: 'home', botId: 'ada', role: 'home', activationId: null, lastActivation: { id: 'act-chat', lane: 'chat' } },
+      { threadId: 'ctx', botId: 'ada', role: 'context', activationId: null, lastActivation: { id: 'act-chat', lane: 'chat' } },
+      { threadId: 'ctx-2', botId: 'ada', role: 'context', activationId: null, lastActivation: null },
+      { threadId: 'run-1', botId: 'ada', role: 'activation', activationId: 'act-1', lastActivation: { id: 'act-1', lane: 'run' } }
+    ])).toEqual([
+      { botId: 'ada', threadId: 'home', lane: 'chat', activationId: 'act-chat' },
+      { botId: 'ada', threadId: 'ctx', lane: 'chat', activationId: 'act-chat' },
+      { botId: 'ada', threadId: 'ctx-2', lane: 'run', activationId: null },
+      { botId: 'ada', threadId: 'run-1', lane: 'run', activationId: 'act-1' }
+    ])
+  })
+})

@@ -46,8 +46,11 @@ export interface BotRuntimeHold {
 
 /** The engine's side of the bot app tools. WP2 implements; WP3's and WP6's app tools call. */
 export interface BotToolHost {
-  /** The bot activation a thread's turn belongs to. Lane and bot always come from here, never from tool arguments. */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane } | undefined
+  /**
+   * The bot activation a thread's turn belongs to. Lane and bot always come from here, never from
+   * tool arguments; `role` is the calling thread's (a consult calls from a `context` thread).
+   */
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' } | undefined
   schedules: {
     add(botId: string, s: { when: BotSchedule['when']; prompt: string }): { scheduleId: string; label: string }
     remove(botId: string, scheduleId: string): boolean
@@ -118,8 +121,11 @@ export interface BotJournal {
   appendInTx(tx: BotStoreTx, row: BotJournalInput): void
   /** Copies new assistant and tool rows of one bot thread (crash-safe through cursors; idempotent). */
   syncThread(input: { botId: string; threadId: string; lane: BotLane; activationId: string }): Promise<void>
-  /** At daemon start, for every bot thread, before `BotScheduler` starts or any activation is admitted. */
-  catchUp(): Promise<void>
+  /**
+   * At daemon start, for every bot thread, before `BotScheduler` starts or any activation is
+   * admitted. `failedBots`: bots whose journal could not be written (the engine marks them stuck).
+   */
+  catchUp(): Promise<void | { failedBots: string[] }>
 }
 
 /** Owner-side memory operations. WP6 implements; the `bots.memory.*` handlers and the engine's purge call it. */
