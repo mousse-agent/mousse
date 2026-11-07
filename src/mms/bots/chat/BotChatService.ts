@@ -27,10 +27,12 @@ const FILLER = new Set([
 
 const titleCase = (words: readonly string[]): string => words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ')
 
-/** A name from the description alone: its first three meaningful words, in title case. */
+/** A name from the description alone: its first three different meaningful words, in title case. */
 export function fallbackBotName(description: string): string {
   const words = description.split(/[^\p{L}\p{N}'-]+/u).map((word) => word.replace(/^['-]+|['-]+$/g, '')).filter((word) => word && !FILLER.has(word.toLowerCase()))
-  return titleCase(words.slice(0, 3)).slice(0, MAX_BOT_NAME_CHARS) || 'New Bot'
+  // "the notes in my Notes folder" says "Notes" once.
+  const distinct = words.filter((word, at) => words.findIndex((other) => other.toLowerCase() === word.toLowerCase()) === at)
+  return titleCase(distinct.slice(0, 3)).slice(0, MAX_BOT_NAME_CHARS) || 'New Bot'
 }
 
 /** A model's naming answer as a name: its first line, without quotes or a trailing stop, in title case, at most four words. */

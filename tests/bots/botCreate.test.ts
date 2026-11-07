@@ -107,5 +107,6 @@ describe('naming helpers', () => {
     expect(cleanBotName('one two three four five')).toBeUndefined()
     expect(fallbackBotName('Every morning at 8, give me three AI headlines')).toBe('Morning 8 Give')
     expect(fallbackBotName('the a an')).toBe('New Bot')
+    expect(fallbackBotName('Keep the notes in my Notes folder tidy')).toBe('Keep Notes Folder')
   })
 })
