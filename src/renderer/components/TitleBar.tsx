@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
-import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen, Search } from '../lib/icons'
+import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
-import { openPalette } from '../commands/paletteActions'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
@@ -60,12 +59,11 @@ export function TitleBar() {
   useEffect(() => {
     void window.mousse?.app?.setAttentionCount?.(needsMeCount)?.catch(() => undefined)
   }, [needsMeCount])
-  // In the Chats tab, New and Search act on agent chats.
+  // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
   const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMeCount)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
-  const searchTitle = useShortcutTitle('Search threads', 'threads.search')
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')
   // A disabled button explains why instead of offering its key.
   const sideCardTitle = sideCardUnavailable ? sideCardButtonTitle(sideCardUnavailable) : detailsTitle
@@ -124,16 +122,6 @@ export function TitleBar() {
               onClick={() => {
                 if (chatsMode) useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })
                 else void createAndSelectThread()
-              }}
-            />
-            <IconButton
-              icon={Search}
-              label={chatsMode ? 'Search chats' : 'Search threads'}
-              title={chatsMode ? 'Search chats' : searchTitle}
-              variant="titlebar"
-              onClick={() => {
-                if (chatsMode) useChatsStore.setState({ searchOpen: true })
-                else openPalette('messages')
               }}
             />
           </div>

@@ -89,7 +89,7 @@
   color: var(--text-primary);
 }
 
-/* Projects · Threads · Agents, three equal segments that never change width, then Add project. */
+/* Projects · Threads · Chats, three equal segments, then Add project on the Projects tab only. */
 .threads-sidebar-tabs-row {
   display: flex;
   align-items: center;
@@ -174,7 +174,7 @@
 }
 
 /* As tall as its rows, and no taller: the footer comes right after it. It shrinks and scrolls once the rows
-   outgrow the sidebar. The Agents tab has no footer, so there it fills the sidebar. */
+   outgrow the sidebar. The Chats tab has no footer, so there it fills the sidebar. */
 .threads-sidebar-scroll {
   flex: 0 1 auto;
   min-height: 0;
@@ -1022,7 +1022,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-device-detail { font-size: 11px; }
 
 /* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
-   width, so switching tabs moves nothing; the other two show their icons, with their names in the tooltips.
+   width, so switching tabs does not resize it; the other two show their icons, with their names in the tooltips.
    A label is shown whole or not at all. */
 @container threads-sidebar (max-width: 319px) {
   .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
