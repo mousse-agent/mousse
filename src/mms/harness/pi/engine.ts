@@ -1422,6 +1422,13 @@ export class PiRpcEngine implements ProviderAdapter {
       builtins = builtins.filter((name) => allowed.has(name))
       tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
     }
+    // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
+    // as on the locked Claude turn (`escalate` is how it asks). Shell has no proven sandbox on Pi, so
+    // it is never offered.
+    if (host.bot) {
+      const granted = new Set([...host.bot.tools].filter((tool) => tool !== 'shell').flatMap((tool) => PI_NATIVE_TOOLS[tool] ?? []))
+      builtins = builtins.filter((name) => granted.has(name))
+    }
     const turn = new PiTurn(key, host.bridge?.turnToken ?? key, input, sink, ctl, host, tools, builtins)
     thread.turn = turn
     starting.turn = turn

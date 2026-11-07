@@ -83,8 +83,8 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
     for (const event of results) expect(String(event.response)).not.toContain('outside-secret')
     expect(String(results[1].response)).toContain('This bot is not allowed to read')
     expect(String(results[2].response)).toContain('This bot is not allowed to change')
-    // `edit` was never granted.
-    expect(String(results[4].response)).toContain('This bot is not allowed to use edit')
+    // `edit` was never granted, so the turn never offered it: it does not exist for the model.
+    expect(String(results[4].response)).toBe('Tool edit not found')
     expect(existsSync(join(root, 'blocked.txt'))).toBe(false)
     expect(readFileSync(join(scratch, 'notes.md'), 'utf8')).toBe('draft')
     expect(readFileSync(join(root, 'inside.txt'), 'utf8')).toBe('inside-content')
@@ -128,6 +128,30 @@ describe('paths Pi rewrites before it opens them (PR 6 review: `~` and `@`)', ()
   }, 120_000)
 })
 
+describe('the built-ins a bot\'s turn offers', () => {
+  it('are its granted ones only, never shell: an ungranted call reaches no gate and asks nobody', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    const base = bot(root, scratch, ['read', 'shell'])
+    const checked: string[] = []
+    const watching: BotAuthority = { ...base, check: (call) => { if (call.kind === 'builtin') checked.push(call.tool); return base.check(call) }, checkAny: undefined }
+    recorder.respond(script([
+      { tool: { name: 'bash', args: { command: 'echo hi' } } },
+      { tool: { name: 'write', args: { path: join(scratch, 'x.md'), content: 'x' } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: watching })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map((event) => String(event.response))).toEqual(['Tool bash not found', 'Tool write not found'])
+    expect(checked).toEqual([])
+    expect(existsSync(join(scratch, 'x.md'))).toBe(false)
+  }, 120_000)
+})
+
 describe('a refused call (an unattended run\'s missing permission, Bot Phase 1 §5.1.1)', () => {
   it('reaches the model as the tool\'s error, and the turn carries on', async () => {
     const { engine, recorder, project } = await setup(cleanups, supervised)
@@ -135,8 +159,8 @@ describe('a refused call (an unattended run\'s missing permission, Bot Phase 1 �
     const scratch = join(root, '..', 'scratch')
     mkdirSync(scratch, { recursive: true })
     writeFileSync(join(root, 'inside.txt'), 'inside-content')
-    const base = bot(root, scratch, ['read'])
-    // `write` is not granted: the run's authority refuses it with an ask instead of a wall.
+    const base = bot(root, scratch, ['read', 'write'])
+    // `write` is outside what this run may do: the run's authority refuses it with an ask instead of a wall.
     const asking: BotAuthority = {
       ...base,
       check: (call) => (call.kind === 'builtin' && call.tool === 'write' ? { ok: false, refused: { text: 'Asked the owner; carry on without it.', askId: 'ask-1' } } : base.check(call)),
