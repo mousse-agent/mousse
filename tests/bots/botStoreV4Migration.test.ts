@@ -80,8 +80,7 @@ function buildV3(): { revision: string; digest: string } {
   return { revision, digest }
 }
 
-function engineFor(opened: BotStore): BotEngine {
-  const definitions = new BotDefinitionStore(opened.directory, (botId) => opened.registry(botId)?.revision ?? null)
+function engineFor(opened: BotStore, definitions = new BotDefinitionStore(opened.directory, (botId) => opened.registry(botId)?.revision ?? null)): BotEngine {
   return new BotEngine({
     profileHome: profile,
     store: opened,
@@ -199,6 +198,31 @@ describe('definitions format 1 → 2', () => {
     // Once: a second pass changes nothing.
     engine.upgradeDefinitions()
     expect(store.registry('site-editor')?.revision).toBe(published.revision)
+    expect(store.schedules('site-editor')).toHaveLength(1)
+  })
+
+  it('an upgrade stopped before the draft was written back resumes: the published revision and its permissions stay', () => {
+    const { digest } = buildV3()
+    // An edit the owner never published.
+    writeFileSync(join(definitionsDir(), 'site-editor', 'draft.json'), JSON.stringify(v1('site-editor', { name: 'Site fixer', permissions: { ...manifest(), tools: ['read', 'search', 'edit'] } })))
+    store = new BotStore({ profileHome: profile })
+    const definitions = new BotDefinitionStore(store.directory, (botId) => store!.registry(botId)?.revision ?? null)
+    const save = definitions.save.bind(definitions)
+    definitions.save = () => { throw new Error('Mousse stopped') }
+    const engine = engineFor(store, definitions)
+    engine.upgradeDefinitions()
+    const upgraded = store.registry('site-editor')!.revision!
+    expect(definitions.isFormat1('site-editor')).toBe(true)
+    definitions.save = save
+    engine.upgradeDefinitions()
+    expect(definitions.isFormat1('site-editor')).toBe(false)
+    const entry = engine.get('site-editor')
+    expect(store.registry('site-editor')?.revision).toBe(upgraded)
+    expect(entry.published).toMatchObject({ format: 2, name: 'Site editor' })
+    expect(botManifestDigest(entry.published!.permissions)).toBe(digest)
+    expect(store.activeGrant('site-editor')?.digest).toBe(digest)
+    // The draft keeps its unpublished edit, still unpublished.
+    expect(entry.draft).toMatchObject({ format: 2, name: 'Site fixer', permissions: { tools: ['edit', 'read', 'search'] } })
     expect(store.schedules('site-editor')).toHaveLength(1)
   })
 

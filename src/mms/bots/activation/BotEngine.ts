@@ -3422,6 +3422,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * written back with its look; a published revision is published again in format 2 (the same
    * manifest, so the grant's digest still holds) and its schedules move to `bot_schedules`; a draft
    * that was never published is published with the starter grant only, approved on first chat.
+   * The draft is written last, so an upgrade that stopped before it resumes at the next open.
    */
   upgradeDefinitions(): void {
     for (const botId of this.host.definitions.ids()) {
@@ -3441,9 +3442,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const registry = this.store.registry(botId)
     const raw = registry?.revision ? this.host.definitions.rawRevision(botId, registry.revision) : undefined
     const legacy = raw && !('format' in raw) ? raw : undefined
+    // Stopped after its published revision and schedules moved, before the draft was written back:
+    // that revision stays (its permissions too), and only the draft is left to write.
+    const resumed = raw && 'format' in raw ? entry.published : undefined
     this.store.ensureRegistry(botId)
     let published: BotDefinition
-    if (legacy) {
+    if (resumed) {
+      published = resumed
+    } else if (legacy) {
       published = this.host.definitions.publishRevision(upgradeDefinitionV1(legacy, look))
       this.store.db.transaction(() => {
         for (const schedule of legacy.triggers.schedules ?? [])
@@ -3456,7 +3462,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.setPublished(botId, published.revision!)
     }
     // The draft follows: unchanged since it was published, it becomes the new revision.
-    const draft = entry.published && entry.draftHash === registry?.revision ? published : legacy ? entry.draft : published
+    const draft = resumed ? entry.draft : entry.published && entry.draftHash === registry?.revision ? published : legacy ? entry.draft : published
     this.host.definitions.save(draft)
     mkdirSync(this.filesFolder(botId), { recursive: true, mode: 0o700 })
   }
