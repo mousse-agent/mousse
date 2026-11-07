@@ -491,6 +491,29 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.stopRun).not.toHaveBeenCalled()
     })
 
+    it('another thread\'s agent never lists, searches or reads a bot\'s thread, marked or only registered', async () => {
+      const { call, denied, result, threads, runs } = await world({}, {
+        botRole: (id: string) => (id === 'target' ? 'activation' : undefined),
+        listThreads: () => [...threads.values()],
+        listProjects: () => [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }] as never,
+        searchThreads: (_query, _limit, options) =>
+          [...threads.values()].filter((found) => options?.allow?.(found) !== false).map((found) => ({ threadId: found.id, threadName: found.name, projectId: found.projectId, matchType: 'title' })) as never
+      })
+      threads.set('home', thread('home', { botOwned: true }))
+      const listed = (await result(call('manage', 'thread_list'))).threads.map((row: { id: string }) => row.id)
+      expect(listed.sort()).toEqual(['caller', 'elsewhere', 'loose'])
+      const found = (await result(call('manage', 'thread_search', { query: 'Thread' }))).results.map((hit: { threadId: string }) => hit.threadId)
+      expect(found.sort()).toEqual(['caller', 'elsewhere', 'loose'])
+      for (const threadId of ['target', 'home'])
+        for (const view of ['events', 'messages']) {
+          const error = await denied(call('manage', 'thread_read', { threadId, view }))
+          expect(error, `${threadId} ${view}`).toMatchObject({ code: 'mousse_scope_denied' })
+          expect(error!.message).toMatch(/belongs to a bot/)
+        }
+      // A bot's own turn still reads its own thread.
+      expect((await call('manage', 'thread_read', {}, { threadId: 'target', runId: runs.target })).isError).toBeUndefined()
+    })
+
     it('a bot\'s own turn is held to its walls: a send, steer or Stop is refused although its grant says manage, and a bot is never granted above lineage in the first place', async () => {
       const { fx, registry, turns, request, host, callerRun } = await world()
       const wall = (tool: string) => ({ kind: 'tool', tool })
