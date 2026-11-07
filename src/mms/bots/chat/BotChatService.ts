@@ -44,9 +44,10 @@ export function cleanBotName(answer: string): string | undefined {
   return name.length <= MAX_BOT_NAME_CHARS ? name : undefined
 }
 
-/** The input of a new bot's first chat activation (§5.3.1, step 6). */
-export function firstMessagePrompt(description: string): string {
-  return `[Mousse] The owner just created you. Their description: "${description}". In one or two sentences say what you understood. If you will need a permission, ask for the first one now (escalate). If the description is unclear, ask one question instead.`
+/** The input of a new bot's first chat activation (§5.3.1, step 6). `nameIt`: its name was made from the description, so it picks its own. */
+export function firstMessagePrompt(description: string, nameIt = false): string {
+  const naming = nameIt ? ' The owner gave you no name: pick a short one (two or three words) and set it with set_profile before you answer.' : ''
+  return `[Mousse] The owner just created you. Their description: "${description}".${naming} In one or two sentences say what you understood. If you will need a permission, ask for the first one now (escalate). If the description is unclear, ask one question instead.`
 }
 
 /** A chat message as the bot's input: the owner's text, and the files attached to it. */
@@ -99,7 +100,8 @@ export class BotChatService {
     // The first bot of an owner with a Claude subscription adds "Claude for bots" (§5.9 item 7).
     await this.engine.prepareBotRunner()
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
-    const name = given || (await this.nameFor(botId, description))
+    const named = given ? { name: given, chosen: true } : await this.nameFor(botId, description)
+    const name = named.name
     const definition: BotDefinition = {
       format: 2,
       id: botId,
@@ -118,15 +120,19 @@ export class BotChatService {
     const raced = this.store.activationByKey(key)
     if (raced) return { bot: this.summaryOf(raced.botId) }
     this.engine.createBot(definition)
-    await this.engine.enqueueChat(botId, key, firstMessagePrompt(description))
+    await this.engine.enqueueChat(botId, key, firstMessagePrompt(description, !named.chosen))
     return { bot: this.summaryOf(botId) }
   }
 
-  /** The bot names itself on its own model (`harness.oneShot`); on a failure or after 5 seconds the description names it. */
-  private async nameFor(botId: string, description: string): Promise<string> {
-    const fallback = fallbackBotName(description)
+  /**
+   * The bot names itself on its own model (`harness.oneShot`); on a failure or after 5 seconds (a
+   * runtime with no single requests, like Claude for bots) the description names it for now, and
+   * the bot picks its own name in its first turn (`chosen: false`).
+   */
+  private async nameFor(botId: string, description: string): Promise<{ name: string; chosen: boolean }> {
     const answer = await this.engine.oneShotFor(botId, `Two or three words naming a helper that does: ${description}\nAnswer with the name only, in plain title case.`, BOT_NAMING_TIMEOUT_MS)
-    return (answer && cleanBotName(answer)) || fallback
+    const name = answer ? cleanBotName(answer) : undefined
+    return name ? { name, chosen: true } : { name: fallbackBotName(description), chosen: false }
   }
 
   /** `bots.update`: rename or change look; a new revision with the same manifest (no approval). */

@@ -50,6 +50,10 @@ describe('bots.create', () => {
     f.oneShot.fail = true
     const failed = await createBot(f, { description: 'Please summarise the AI news for me every day' })
     expect(f.bots.definitionOf(failed.botId).name).toBe('Summarise Ai News')
+    // That name is a stand-in: the bot's first turn picks its own.
+    expect(f.store.activation(failed.firstActivation)?.trigger).toMatchObject({ input: firstMessagePrompt('Please summarise the AI news for me every day', true) })
+    expect(firstMessagePrompt('x', true)).toContain('set it with set_profile')
+    expect(firstMessagePrompt('x')).not.toContain('set_profile')
     f.oneShot.fail = false
     f.oneShot.answer = '"Inbox Helper, the best one here"'
     const long = await createBot(f, { description: 'watch prices of flights to Lisbon' })
