@@ -45,6 +45,13 @@ function withInstance<T extends { instanceId?: unknown; model?: unknown; effort?
   return (typeof rest.model === 'string' ? upgradeSelection(stored as typeof stored & { model: string }) : stored) as T
 }
 
+/** A selection without a reasoning level or name. */
+function withoutLevel<T extends object>(selection: T): T {
+  if (!selection || typeof selection !== 'object') return selection
+  const { effort: _effort, name: _name, ...rest } = selection as T & { effort?: unknown; name?: unknown }
+  return rest as T
+}
+
 /** An update that names a model: its reasoning level and name are the update's, or none. */
 function namesModel(selection: { model?: unknown } | undefined): boolean {
   return selection?.model !== undefined
@@ -90,6 +97,8 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     storage: normalizeStorageSettings(settings.storage),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
+    // The bot's depth sets the level, so a bot model keeps none.
+    ...(settings.botModel ? { botModel: withoutLevel(withInstance(settings.botModel)) } : {}),
     integrations: {
       ...settings.integrations,
       ...(skills?.model ? {
@@ -179,6 +188,8 @@ export class SettingsStore {
       ...(namesModel(update) && !update.effort ? { effort: '' } : {})
     })
     if (partial.title) normalized.title = cleared(normalized.title, partial.title)
+    // The bot model keeps no level, so only its instance is cleared.
+    if (partial.botModel && namesProviderOnly(partial.botModel)) normalized.botModel = { ...normalized.botModel, instanceId: '' }
     const skillModels = Object.entries(partial.integrations?.skills?.model ?? {})
     if (skillModels.length) {
       const model = { ...normalized.integrations.skills.model }

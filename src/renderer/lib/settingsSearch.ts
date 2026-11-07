@@ -59,6 +59,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
 
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
   { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
+  { title: 'Bot model', section: 'agents', anchor: 'agents-bot-model', keywords: ['bot model', 'bots', 'personal bots'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
   { title: 'Agent access', section: 'agents', anchor: 'agents-access', keywords: ['reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
   { title: 'Agents may answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions'] },

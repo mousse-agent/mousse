@@ -52,6 +52,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
+  botProviderOptions,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
   type MousseSettingsUpdate
@@ -2799,12 +2800,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // The first read after start waits for each instance's first check (`awaitFirstChecks`).
       const llmProviders = (await ctx.mms.harness?.llmProviders({ kind: 'device' })) ?? []
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
+      // The bot model choices: the listed models that can hold a bot now. A failed read offers only Automatic.
+      const holdable = ctx.mms.botModels ? await ctx.mms.botModels.holdable().catch(() => []) : []
       return {
         options: {
           themes: THEME_OPTIONS,
           accentColors: ACCENT_COLORS,
           llmProviders,
-          agentTypes
+          agentTypes,
+          botProviders: botProviderOptions(llmProviders, holdable)
         }
       }
     }

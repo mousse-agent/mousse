@@ -54,7 +54,7 @@ import { createBotMemoryAdmin } from './bots/memory/admin'
 import { BotMemoryStore } from './bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
 import { createBotContextProvider } from './bots/memory/contextPack'
-import { createBotModelResolver } from './bots/model/BotModelResolver'
+import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduler } from './bots/triggers/scheduler'
 import type { BotStore } from './bots/store/BotStore'
@@ -270,6 +270,8 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
+  readonly botModels: BotModelChooser
   private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
@@ -572,8 +574,15 @@ export class MmsProfileServices {
       snapshots: () => harness.instances.snapshots({ kind: 'device' }),
       models: (instanceId) => harness.catalog.models(instanceId, { kind: 'device' }),
       hold: { canHoldBot: (instanceId, policy, model) => harness.canHoldBot(instanceId, policy, model) },
-      refresh: (instanceId) => harness.refreshPolicyFacts(instanceId)
+      refresh: (instanceId) => harness.refreshPolicyFacts(instanceId),
+      // Settings → Models → Bots: blank is Automatic. A choice saved before instances names its provider.
+      defaultModel: () => {
+        const chosen = this.settings.get().botModel
+        const instanceId = chosen?.instanceId || chosen?.llmProvider
+        return instanceId && chosen?.model ? { instanceId, model: chosen.model } : undefined
+      }
     })
+    this.botModels = botModels
     // Activity chips (§5.8): live as `bots.activity` through the engine, rolled up into each message.
     const botActivity = createBotActivitySink({
       emit: (event) => this.personalBots?.publishActivity(event),

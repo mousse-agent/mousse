@@ -5,7 +5,7 @@ import type { ModelCatalog } from '../../../shared/modelCatalog'
 import { modelCatalog } from '../../models/modelCatalog'
 import type { BotModelResolver, BotRuntimeHold } from '../seams'
 import { botModelCandidates, instanceReady, signInCandidate } from './candidates'
-import { chooseBotModel, nameMatch, type BotModelChoiceResult } from './chooseModel'
+import { chooseBotModel, effortFor, nameMatch, type BotModelCandidate, type BotModelChoiceResult } from './chooseModel'
 
 /**
  * The hidden model choice in the daemon (Bot Phase 1 §5.6): `BotEngine` resolves each activation's
@@ -29,7 +29,24 @@ export interface BotModelResolverDeps {
   /** Default: the bundled catalog for this Mousse (`modelCatalog()`). */
   catalog?(): ModelCatalog
   now?(): Date
+  /**
+   * The default bot model from Settings (`settings.botModel`): used when a bot's choice is
+   * automatic, while it can run the bot. Absent or undefined: Automatic.
+   */
+  defaultModel?(): { instanceId: string; model: string } | undefined
 }
+
+/**
+ * A policy that stands for any bot's (`canHoldBot` needs a bot authority): what Settings lists as
+ * bot model choices. Each activation's own compiled policy is checked again when it resolves.
+ */
+export const REPRESENTATIVE_BOT_POLICY: RunPolicy = Object.freeze({
+  mode: 'default',
+  origin: 'bot',
+  approvals: 'grants',
+  approve: 'host',
+  authority: Object.freeze({ kind: 'bot', digest: 'settings' })
+}) as RunPolicy
 
 export class BotModelChooser implements BotModelResolver {
   private readonly limited = new Map<string, string>()
@@ -50,7 +67,16 @@ export class BotModelChooser implements BotModelResolver {
       catalog: this.catalog(),
       limited: this.limitedAt(now)
     })
+    // The bot's own override first, then its definition's choice; an automatic one takes the
+    // Settings default while that can run the bot, else it stays automatic at the same depth.
     const choice = input.override ?? input.choice
+    if (choice.mode === 'auto') {
+      const chosen = this.defaultCandidate(candidates, now)
+      if (chosen) {
+        const effort = effortFor(choice.depth, chosen)
+        return { selection: { instanceId: chosen.instanceId, model: chosen.model, ...(effort ? { effort } : {}) } }
+      }
+    }
     let result = chooseBotModel(choice, candidates, now)
     // A named model that is missing or at its limit: the bot stays on auto at the same depth.
     if (choice.mode === 'named' && 'problem' in result) result = chooseBotModel({ mode: 'auto', depth: choice.depth }, candidates, now)
@@ -59,6 +85,32 @@ export class BotModelChooser implements BotModelResolver {
       return instanceId ? { problem: 'no_provider', instanceId } : { problem: 'no_provider' }
     }
     return result
+  }
+
+  /**
+   * The ready models that can hold a bot now, by instance (the Settings choices). Read with a
+   * policy that stands for any bot's (`REPRESENTATIVE_BOT_POLICY`).
+   */
+  async holdable(): Promise<Array<{ instanceId: string; model: string }>> {
+    const snapshots = await this.deps.snapshots()
+    const refresh = this.deps.refresh
+    if (refresh) await Promise.all(snapshots.filter((snapshot) => snapshot.enabled.effective).map((snapshot) => refresh(snapshot.instanceId).catch(() => undefined)))
+    return botModelCandidates({ snapshots, models: (instanceId) => this.deps.models(instanceId), hold: this.deps.hold, policy: REPRESENTATIVE_BOT_POLICY, catalog: this.catalog() })
+      .map((candidate) => ({ instanceId: candidate.instanceId, model: candidate.model }))
+  }
+
+  /** The Settings default among the candidates, when it is there and not at its usage limit. */
+  private defaultCandidate(candidates: readonly BotModelCandidate[], now: Date): BotModelCandidate | undefined {
+    let wanted: { instanceId: string; model: string } | undefined
+    try {
+      wanted = this.deps.defaultModel?.()
+    } catch {
+      return undefined
+    }
+    if (!wanted?.instanceId || !wanted.model) return undefined
+    const found = candidates.find((candidate) => candidate.instanceId === wanted!.instanceId && candidate.model === wanted!.model)
+    if (!found) return undefined
+    return found.limitedUntil !== undefined && Date.parse(found.limitedUntil) > now.getTime() ? undefined : found
   }
 
   markLimited(instanceId: string, until: string): void {
