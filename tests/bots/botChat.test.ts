@@ -134,6 +134,27 @@ describe('bots.chat.send', () => {
     }
   })
 
+  it('a reply or run report Mousse stopped before writing is written at startup, once', async () => {
+    const engine = f.bots as unknown as { postReply: (...args: unknown[]) => void }
+    const postReply = engine.postReply
+    engine.postReply = () => {}
+    await send('What came in today?', 'm1')
+    const chat = chatActivation()
+    await runDispatch(f, chat.id, 1, { text: 'Two invoices.' })
+    const run = await f.bots.activate({ botId, input: 'Check the inbox', clientRequestId: 'r1' })
+    await runDispatch(f, run.id, 1, { text: 'Nothing new.' })
+    engine.postReply = postReply
+    expect(f.store.activation(chat.id)?.status).toBe('done')
+    expect(f.store.message(`bm_${chat.id}_d1`)).toBeUndefined()
+    for (let restart = 0; restart < 2; restart++) {
+      f.bots.close()
+      f.bots = new BotEngine(f.host)
+      await f.bots.reconcileOnStartup()
+    }
+    expect(chatOf(f, botId).filter((message) => message.activationId === chat.id || message.activationId === run.id).map((message) => [message.kind, message.text]))
+      .toEqual([['text', 'What came in today?'], ['text', 'Two invoices.'], ['run_report', 'Nothing new.']])
+  })
+
   it('each chat row and its journal row share one transaction; the owner\'s row is journaled before any dispatch starts', async () => {
     const dispatchesAtAppend: Array<{ kind: string; started: number }> = []
     const append = f.host.journal!.appendInTx.bind(f.host.journal)

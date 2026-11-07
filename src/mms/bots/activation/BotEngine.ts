@@ -2900,6 +2900,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.store.moveActivation(row.id, [current.status], 'paused', { endReason: 'reconcile_failed' })
       }
     }
+    // A dispatch's message Mousse stopped before writing (its id is the dispatch's, so it is written once).
+    this.postMissingReplies()
     // An owner's message that answered a chat's wall, written just before Mousse stopped.
     for (const row of this.store.activationsWith(['waiting_grant']).filter((activation) => activation.lane === 'chat')) {
       const latest = this.store.get("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' ORDER BY seq DESC LIMIT 1", row.id)
@@ -2909,6 +2911,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       })
     }
     for (const botId of new Set(this.store.activationsWith(['queued']).map((row) => row.botId))) this.pumpLater(botId)
+  }
+
+  /**
+   * The message of a main dispatch whose activation moved on (done, at a wall, or paused) but whose
+   * reply, run report or cards were not written before Mousse stopped: written now from the
+   * activation's result. Only the latest finished activation of each lane can be missing one;
+   * activations from before the chat (no selection) never had one.
+   */
+  private postMissingReplies(): void {
+    const rows = this.store.all(`SELECT id FROM bot_activations a WHERE selection_json IS NOT NULL AND (status IN ('waiting_grant', 'paused')
+      OR (status = 'done' AND NOT EXISTS (SELECT 1 FROM bot_activations b WHERE b.bot_id = a.bot_id AND b.lane = a.lane AND b.status = 'done' AND b.ended_at > a.ended_at)))`)
+    for (const { id } of rows) {
+      try {
+        const row = this.store.activation(id as string)
+        const main = row ? this.store.lastMainDispatch(row.id) : undefined
+        if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        this.postReply(row, main, row.result ?? '', false)
+      } catch (error) {
+        console.warn('a bot message could not be written at startup', { activationId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
   }
 
   private reconcilePhaseOne(runs: RunEngine): void {
