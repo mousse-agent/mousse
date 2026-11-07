@@ -110,7 +110,9 @@ describe('the bot runner entry, "Claude for bots" (§5.9 item 7)', () => {
     // A later bot adds nothing: a locked entry exists.
     expect(await p.harness.ensureBotRunner()).toBeUndefined()
     const runner = await p.harness.instances.recheck(CLAUDE_BOT_RUNNER_ID)
-    expect(runner).toMatchObject({ displayName: 'Claude for bots', auth: { state: 'signed_out', canSignIn: true } })
+    expect(runner).toMatchObject({ displayName: 'Claude for bots', auth: { state: 'signed_out', canSignIn: true }, config: { profile: 'locked' } })
+    // It runs bot turns only: no thread model picker lists it.
+    expect(p.harness.listedLlmProviders({ kind: 'device' }).map((option) => option.instanceId)).not.toContain(CLAUDE_BOT_RUNNER_ID)
     // Its own home: the status check ran there, and the owner's credentials file is not in it.
     const home = join(instanceStateDir(p.profileHome, CLAUDE_BOT_RUNNER_ID), 'home')
     expect(p.authEnvs[CLAUDE_BOT_RUNNER_ID]).toBe(home)

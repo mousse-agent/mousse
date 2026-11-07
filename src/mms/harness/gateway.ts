@@ -2196,6 +2196,8 @@ export class Harness implements HarnessGateway {
     for (const [instanceId, entry] of Object.entries(entries)) {
       if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
       const record = this.listedRecord(instanceId)
+      // A locked entry ("Claude for bots") runs bot turns only: no picker offers it for a thread.
+      if (record?.config.profile === 'locked') continue
       // A runtime lists nothing while it cannot run (a model API without its credential).
       const option = record && this.named(record, record.runtime.llmProvider?.())
       if (!option) continue
@@ -2537,6 +2539,7 @@ export class Harness implements HarnessGateway {
       ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
       ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {}),
       ...(record.config.setup ? { setup: record.config.setup } : {}),
+      ...(record.config.profile ? { profile: record.config.profile } : {}),
       ...(record.config.source?.kind === 'registry'
         ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
         : {})

@@ -82,6 +82,8 @@ export interface InstanceConfigView {
   source?: { kind: 'registry'; agentId: string; version: string; distribution: 'binary' | 'npx' }
   /** Codex: Mousse's own download and sign-in, or the user's Codex CLI. */
   setup?: 'managed' | 'existing'
+  /** `locked`: the entry runs personal bots only ("Claude for bots"); no thread picker offers it. */
+  profile?: 'locked'
 }
 
 /**

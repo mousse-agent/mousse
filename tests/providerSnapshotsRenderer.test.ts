@@ -73,6 +73,11 @@ describe('composer picker from snapshots', () => {
     expect(pickerIdFor({ llmProvider: 'claude-subscription' }, [entry])).toBe('claude-subscription')
   })
 
+  it('never offers the locked "Claude for bots" entry, which runs bot turns only', () => {
+    const runner = snapshot({ instanceId: 'claude:bots', displayName: 'Claude for bots', builtIn: false, models: { entries: claudeModels, source: 'live' }, config: { home: 'private', args: [], env: {}, profile: 'locked' } })
+    expect(pickerProviders([snapshot({ models: { entries: claudeModels, source: 'live' } }), runner], []).map((entry) => entry.instanceId)).toEqual(['claude'])
+  })
+
   it('orders providers as Settings does: Claude Code and its accounts, Codex, Antigravity, then APIs by name (D8)', () => {
     const order = sortInstances([
       snapshot({ instanceId: 'pi:zai', driver: 'pi', displayName: 'Z.ai' }),

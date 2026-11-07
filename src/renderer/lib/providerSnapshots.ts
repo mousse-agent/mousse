@@ -402,7 +402,8 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
   if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id }))
   const providers: PickerProvider[] = []
   for (const snapshot of sortInstances(snapshots)) {
-    if (!snapshot.enabled.effective) continue
+    // A locked entry ("Claude for bots") runs bot turns only.
+    if (!snapshot.enabled.effective || snapshot.config?.profile === 'locked') continue
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
     const models = snapshot.models.entries
       .filter((model) => !model.hidden)
