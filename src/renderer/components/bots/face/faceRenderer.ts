@@ -484,6 +484,16 @@ interface TimerQueryExt {
   getQueryObjectEXT(query: object, pname: number): unknown
 }
 
+/**
+ * Whether the context renders in software (SwiftShader, llvmpipe), which `failIfMajorPerformanceCaveat`
+ * does not always refuse (Chromium's unsafe SwiftShader): ray-marching faces there burns the CPU.
+ */
+export function softwareWebGl(gl: Pick<WebGLRenderingContext, 'getExtension' | 'getParameter'>): boolean {
+  const info = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL: number } | null
+  const renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : undefined
+  return typeof renderer === 'string' && /swiftshader|llvmpipe|softpipe|software/i.test(renderer)
+}
+
 /** The WebGL side: one context on a detached canvas. Where the driver can, the shader compiles in the background. */
 export function createWebGlGpu(doc: Document): FaceGpu | null {
   let canvas: HTMLCanvasElement
@@ -505,7 +515,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
   } catch {
     return null
   }
-  if (!gl) return null
+  if (!gl || softwareWebGl(gl)) return null
   const context = gl
   let state: 'pending' | 'ready' | 'lost' | 'failed' = 'pending'
   let program: WebGLProgram | null = null

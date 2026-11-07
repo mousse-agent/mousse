@@ -10,6 +10,7 @@ import {
   resetSharedFaceRenderer,
   SAMPLE_BUDGET,
   sharedFaceRendererStatus,
+  softwareWebGl,
   type FaceGpu,
   type FaceRendererEnv
 } from '../../src/renderer/components/bots/face/faceRenderer'
@@ -354,6 +355,19 @@ describe('the shared renderer', () => {
     // Whiskers show from 56 px up.
     expect(fake.draws[0]!.uniforms.uV[3]).toBe(0)
     renderer.dispose()
+  })
+})
+
+describe('software WebGL', () => {
+  const gl = (renderer: string | null) => ({
+    getExtension: (name: string) => (name === 'WEBGL_debug_renderer_info' && renderer !== null ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null),
+    getParameter: () => renderer
+  }) as unknown as WebGLRenderingContext
+  it('counts as no WebGL, so faces stay still instead of burning the CPU', () => {
+    expect(softwareWebGl(gl('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)'))).toBe(true)
+    expect(softwareWebGl(gl('llvmpipe (LLVM 17.0.6, 256 bits)'))).toBe(true)
+    expect(softwareWebGl(gl('ANGLE (Intel, Mesa Intel(R) Graphics, OpenGL 4.6)'))).toBe(false)
+    expect(softwareWebGl(gl(null))).toBe(false)
   })
 })
 
