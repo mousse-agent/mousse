@@ -56,6 +56,23 @@ describe('a private thread seen from another computer', () => {
     expect(listed.ok && (listed.result as { threads: Array<{ id: string }> }).threads.map((thread) => thread.id)).toEqual([shared.id])
   }, 60_000)
 
+  it('a personal bot\'s thread answers every call as an unknown thread', async () => {
+    const { f, call } = await owner()
+    const shared = f.mms.threads.createThread('Shared', undefined, undefined, { started: true })
+    const bot = f.mms.threads.ensureExecutionThread('bot:b1', 'Alpha bot', undefined, undefined, { botOwned: true })
+    for (const [method, params] of [
+      ['threads.get', { threadId: bot.id }],
+      ['queue.list', { threadId: bot.id }],
+      ['thread.snapshot', { threadId: bot.id }],
+      ['threads.rename', { threadId: bot.id, name: 'Seen' }]
+    ] as const) {
+      expect(await call(method, params), method).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
+    }
+    expect(f.mms.threads.getThread(bot.id)?.name).toBe('Alpha bot')
+    const listed = await call('threads.list', {})
+    expect(listed.ok && (listed.result as { threads: Array<{ id: string }> }).threads.map((thread) => thread.id)).toEqual([shared.id])
+  }, 60_000)
+
   it('cannot be created or read in the trash from another computer', async () => {
     const { f, call } = await owner()
     // `localOnly` is not a key of the routed create: the call is malformed before any handler runs.

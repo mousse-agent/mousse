@@ -9,7 +9,7 @@ import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
-import { BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
+import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
@@ -95,9 +95,11 @@ describe('compileBotThread', () => {
     expect(compiled.permissions.workspace).toEqual({ roots: [root], access: 'write', writeRoots: [root], scratch: realpathSync(scratch) })
   })
 
-  it('refuses shell: no runtime has a proven sandbox here', () => {
+  it('compiles "run commands" (shell) like any tool: the runtime\'s shell is on the allowlist', () => {
     const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
-    expect(compiled).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'] } })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    expect(compiled.policy.tools?.allow).toContain('bash')
+    expect(compiled.permissions.tools).toEqual(['read', 'shell'])
   })
 
   it('refuses a write root inside a temporary folder, and roots overlapping Mousse data or scratch', () => {
@@ -153,17 +155,49 @@ describe('host approvals in checkPolicy', () => {
     expect(checkPolicy(exact, { ...policy(), authority: { kind: 'definition', digest: 'd' } }, 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false })
   })
 
-  it('still needs exact tool control and hard budgets', () => {
+  it('holds on an approval-based runtime only where the bot authority answers its approvals, and never on one that approves tools itself', () => {
     const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
-    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // Claude Code and Codex: every approval they raise in a bot turn is answered by the authority.
+    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toEqual({ ok: true })
+    // Without the driver answering them, nothing would: refused.
+    expect(checkPolicy(approvalOnly, policy(), 'claude', undefined, { botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A runtime that holds bots only exactly (a locked entry on a version with no record) is refused there.
+    expect(checkPolicy(approvalOnly, policy(), 'claude:locked', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A runtime that approves tools itself never holds a bot, whatever its driver claims.
+    const uncontrolled = { ...exact, toolControl: 'uncontrolled' } as HarnessCaps
+    expect(checkPolicy(uncontrolled, policy(), 'cursor', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+    // A definition's authority still needs exact control there.
+    expect(checkPolicy(approvalOnly, { ...policy(), authority: { kind: 'definition', digest: 'd' }, approve: undefined }, 'claude', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
+  })
+
+  it('runs a bot turn only in the asking mode, never a mode that runs calls without asking', () => {
+    const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
+    expect(checkPolicy(approvalOnly, { ...policy(), permissionMode: 'ask' }, 'codex', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] })).toEqual({ ok: true })
+    for (const mode of ['accept_edits', 'auto', 'full'] as const)
+      expect(checkPolicy(approvalOnly, { ...policy(), permissionMode: mode }, 'codex', undefined, { hostApprovals: true, botApprovals: true, botRuntimeGaps: [] }), mode).toMatchObject({ ok: false, error: { missing: ['toolControl'], reason: BOT_ASKING_MODE_REQUIRED } })
+  })
+
+  it('a shell grant holds wherever a bot holds: Pi exactly, Claude Code and Codex through their approvals', () => {
+    const compiled = compile({ grant: manifest({ tools: ['read', 'shell'] }) })
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    const shell: RunPolicy = { mode: 'default', origin: 'bot', ...compiled.policy }
+    expect(checkPolicy(exact, shell, 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
+    const approvalOnly = { ...exact, toolControl: 'approval_only' } as HarnessCaps
+    for (const instance of ['claude', 'codex']) expect(checkPolicy(approvalOnly, { ...shell, permissionMode: 'ask' }, instance, undefined, { hostApprovals: true, botApprovals: true }), instance).toEqual({ ok: true })
+  })
+
+  it('still needs hard budgets for count limits', () => {
     const observed = { ...exact, budgets: 'observed' } as HarnessCaps
     expect(checkPolicy(observed, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: [] })).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
   })
 
   it('fail closed: no runtime runs a bot while bot runtimes still lack a piece, whatever its caps', () => {
-    expect(BOT_RUNTIME_GAPS.length).toBeGreaterThan(0)
-    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })
-    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    // None is missing since Bot Phase 1 (§5.9); the switch stays for a piece a later change needs.
+    expect(BOT_RUNTIME_GAPS).toEqual([])
+    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
+    const gaps = ['a piece bots rely on']
+    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: gaps })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
   })
@@ -172,6 +206,18 @@ describe('host approvals in checkPolicy', () => {
 describe('BotAuthority.check', () => {
   const read = (path: string) => ({ kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path } })
   const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path } })
+
+  it('"run commands" is granted as a whole: any command, wherever it says it runs; without it, a wall on the tool', () => {
+    const command = (args: Record<string, unknown>) => ({ kind: 'builtin' as const, tool: 'shell' as const, nativeName: 'bash', args })
+    const granted = authorityFor(manifest({ tools: ['read', 'shell'] }))
+    for (const args of [{ command: 'ls -la' }, { command: 'rm -rf build', cwd: join(base, 'elsewhere') }, { command: 'cat ~/.profile', cwd: '~' }])
+      expect(granted.check(command(args)), JSON.stringify(args)).toEqual({ ok: true })
+    // A bot with no folder at all still runs commands once it holds them.
+    expect(authorityFor(manifest({ tools: ['shell'], workspace: null })).check(command({ command: 'date' }))).toEqual({ ok: true })
+    expect(authorityFor().check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'tool', tool: 'bash' } })
+    // Waiting for the owner still stops it.
+    expect(authorityFor(manifest({ tools: ['shell'] }), true).check(command({ command: 'ls' }))).toEqual({ ok: false, wall: { kind: 'waiting' } })
+  })
 
   it('allows granted tools inside a root and inside scratch', () => {
     const bot = authorityFor()
@@ -301,5 +347,40 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
       expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
     }
+  })
+})
+
+describe('onAllowed (Bot Phase 1 §5.8)', () => {
+  const observed = (onAllowed: (call: unknown) => void) => {
+    const compiled = compile()
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    return createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: compiled.permissions,
+      waiting: () => false,
+      counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => 0, signal: new AbortController().signal },
+      spend: null,
+      onAllowed
+    })
+  }
+
+  it('is told of every allowed call, on any runtime, and of no refused one', () => {
+    const calls: unknown[] = []
+    const authority = observed((call) => calls.push(call))
+    const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'index.html') } }
+    expect(authority.check(read)).toEqual({ ok: true })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: { query: 'x' } })).toEqual({ ok: true })
+    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'secret.txt') } }).ok).toBe(false)
+    expect(authority.check({ kind: 'app', tool: 'delegate_task', args: {} }).ok).toBe(false)
+    expect(calls).toEqual([read, { kind: 'app', tool: 'web_search', args: { query: 'x' } }])
+  })
+
+  it('never fails the call it watched', () => {
+    const authority = observed(() => {
+      throw new Error('broken sink')
+    })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: {} })).toEqual({ ok: true })
   })
 })

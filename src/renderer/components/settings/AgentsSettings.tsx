@@ -11,7 +11,7 @@ import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 
 /**
- * Settings > Agents: the default model and thread title model, plus context
+ * Settings > Agents: the default model, thread title model and bots' model, plus context
  * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
  * per-CLI Agents pages; their stored keys are left untouched.
  */
@@ -42,6 +42,17 @@ export function AgentsSettings({
   const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
     (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
     Boolean(findListedModel(provider.models, titleModel)))
+
+  // The bots' default model: blank is Automatic (each bot picks by how deeply it works).
+  const botProviders = options.botProviders ?? []
+  const botProvider = settings.botModel?.llmProvider ?? ''
+  const botModel = settings.botModel?.model ?? ''
+  const botInstance = settings.botModel?.instanceId
+  const botIsAutomatic = !botProvider || !botModel
+  // A stored choice no ready entry can run a bot on now: bots pick automatically meanwhile.
+  const botUnavailable = !botIsAutomatic && !botProviders.some((provider) =>
+    (botInstance ? provider.instanceId === botInstance : provider.id === botProvider) &&
+    Boolean(findListedModel(provider.models, botModel)))
 
   const context = normalizeContextSettings(settings.context)
   const compactionModel = compactionModelOf(providers, settings.provider)
@@ -106,6 +117,40 @@ export function AgentsSettings({
               onSelect={(llmProvider, pick, instanceId) =>
                 // Always the whole selection: a write without the instance or level clears it.
                 void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}) } })
+              }
+            />
+          }
+        />
+        <SettingsRow
+          title="Bot model"
+          anchor="agents-bot-model"
+          titleId="agents-bot-model-title"
+          description={botUnavailable
+            ? `${modelLabel(resolveModelChoice({ instanceId: botInstance, provider: botProvider, model: botModel }, providers), { effort: false })} can't run bots right now, so bots pick a model automatically. Choose another model or Automatic.`
+            : 'Automatic picks a model for each bot by how deeply it works. Bots use the model chosen here while it can run them.'}
+          titleAction={!botIsAutomatic && (
+            <button
+              type="button"
+              className="settings-title-icon-btn"
+              aria-label="Use automatic for bots"
+              title="Use automatic"
+              onClick={() => void updateSettings({ botModel: { llmProvider: '', model: '', instanceId: '' } })}
+            >
+              <RotateCcw size={14} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          )}
+          control={
+            <SettingsModelPicker
+              id="agents-bot-model"
+              ariaLabel="Bot model"
+              placeholder="Automatic"
+              providers={botProviders}
+              providerId={botIsAutomatic ? '' : botProvider}
+              instanceId={botIsAutomatic ? undefined : botInstance}
+              modelId={botIsAutomatic ? '' : botModel}
+              onSelect={(llmProvider, pick, instanceId) =>
+                // The bot's depth sets the reasoning level, so only the model is kept.
+                void updateSettings({ botModel: { llmProvider, model: pick.model, instanceId: instanceId ?? '' } })
               }
             />
           }

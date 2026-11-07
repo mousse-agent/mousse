@@ -191,6 +191,18 @@ export interface HarnessGateway {
    */
   checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
   /**
+   * Whether the instance's runtime can hold a bot to `policy` (Bot Phase 1 §5.9, `BotRuntimeHold`):
+   * a bot policy, a runtime that holds every call of a bot turn to its bot authority
+   * (`HarnessDriver.botAuthority`), and `checkPolicy`. The bot model's candidates are filtered by it.
+   */
+  canHoldBot(instanceId: string, policy: RunPolicy, model?: string): Enforceability
+  /**
+   * Removes the "Claude for bots" entry an earlier build of Bot Phase 1 added at a bot's creation
+   * (`claude:bots`, locked, under that name): bots run on the owner's own entries now. An entry the
+   * owner renamed is left alone. True when one was removed.
+   */
+  removeRetiredBotRunner(): Promise<boolean>
+  /**
    * Reads again, now, what the instance's bot checks depend on beyond its config
    * (`HarnessDriver.readPolicyFacts`: a locked Claude entry's organisation policy). The bot engine
    * awaits it before approval and dispatch; a failure leaves the entry claiming nothing.
@@ -526,6 +538,9 @@ export interface TurnHandle {
 
 /** Probes refresh at most this often, and only when a client asks (page open, recheck, turn). */
 export const PROBE_TTL_MS = 10 * 60_000
+
+/** The bot runner entry earlier builds of Bot Phase 1 added (`removeRetiredBotRunner`). */
+const RETIRED_BOT_RUNNER = { id: 'claude:bots', name: 'Claude for bots' } as const
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
 /** Every enabled, signed-in instance's model list is refreshed this often (`startModelRefreshSchedule`). */
@@ -1182,9 +1197,31 @@ export class Harness implements HarnessGateway {
     return checkPolicy(this.recordCaps(record), policy, instanceId, spendModel, this.policyOptions(record))
   }
 
+  canHoldBot(instanceId: string, policy: RunPolicy, model?: string): Enforceability {
+    const refuse = (reason: string): Enforceability => ({ ok: false, error: { code: 'policy_unenforceable', message: `This provider cannot enforce the requested restrictions (toolControl). ${reason}`, missing: ['toolControl'], reason, instanceId } })
+    if (policy.authority?.kind !== 'bot') return refuse('This is not a bot policy.')
+    let record: InstanceRecord
+    try {
+      record = this.record(instanceId)
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error))
+    }
+    if (record.driver.botAuthority?.(record.config, record.instanceId) !== true) return refuse(`${this.displayName(record)} cannot hold a bot to its permissions.`)
+    return this.checkPolicy(instanceId, policy, model)
+  }
+
+  async removeRetiredBotRunner(): Promise<boolean> {
+    const entry = this.instanceMap.list()[RETIRED_BOT_RUNNER.id]
+    const config = entry?.config as Record<string, unknown> | undefined
+    if (!entry || entry.driver !== 'claude' || config?.profile !== 'locked' || config.displayName !== RETIRED_BOT_RUNNER.name) return false
+    await this.remove(RETIRED_BOT_RUNNER.id)
+    return true
+  }
+
   private policyOptions(record: InstanceRecord): CheckPolicyOptions {
     return {
       hostApprovals: record.driver.botAuthority?.(record.config, record.instanceId) === true,
+      botApprovals: record.driver.botApprovals?.(record.config) === true,
       ...(this.options.botRuntimeGaps ? { botRuntimeGaps: this.options.botRuntimeGaps } : {})
     }
   }
@@ -2130,6 +2167,8 @@ export class Harness implements HarnessGateway {
     for (const [instanceId, entry] of Object.entries(entries)) {
       if (!this.scopes.enabled(instanceId, entry.enabled, scope).effective) continue
       const record = this.listedRecord(instanceId)
+      // A locked entry runs bot turns only: no picker offers it for a thread.
+      if (record?.config.profile === 'locked') continue
       // A runtime lists nothing while it cannot run (a model API without its credential).
       const option = record && this.named(record, record.runtime.llmProvider?.())
       if (!option) continue
@@ -2471,6 +2510,7 @@ export class Harness implements HarnessGateway {
       ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
       ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {}),
       ...(record.config.setup ? { setup: record.config.setup } : {}),
+      ...(record.config.profile ? { profile: record.config.profile } : {}),
       ...(record.config.source?.kind === 'registry'
         ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
         : {})
@@ -2492,8 +2532,9 @@ export class Harness implements HarnessGateway {
   /**
    * Adds an entry; an explicit add, so a removed (tombstoned) id comes back with a fresh entry. A
    * driver with fixed ids (`instanceIdFor`) returns an existing entry unchanged (`existed`).
+   * `internal.profile` is the entry's profile, which only Mousse sets (the bot runner); no client passes one.
    */
-  private async add(input: AddInstanceInput): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
+  private async add(input: AddInstanceInput, internal: Pick<InstanceConfig, 'profile'> = {}): Promise<{ snapshot: InstanceSnapshot; existed: boolean }> {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
@@ -2520,7 +2561,7 @@ export class Harness implements HarnessGateway {
     const ownSetup = defaultInstanceId(driver.kind)
     // An entry that must have a home of its own (a managed Codex) is never the user's own setup,
     // and does not count as one.
-    const rule = privateHomeRule(driver, driver.decodeConfig(patch as Record<string, unknown>))
+    const rule = privateHomeRule(driver, driver.decodeConfig({ ...(patch as Record<string, unknown>), ...(internal.profile ? { home: 'private', profile: internal.profile } : {}) }))
     const hasOwnSetup = Object.values(entries).some((entry) => entry.driver === driver.kind && privateHomeRule(driver, driver.decodeConfig(entry.config)) !== 'required')
     // A driver whose home depends on the setup has one entry on the user's own setup at most.
     if (driver.privateHomeFor && rule === 'forbidden' && hasOwnSetup)
@@ -2546,6 +2587,7 @@ export class Harness implements HarnessGateway {
           ...(patch.env && Object.keys(patch.env).length ? { env: patch.env } : {})
         }, driver)
       : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
+    if (internal.profile && !useOwnSetup && config.home === 'private') config.profile = internal.profile
     const entry: ProviderInstanceConfig = { driver: driver.kind, enabled: true, config }
     // An instance with a vendor mirror starts signed in, takes the launch settings its vendor file
     // still holds (a re-added built-in keeps them, as the seed does) unless the add set them, and

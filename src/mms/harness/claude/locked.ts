@@ -1,23 +1,27 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { homedir } from 'node:os'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
-import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../../shared/bots/personal/walls'
+import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
-import { hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /**
- * The locked Claude Code profile (PR 6 §3): how a bot's turn runs on Claude Code. An instance with
- * `config.profile: 'locked'` runs in a home of its own and only bot turns; every interactive
- * instance keeps the user's own setup, untouched.
+ * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
+ * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
+ *   entry's environment, as one query that is never kept warm, and its process is the turn's own:
+ *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
+ * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
+ *   turns, in the locked environment, with its process group under the bot supervisor.
+ * Every interactive turn keeps the user's own setup, untouched.
  *
  * A locked turn loads no settings, plugins or MCP servers but Mousse's own, runs in the activation's
  * private scratch folder, offers exactly the granted built-ins (`tools`) and turns every other one
@@ -67,7 +71,7 @@ export function claudeSandboxFact(platform: NodeJS.Platform, onPath: (name: stri
  */
 export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Platform; cliVersion?: string; managedPolicy: boolean; evidence?: readonly ContainmentEvidence[] }): HarnessCaps {
   const proven = (kind: 'tools' | 'sandbox') => !input.managedPolicy && input.cliVersion !== undefined &&
-    hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion }, input.evidence)
+    hasContainmentEvidence({ driver: 'claude', kind, platform: input.platform, cliVersion: input.cliVersion, ...(kind === 'tools' ? { items: CLAUDE_LOCKED_TOOLS_ITEMS } : {}) }, input.evidence)
   return Object.freeze({
     ...base,
     planMode: false,
@@ -83,12 +87,13 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
 
 /**
  * Whether a locked instance holds a bot to its grant on this platform: once the gate and ledger
- * (`tools`, items 1–7) have evidence here, and no managed Claude Code policy applies. The sandbox's
- * evidence is needed only for shell (`shellContained`, per turn); the version is checked by the caps
- * (`claudeLockedCaps`) and again when a turn starts.
+ * (`tools`, `CLAUDE_LOCKED_TOOLS_ITEMS`) have evidence here, and no managed Claude Code policy
+ * applies. The sandbox's evidence is needed only for shell (`shellContained`, per turn); the version
+ * is checked by the caps (`claudeLockedCaps`) and again when a turn starts, so a Claude Code that
+ * updated itself to a version with no record holds no bot until one is added.
  */
 export function claudeLockedHoldsBots(platform: NodeJS.Platform, managedPolicy: boolean, evidence?: readonly ContainmentEvidence[]): boolean {
-  return !managedPolicy && hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform }, evidence)
+  return !managedPolicy && hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, items: CLAUDE_LOCKED_TOOLS_ITEMS }, evidence)
 }
 
 /** What `resolveSettings` reports: whether any managed (policy) tier is present, whatever its origin. */
@@ -115,15 +120,32 @@ export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
   web_search: ['WebSearch']
 })
 
-/** What a locked turn runs with, from the turn's bot authority and the runtime's facts. */
+/** What a bot turn runs with, from the turn's bot authority and the runtime's facts. */
 export interface ClaudeLockedTurn {
   authority: BotAuthority
+  /**
+   * The turn runs on the owner's own entry, not a locked one: their environment and sign-in, the
+   * SDK's own process handling, and no organisation-policy reading. Every call still goes through
+   * the grant gate, and Claude Code runs in its asking mode with none of the user's settings files.
+   */
+  ownerEntry?: true
   /** The run's tool ledger; without it no built-in runs. */
   ledger?: ToolLedger
-  /** The activation's private scratch folder: the turn's working directory. */
+  /**
+   * The turn's working directory: the activation's scratch folder on a locked entry, the bot's
+   * files folder on the owner's entry. A relative path a call names is checked against it.
+   */
   cwd: string
-  /** A `shell` grant may run: the sandbox is available and has evidence for this CLI and platform. */
+  /**
+   * A `shell` grant runs in Claude Code's sandbox: it is available here (and, on a locked entry, has
+   * evidence for this CLI and platform).
+   */
   shellContained: boolean
+  /**
+   * The owner's entry where the sandbox is not available: a `shell` grant still runs, outside any
+   * sandbox, since the owner allowed "run commands" as a whole. Never set on a locked entry.
+   */
+  shellOpen?: true
   /** The system temporary folders (`systemTempDirs`), closed to sandboxed writes. */
   temps: readonly string[]
   /** The bot's instructions, which replace Claude Code's own system prompt. */
@@ -138,11 +160,11 @@ export interface ClaudeLockedTurn {
 }
 
 /** The built-ins a locked turn offers, and every other built-in, turned off. */
-export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'shellContained'>, mousseTools: boolean): { tools: string[]; disallowedTools: string[] } {
+export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'shellContained' | 'shellOpen'>, mousseTools: boolean): { tools: string[]; disallowedTools: string[] } {
   const offered = new Set<string>()
   for (const tool of turn.authority.tools) {
-    // Shell runs only in a proven sandbox; without one it is never offered.
-    if (tool === 'shell' && !turn.shellContained) continue
+    // A locked entry runs shell only in a proven sandbox; the owner's entry also without one.
+    if (tool === 'shell' && !turn.shellContained && !turn.shellOpen) continue
     for (const name of CLAUDE_NATIVE_TOOLS[tool] ?? []) offered.add(name)
   }
   // ToolSearch only loads the Mousse tools' schemas; each call is still gated.
@@ -194,7 +216,8 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
   home?: string
 }): Partial<Options> {
   const { tools, disallowedTools } = claudeLockedTools(turn, input.mousseTools)
-  const shell = tools.includes('Bash') && turn.authority.workspace
+  // Bash runs in the sandbox whenever it can; only the owner's entry without one runs it open.
+  const shell = tools.includes('Bash') && turn.shellContained && turn.authority.workspace
   return {
     cwd: turn.cwd,
     env: input.env,
@@ -235,6 +258,24 @@ function patternEscapes(value: unknown): boolean {
   if (typeof value !== 'string') return false
   return isAbsolute(value) || /^[A-Za-z]:/.test(value) || runtimeExpandedPath(value) || value.includes('..')
 }
+
+/**
+ * A call's path arguments as Claude Code opens them: a relative one under the turn's working
+ * directory, when that is not the scratch folder the authority resolves against. A path the runtime
+ * expands itself (`~`, a variable) is left as it is, for the authority to refuse.
+ */
+function inFolder(args: Record<string, unknown>, cwd: string, scratch: string | undefined): Record<string, unknown> {
+  if (scratch === undefined || resolve(cwd) === resolve(scratch)) return args
+  const out: Record<string, unknown> = { ...args }
+  for (const key of CLAUDE_PATH_ARGUMENTS) {
+    const value = out[key]
+    if (typeof value === 'string' && value !== '' && !isAbsolute(value) && !runtimeExpandedPath(value)) out[key] = resolve(cwd, value)
+  }
+  return out
+}
+
+/** The arguments of Claude Code's built-ins that name a path (`botAuthority`'s `PATH_ARGUMENTS`). */
+const CLAUDE_PATH_ARGUMENTS = ['path', 'file_path', 'filePath', 'notebook_path', 'directory', 'dir', 'cwd'] as const
 
 /** What the model is told when the gate itself fails: the call does not run. */
 const GATE_FAILED = 'This call could not be checked against the bot\'s permissions, so it does not run.'
@@ -283,14 +324,14 @@ export class ClaudeLockedGate {
       }
       case 'builtin': {
         if (classified.neutral.includes('shell')) {
-          if (!this.turn.shellContained) return { ok: false, reason: wallMessage({ kind: 'policy_unenforceable', tool: toolName, missing: ['containment'] }) }
-          if (args.dangerouslyDisableSandbox === true) return { ok: false, reason: 'Commands always run in the sandbox here. Run it again without dangerouslyDisableSandbox.' }
+          if (!this.turn.shellContained && !this.turn.shellOpen) return { ok: false, reason: wallMessage({ kind: 'policy_unenforceable', tool: toolName, missing: ['containment'] }) }
+          if (this.turn.shellContained && args.dangerouslyDisableSandbox === true) return { ok: false, reason: 'Commands always run in the sandbox here. Run it again without dangerouslyDisableSandbox.' }
         }
         // Glob's pattern and Grep's glob name files too: one that leaves the folder it searches is refused.
         if (patternEscapes(toolName === 'Glob' ? args.pattern : toolName === 'Grep' ? args.glob : undefined))
           return { ok: false, reason: `This bot searches only inside its folders: give ${toolName} a relative pattern and a path.` }
-        const decided = checkBuiltinCall(authority, CLAUDE_NATIVE_TOOLS, toolName, args)
-        return decided.ok ? { ok: true, classified } : { ok: false, reason: wallMessage(decided.wall) }
+        const decided = checkBuiltinCall(authority, CLAUDE_NATIVE_TOOLS, toolName, inFolder(args, this.turn.cwd, authority.workspace?.scratch))
+        return decided.ok ? { ok: true, classified } : { ok: false, reason: checkMessage(decided) }
       }
     }
   }

@@ -498,6 +498,13 @@ export interface HarnessDriver {
    */
   botAuthority?(config: InstanceConfig, instanceId?: string): boolean
   /**
+   * The runtime holds a bot turn through its approvals (`toolControl: 'approval_only'`): the turn
+   * runs in its asking mode, and every approval it raises is answered by the bot's authority, never
+   * a person (Claude Code's grant gate, Codex's approval requests). What it runs without asking is
+   * not checked. Absent or false: a bot policy there needs `exact` tool control.
+   */
+  botApprovals?(config: InstanceConfig): boolean
+  /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
    * approval, dispatch and turn admission.

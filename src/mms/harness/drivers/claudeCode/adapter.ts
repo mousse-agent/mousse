@@ -74,18 +74,36 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     /** The user's Mousse MCP servers and skills; read per turn, like the service. */
     private readonly integrations: () => ClaudeIntegrationSource | null = () => null,
     /** Set for a locked instance, which runs bot turns only. */
-    private readonly locked?: ClaudeLockedProfile
+    private readonly locked?: ClaudeLockedProfile,
+    /**
+     * On the owner's own entry: whether Claude Code's sandbox can run here now (`claudeSandboxFact`).
+     * Read as each bot turn starts. Absent: it cannot, and a `shell` grant runs outside it.
+     */
+    private readonly ownerSandbox?: () => boolean
   ) {}
 
   /**
-   * A bot runs on Claude Code only under the locked profile, and a locked instance runs nothing but
-   * bots: either mismatch is refused before anything starts.
+   * A bot turn's profile. On the owner's own entry it runs with their sign-in and environment, every
+   * call through the grant gate, in the bot's files folder (`ownerEntry`). A locked instance runs
+   * nothing but bots, each under the locked profile: anything else is refused before it starts.
    */
   private async lockedTurn(input: TurnInput, host: AdapterHost, service: ClaudeSubscriptionClient): Promise<ClaudeLockedTurn | undefined> {
     const refuse = (message: string) => new AppError({ code: 'policy_unenforceable', message, errorInfo: { category: 'unavailable', retryable: false } })
     if (!this.locked) {
-      if (host.bot) throw refuse('A bot runs on Claude Code only in a locked runtime. Add a bot runtime for it.')
-      return undefined
+      const bot = host.bot
+      if (!bot) return undefined
+      return {
+        authority: bot,
+        ownerEntry: true,
+        ...(host.tools.toolLedger ? { ledger: host.tools.toolLedger } : {}),
+        // The bot's files folder: what Claude Code would touch without asking stays the bot's own.
+        cwd: bot.workspace?.files ?? bot.workspace?.scratch ?? service.standaloneWorkspace(input.threadId),
+        // "Run commands" is granted as a whole: Bash runs in Claude Code's sandbox where it can run
+        // here (over the bot's folders, so only with a workspace), and outside it where it cannot.
+        ...(this.ownerSandbox?.() === true && bot.workspace ? { shellContained: true } : { shellContained: false, shellOpen: true as const }),
+        temps: systemTempDirs(),
+        systemPrompt: host.bridge?.sessionInstructions ?? ''
+      }
     }
     const bot = host.bot
     if (!bot) throw refuse('This Claude Code runtime is locked for bots, so it runs only bot turns.')
@@ -117,7 +135,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     return this.service()?.configured() ?? false
   }
 
-  /** A locked runtime runs bot turns in their activation's folder, never in a thread's. */
+  /** A locked runtime runs bot turns in their own folders, never in a thread's. */
   standaloneWorkspace(threadId: string): string | undefined {
     return this.locked ? undefined : this.service()?.standaloneWorkspace(threadId)
   }
@@ -159,7 +177,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
-      permissionMode: input.permissionMode,
+      // A bot turn asks about every call, whatever the thread's or the entry's default.
+      permissionMode: locked ? 'ask' : input.permissionMode,
       child: input.child,
       continuation: input.continuation,
       continuationId: input.continuationId,

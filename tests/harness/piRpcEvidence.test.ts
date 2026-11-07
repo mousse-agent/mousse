@@ -58,14 +58,17 @@ describe('Pi RPC’s evidence gate', () => {
     expect(piRpcCaps({ platform: 'win32', piVersion: version, evidence: [noShell, record({ platform: 'win32' })] })).toBe(PI_RPC_EXACT_CAPS)
   })
 
-  it('with a no-shell record, definitions run on Pi RPC and pass admission; bots stay refused', () => {
+  it('with a no-shell record, definitions and bots without shell run on Pi RPC and pass admission', () => {
     const noShell = driver('win32', [record({ platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS })])
     expect(noShell.caps({})).toBe(PI_RPC_NO_SHELL_CAPS)
     // Interactive and unattended definition turns are admitted: shell is decided per call, at the gate.
     expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, definitionPolicy)).toEqual({ ok: true })
     expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, { ...definitionPolicy, origin: 'workflow' })).toEqual({ ok: true })
-    // A bot authority is still refused, whatever the caps.
-    expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, { ...definitionPolicy, origin: 'bot', authority: { kind: 'bot', digest: 'b' } }, undefined, undefined, { hostApprovals: true })).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['containment']) } })
+    // A bot authority is admitted too (Bot Phase 1 §5.9: no runtime gaps left), and still refused
+    // while a gap is listed.
+    const botPolicy = { ...definitionPolicy, origin: 'bot' as const, authority: { kind: 'bot' as const, digest: 'b' } }
+    expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, botPolicy, undefined, undefined, { hostApprovals: true })).toEqual({ ok: true })
+    expect(checkPolicy(PI_RPC_NO_SHELL_CAPS, botPolicy, undefined, undefined, { hostApprovals: true, botRuntimeGaps: ['a piece'] })).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['containment']) } })
   })
 
   it('a record labelled as made in WSL2 holds for Linux', () => {

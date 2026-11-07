@@ -459,6 +459,15 @@ export interface MousseSettings {
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
   }
+  /**
+   * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
+   * Automatic: each bot picks by its depth. The bot's depth sets the reasoning level, so none is kept.
+   */
+  botModel: {
+    llmProvider: LlmProviderId
+    model: string
+    instanceId?: string
+  }
   agents: {
     enabled: Record<AgentTypeId, boolean>
     /** Default provider for in-app Mousse subagents; blank inherits the main model. */
@@ -549,6 +558,29 @@ export interface SettingsOptions {
   accentColors: AccentColorOption[]
   llmProviders: LlmProviderOption[]
   agentTypes: AgentTypeOption[]
+  /**
+   * The bot model choices (`botModel`): the listing narrowed to the ready instances and models that
+   * can hold a bot. Absent from a daemon without bots.
+   */
+  botProviders?: LlmProviderOption[]
+}
+
+/**
+ * The bot model choices: `providers` narrowed to the models `holds` names (instance and model, as the
+ * bot candidates list them), without instances left with none. The reasoning level is the bot's
+ * depth, so no level is offered.
+ */
+export function botProviderOptions(providers: readonly LlmProviderOption[], holds: ReadonlyArray<{ instanceId: string; model: string }>): LlmProviderOption[] {
+  const held = new Set(holds.map((entry) => `${entry.instanceId}\u0000${entry.model}`))
+  return providers
+    .filter((provider) => provider.instanceId !== undefined)
+    .map((provider) => ({
+      ...provider,
+      models: provider.models
+        .filter((model) => held.has(`${provider.instanceId}\u0000${model.id}`))
+        .map(({ efforts: _efforts, defaultEffort: _defaultEffort, effortDescriptions: _descriptions, ...model }) => model)
+    }))
+    .filter((provider) => provider.models.length > 0)
 }
 
 export const ACRYLIC_INTENSITY_MIN = 0
@@ -786,6 +818,10 @@ export function getDefaultSettings(): MousseSettings {
       model: ''
     },
     title: {
+      llmProvider: '',
+      model: ''
+    },
+    botModel: {
       llmProvider: '',
       model: ''
     },

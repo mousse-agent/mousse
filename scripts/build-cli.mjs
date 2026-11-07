@@ -77,6 +77,22 @@ export function getSshProxyBuildOptions(projectRoot = root) {
 }
 
 /**
+ * A bot dispatch's active-time supervisor on its own (`out/cli/bot-supervisor.js`): Node built-ins only.
+ * The daemon starts it detached with `ELECTRON_RUN_AS_NODE=1` for each bot process (Bot Phase 1 §5.9).
+ */
+export function getBotSupervisorBuildOptions(projectRoot = root) {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/cli/fastpath/botSupervisorMain.ts')],
+    outfile: resolve(projectRoot, 'out/cli/bot-supervisor.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: false
+  }
+}
+
+/**
  * One-shot CLI build, or watch mode for development.
  * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean, reuse?: boolean }} [opts]
  */
@@ -94,6 +110,7 @@ export async function buildCli(opts = {}) {
     await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host', reuse })
     await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token', reuse })
     await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy', reuse })
+    await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -122,6 +139,7 @@ export async function buildCli(opts = {}) {
   await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host' })
   await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token' })
   await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy' })
+  await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {

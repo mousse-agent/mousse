@@ -17,7 +17,7 @@ import type { ClaudeTurnIntegrations } from '../src/mms/harness/vendors/claude/i
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../src/mms/harness/vendors/claude/turnFrames'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
+import { codexBotSandbox, codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
 import type { ChildTurnPolicy } from '../src/mms/harness/adapter'
@@ -60,6 +60,20 @@ describe('policy table: permission decisions', () => {
     ['shared child in plan mode', 'plan', SHARED, 'ask', READ_ONLY]
   ] as const)('Codex sandbox and approvals for a %s', (_name, mode, child, permissionMode, expected) => {
     expect(codexTurnPolicy(mode, child, permissionMode)).toEqual(expected)
+  })
+
+  it('a bot turn asks (untrusted): read-only without "run commands", workspace-write over its own folders with it', () => {
+    expect(codexTurnPolicy('default', undefined, 'ask', { shell: false, writableRoots: [] })).toEqual(SUPERVISED)
+    expect(codexTurnPolicy('default', undefined, 'ask', { shell: true, writableRoots: ['/p/files/b1', '/home/me/site'] })).toEqual({
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/p/files/b1', '/home/me/site'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
+    })
+    // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell.
+    const workspace = { roots: ['/home/me/site', '/home/me/ref'], access: 'read' as const, writeRoots: ['/home/me/site', '/p/files/b1'], scratch: '/p/scratch/a', files: '/p/files/b1' }
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace })).toEqual({ shell: true, writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'] })
+    expect(codexBotSandbox({ tools: new Set(['read']), workspace })).toEqual({ shell: false, writableRoots: [] })
+    expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })
 
   it('never sends a workspaceWrite policy on an interactive turn', () => {

@@ -38,24 +38,37 @@ export function recordHarnessSpawn(spawned: HarnessSpawn): void {
   }
 }
 
-/** `command args…` with the instance's environment, `extraEnv` on top, and its enforced variables last. */
+/**
+ * `command args…` with the instance's environment, `extraEnv` on top, and its enforced variables last.
+ * `onProcess` gets the new process's pid (a bot's supervision, Bot Phase 1 §5.9); when it throws,
+ * the process tree is killed and the error is rethrown, so nothing runs unsupervised.
+ */
 export function spawnHarness(
   env: InstanceEnv,
   purpose: string,
   command: string,
   args: string[],
-  options: Omit<SpawnOptions, 'env'> & { extraEnv?: NodeJS.ProcessEnv } = {}
+  options: Omit<SpawnOptions, 'env'> & { extraEnv?: NodeJS.ProcessEnv; onProcess?: (pid: number) => void } = {}
 ): ChildProcess {
-  const { extraEnv, ...spawnOptions } = options
+  const { extraEnv, onProcess, ...spawnOptions } = options
   const processEnv = withEnforced(extraEnv ? { ...env.env, ...extraEnv } : env.env, env.enforced)
   recordHarnessSpawn({ instanceId: env.instanceId, purpose, command, args, env: processEnv })
-  return spawn(command, args, {
+  const child = spawn(command, args, {
     windowsHide: true,
     // A process group on POSIX, so a timeout kills the whole tree.
     detached: process.platform !== 'win32',
     ...spawnOptions,
     env: processEnv
   })
+  if (onProcess && child.pid !== undefined) {
+    try {
+      onProcess(child.pid)
+    } catch (error) {
+      killTree(child)
+      throw error
+    }
+  }
+  return child
 }
 
 /**

@@ -233,7 +233,8 @@ export class MousseMainService extends MmsProfileServices {
     registerChatNetworkMethods(this.domains, async profileId => (await profile(profileId)).chatNetwork)
     const chatResourceDomains = registerChatResourceMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chatResources)
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
-    registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots)
+    // The Bot UI's methods (`bots.personal.v2`): the profile's bot engine answers them.
+    registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots?.service)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

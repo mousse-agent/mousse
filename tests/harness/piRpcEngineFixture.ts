@@ -48,6 +48,11 @@ export interface SetupOptions {
   compaction?: () => boolean
   /** The engine's caps (default `PI_RPC_CAPS`: weak containment, so a definition's shell asks first). */
   capabilities?: PiRpcEngineOptions['capabilities']
+  /** A bot turn's process supervision (without it the engine runs no bot turn). */
+  onBotProcess?: PiRpcEngineOptions['onBotProcess']
+  credentialKind?: PiRpcEngineOptions['credentialKind']
+  /** Variables added to the instance's environment (the user's own, which a bot turn never gets). */
+  baseEnv?: NodeJS.ProcessEnv
 }
 
 /** An engine on a fresh scratch dir with a recorder; `cleanups` gets what to undo, in order. */
@@ -61,7 +66,7 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
   const home = join(stateDir, 'home')
   const userHome = join(scratch.dir, 'user')
   mkdirSync(userHome, { recursive: true })
-  const env = instanceEnv({ instanceId: 'pi:mock', driver: 'pi', configRevision: 0, home, searchPath: [], base: cleanBase(userHome) })
+  const env = instanceEnv({ instanceId: 'pi:mock', driver: 'pi', configRevision: 0, home, searchPath: [], base: cleanBase(userHome, options.baseEnv) })
   const commands: string[] = []
   const catalogRevision = { value: 1 }
   const spawned: number[] = []
@@ -91,6 +96,8 @@ export async function setup(cleanups: Array<() => unknown>, options: SetupOption
     ...(options.holdTurn ? { holdTurn: options.holdTurn } : {}),
     ...(options.mousseTools ? { mousseTools: options.mousseTools } : {}),
     ...(options.userMcpTools ? { userMcpTools: options.userMcpTools } : {}),
+    ...(options.onBotProcess ? { onBotProcess: options.onBotProcess } : {}),
+    ...(options.credentialKind ? { credentialKind: options.credentialKind } : {}),
     ...(options.retry ? { settings: { retry: options.retry } } : { settings: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 10, provider: { maxRetries: 0 } } } })
   })
   cleanups.push(() => engine.stop())

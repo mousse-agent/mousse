@@ -128,6 +128,16 @@ describe('provider error classification', () => {
     expect(JSON.stringify(serializeAppError(error))).not.toMatch(/privateFixture|private\/path|unrecognized provider failure/)
   })
 
+  it("reads the status after pi-ai's Responses label (`xai API error (400): …`), as Pi's xAI and OpenAI entries report it", () => {
+    // pi-ai's `formatProviderError(…, '<provider> API error')` (openai-responses.js, azure-openai-responses.js).
+    expect(normalizeProviderError(new Error('xai API error (400): 400 Unsupported schema for tool escalate'), 'xai')).toMatchObject({ code: 'provider_request_invalid', details: { provider: 'xai', status: 400 } })
+    expect(normalizeProviderError(new Error('xai API error (401): Incorrect API key provided'), 'xai').code).toBe('provider_auth_invalid')
+    expect(normalizeProviderError(new Error('OpenAI API error (403): {"error":"no"}'), 'openai').code).toBe('provider_permission_denied')
+    expect(normalizeProviderError(new Error('Azure OpenAI API error (503): busy'), 'azure')).toMatchObject({ code: 'provider_unavailable', errorInfo: { retryable: true } })
+    // A status further in the text is not one.
+    expect(normalizeProviderError(new Error('the tool said: request error (400): no'), 'xai').code).toBe('provider_unknown')
+  })
+
   it('honors short Retry-After for 503 from structured errors and captured HTTP metadata', () => {
     const structured = normalizeProviderError({ status: 503, headers: new Headers({ 'Retry-After': '2' }) }, 'anthropic')
     const captured = normalizeProviderError('503: Service is busy', 'anthropic', { status: 503, retryAfter: '2' })

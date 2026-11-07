@@ -11,7 +11,8 @@ import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
 import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
-import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
+import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -92,6 +93,9 @@ import {
   bodyWithProject,
   getThreadNotificationPresentation,
   planThreadNotification,
+  BotNotificationIndex,
+  botNotificationContent,
+  botNotificationKind,
   type ThreadNotificationKind,
   type ThreadToastPayload
 } from '../notifications/threadNotification'
@@ -193,7 +197,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BRIDGE_ACTIVITY_METHODS,
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
-  ...BOTS_PERSONAL_METHODS,
+  ...BOTS_PERSONAL_V2_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -378,7 +382,10 @@ export function registerGuiIpc(
   registerHandler('browser:take-control', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'takeControl'))
   registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'resume'))
 
-  registerHandler('platform:request', async (_event, request: unknown): Promise<PlatformResponse<unknown>> => {
+  // Bot names seen in the Bot UI's replies, and the bot rows already announced, for bot notifications.
+  const botNotifications = new BotNotificationIndex()
+  const BOT_NAMED_REPLIES = new Set(['bots.personal.list', 'bots.create', 'bots.get', 'bots.update', 'bots.personal.pause', 'bots.personal.resume'])
+  registerHandler('platform:request', async (event, request: unknown): Promise<PlatformResponse<unknown>> => {
     try {
       if (!request || typeof request !== 'object' || Array.isArray(request)) {
         throw new PlatformRequestError('platform_invalid_request', 'Expected a platform request object')
@@ -400,6 +407,10 @@ export function registerGuiIpc(
         throw new PlatformRequestError('platform_params_too_large', 'Platform parameters exceed the size limit')
       }
       const value = await guiMms.request(method, params)
+      if (BOT_NAMED_REPLIES.has(method)) {
+        const profileId = guiMms.getWindowBindingForSender(event.sender.id)?.profileId
+        if (profileId) botNotifications.note(profileId, value)
+      }
       return {
         ok: true,
         value: method === 'chatReferences.resolve'
@@ -526,6 +537,50 @@ export function registerGuiIpc(
         // Open the thread the banner is about; the window selects it as if its row were clicked.
         win.webContents.send('app:openThread', about.threadId)
       }
+    })
+    notification.show()
+    if (useWindowsCompletionSound) playThreadCompletionSound()
+  }
+
+  // The bot whose chat each window shows, so that bot's rows only sound while it is on screen.
+  const viewedBots = new Map<number, string | null>()
+  registerHandler('notifications:viewBot', async (event, botId: unknown) => {
+    viewedBots.set(event.sender.id, typeof botId === 'string' && botId ? botId : null)
+  })
+
+  /**
+   * A bot's new chat row (Bot Phase 1 §5.7): a run report, a reply, a notice or an error uses the
+   * person's choices for `completed`, an open ask those for `question`. Bots have no in-window toast
+   * yet, so the system notification stands in for it. A click opens the bot's chat.
+   */
+  const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
+    const { botId, message, botName } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown }
+    if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
+    const kind = botNotificationKind(message)
+    if (!kind || !botNotifications.first(profileId, message.id)) return
+    const channels = { ...threadNotificationChannels(profileSettings.notifications, kind), toast: false }
+    const plan = planThreadNotification(channels, {
+      windowFocused: win.isFocused(),
+      viewingThread: viewedBots.get(win.webContents.id) === botId,
+      systemSupported: Notification.isSupported()
+    })
+    if (!plan.system) {
+      if (plan.playSound) playThreadCompletionSound()
+      return
+    }
+    const content = getThreadNotificationPresentation(kind, profileSettings)
+    const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
+    const notification = new Notification({
+      ...content,
+      ...botNotificationContent(typeof botName === 'string' ? botName : botNotifications.name(profileId, botId), message),
+      silent: useWindowsCompletionSound ? true : content.silent
+    })
+    notification.on('click', () => {
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+      win.webContents.send('notifications:openBot', botId)
     })
     notification.show()
     if (useWindowsCompletionSound) playThreadCompletionSound()
@@ -942,6 +997,7 @@ export function registerGuiIpc(
         )
       }
     }
+    if (event.type === 'bots.message' && !replay) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
       tracker.setState(event.threadId, 'awaiting_input')
       target('threads:activity', tracker.getSnapshot())
@@ -2648,6 +2704,25 @@ export function registerGuiIpc(
   registerHandler('providers:instances:refreshAllModels', async () => refreshAllInstanceModels({}))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
     setInstanceModelPrefs({ instanceId, patch }))
+  // A bot's "export your memory" ask and its chat's Attach pick here, with the system's pickers.
+  registerHandler('dialog:pickFolder', async (event, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    const input = (request ?? {}) as { title?: unknown; buttonLabel?: unknown }
+    const options: Electron.OpenDialogOptions = {
+      ...(typeof input.title === 'string' ? { title: input.title } : {}),
+      ...(typeof input.buttonLabel === 'string' ? { buttonLabel: input.buttonLabel } : {}),
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled ? null : (result.filePaths[0] ?? null)
+  })
+  registerHandler('dialog:pickFiles', async (event, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    const title = (request as { title?: unknown } | null)?.title
+    const options: Electron.OpenDialogOptions = { ...(typeof title === 'string' ? { title } : {}), properties: ['openFile', 'multiSelections'] }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled ? [] : result.filePaths
+  })
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

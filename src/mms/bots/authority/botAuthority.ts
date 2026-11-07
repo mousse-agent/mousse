@@ -1,4 +1,4 @@
-import type { ActiveTimeScope, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -8,8 +8,10 @@ import type { BotPermissions } from '../grants/compile'
 
 /**
  * A bot activation's authority over one turn (PR 6 §4), checked on every call by each check point:
- * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools (and the
- * locked Claude gate, 6b). It asks nobody: a call outside the grant stops at a wall.
+ * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
+ * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
+ * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
+ * reported to `onAllowed`, the source of activity chips (§5.8).
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
@@ -34,6 +36,8 @@ export interface BotAuthorityInput {
   counters: CounterScope
   time: ActiveTimeScope
   spend: SpendScope | null
+  /** Told of every call the check allows, whatever the runtime (`BotActivitySink.observer`). Never fails a call. */
+  onAllowed?: BotAllowedObserver
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
@@ -42,8 +46,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
   const mcp: ReadonlySet<`${string}::${string}`> = new Set(permissions.mcp)
-  // Without per-folder access every root has the workspace's access.
-  const workspace = permissions.workspace ? { ...permissions.workspace, writeRoots: permissions.workspace.writeRoots ?? (permissions.workspace.access === 'write' ? permissions.workspace.roots : []) } : null
+  // Without per-folder access every root has the workspace's access. The files folder is one more
+  // writable root, granted with the bot itself.
+  const workspace = permissions.workspace ? workspaceWithFiles(permissions.workspace) : null
   const readOnlyRoots = workspace ? workspace.roots.filter((root) => !workspace.writeRoots.includes(root)) : []
   const authority: BotAuthority = {
     activationId: input.activationId,
@@ -52,32 +57,47 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
-    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch } : null,
+    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch, ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}) } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,
     spend: input.spend,
     check(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
-      const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
-      if (ended) return { ok: false, wall: ended }
-      if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
-      switch (call.kind) {
-        case 'skill':
-          return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
-        case 'mcp':
-          // Granted parts never hold `:`, so a call whose parts do can never match another pair.
-          return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
-        case 'app':
-          return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
-        case 'builtin':
-          return checkBuiltin(call.tool, call.nativeName, call.args)
+      const decided = decide(call)
+      if (decided.ok && input.onAllowed) {
+        try {
+          input.onAllowed(call)
+        } catch {
+          // Chips are a view of the calls; they never decide one.
+        }
       }
+      return decided
     }
   }
   return authority
 
+  function decide(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+    const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
+    if (ended) return { ok: false, wall: ended }
+    if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
+    switch (call.kind) {
+      case 'skill':
+        return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
+      case 'mcp':
+        // Granted parts never hold `:`, so a call whose parts do can never match another pair.
+        return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
+      case 'app':
+        return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
+      case 'builtin':
+        return checkBuiltin(call.tool, call.nativeName, call.args)
+    }
+  }
+
   function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
+    // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
+    // can reach is the runtime's sandbox, where it has one, not a path check here.
+    if (tool === 'shell') return { ok: true }
     if (NETWORK_TOOLS.has(tool)) return { ok: true }
     const writes = WRITE_TOOLS.has(tool)
     const access = writes ? 'write' : 'read'
@@ -140,6 +160,18 @@ export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = pro
   if (/\$(\{|[A-Za-z_])/.test(raw)) return true
   if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
   return false
+}
+
+/** The compiled workspace as the authority checks it: the files folder joins the roots, writable. */
+function workspaceWithFiles(workspace: NonNullable<BotPermissions['workspace']>): { roots: string[]; access: 'read' | 'write'; writeRoots: string[]; scratch: string } {
+  const writeRoots = workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])
+  const files = workspace.files
+  return {
+    roots: files !== undefined ? [...workspace.roots, files] : [...workspace.roots],
+    access: workspace.access,
+    writeRoots: files !== undefined ? [...writeRoots, files] : [...writeRoots],
+    scratch: workspace.scratch
+  }
 }
 
 function firstPath(args: Record<string, unknown>): unknown {

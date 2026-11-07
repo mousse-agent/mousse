@@ -118,8 +118,9 @@ export function knownProblemOf(rows: readonly KnownBrokenVersions[] | undefined,
  * platform. A record is written only by a passing run of the runtime's evidence suite on that
  * platform (for locked Claude Code, `claudeLockedProcess.test.ts` against the real pinned CLI); a
  * failing item writes none. Without a record the runtime claims nothing:
- * - `tools` (items 1–7): the exact tool list, Mousse's grant gate and the built-in ledger hold, so
- *   the runtime's tool control is `exact` and it may hold a bot authority;
+ * - `tools` (items 1–7; locked Claude Code's real-CLI suite runs `CLAUDE_LOCKED_TOOLS_ITEMS`): the
+ *   exact tool list, Mousse's grant gate and the built-in ledger hold, so the runtime's tool control
+ *   is `exact` and it may hold a bot authority;
  * - `sandbox` (items 8–14, 16 and 17): the sandbox holds every write, read, network and kill rule,
  *   so a `shell` grant may run there and containment is `strong`.
  *
@@ -172,15 +173,34 @@ export const PI_RPC_EVIDENCE_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 
 export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVIDENCE_ITEMS.filter((item) => item !== 10))
 
 /**
+ * The `tools` items `claudeLockedProcess.test.ts` asserts against the real CLI: 1, Mousse's own
+ * spawn runs the CLI; 2 and 3, no hook of the entry's home or of the working folder runs (nor their
+ * allow rules or MCP servers); 4, each request offers exactly the granted built-ins; 5 (all three
+ * tests), the gate denies every path outside the roots (`~`, padded and trailing-space paths
+ * included), a gate that throws denies the call, and only the granted inside read runs and is
+ * ledgered; 7, on Linux, the CLI starts in the locked environment (none of Mousse's variables or
+ * credentials, nor the entry's own; its own config home and the scratch's `TMPDIR`). Item 6 is not
+ * run there, so a locked Claude record never claims it; a record must hold every one of these to count.
+ */
+export const CLAUDE_LOCKED_TOOLS_ITEMS: readonly number[] = Object.freeze([1, 2, 3, 4, 5, 7])
+
+/**
  * Every record so far.
- * - Locked Claude Code: none. No platform has passed the real-CLI suite yet, so it holds no bot
- *   authority and runs no shell anywhere.
+ * - Locked Claude Code, `tools` only (`CLAUDE_LOCKED_TOOLS_ITEMS`), on Linux (CachyOS, x64, with
+ *   bubblewrap and socat present): `claudeLockedProcess.test.ts`, 3 of 3, once with the pinned SDK's
+ *   binary (`@anthropic-ai/claude-agent-sdk-linux-x64` 0.3.291, Claude Code 2.1.291) and once with
+ *   `MOUSSE_CLAUDE_EVIDENCE_BINARY` set to the installed Claude Code 2.1.306. Another version (a
+ *   Claude Code that updated itself), macOS and Windows have no record: a locked entry there runs
+ *   no bot, and bots use Pi. No platform has a
+ *   `sandbox` record, so no locked entry runs shell.
  * - Pi RPC, for Pi 1.4.0, each evidence file run on its own: Linux, from a run in WSL2 (a real Linux
  *   kernel in a VM on Windows, accepted as Linux evidence): items 1–12. Windows (native Windows 11,
  *   x64): a no-shell record, items 1–9, 11 and 12 (Pi's shell runs uncontained there, so item 10
  *   does not apply). macOS (macOS 26.6.2 on Apple silicon): items 1–12.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
+  Object.freeze({ driver: 'claude', kind: 'tools', cliVersion: '2.1.291', platform: 'linux', items: CLAUDE_LOCKED_TOOLS_ITEMS, recordedAt: '2026-11-06T23:08:49Z' }),
+  Object.freeze({ driver: 'claude', kind: 'tools', cliVersion: '2.1.306', platform: 'linux', items: CLAUDE_LOCKED_TOOLS_ITEMS, recordedAt: '2026-11-06T23:08:52Z' }),
   Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T02:51:11Z' }),
   Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-28T02:52:13Z' }),
   Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T02:50:26Z' })

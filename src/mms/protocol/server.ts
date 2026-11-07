@@ -639,6 +639,8 @@ export class MmsProtocolServer {
 
     // Activity + agent/task registry fan-out from multi-tenant runtimes
     const runtimes = services.threadRuntimes
+    // A personal bot's threads are its chat (`Thread.botOwned`): their work is told by `bots.*`
+    // events, so no window counts them, toasts them or notifies about them as threads.
     onEmitter(
       runtimes,
       'activity',
@@ -647,10 +649,12 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
+        const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
         if (payload.activity) {
+          const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
-            this.ring.push('activity.snapshot', { activity: payload.activity }, undefined)
+            this.ring.push('activity.snapshot', { activity }, undefined)
           )
         }
       }
@@ -719,9 +723,12 @@ export class MmsProtocolServer {
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
     })
-    // A wall asks the owner: the Bots tab's inbox and a desktop notification.
-    if (services.personalBots) onEmitter(services.personalBots.events, 'escalation', (escalation: unknown) => {
-      emitToSubscribers(this.ring.push('bots.escalation', escalation, undefined))
+    // A new or changed chat row (run reports, asks and errors notify), and a working bot's live chip.
+    if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.message', event, undefined))
+    })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.activity', event, undefined))
     })
   }
 

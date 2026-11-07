@@ -52,6 +52,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
+  botProviderOptions,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
   type MousseSettingsUpdate
@@ -1650,9 +1651,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A computer asked by another of the user's computers reads the transcripts of its newest threads only,
       // so a search typed on one computer is bounded work on the others.
       const hidden = connectionIsLocal(ctx.connection) ? undefined : localOnlyThreadIds(ctx.mms.threads.listAllThreads())
+      // A personal bot's threads are its chat, never a thread result (`Thread.botOwned`).
       const results = ctx.mms.threads.searchThreads(query, limit, {
         hideSubagents: true,
-        ...(hidden?.size ? { allow: (thread: Thread) => !hidden.has(thread.id) } : {}),
+        allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
         ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
@@ -2454,7 +2456,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'activity.snapshot': {
-      const activity = withoutLocalOnlyKeys(ctx, ctx.mms.threadRuntimes.getActivitySnapshot())
+      // A personal bot's threads are its chat, not threads anyone counts (`Thread.botOwned`).
+      const bots = new Set(ctx.mms.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+      const all = ctx.mms.threadRuntimes.getActivitySnapshot()
+      const activity = withoutLocalOnlyKeys(ctx, bots.size ? Object.fromEntries(Object.entries(all).filter(([threadId]) => !bots.has(threadId))) : all)
       // A window also gets what the threads of the other computers are doing.
       const remote = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists?.activity() : undefined
       return { activity: remote ? { ...activity, ...remote } : activity }
@@ -2795,12 +2800,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // The first read after start waits for each instance's first check (`awaitFirstChecks`).
       const llmProviders = (await ctx.mms.harness?.llmProviders({ kind: 'device' })) ?? []
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
+      // The bot model choices: the listed models that can hold a bot now. A failed read offers only Automatic.
+      const holdable = ctx.mms.botModels ? await ctx.mms.botModels.holdable().catch(() => []) : []
       return {
         options: {
           themes: THEME_OPTIONS,
           accentColors: ACCENT_COLORS,
           llmProviders,
-          agentTypes
+          agentTypes,
+          botProviders: botProviderOptions(llmProviders, holdable)
         }
       }
     }

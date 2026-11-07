@@ -13,7 +13,8 @@ import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { addedPermissions, canonicalManifest, describeManifest, intersectManifest, isAbsolutePath, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
+import { addedPermissions, BOT_APP_TOOLS, BOT_DEFAULT_APP_TOOLS, botStarterManifest, canonicalManifest, describeManifest, intersectManifest, isAbsolutePath, isOwnBotAppTool, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'edit'],
@@ -157,8 +158,9 @@ describe('round-1 review fixes', () => {
     expect(manifestSubset(granted, granted)).toBe(true)
   })
 
-  it('only web and skill app tools can be granted: delegation, thread and queue tools are refused at publish', () => {
+  it('only web, skill and the bot\'s own app tools can be granted: delegation, thread and queue tools are refused at publish', () => {
     expect(manifestProblem(valid({ appTools: ['web_search', 'web_fetch'] }))).toBeUndefined()
+    expect(manifestProblem(valid({ appTools: [...BOT_DEFAULT_APP_TOOLS] }))).toBeUndefined()
     for (const tool of ['delegate_task', 'continue_subagent', 'create_subagents', 'thread_fork', 'thread_merge_back', 'queue_enqueue', 'thread_read', 'ask_user', 'read'])
       expect(manifestProblem(valid({ appTools: [tool] })), tool).toContain(`the Mousse tool ${tool}`)
   })
@@ -215,6 +217,14 @@ describe('round 2: per-folder access survives every answer and narrowing', () =>
     expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
   })
 
+  it('"run commands" is one line, not tied to a folder, and an Allow adds only it', () => {
+    const authored = two({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
+    const after = withPermission(authored, { tool: 'shell' })
+    expect(after.tools).toContain('shell')
+    expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+    expect(describeManifest(after).map((line) => line.text)).toContain('Run commands')
+  })
+
   it('a thread\'s narrowing keeps its read-only folders read-only, through compilation and the call check', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-narrow-')))
     const site = join(base, 'site')
@@ -244,5 +254,32 @@ describe('round 2: the locked Claude sandbox writes only to folders granted for 
     const sandbox = claudeLockedSandbox({ workspace: { roots: ['/a', '/b'], access: 'read', writeRoots: ['/b'], scratch: '/s' }, temps: ['/tmp'], home: '/home/me' }) as { filesystem: { allowWrite: string[]; denyWrite: string[] } }
     expect(sandbox.filesystem.allowWrite).toEqual(['/b', '/s'])
     expect(sandbox.filesystem.denyWrite).toEqual(['/a', '/tmp'])
+  })
+})
+
+describe('default app tools (Bot Phase 1 §5.10)', () => {
+  it('every new bot gets the web, its schedules, profile, depth, model, escalate and the five memory tools', () => {
+    expect([...BOT_DEFAULT_APP_TOOLS].sort()).toEqual([
+      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
+      'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
+    ])
+    for (const tool of BOT_MEMORY_TOOLS) {
+      expect(BOT_DEFAULT_APP_TOOLS).toContain(tool)
+      expect(BOT_APP_TOOLS.has(tool)).toBe(true)
+    }
+    // `consult` stays conditional: it comes with context threads, never by default.
+    expect(BOT_DEFAULT_APP_TOOLS).not.toContain('consult')
+  })
+
+  it('the bot\'s own tools are not permissions; the web tools are', () => {
+    for (const tool of ['bot_schedule_add', 'set_depth', 'use_model', 'set_profile', 'escalate', ...BOT_MEMORY_TOOLS]) expect(isOwnBotAppTool(tool), tool).toBe(true)
+    for (const tool of ['web_search', 'web_fetch', 'consult']) expect(isOwnBotAppTool(tool), tool).toBe(false)
+  })
+
+  it('the starter grant is file tools without a folder, the default app tools and 15 minutes', () => {
+    const starter = botStarterManifest()
+    expect(manifestProblem(starter)).toBeUndefined()
+    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 15 * 60_000 } })
+    expect(starter.appTools).toEqual([...BOT_DEFAULT_APP_TOOLS])
   })
 })
