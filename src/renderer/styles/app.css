@@ -1179,7 +1179,7 @@ html[data-theme='high-contrast'] .chat-input-area {
   font-size: 12.5px;
 }
 
-/* Add project under an empty thread's composer; Create agent in the empty Agents tab (chats.css). */
+/* Add project under an empty thread's composer; Create agent in the empty Chats tab (chats.css). */
 .chat-empty-add-project {
   margin: 16px auto 0;
 }

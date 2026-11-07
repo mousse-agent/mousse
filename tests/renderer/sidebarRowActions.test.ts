@@ -105,14 +105,13 @@ const click = (target: Element) => act(() => { (target as HTMLElement).click() }
 const openProject = () => click(projectToggle())
 
 describe('naming', () => {
-  it('says thread, Agents, No project and Archived', () => {
+  it('says thread, Chats, No project and Archived', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests')], threadsSidebarView: 'threads', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    // New thread and Search may live in the sidebar header or in the title bar; either way they say "thread".
+    // New thread may live in the sidebar header or in the title bar; either way it says "thread".
     const shell = renderToStaticMarkup(createElement(TitleBar)) + html
     expect(shell).toContain('aria-label="New thread"')
-    expect(shell).toContain('aria-label="Search threads"')
-    expect(html).toContain('aria-label="Agents"')
+    expect(html).toContain('aria-label="Chats"')
     expect(html).toContain('<span>No project · 0</span>')
     expect(html).toContain('<span>Archived · 0</span>')
     expect(html).toContain('aria-label="New thread in Mousse"')

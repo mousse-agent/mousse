@@ -1,8 +1,11 @@
 import { useEffect } from 'react'
-import { Gauge, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { Gauge, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { useShortcutTitle } from '../commands/commandRegistry'
+import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { useAppStore } from '../stores/appStore'
+import { useChatsStore } from '../stores/chatsStore'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import '../styles/navigation-rail.css'
 
@@ -14,6 +17,9 @@ export function NavigationRail() {
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
+  // In the Chats tab, Search finds agent chats.
+  const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
+  const searchThreadsTitle = useShortcutTitle('Search threads', 'threads.search')
 
   const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen })
   const reviewPending = useStorageReviewPending()
@@ -42,8 +48,20 @@ export function NavigationRail() {
     )
   }
 
+  const search = async () => {
+    if (!chatsMode) return openPalette('messages')
+    // The chat search is in the sidebar, which a rail page covers.
+    await leaveRailPage()
+    if (activeRailPage(useAppStore.getState()) === null) useChatsStore.setState({ searchOpen: true })
+  }
+
   return (
     <nav className="navigation-rail" aria-label="Mousse navigation">
+      <button type="button" className="navigation-rail-button"
+        aria-label={chatsMode ? 'Search chats' : 'Search threads'} title={chatsMode ? 'Search chats' : searchThreadsTitle}
+        onClick={() => void search()}>
+        <Search size={18} strokeWidth={1.8} aria-hidden="true" />
+      </button>
       {shortcut('automations', 'Automations', Workflow)}
       <div className="navigation-rail-separator" role="separator" />
       {shortcut('usage', 'Subscription usage', Gauge)}

@@ -1406,7 +1406,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           {([
             ['projects', 'Projects', FolderKanban],
             ['threads', 'Threads', ListTree],
-            ['chats', 'Agents', MessagesSquare]
+            ['chats', 'Chats', MessagesSquare]
           ] as const).map(([view, label, Icon]) => (
             <button
               key={view}
@@ -1426,9 +1426,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </button>
           ))}
         </div>
-        <button type="button" className="threads-sidebar-toolbar-button threads-sidebar-add-project" onClick={() => void openProject()} title="Add project" aria-label="Add project">
-          <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />
-        </button>
+        {/* Only beside Projects; on the other tabs the tabs take the whole row. */}
+        {sidebarView === 'projects' && (
+          <button type="button" className="threads-sidebar-toolbar-button threads-sidebar-add-project" onClick={() => void openProject()} title="Add project" aria-label="Add project">
+            <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={sidebarView} data-more-below={moreBelow || undefined}>
