@@ -122,6 +122,22 @@ describe('starting work', () => {
     expect(projectsApi.open).toHaveBeenCalledTimes(1)
   })
 
+  it('shows Add project only on the Projects tab; elsewhere the tabs take the whole row', () => {
+    show([thread('a', 'Fix tests')])
+    const tab = (name: string) => [...host.querySelectorAll<HTMLElement>('[role="tab"]')].find((item) => item.getAttribute('aria-label') === name)!
+    const rowChildren = () => [...host.querySelector('.threads-sidebar-tabs-row')!.children].map((child) => child.className)
+    expect(rowChildren()).toEqual(['threads-sidebar-tabs', 'threads-sidebar-toolbar-button threads-sidebar-add-project'])
+    for (const name of ['Threads', 'Chats']) {
+      click(tab(name))
+      expect(byLabel('Add project')).toBeNull()
+      expect(rowChildren()).toEqual(['threads-sidebar-tabs'])
+    }
+    click(tab('Projects'))
+    expect(byLabel('Add project')).not.toBeNull()
+    // The tab list grows into the row when Add project is gone.
+    expect(rule(sidebarCss, '.threads-sidebar-tabs')).toMatch(/flex:\s*1;/)
+  })
+
   it('says "No projects" with an inline Add project when there are none', () => {
     show([], { projects: [] })
     const empty = host.querySelector<HTMLElement>('.threads-sidebar-empty-projects')!
@@ -154,7 +170,7 @@ describe('tabs', () => {
   it('label all three segments, not only the selected one', () => {
     show([thread('a', 'Fix tests')])
     const labels = [...host.querySelectorAll('[role="tab"] .threads-sidebar-tab-label')].map((label) => label.textContent)
-    expect(labels).toEqual(['Projects', 'Threads', 'Agents'])
+    expect(labels).toEqual(['Projects', 'Threads', 'Chats'])
   })
 
   it('show their labels whole or not at all: at the 260px default the open tab keeps its word at a fixed width', () => {
@@ -180,7 +196,7 @@ describe('tabs', () => {
   it('keep their names as tooltips when the words are hidden', () => {
     show([thread('a', 'Fix tests')])
     const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
-    expect(tabs.map((tab) => [tab.title, tab.getAttribute('aria-label')])).toEqual([['Projects', 'Projects'], ['Threads', 'Threads'], ['Agents', 'Agents']])
+    expect(tabs.map((tab) => [tab.title, tab.getAttribute('aria-label')])).toEqual([['Projects', 'Projects'], ['Threads', 'Threads'], ['Chats', 'Chats']])
     expect(tabs.map((tab) => tab.classList.contains('active'))).toEqual([true, false, false])
   })
 
