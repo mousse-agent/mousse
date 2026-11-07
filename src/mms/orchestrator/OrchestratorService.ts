@@ -76,7 +76,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { createHash, randomUUID } from 'node:crypto'
@@ -98,6 +98,7 @@ import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnP
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
+import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
@@ -784,12 +785,14 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
 /**
- * A bot turn's preamble: the bot's role and instructions first, then Mousse's own. Bots that never
- * ask anyone run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
+ * A bot turn's preamble: the bot's role and instructions first, then its context pack (memory and
+ * history, built by Mousse and frozen for the activation, Bot Phase 1 §5.3.2), then Mousse's own.
+ * Bots that never ask anyone run their app tools with `approvals: 'never'`, so a tool that would
+ * ask is refused.
  */
-function withBotInstructions(instructions: string | undefined, preamble: string): string {
-  if (!instructions?.trim()) return preamble
-  return [`Your role and instructions:\n${instructions.trim()}`, preamble].filter(Boolean).join('\n\n')
+function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
+  const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
+  return parts.filter(Boolean).join('\n\n')
 }
 
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
@@ -1412,6 +1415,17 @@ export class OrchestratorService extends EventEmitter {
 
   setBotDispatcher(dispatcher: BotTurnDispatcher | null): void {
     this.botDispatcher = dispatcher
+  }
+
+  /**
+   * What the bots' own app tools reach (Bot Phase 1 §5.5, §5.6, §5.10): the engine's tool host, the
+   * activity chips, the model resolver, and the memory tools' host. Read at each call: `bots.db`
+   * opens after the app-tool registry is built. Null: the tools refuse.
+   */
+  private botAppTools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null = null
+
+  setBotAppTools(tools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null): void {
+    this.botAppTools = tools
   }
 
   /** Wakes the effect worker: a `turn.start` was written outside the orchestrator (a bot dispatch). */
@@ -3050,7 +3064,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     try {
@@ -3084,7 +3098,9 @@ export class OrchestratorService extends EventEmitter {
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
-    const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
+    // A bot's turn runs on its own instructions (`botInstructions`, in the preamble): Mousse's
+    // orchestration and applet guidance would point it at tools its grant never holds.
+    const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     return {
@@ -3097,13 +3113,13 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        sessionInstructions: turn.bot ? '' : sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
           usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
-        }))
+        }), input.botPreamble)
       })
     }
   }
@@ -3129,6 +3145,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A bot turn may use only its granted app tools; every other one is refused if called.
+      .filter((tool) => botTurnOffers(turn.bot, tool.name))
       // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
       .filter((tool) => !unattendedRefusal(tool, turn))
       // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
@@ -3145,6 +3163,8 @@ export class OrchestratorService extends EventEmitter {
       host: this.mcpToolHost(),
       engine: this.requireRunEngine(),
       turns: this.appToolTurns,
+      bots: () => this.botAppTools?.bots,
+      botMemory: () => this.botAppTools?.memory,
       // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
       ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
     }).registry
@@ -4041,8 +4061,10 @@ export class OrchestratorService extends EventEmitter {
    * A bot dispatch's `turn.start` (PR 6 §4): the bot engine rebuilds the turn from `bots.db` and
    * checks that its grant still holds; only then does the turn start, bound to the compiled policy,
    * with the activation's authority, counts and spend. A refusal cancels the queued run, and
-   * nothing is sent. The activation thread is new, so the turn starts with no history; anything
-   * else fails it with `bot_state_invalid` before a request.
+   * nothing is sent. A run's thread is new, so its first turn starts with no history; a chat
+   * activation's first turn runs on the home thread right after the engine cleared its context
+   * (`history: 'cleared'`: the transcript stays, nothing of it is sent). Anything else fails it with
+   * `bot_state_invalid` before a request.
    */
   private async executeBotEffect(payload: BotTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
@@ -4071,10 +4093,12 @@ export class OrchestratorService extends EventEmitter {
       return cancel('bot_prepare_failed')
     }
     if ('refused' in prepared) return cancel(prepared.code)
-    // History 'none': a fresh activation thread has no transcript, native context or summary. A
+    // History 'none': a fresh activation thread has no transcript, native context or summary.
+    // 'cleared': the home thread's context was just cleared, so none of its transcript is sent. A
     // continuation or a consult runs on the thread's own history ('thread').
-    const fresh = session.messages.length === 0 && getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
-    if (busy() || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
+    const cleared = getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
+    const fresh = session.messages.length === 0 && cleared
+    if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
     try {
       const response = await this.runTurnOnSession(
@@ -10248,7 +10272,7 @@ export class OrchestratorService extends EventEmitter {
       const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
-        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
+        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -10342,7 +10366,8 @@ export class OrchestratorService extends EventEmitter {
         else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
         // A scheduled occurrence is never paused (its run would outlive the occurrence). It fails, and the run
         // records when the limit resets so the scheduler waits for it instead of taking slots inside the window.
-        const scheduled = opts?.schedule ? usageLimitOf(err) : undefined
+        // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
+        const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
         assistantText = `[${providerError.code}] ${providerError.message}`
       }

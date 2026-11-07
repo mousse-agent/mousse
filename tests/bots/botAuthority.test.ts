@@ -161,9 +161,12 @@ describe('host approvals in checkPolicy', () => {
   })
 
   it('fail closed: no runtime runs a bot while bot runtimes still lack a piece, whatever its caps', () => {
-    expect(BOT_RUNTIME_GAPS.length).toBeGreaterThan(0)
-    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })
-    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    // None is missing since Bot Phase 1 (§5.9); the switch stays for a piece a later change needs.
+    expect(BOT_RUNTIME_GAPS).toEqual([])
+    expect(checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true })).toEqual({ ok: true })
+    const gaps = ['a piece bots rely on']
+    const refused = checkPolicy(exact, policy(), 'pi:x', undefined, { hostApprovals: true, botRuntimeGaps: gaps })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
   })
@@ -301,5 +304,40 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
       expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
     }
+  })
+})
+
+describe('onAllowed (Bot Phase 1 §5.8)', () => {
+  const observed = (onAllowed: (call: unknown) => void) => {
+    const compiled = compile()
+    if (!compiled.ok) throw new Error(compiled.error.message)
+    return createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: compiled.permissions,
+      waiting: () => false,
+      counters: { charge: () => ({ ok: true, count: 1 }) },
+      time: { deadline: () => 0, signal: new AbortController().signal },
+      spend: null,
+      onAllowed
+    })
+  }
+
+  it('is told of every allowed call, on any runtime, and of no refused one', () => {
+    const calls: unknown[] = []
+    const authority = observed((call) => calls.push(call))
+    const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'index.html') } }
+    expect(authority.check(read)).toEqual({ ok: true })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: { query: 'x' } })).toEqual({ ok: true })
+    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'secret.txt') } }).ok).toBe(false)
+    expect(authority.check({ kind: 'app', tool: 'delegate_task', args: {} }).ok).toBe(false)
+    expect(calls).toEqual([read, { kind: 'app', tool: 'web_search', args: { query: 'x' } }])
+  })
+
+  it('never fails the call it watched', () => {
+    const authority = observed(() => {
+      throw new Error('broken sink')
+    })
+    expect(authority.check({ kind: 'app', tool: 'web_search', args: {} })).toEqual({ ok: true })
   })
 })

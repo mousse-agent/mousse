@@ -32,8 +32,8 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.defaultActions).toEqual(['Rename', 'Colour'])
     expect(report.renameDialog).toMatchObject({ title: 'Edit profile', value: 'Adithya', maxLength: 64, submit: 'Save profile name', submitDisabled: true, archive: false, focus: 'Profile name' })
     expect(report.updates).toEqual([{ id: 'prf_alpha', displayName: 'Adithya local' }])
-    // The fixture has no chats with an agent, so Recent stays hidden.
-    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Roster', 'Groups'])
+    // The fixture has no chats and no bots, so Recent stays hidden.
+    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Bots', 'Groups'])
     for (const heading of report.headings) expect(heading).toMatchObject({ transform: 'none', spacing: 'normal' })
     expect(report.fonts.ui).toMatch(/^Geist,/)
     expect(report.fonts.code).toMatch(/^"Geist Mono",/)

@@ -24,6 +24,13 @@ export interface ModelCatalogRoute {
   minMousse?: string
 }
 
+/**
+ * How capable a model is, for bots' hidden model choice (Bot Phase 1 §5.6): `frontier` the makers'
+ * strongest, `standard` the everyday one, `small` the fast and cheap one.
+ */
+export const MODEL_CATALOG_TIERS = ['frontier', 'standard', 'small'] as const
+export type ModelCatalogTier = (typeof MODEL_CATALOG_TIERS)[number]
+
 export interface ModelCatalogEntry {
   /** The maker's own model id; never renamed or reused. */
   id: string
@@ -33,6 +40,8 @@ export interface ModelCatalogEntry {
   short: string
   maker: string
   family?: string
+  /** Optional; a value this reader does not know is dropped. */
+  tier?: ModelCatalogTier
   /** `YYYY-MM-DD`. */
   released: string
   older?: true
@@ -51,6 +60,7 @@ export interface ModelCatalog {
 export class ModelCatalogError extends Error {}
 
 const ROUTE_KEYS: ReadonlySet<string> = new Set(MODEL_CATALOG_ROUTES)
+const TIERS: ReadonlySet<string> = new Set(MODEL_CATALOG_TIERS)
 const EFFORTS: ReadonlySet<string> = new Set(REASONING_LEVELS)
 const DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const VERSION = /^\d+(?:\.\d+)*$/
@@ -99,6 +109,7 @@ function model(value: unknown): ModelCatalogEntry | undefined {
   }
   if (!Object.keys(routes).length) return undefined
   const family = text(raw.family)
+  const tier = typeof raw.tier === 'string' && TIERS.has(raw.tier) ? (raw.tier as ModelCatalogTier) : undefined
   const efforts = Array.isArray(raw.efforts)
     ? [...new Set(raw.efforts.filter((level): level is string => typeof level === 'string' && EFFORTS.has(level)))]
     : undefined
@@ -108,6 +119,7 @@ function model(value: unknown): ModelCatalogEntry | undefined {
     short: text(raw.short) ?? name,
     maker,
     ...(family ? { family } : {}),
+    ...(tier ? { tier } : {}),
     released,
     ...(raw.older === true ? { older: true as const } : {}),
     ...(efforts?.length ? { efforts } : {}),

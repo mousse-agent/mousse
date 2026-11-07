@@ -1,4 +1,5 @@
 import { isNeutralTool } from '../../harness/tools'
+import { stableStringify } from '../../workflows/canonical'
 import { foldersOf, workspaceOf, type BotManifest } from './definition'
 import { isAbsolutePath } from './manifest'
 
@@ -20,10 +21,44 @@ export type BotPermissionRequest =
   | { mcp: { serverId: string; tool: string } }
   | { budget: { key: BotBudgetWallKey; amount?: number } }
 
+/**
+ * An ask that grants nothing (Bot Phase 1 §5.11): `export_memory` ("Save my memory to a folder").
+ * Allow opens a folder picker in the renderer, which calls `bots.memory.export`.
+ */
+export interface BotSpecialAsk {
+  ask: 'export_memory'
+}
+
+/** What the bot may ask its owner for with `escalate`: a permission, or a special ask. */
+export type BotAskRequest = BotPermissionRequest | BotSpecialAsk
+
+export function isSpecialAsk(request: BotAskRequest): request is BotSpecialAsk {
+  return 'ask' in request
+}
+
+/**
+ * The fingerprint of an ask: the canonical JSON of what it asks for. There is at most one open ask
+ * per bot and fingerprint, and a permission's fingerprint is its id in About → Can use.
+ */
+export function askFingerprint(request: BotAskRequest): string {
+  return stableStringify(request)
+}
+
+/**
+ * How an escalation waits (Bot Phase 1 §5.4). `wall`: a chat turn, the owner present; the dispatch
+ * ends and the answer continues it. `ask`: an unattended run; the call is refused, the run carries
+ * on without it, and the ask stays open for the owner. Neither expires.
+ */
+export type BotAskMode = 'wall' | 'ask'
+
+/** After Not now on a run ask, no new ask for the same permission for this long. */
+export const BOT_ASK_DENY_COOLDOWN_MS = 24 * 60 * 60_000
+
 /** How the wall was reached: the bot asked (`escalate`), a gate refused a call, or a limit ran out. */
 export type BotWallKind = 'escalate' | 'gate' | 'budget'
 
-export type BotEscalationStatus = 'open' | 'allowed_bot' | 'allowed_once' | 'denied' | 'expired' | 'cancelled'
+/** `withdrawn`: the v4 migration closed it (Bot Phase 1 §5.2), or the bot's grant moved past it. */
+export type BotEscalationStatus = 'open' | 'allowed_bot' | 'allowed_once' | 'denied' | 'expired' | 'cancelled' | 'withdrawn'
 
 /** The owner's answer (`bots.escalations.respond`). `allow_more` answers a budget wall. */
 export type BotEscalationAnswer = 'allow_bot' | 'allow_once' | 'deny' | 'allow_more'
@@ -38,20 +73,30 @@ export interface BotEscalationSummary {
   /** The main dispatch that hit the wall. */
   dispatchN: number
   kind: BotWallKind
-  permission: BotPermissionRequest
+  /** What is asked for: a permission, or an ask that grants nothing (`export_memory`). */
+  permission: BotAskRequest
   /** The permission in plain words ("Read files in ~/proj/site"). */
   permissionText: string
   /** Why the bot needs it (its own words for `escalate`; Mousse's for a gate or a limit). */
   reason: string
   status: BotEscalationStatus
   createdAt: string
-  expiresAt: string
+  /** Asks never expire (Bot Phase 1): null, except on an escalation an older build wrote. */
+  expiresAt: string | null
   answeredAt: string | null
   /** The amount a budget wall was answered with. */
   amount: number | null
+  /** Bot Phase 1 asks (`bots.db` v4). */
+  mode?: BotAskMode
+  fingerprint?: string
+  /** Plain words for the card (`askText`). */
+  title?: string
+  note?: string
+  /** The `bot_messages` row carrying the card. */
+  messageId?: string
 }
 
-/** How long an open escalation waits for the owner by default. */
+/** How long an open escalation waits for the owner by default. Bot Phase 1 asks don't expire. */
 export const BOT_ESCALATION_TTL_MS = 30 * 60_000
 /** The waits a bot may choose (30 minutes, 4 hours, 24 hours). */
 export const BOT_ESCALATION_TTLS_MS: readonly number[] = [30 * 60_000, 4 * 60 * 60_000, 24 * 60 * 60_000]
@@ -104,6 +149,13 @@ export function permissionProblem(value: unknown): string | undefined {
     return undefined
   }
   return 'The permission is not one a bot can ask for.'
+}
+
+/** Why a value is not something `escalate` may ask for, or undefined when it is one. */
+export function askProblem(value: unknown): string | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && 'ask' in value)
+    return (value as { ask: unknown }).ask === 'export_memory' ? undefined : 'The ask is not one a bot can make.'
+  return permissionProblem(value)
 }
 
 /**

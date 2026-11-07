@@ -12,7 +12,16 @@ import { NetworkTranscript } from './NetworkTranscript'
 import { NetworkChatActions } from './NetworkChatActions'
 import { NetworkTaskPicker } from './NetworkTaskPicker'
 import type { BotId } from '../../../shared/net'
+import type { BotLook } from '../../../shared/bots/personal/look'
+import { useBotsPolling, useBotsStore } from '../../stores/botsStore'
+import { BotChatView } from '../bots/BotChatView'
+import { BotDialogs } from '../bots/BotDialogs'
+import { NewBotDialog } from '../bots/NewBotDialog'
+import { BotFace } from '../bots/face/BotFace'
 import '../../styles/chats.css'
+import '../../styles/bots.css'
+
+const FIRST_BOT_LOOK: BotLook = { colour: 'coral', accessory: 'headphones' }
 
 export function ChatWorkspace() {
   const chat = useChatsStore((s) => s.conversation)
@@ -21,6 +30,11 @@ export function ChatWorkspace() {
   const loading = useChatsStore((s) => s.loading)
   const error = useChatsStore((s) => s.error)
   const newChatOpen = useChatsStore((s) => s.newChatOpen)
+  const activeBotId = useChatsStore((s) => s.activeBotId)
+  const bots = useBotsStore((s) => s.bots)
+  const newBotOpen = useBotsStore((s) => s.newBotOpen)
+  const bot = activeBotId ? bots.find((entry) => entry.id === activeBotId) : undefined
+  useBotsPolling()
   const draft = useChatsStore((s) => s.drafts[activeId || ''] || '')
   const send = useChatsStore((s) => s.send)
   const cancel = useChatsStore((s) => s.cancel)
@@ -39,6 +53,11 @@ export function ChatWorkspace() {
     if (element) element.scrollTop = element.scrollHeight
   }, [activeId, messages?.length, network?.records.length, running])
   const setDraft = (value: string) => { if (activeId) useChatsStore.getState().setDraft(activeId, value) }
+  const newBot = () => useBotsStore.setState({ newBotOpen: true, error: null })
+  const dialogs = <>{newChatOpen && <NewChatDialog />}{newBotOpen && <NewBotDialog />}<BotDialogs /></>
+  if (bot) return <main className="chat-workspace" aria-label="Chats workspace"><BotChatView key={bot.id} bot={bot} />{dialogs}</main>
+  // Nothing to talk to yet: the first bot is one click away (bot-ui §4.1).
+  const firstBot = !chat && !snapshot.chats.length && !bots.length && !loading
   return <main className="chat-workspace" aria-label="Chats workspace">
     <section className="chat-conversation">
       {chat ? <>
@@ -66,11 +85,18 @@ export function ChatWorkspace() {
           <textarea ref={textarea} aria-label="Message agents" placeholder={`Message ${chat.kind === 'group' ? '#' : ''}${chat.name}${network ? ' · select bots with Mention' : ' — @ an agent'}`} value={draft} disabled={loading || network?.readonly} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
           <div className="agent-chat-composer-controls"><details className="chat-mention-menu"><summary><AtSign size={15} />Mention{network && !!selection.length && ` (${selection.length})`}</summary><div>{agents.map((agent) => <button type="button" key={agent.id} aria-pressed={network ? selection.includes(agent.id as BotId) : undefined} onClick={(event) => { if (network) setMentions(previous => ({ ...previous, [chat.id]: selection.includes(agent.id as BotId) ? selection.filter(id => id !== agent.id) : [...selection, agent.id as BotId] })); else setDraft(`${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}@${agent.slug} `); if (!network) event.currentTarget.closest('details')?.removeAttribute('open'); textarea.current?.focus() }}><ChatAvatar name={agent.name} small />{agent.name}<span>{network ? selection.includes(agent.id as BotId) ? 'Selected' : 'Select' : `@${agent.slug}`}</span></button>)}</div></details><span className="chat-composer-device">{network ? 'Mentioned bots use their own devices' : 'Agents run on this device'}</span>{running ? <button type="button" className="chat-send-button" aria-label="Stop agent run" onClick={() => void cancel()}><Square size={14} /></button> : <button type="submit" className="chat-send-button" disabled={!draft.trim() || loading || network?.readonly} aria-label="Send message"><ArrowUp size={16} /></button>}</div>
         </form>
-      </> : <div className="chat-workspace-empty"><h1>{loading ? 'Opening chat…' : 'Work with your agents'}</h1>{snapshot.agents.length
-        ? <button className="chat-primary-button" disabled={loading} onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })}>New chat</button>
-        : <button className="chat-primary-button" disabled={loading} onClick={() => useAppStore.getState().openAutomations('agents')}>Create an agent</button>}{error && <p role="alert" className="chat-error">{error}</p>}</div>}
+      </> : firstBot ? <div className="chat-workspace-empty">
+        <BotFace look={FIRST_BOT_LOOK} state="idle" size={96} view="full" className="bot-empty-face" />
+        <h1>Make your first bot</h1>
+        <p>Pick a colour and an accessory, and say what it should do. It asks for anything else it needs as it goes.</p>
+        <button className="chat-primary-button" onClick={newBot}>New bot</button>
+        {error && <p role="alert" className="chat-error">{error}</p>}
+      </div> : <div className="chat-workspace-empty"><h1>{loading ? 'Opening chat…' : 'Talk to your bots and agents'}</h1>
+        {!loading && <span className="bot-empty-actions"><button className="chat-primary-button" onClick={newBot}>New bot</button>
+          {!!snapshot.agents.length && <button className="bot-ghost-button" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })}>New chat</button>}</span>}
+        {error && <p role="alert" className="chat-error">{error}</p>}</div>}
     </section>
     {chat?.kind === 'group' && chat.presentation !== 'network' && !network && <ChatResourcesPanel key={chat.id} chat={chat} />}
-    {newChatOpen && <NewChatDialog />}
+    {dialogs}
   </main>
 }

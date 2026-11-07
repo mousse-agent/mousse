@@ -216,9 +216,10 @@ export class MmsListsSource {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
-    // Private threads (`Thread.localOnly`) and everything below them never reach another device's lists.
+    // Private threads (`Thread.localOnly`) and everything below them never reach another device's lists,
+    // nor does a personal bot's thread (`Thread.botOwned`), or its state: the bot's chat shows its work.
     const all = s.threads.listAllThreads()
-    const inventory = all.filter((thread) => !isLocalOnlyThread(thread, all))
+    const inventory = all.filter((thread) => !thread.botOwned && !isLocalOnlyThread(thread, all))
     const own = this.options.private === true
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.

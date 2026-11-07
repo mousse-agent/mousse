@@ -28,9 +28,9 @@ import {
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
-import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
+import { CLAUDE_BOT_RUNNER_NAME, CLAUDE_BOT_RUNNER_SLUG, CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
-import { compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { CLAUDE_LOCKED_TOOLS_ITEMS, compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
@@ -139,9 +139,16 @@ export interface ClaudeCodeDriverOptions {
   readPolicy?: (input: ManagedPolicyReadInput) => Promise<boolean>
   /** Test seam: the containment evidence (default `CONTAINMENT_EVIDENCE`). */
   evidence?: readonly ContainmentEvidence[]
-  /** Each Claude Code process a locked entry's bot turn starts (its active-time supervision). */
+  /**
+   * Each Claude Code process a locked entry's bot turn starts, by pid and bot thread: its active-time
+   * supervision (`BotProcessRegistry.attachThread`, Bot Phase 1 §5.9). When it throws, the process is
+   * ended and the turn fails. Without it a locked entry runs no bot turn.
+   */
   onLockedProcess?: (pid: number, threadId: string) => void
 }
+
+/** Why a locked entry refuses a bot turn when the profile gave it no process supervision. */
+export const CLAUDE_UNSUPERVISED_REFUSAL = 'Mousse can\'t supervise this bot runtime here, so the bot does not run on it.'
 
 /** The SDK's `resolveSettings`: the settings a turn's folder gives Claude Code, without starting it. */
 export type SettingsResolver = (options: { cwd: string; settingSources: Array<'project' | 'local'> }) => Promise<Pick<ResolvedSettings, 'sources'>>
@@ -288,8 +295,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     caps: (config, installedVersion, _facts, instanceId) =>
       claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : claudeCodeCaps(installedVersion),
     // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
-    // this platform (`CONTAINMENT_EVIDENCE`) and no organisation policy applies; no record exists yet.
+    // this platform (`CONTAINMENT_EVIDENCE`: Linux so far) and no organisation policy applies.
     botAuthority: (config, instanceId) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),
+    // "Claude for bots" (`claude:bots`): added when the owner's Claude subscription is signed in.
+    botRunner: { slug: CLAUDE_BOT_RUNNER_SLUG, displayName: CLAUDE_BOT_RUNNER_NAME },
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },
@@ -531,9 +540,12 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             // Read again as each turn starts: the policy, the CLI version's gate-and-ledger evidence, and
             // for shell the sandbox and its evidence for this version here.
             admit: async () => {
+              // Every process of a bot turn is supervised (Bot Phase 1 §5.9): without the profile's
+              // registry, nothing would end it at its deadline outside the daemon's loop.
+              if (!options.onLockedProcess) return { ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL }
               if (await readManaged(context.instanceId)) return { ok: false, reason: CLAUDE_MANAGED_POLICY_REFUSAL }
               const version = (await service.cliConfig()).version
-              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version }, evidence))
+              if (version === undefined || !hasContainmentEvidence({ driver: 'claude', kind: 'tools', platform, cliVersion: version, items: CLAUDE_LOCKED_TOOLS_ITEMS }, evidence))
                 return { ok: false, reason: `Mousse has no evidence that Claude Code ${version ?? '(unknown version)'} holds a bot to its permissions here.` }
               const sandbox = claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], context.env))) === 'available'
               return { ok: true, shellContained: sandbox && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: version }, evidence) }

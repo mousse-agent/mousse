@@ -31,11 +31,11 @@ import { checkPolicy } from '../../src/mms/harness/policy'
 import type { DriverContext, InstanceConfig } from '../../src/mms/harness/driver'
 import type { RunPolicy } from '../../src/shared/harness/types'
 import { decodeInstanceConfig } from '../../src/mms/harness/driver'
-import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_REREAD_MS, CLAUDE_POLICY_TRUST_MS, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
+import { CLAUDE_CODE_CAPS, CLAUDE_POLICY_REREAD_MS, CLAUDE_POLICY_TRUST_MS, CLAUDE_UNSUPERVISED_REFUSAL, claudeCodeDriver, claudeLocked } from '../../src/mms/harness/drivers/claudeCode'
 import { instanceEnv, lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
+import { ClaudeSubscriptionAdapter, type ClaudeLockedProfile } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
@@ -298,16 +298,29 @@ describe('locked Claude Code: who runs bots', () => {
   })
 
   it('no locked entry holds a bot, or gets exact tool control, without recorded evidence (item 14)', () => {
-    // No Claude record (Pi RPC's own records do not count for Claude Code).
-    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude')).toEqual([])
+    // Claude's records: `tools` on Linux, for the two versions the real-CLI suite passed on, with
+    // the items it asserts (Pi RPC's own records do not count for Claude Code). No `sandbox` record.
+    expect(CONTAINMENT_EVIDENCE.filter((record) => record.driver === 'claude').map(({ kind, platform, cliVersion, items }) => ({ kind, platform, cliVersion, items: [...items] }))).toEqual([
+      { kind: 'tools', platform: 'linux', cliVersion: '2.1.291', items: [1, 2, 3, 4, 5, 7] },
+      { kind: 'tools', platform: 'linux', cliVersion: '2.1.306', items: [1, 2, 3, 4, 5, 7] }
+    ])
     for (const platform of ['linux', 'darwin', 'win32'] as const) {
       const driver = claudeCodeDriver({ platform, managedPolicy: () => false })
-      expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(false)
+      // Only Linux has a record: a locked entry there holds a bot; nowhere does an unlocked one.
+      expect(driver.botAuthority!({ home: 'private', profile: 'locked' }), platform).toBe(platform === 'linux')
       expect(driver.botAuthority!({ home: 'private' }), platform).toBe(false)
+      // A version with no record (one Claude Code updated itself to) gets no exact tool control, anywhere.
       expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.0')).toMatchObject({ toolControl: 'approval_only', containment: 'weak', budgets: 'unsupported', spendLimits: 'unsupported', childPolicy: 'enforced' })
+      expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.307').toolControl, platform).toBe('approval_only')
+      // A recorded version: exact on Linux only, and never strong (no sandbox record, so no shell).
+      expect(driver.caps({ home: 'private', profile: 'locked' }, '2.1.306'), platform).toMatchObject(platform === 'linux' ? { toolControl: 'exact', containment: 'weak' } : { toolControl: 'approval_only', containment: 'weak' })
       // The user's own entry is unchanged.
       expect(driver.caps({ home: 'default' }, '2.1.0')).toBe(CLAUDE_CODE_CAPS)
     }
+    // A record must hold every item the real-CLI suite asserts.
+    const partial: ContainmentEvidence[] = [{ driver: 'claude', kind: 'tools', cliVersion: '2.1.0', platform: 'linux', items: [1, 2, 3, 4, 7], recordedAt: '2026-10-27T00:00:00Z' }]
+    expect(claudeLockedHoldsBots('linux', false, partial)).toBe(false)
+    expect(claudeLockedCaps(CLAUDE_CODE_CAPS, { platform: 'linux', cliVersion: '2.1.0', managedPolicy: false, evidence: partial }).toolControl).toBe('approval_only')
     const evidence: ContainmentEvidence[] = [
       { driver: 'claude', kind: 'tools', cliVersion: '2.1.0', platform: 'linux', items: [1, 2, 3, 4, 5, 6, 7], recordedAt: '2026-10-27T00:00:00Z' },
       { driver: 'claude', kind: 'sandbox', cliVersion: '2.1.0', platform: 'linux', items: [8, 9, 10, 11, 12, 13, 14, 16, 17], recordedAt: '2026-10-27T00:00:00Z' }
@@ -492,6 +505,19 @@ describe('locked Claude Code: its policy reading outside a turn (review r2)', ()
     await Promise.all(waiting)
     expect(reads).toBe(1)
     expect(driver.botAuthority!(lockedConfig, 'claude-c')).toBe(true)
+  })
+
+  it('a locked entry runs no bot turn without process supervision, and reports each process with its thread (Bot Phase 1 §5.9)', async () => {
+    const unsupervised = boundEntry(claudeCodeDriver({ evidence: evidence(), readPolicy: async () => false }), 'claude-u')
+    const lockedOf = (runtime: typeof unsupervised.runtime) => (runtime.adapter as unknown as { locked: ClaudeLockedProfile }).locked
+    expect(await lockedOf(unsupervised.runtime).admit()).toEqual({ ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL })
+    unsupervised.runtime.stop?.()
+    const reports: Array<[number, string]> = []
+    const supervised = boundEntry(claudeCodeDriver({ evidence: evidence(), readPolicy: async () => false, onLockedProcess: (pid, threadId) => void reports.push([pid, threadId]) }), 'claude-s')
+    expect(await lockedOf(supervised.runtime).admit()).not.toEqual({ ok: false, reason: CLAUDE_UNSUPERVISED_REFUSAL })
+    lockedOf(supervised.runtime).onProcess!(4242, 'bot-thread')
+    expect(reports).toEqual([[4242, 'bot-thread']])
+    supervised.runtime.stop?.()
   })
 
   it('one entry\'s reading never answers for another, and a stale or policy reading claims nothing', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planThreadNotification } from '../src/main/notifications/threadNotification'
+import { botNotificationKind, planThreadNotification } from '../src/main/notifications/threadNotification'
 import { threadNotificationChannelPatch, threadNotificationChannels, type NotificationChannels } from '../src/shared/settings'
 
 const all: NotificationChannels = { toast: true, system: true, sound: true }
@@ -50,5 +50,17 @@ describe('how a thread event reaches the person', () => {
   it('plays the sound itself where the system cannot show notifications', () => {
     expect(planThreadNotification(all, { windowFocused: false, viewingThread: false, systemSupported: false }))
       .toEqual({ toast: true, system: false, playSound: true })
+  })
+})
+
+describe('a bot row on the same channels', () => {
+  const at = new Date().toISOString()
+  it('uses the completed choices for a report and the question choices for an ask, as threads do', () => {
+    const settings = { threadCompletionSound: true, allRemoteThreads: false, events: { question: { system: false } } }
+    const report = botNotificationKind({ author: 'bot', at })!
+    const ask = botNotificationKind({ author: 'bot', at, ask: { askId: 'k1', title: 'read files in ~/Notes', note: '', status: 'open' } })!
+    expect([report, ask]).toEqual(['completed', 'question'])
+    expect(threadNotificationChannels(settings, report)).toEqual(all)
+    expect(threadNotificationChannels(settings, ask)).toEqual({ toast: true, system: false, sound: true })
   })
 })

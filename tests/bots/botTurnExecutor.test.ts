@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import type { BotTurnDispatcher } from '../../src/mms/bots/activation/dispatcher'
+import { clearNativeContext, createNativeContext } from '../../src/mms/orchestrator/nativeContext'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
@@ -98,7 +99,7 @@ describe('the turn.start executor', () => {
 })
 
 describe('a prepared bot turn', () => {
-  const prepare = (): BotTurnDispatcher['prepare'] => (payload) => ({
+  const prepare = (history: 'none' | 'cleared' | 'thread' = 'none'): BotTurnDispatcher['prepare'] => (payload) => ({
     activationId: payload.activationId,
     dispatchN: payload.dispatchN,
     prompt: 'Fix the footer',
@@ -106,8 +107,12 @@ describe('a prepared bot turn', () => {
     policy: { approvals: 'grants', approve: 'host', tools: { allow: ['read'] }, authority: { kind: 'bot', digest: 'd' } },
     authority: { time: { signal: new AbortController().signal } } as never,
     scratch: join(home, 'scratch'),
-    skills: []
+    skills: [],
+    history
   })
+  type Session = { messages: unknown[]; nativeContext: ReturnType<typeof createNativeContext> }
+  const session = (threadId = 'bot-thread') => (orch as unknown as { getOrCreateSession(threadId: string): Session }).getOrCreateSession(threadId)
+  const old = () => createNativeContext([{ role: 'user', content: 'ZEBRA-7731', timestamp: 0 } as never])
 
   it('runs as a bot turn on the activation thread, and settles with the final message', async () => {
     orch.setBotDispatcher({ prepare: prepare(), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
@@ -130,6 +135,36 @@ describe('a prepared bot turn', () => {
     expect(runTurn).not.toHaveBeenCalled()
     expect(engine.getRun(effect.runId!)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_state_invalid' } })
   })
+
+  it('a chat activation\'s first turn runs on the home thread once its context was cleared: the transcript stays, none of it is sent (Bot Phase 1 §5.3.2)', async () => {
+    orch.setBotDispatcher({ prepare: prepare('cleared'), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementation(async () => ({ message: 'Hello again.', actions: [] }))
+    const effect = await queuedBotRun()
+    const home = session()
+    home.messages.push({ role: 'user', content: 'ZEBRA-7731' })
+    home.nativeContext = clearNativeContext(old())
+    await execute(effect)
+    expect(runTurn).toHaveBeenCalledTimes(1)
+    expect(settled).toEqual([{ payload: expect.objectContaining({ runId: effect.runId }), outcome: { text: 'Hello again.' } }])
+  })
+
+  it('a "cleared" turn whose home context still holds history is refused before anything is sent', async () => {
+    orch.setBotDispatcher({ prepare: prepare('cleared'), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    const effect = await queuedBotRun()
+    session().nativeContext = old()
+    await execute(effect)
+    expect(runTurn).not.toHaveBeenCalled()
+    expect(engine.getRun(effect.runId!)).toMatchObject({ status: 'cancelled', outcome: { error: 'bot_state_invalid' } })
+  })
+
+  it('a continuation runs on the thread\'s own history', async () => {
+    orch.setBotDispatcher({ prepare: prepare('thread'), settle: (payload, outcome) => { settled.push({ payload, outcome }) }, ownerOf: () => 'Site editor' })
+    runTurn.mockImplementation(async () => ({ message: 'Continued.', actions: [] }))
+    const effect = await queuedBotRun()
+    session().nativeContext = old()
+    await execute(effect)
+    expect(runTurn).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('bot turn setup', () => {
@@ -146,15 +181,34 @@ describe('bot turn setup', () => {
     const internals = orch as unknown as {
       getOrCreateSession(threadId: string): unknown
       registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: { approvals?: string; bot?: unknown } }
-      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { turnPreamble: string } }>
+      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ bot?: unknown; instructions(mcp: boolean): { sessionInstructions: string; turnPreamble: string } }>
       appToolTurns: { get(runId: string): { approvals?: string } | undefined }
     }
-    const authority = { skills: new Set<string>(), time: { signal: new AbortController().signal } }
+    const authority = { skills: new Set<string>(), appTools: new Set(['escalate', 'memory_save']), time: { signal: new AbortController().signal } }
     const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-bot', 'agent', false, { authority, skills: [] })
     const app = await internals.completeAppTurn(registered.turn, { promptRuntime: false, userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
     expect(app.bot).toBe(authority)
     expect(app.instructions(true).turnPreamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.')).toBe(true)
     expect(internals.appToolTurns.get('run-bot')?.approvals).toBe('never')
+    // Its own instructions only: no orchestration or applet guidance about tools its grant never holds.
+    expect(app.instructions(true).sessionInstructions).toBe('')
+  })
+
+  it('the context pack follows the role in the turn preamble, ahead of Mousse\'s own text (Bot Phase 1 §5.3.2)', async () => {
+    const internals = orch as unknown as {
+      getOrCreateSession(threadId: string): unknown
+      registerAppTurn(session: unknown, runId: string, mode: string, continuation: boolean, bot?: unknown): { turn: unknown }
+      completeAppTurn(turn: unknown, input: Record<string, unknown>): Promise<{ instructions(mcp: boolean): { turnPreamble: string } }>
+    }
+    const authority = { skills: new Set<string>(), appTools: new Set<string>(), time: { signal: new AbortController().signal } }
+    const registered = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-pack', 'agent', false, { authority, skills: [] })
+    const app = await internals.completeAppTurn(registered.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.', botPreamble: '<bot_memory>PACK-4411</bot_memory>' })
+    const preamble = app.instructions(true).turnPreamble
+    expect(preamble.startsWith('Your role and instructions:\nYou are ZEBRA-REVIEWER.\n\n<bot_memory>PACK-4411</bot_memory>')).toBe(true)
+    // Without a pack the preamble is as before.
+    const plain = internals.registerAppTurn(internals.getOrCreateSession('bot-thread'), 'run-plain', 'agent', false, { authority, skills: [] })
+    const without = await internals.completeAppTurn(plain.turn, { userContent: 'go', instanceId: 'pi:x', model: 'm', approvals: 'never', botInstructions: 'You are ZEBRA-REVIEWER.' })
+    expect(without.instructions(true).turnPreamble).not.toContain('PACK-4411')
   })
 })
 

@@ -134,12 +134,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   ) {}
   /**
    * The thread a caller on another device may reach: one of this profile's, and never a private one
-   * (`Thread.localOnly`), which answers as if it did not exist. Every call that names a thread checks here.
+   * (`Thread.localOnly`) or a personal bot's (`Thread.botOwned`), which answer as if they did not exist.
+   * Every call that names a thread checks here.
    */
   private remoteThread(threadId: string): Thread | undefined {
     const inventory = this.services.threads.listAllThreads()
     const thread = inventory.find((candidate) => candidate.id === threadId)
-    return thread && !isLocalOnlyThread(thread, inventory) ? thread : undefined
+    return thread && !thread.botOwned && !isLocalOnlyThread(thread, inventory) ? thread : undefined
   }
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))

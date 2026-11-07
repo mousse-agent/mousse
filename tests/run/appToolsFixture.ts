@@ -76,9 +76,9 @@ export function appTurn(overrides: Partial<AppToolTurn> & Pick<AppToolTurn, 'thr
  * The MCP server's registry over `engine`, with its turns: `turn` registers a turn for a run, and
  * `request` builds a call under a credential bound to a run.
  */
-export function appToolRegistry(engine: RunEngine, host: AppToolHost) {
+export function appToolRegistry(engine: RunEngine, host: AppToolHost, extra: Pick<Parameters<typeof createAppToolRegistry>[0], 'bots' | 'botMemory'> = {}) {
   const turns = new AppToolTurns()
-  const { registry, families } = createAppToolRegistry({ host, engine, turns })
+  const { registry, families } = createAppToolRegistry({ host, engine, turns, ...extra })
   const request = (input: {
     threadId: string
     runId: string
