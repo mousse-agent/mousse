@@ -84,8 +84,10 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.limit !== undefined && (!whole(p.limit, 1) || p.limit > MAX_BOT_CHAT_PAGE)) throw new DomainRpcError('invalid_params', `limit must be 1 to ${MAX_BOT_CHAT_PAGE}`)
       break
     case 'bots.chat.send':
-      if (!text(p.text, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'The message is empty or too long')
       if (p.attachments !== undefined) p.attachments = attachments(p.attachments)
+      // Files alone are a message too.
+      if (typeof p.text !== 'string' || p.text.length > MAX_CHAT_TEXT || (!p.text.trim() && !(p.attachments as BotChatAttachment[] | undefined)?.length))
+        throw new DomainRpcError('invalid_params', 'The message is empty or too long')
       break
     case 'bots.chat.markRead':
       if (!whole(p.seq, 0)) throw new DomainRpcError('invalid_params', 'seq must be a whole number')

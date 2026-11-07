@@ -53,7 +53,8 @@ export function firstMessagePrompt(description: string, nameIt = false): string 
 /** A chat message as the bot's input: the owner's text, and the files attached to it. */
 export function chatInput(text: string, attachments: readonly BotChatAttachment[] | undefined): string {
   if (!attachments?.length) return text
-  return `${text}\n\nAttached files:\n${attachments.map((file) => `- ${file.name}: ${file.path}`).join('\n')}`
+  const files = `Attached files:\n${attachments.map((file) => `- ${file.name}: ${file.path}`).join('\n')}`
+  return text ? `${text}\n\n${files}` : files
 }
 
 export class BotChatService {
@@ -178,7 +179,7 @@ export class BotChatService {
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
-    if (!text) throw new BotEngineError('invalid_params', 'The message is empty.')
+    if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
     const existing = this.store.messageByRequest(input.clientRequestId)
     if (existing) {
       if (existing.botId !== input.botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')

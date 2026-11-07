@@ -74,6 +74,7 @@ describe('validation', () => {
       ['bots.chat.list', { botId, limit: 101 }],
       ['bots.chat.list', { botId, beforeSeq: 0 }],
       ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1' }],
+      ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1', attachments: [] }],
       ['bots.chat.send', { botId, text: 'hi', clientRequestId: 'm1', attachments: [{ name: 'a.pdf', path: 'relative/a.pdf' }] }],
       ['bots.chat.send', { botId, text: 'hi', clientRequestId: 'm1', attachments: [{ name: 'a.pdf' }] }],
       ['bots.chat.markRead', { botId, seq: -1 }],
@@ -86,6 +87,14 @@ describe('validation', () => {
       ['bots.memory.export', { botId, dir: 'relative/dir' }]
     ]
     for (const [method, params] of bad) await expect(domains.dispatch(context, method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code: expect.stringMatching(/^(invalid_params|unknown_field)$/) })
+  })
+
+  it('accepts a message of files alone', async () => {
+    const botId = await created()
+    const path = join(f.base, 'list.txt')
+    const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: '', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path }] })
+    expect(sent.message).toMatchObject({ author: 'owner', kind: 'text', text: '', attachments: [{ name: 'list.txt' }] })
+    expect(f.store.activationByKey('chat:m1')?.trigger).toMatchObject({ input: `Attached files:\n- list.txt: ${path}` })
   })
 
   it('keeps the engine\'s error codes', async () => {
