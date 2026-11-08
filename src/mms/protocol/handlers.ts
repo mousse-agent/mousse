@@ -1539,7 +1539,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly, expiresAt, expiryStopsRun })
+      // A new worktree started from a branch of the project other than the one its folder is on: its tip, read now.
+      const baseBranch = asOptionalString(p.baseBranch, 256)
+      let worktreeStart: { sha: string; branch: string } | undefined
+      if (baseBranch) {
+        if (!projectPath || worktreeEnabled !== true) throw new DomainRpcError('invalid_params', 'A base branch needs a project and a new worktree')
+        let sha: string
+        try {
+          // A plain branch name only: revision syntax such as `main~1` or `main@{1}` would name some other commit.
+          await workspaceGitAsync(projectPath, ['check-ref-format', `refs/heads/${baseBranch}`])
+          sha = await workspaceGitAsync(projectPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${baseBranch}^{commit}`])
+        } catch {
+          throw new DomainRpcError('invalid_params', `Branch ${baseBranch} was not found`)
+        }
+        worktreeStart = { sha, branch: baseBranch }
+      }
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled, localOnly, expiresAt, expiryStopsRun, ...(worktreeStart ? { worktreeStart } : {}) })
       if (expiresAt) ctx.mms.threadExpiry?.reschedule()
       const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
       if (lastUsed) {

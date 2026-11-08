@@ -1114,6 +1114,13 @@ export interface Thread {
    * workspace is provisioned or the thread has started.
    */
   worktreeEnabled?: boolean
+  /**
+   * The commit a new worktree for this thread starts at, instead of the project folder's HEAD: the tip of the branch
+   * picked for it in the new-thread menu, read when the thread was created. Its own branch is still named as usual.
+   */
+  worktreeStartSha?: string
+  /** The branch `worktreeStartSha` was read from, for display. */
+  worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
   /** Explicit sidebar position within this thread's project (or standalone group). */

@@ -51,6 +51,16 @@ async function git(cwd: string, args: string[], userRequested?: UserAction): Pro
   return ran.stdout.trim()
 }
 
+/** `Thread.worktreeStartSha` from the thread folder's meta.json, when it holds a full commit id. */
+function threadFolderWorktreeStart(location: string): string | undefined {
+  try {
+    const meta = JSON.parse(readFileSync(join(location, 'meta.json'), 'utf8')) as { worktreeStartSha?: unknown }
+    return typeof meta.worktreeStartSha === 'string' && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(meta.worktreeStartSha) ? meta.worktreeStartSha : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function tryGit(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
   try {
     return { ok: true, stdout: await git(cwd, args) }
@@ -362,6 +372,8 @@ export class ThreadWorkspaceManager {
       if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const primaryHead = await git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
+      // Without a start from the caller, the branch picked for the thread when it was created (`Thread.worktreeStartSha`).
+      startSha ??= threadFolderWorktreeStart(this.threadDirectory)
       const head = startSha ? await git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
       // Named once, under the repository's lease, so two threads cannot take the same name.
       // A private thread's branch never carries its first message: Git reads from the user's other computers list branch names.
