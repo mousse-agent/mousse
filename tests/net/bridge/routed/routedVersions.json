@@ -239,6 +239,21 @@
     "digest": "0814058e14a91abf",
     "security": "6f012c3ca58ce7c5"
   },
+  "git.restoreReverted": {
+    "version": 1,
+    "digest": "9bf824c8b5094a0a",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.revert": {
+    "version": 1,
+    "digest": "81f6b6ddd98590e1",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.revertedList": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
+  },
   "git.stage": {
     "version": 1,
     "digest": "5258b6f22a1a17a8",

@@ -39,6 +39,10 @@ import type {
   GitIncludeRequest,
   GitIncludeResult,
   GitSelectionState,
+  GitRestoreRevertedResult,
+  GitRevertedItem,
+  GitRevertRequest,
+  GitRevertResult,
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
@@ -515,6 +519,15 @@ const api = {
     /** Undoes the last local commit of a project folder; its changes stay in the files and the index. */
     undoLastCommit: (scope: GitScope, expectedHead: string): Promise<GitMutationResult> =>
       storageInvoke('git:undoLastCommit', scope, expectedHead),
+    /** Makes hunks, lines or a whole file match HEAD again, keeping a copy first; `revertId` puts it back. */
+    revert: (scope: GitScope, input: GitRevertRequest): Promise<GitRevertResult> =>
+      storageInvoke('git:revert', scope, input),
+    /** Puts a revert back while its files are still as it left them. */
+    restoreReverted: (scope: GitScope, revertId: string): Promise<GitRestoreRevertedResult> =>
+      storageInvoke('git:restoreReverted', scope, revertId),
+    /** The reverts of the folder whose copies are still kept, newest first. */
+    revertedList: (scope: GitScope): Promise<GitRevertedItem[]> =>
+      storageInvoke('git:revertedList', scope),
     /** Another view changed what the next commit takes in a thread's or project's folder. */
     onSelectionChanged: (cb: (event: { threadId?: string; projectId?: string }) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: { threadId?: string; projectId?: string }): void => cb(payload)

@@ -230,6 +230,11 @@ export const GIT_ACCESS = {
   'git.changes': 'owned',
   'git.include': 'userRequested',
   'git.undoLastCommit': 'userRequested',
+  // Writes the files back to HEAD (or the kept copy back) for the person, with a copy kept first.
+  'git.revert': 'userRequested',
+  'git.restoreReverted': 'userRequested',
+  // Reads the owner's journal and the kept refs; may restore a retired worktree first, like `git.status`.
+  'git.revertedList': 'owned',
   'github.status': 'read',
   'github.createRepository': 'userRequested',
   'github.cloneRepository': 'userRequested',
