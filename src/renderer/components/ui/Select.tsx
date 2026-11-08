@@ -12,6 +12,7 @@ import {
 import { Check, ChevronDown } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import '../../styles/select.css'
+import '../../styles/composer-workspace.css'
 
 export interface SelectOption<T extends string = string> {
   value: T
@@ -38,6 +39,11 @@ export interface SelectProps<T extends string = string> {
   ariaDescribedBy?: string
   ariaInvalid?: boolean
   size?: 'default' | 'small'
+  /**
+   * `field` (default): the bordered settings control. `menu`: the app's main dropdown, as under the new-thread
+   * composer: a borderless chip that opens the shared workspace menu, the chosen row checked on the right.
+   */
+  variant?: 'field' | 'menu'
   className?: string
   /** Custom trigger content for the selected option. */
   renderValue?: (option: SelectOption<T> | undefined) => ReactNode
@@ -69,6 +75,7 @@ export function Select<T extends string = string>({
   ariaDescribedBy,
   ariaInvalid,
   size = 'default',
+  variant = 'field',
   className,
   renderValue,
   title,
@@ -259,7 +266,8 @@ export function Select<T extends string = string>({
       ? selected.label
       : placeholder
 
-  const classes = ['ui-select']
+  const menu = variant === 'menu'
+  const classes = menu ? ['new-thread-chip', 'ui-select-chip'] : ['ui-select']
   if (size === 'small') classes.push('small')
   if (open) classes.push('open')
   if (className) classes.push(className)
@@ -298,7 +306,7 @@ export function Select<T extends string = string>({
             ref={listRef}
             id={listId}
             role="listbox"
-            className="ui-select-list"
+            className={menu ? 'composer-workspace-menu ui-select-menu scrollbar-ultra-thin' : 'ui-select-list'}
             aria-label={ariaLabel}
             aria-labelledby={ariaLabel ? undefined : ariaLabelledBy ?? id}
             tabIndex={-1}
@@ -326,19 +334,22 @@ export function Select<T extends string = string>({
                     data-value={option.value}
                     aria-selected={isSelected}
                     aria-disabled={option.disabled || undefined}
-                    className={`ui-select-option${index === active ? ' active' : ''}${isSelected ? ' selected' : ''}${option.disabled ? ' disabled' : ''}`}
+                    className={`ui-select-option${menu ? ' composer-workspace-menu-item' : ''}${index === active ? ' active' : ''}${isSelected ? ' selected' : ''}${option.disabled ? ' disabled' : ''}`}
                     onMouseMove={() => {
                       if (!option.disabled && index !== active) setActive(index)
                     }}
                     onClick={() => commit(index)}
                   >
-                    <span className="ui-select-check" aria-hidden="true">
-                      {isSelected && <Check size={14} strokeWidth={2} />}
-                    </span>
+                    {menu ? null : (
+                      <span className="ui-select-check" aria-hidden="true">
+                        {isSelected && <Check size={14} strokeWidth={2} />}
+                      </span>
+                    )}
                     <span className="ui-select-option-text">
                       <span className="ui-select-option-label">{option.label}</span>
                       {option.description && <span className="ui-select-option-desc">{option.description}</span>}
                     </span>
+                    {menu && isSelected ? <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" /> : null}
                   </div>
                 </div>
               )

@@ -41,10 +41,9 @@ const railLabels = () => [...host.querySelectorAll('.navigation-rail-button')].m
 const click = (label: string) => act(async () => { host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click() })
 
 describe('search in the navigation rail', () => {
-  it('is the first rail button, styled like the others, and the title bar has none', () => {
+  it('comes right after Home, styled like the others, and the title bar has none', () => {
     render()
-    expect(railLabels()[0]).toBe('Search threads')
-    expect(railLabels().slice(1)).toEqual(['Automations', 'Subscription usage', 'Settings'])
+    expect(railLabels()).toEqual(['Home', 'Search threads', 'Automations', 'Subscription usage', 'Settings'])
     expect(host.querySelector('[aria-label="Search threads"]')!.getAttribute('title')).toMatch(/^Search threads/)
     const titleBar = renderToStaticMarkup(createElement(TitleBar))
     expect(titleBar).not.toMatch(/aria-label="Search (threads|chats)"/)
@@ -62,9 +61,35 @@ describe('search in the navigation rail', () => {
   it('opens the chat search in the Chats tab, leaving a rail page that covers the sidebar', async () => {
     useAppStore.setState({ sidebarMode: 'chats', scheduledOpen: true })
     render()
-    expect(railLabels()[0]).toBe('Search chats')
+    expect(railLabels()[1]).toBe('Search chats')
     await click('Search chats')
     expect(useChatsStore.getState().searchOpen).toBe(true)
     expect(useAppStore.getState()).toMatchObject({ scheduledOpen: false, paletteOpen: false })
+  })
+})
+
+describe('Home in the navigation rail', () => {
+  const home = () => host.querySelector<HTMLButtonElement>('[aria-label="Home"]')!
+
+  it('is active while no rail page is open, and a click there changes nothing', async () => {
+    render()
+    expect(home().title).toBe('Home')
+    expect(home().classList.contains('active')).toBe(true)
+    expect(home().getAttribute('aria-current')).toBe('page')
+    await click('Home')
+    expect(useAppStore.getState()).toMatchObject(closed)
+    expect(home().classList.contains('active')).toBe(true)
+  })
+
+  it('leaves Automations or Usage and becomes the active item', async () => {
+    for (const page of ['scheduledOpen', 'usageOpen'] as const) {
+      useAppStore.setState({ ...closed, [page]: true })
+      render()
+      expect(home().classList.contains('active')).toBe(false)
+      expect(home().hasAttribute('aria-current')).toBe(false)
+      await click('Home')
+      expect(useAppStore.getState()).toMatchObject({ scheduledOpen: false, usageOpen: false })
+      expect(home().classList.contains('active')).toBe(true)
+    }
   })
 })

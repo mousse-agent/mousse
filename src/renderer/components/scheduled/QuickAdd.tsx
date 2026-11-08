@@ -4,8 +4,16 @@ import { Select, type SelectOption } from '../ui/Select'
 import { createInputOf, quickDraft, scheduleOf, validateDraft, type JobDraft, type ScheduledCatalog } from './jobDraft'
 import { describeScheduleLong, errorText, firstRunOf, relativeWhen, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
 import type { CreateScheduledJobInput } from '../../../shared/types'
+import { QUICK_ADD_PLACEHOLDER } from './automationsCopy'
 
 type Preset = Exclude<SchedulePreset, 'custom'>
+
+/** When: the editor's default (every 30 minutes), the presets, then Custom…, which opens the full editor. */
+const WHEN_OPTIONS: SelectOption<Preset | 'default' | 'custom'>[] = [
+  { value: 'default', label: 'Every 30 min' },
+  ...SCHEDULE_PRESETS.map((item) => ({ value: item.value, label: item.label })),
+  { value: 'custom', label: 'Custom…' }
+]
 
 /**
  * The quick-add line at the top of the page: type what the agent should do, pick when (or nothing, for the editor's
@@ -111,6 +119,7 @@ export const QuickAdd = forwardRef<HTMLInputElement, {
       : repo[projectId]
         ? 'Runs in a new worktree'
         : 'Runs in the project checkout'
+  // What Add makes, in the Add button's tooltip only.
   const preview = [
     describeScheduleLong(schedule).replace(/, this computer's time$/, ''),
     first ? `First run ${relativeWhen(first.toISOString())}` : null,
@@ -126,7 +135,7 @@ export const QuickAdd = forwardRef<HTMLInputElement, {
             ref={inputRef}
             className="scheduled-quick-input"
             aria-label="New task"
-            placeholder="What should the agent do?"
+            placeholder={QUICK_ADD_PLACEHOLDER}
             value={text}
             onChange={(event) => { setText(event.target.value); setError(null) }}
             onKeyDown={(event) => {
@@ -145,27 +154,20 @@ export const QuickAdd = forwardRef<HTMLInputElement, {
       {expanded ? (
         <>
           <div className="scheduled-quick-row">
-            <div className="scheduled-chips" role="group" aria-label="When">
-              {SCHEDULE_PRESETS.map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  className="scheduled-chip"
-                  aria-pressed={preset === item.value}
-                  onClick={() => setPreset((current) => (current === item.value ? null : item.value))}
-                >
-                  {item.label}
-                </button>
-              ))}
-              <button type="button" className="scheduled-chip" onClick={() => void custom()}>Custom…</button>
-            </div>
+            <Select
+              variant="menu"
+              ariaLabel="When"
+              data-testid="quick-when"
+              value={preset ?? 'default'}
+              options={WHEN_OPTIONS}
+              onChange={(next) => (next === 'custom' ? void custom() : setPreset(next === 'default' ? null : next))}
+            />
+            <Select variant="menu" ariaLabel="Project" value={projectId} options={projectOptions} onChange={chooseProject} />
             <span className="scheduled-when-gap" />
-            <Select className="scheduled-select where" ariaLabel="Project" value={projectId} options={projectOptions} onChange={chooseProject} />
-            <button type="button" className="settings-btn scheduled-add" disabled={busy || !text.trim()} onClick={() => void add()}>
+            <button type="button" className="settings-btn scheduled-add" title={preview} data-testid="quick-preview" disabled={busy || !text.trim()} onClick={() => void add()}>
               Add <kbd aria-hidden="true">↵</kbd>
             </button>
           </div>
-          <p className="scheduled-quick-hint" data-testid="quick-preview">{preview}</p>
         </>
       ) : null}
       {error ? <p className="scheduled-field-error" role="alert">{error}</p> : null}

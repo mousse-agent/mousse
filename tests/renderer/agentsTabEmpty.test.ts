@@ -136,9 +136,10 @@ describe('the Agents pane', () => {
 })
 
 describe('Automations', () => {
-  it('has Agents, Workflows and Scheduled, and no Bots tab', () => {
+  it('has Home (open first), Agents, Workflows and Schedule, and no Bots tab', () => {
     act(() => root.render(createElement(AutomationsWorkspace)))
-    expect(text('[role="tab"]').map((label) => label?.trim())).toEqual(['Agents', 'Workflows', 'Scheduled'])
+    expect(text('[role="tab"]').map((label) => label?.trim())).toEqual(['Home', 'Agents', 'Workflows', 'Schedule'])
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.id).toBe('automations-home-tab')
     expect(host.querySelector('#automations-bots-tab')).toBeNull()
   })
 

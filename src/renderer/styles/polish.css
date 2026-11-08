@@ -246,10 +246,6 @@ html[data-theme='high-contrast'] {
   box-shadow: var(--ui-specular);
 }
 
-.app .navigation-rail-separator {
-  border-top-color: var(--ui-line-strong);
-}
-
 .app .resizer {
   background: var(--ui-line);
 }
@@ -925,7 +921,8 @@ textarea:focus {
    upper edge that fades out before the corners. padding-box keeps that line
    inside the border, which would otherwise paint over it. */
 .app .chat-input-area .composer,
-.app .agent-chat-composer {
+.app .agent-chat-composer,
+.thread-search-dialog {
   background-color: var(--ui-raised);
   background-image:
     linear-gradient(90deg, transparent, var(--ui-glint), transparent),

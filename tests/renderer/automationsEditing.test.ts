@@ -123,13 +123,13 @@ describe('libraries', () => {
   it('an empty agents library shows one line, one New agent, Import, and no filters', async () => {
     await act(async () => root.render(createElement(AgentsLibrary, { profileId: 'p', client: agentClient([]), onOpen: () => {}, onRefreshTools: () => {} })))
     await flush()
-    expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No agents yet.')
+    expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No crew yet.')
     expect(buttons().filter((item) => item.textContent?.includes('New agent'))).toHaveLength(1)
     // Create is a neutral button, not an accent fill.
     expect(document.querySelector('[data-action="new-agent"]')?.className).toBe('btn')
     expect(document.querySelector('[aria-label="Import agent"]')).not.toBeNull()
     expect(document.querySelector('.agent-library-toolbar')).toBeNull()
-    expect(document.querySelector('h2')?.textContent).toBe('Agents')
+    expect(document.querySelector('h2')?.textContent).toBe('The crew')
     expect(document.querySelector('h1')).toBeNull()
   })
 
@@ -165,7 +165,7 @@ describe('libraries', () => {
     const client = { list: async () => [] } as unknown as WorkflowDefinitionsClient
     await act(async () => root.render(createElement(WorkflowLibrary, { profileId: 'p', client, onOpen: () => {} })))
     await flush()
-    expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No workflows yet.')
+    expect(document.querySelector('[data-library-empty]')?.textContent).toBe('No playbooks yet.')
     expect(document.querySelectorAll('[data-action="new-workflow"]')).toHaveLength(1)
     expect(document.querySelector('[data-action="new-workflow"]')?.className).toBe('btn')
     expect(document.querySelector('[aria-label="Import workflow"]')).not.toBeNull()
