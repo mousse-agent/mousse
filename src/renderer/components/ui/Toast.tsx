@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { create } from 'zustand'
-import { X } from '../../lib/icons'
+import { Check, Copy, X } from '../../lib/icons'
 import { FloatingPortal } from '../../lib/floatingLayer'
 import '../../styles/toast.css'
 
@@ -22,9 +22,9 @@ const HEAD_HEIGHT = 20
 const HEAD_GAP = 6
 
 /**
- * What a toast is about, shown by a status dot like the sidebar's: finished (success),
- * needs you (attention), stopped (paused), failed (error). Neutral (something done, such as
- * "Archived") has a faint dot without a ring, so every toast's text starts on one line.
+ * What a toast is about, shown by a faint wash of the status colour over the toast: finished
+ * (success), needs you (attention), stopped (paused), failed (error). Neutral (something done,
+ * such as "Archived") is untinted.
  */
 export type ToastTone = 'neutral' | 'error' | 'success' | 'attention' | 'paused'
 
@@ -54,18 +54,78 @@ interface ToastCardProps {
   ghost?: boolean
 }
 
-/** One toast: a status mark, its line or two of text, up to two text actions and a close button. */
-function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, openLabel, onDismiss, time, className, ghost }: ToastCardProps) {
+/** Read before the text by screen readers, since the tint alone says nothing to them. */
+const TONE_SPOKEN: Partial<Record<ToastTone, string>> = { error: 'Error:', paused: 'Warning:' }
+/** How long "Copied" shows after the error is copied. */
+const COPIED_MS = 1_400
+
+/**
+ * Whether a toast's text is cut off, and whether it is open to show all of it: while hovered, or
+ * after a click (or Enter) until the next click. Reports a clicked-open toast so its timer can wait.
+ */
+function useToastExpansion(text: HTMLElement | null, content: string, onPinnedChange?: (pinned: boolean) => void) {
+  const [overflows, setOverflows] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const [pinned, setPinned] = useState(false)
+  const expanded = overflows && (hovered || pinned)
+  const expandedRef = useRef(expanded)
+  expandedRef.current = expanded
+  useLayoutEffect(() => {
+    if (!text) return
+    // Measured only while closed: the open text wraps, so it never looks cut off.
+    const check = () => {
+      if (expandedRef.current) return
+      const lines = text.querySelectorAll<HTMLElement>('.ui-toast-title, .ui-toast-message')
+      setOverflows([...lines].some((line) => line.scrollWidth > line.clientWidth + 1))
+    }
+    check()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(check)
+    observer.observe(text)
+    return () => observer.disconnect()
+  }, [text, content])
+  const report = useRef(onPinnedChange)
+  report.current = onPinnedChange
+  const held = pinned && overflows
+  useEffect(() => { report.current?.(held) }, [held])
+  const toggle = () => {
+    if (pinned) {
+      setPinned(false)
+      setHovered(false)
+    } else setPinned(true)
+  }
+  return { overflows, expanded, setHovered, toggle }
+}
+
+/** One toast, tinted by its tone: its line or two of text, up to two text actions and a close button. */
+function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, openLabel, onDismiss, time, className, ghost, onPinnedChange }: ToastCardProps & {
+  /** The toast was clicked open (true) or closed again (false). */
+  onPinnedChange?: (pinned: boolean) => void
+}) {
+  const [textElement, setTextElement] = useState<HTMLElement | null>(null)
+  const fullText = title ? `${title}\n${message}` : message
+  const { overflows, expanded, setHovered, toggle } = useToastExpansion(ghost ? null : textElement, fullText, onPinnedChange)
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), COPIED_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
+  const expandable = overflows && !onOpen
+  const spoken = ghost ? undefined : TONE_SPOKEN[tone]
   const text = (
     <>
+      {spoken && <span className="sr-only">{spoken} </span>}
       {title && <span className="ui-toast-title">{title}</span>}
       <span className="ui-toast-message">{message}</span>
     </>
   )
   return (
     <div
-      className={`ui-toast-card${ghost ? '' : ' ui-toast'} ui-toast-${tone}${title ? ' ui-toast-two-line' : ''}${onOpen ? ' ui-toast-openable' : ''}${className ? ` ${className}` : ''}`}
+      className={`ui-toast-card${ghost ? '' : ' ui-toast'} ui-toast-${tone}${title ? ' ui-toast-two-line' : ''}${onOpen ? ' ui-toast-openable' : ''}${overflows ? ' ui-toast-expandable' : ''}${expanded ? ' is-open' : ''}${className ? ` ${className}` : ''}`}
       role={ghost ? undefined : tone === 'error' ? 'alert' : 'status'}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
       onKeyDown={(event) => {
         if (event.key === 'Escape' && onDismiss) {
           event.stopPropagation()
@@ -73,14 +133,40 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
         }
       }}
     >
-      <span className="ui-toast-mark" aria-hidden="true">
-        <span className="ui-toast-dot" />
+      <span className="ui-toast-body">
+        {onOpen ? (
+          <button ref={setTextElement} type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} onClick={onOpen}>{text}</button>
+        ) : (
+          <span
+            ref={setTextElement}
+            className="ui-toast-text"
+            role={expandable ? 'button' : undefined}
+            tabIndex={expandable ? 0 : undefined}
+            aria-expanded={expandable ? expanded : undefined}
+            onClick={expandable ? toggle : undefined}
+            onKeyDown={expandable ? (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              toggle()
+            } : undefined}
+          >{text}</span>
+        )}
+        {expanded && (
+          <span className="ui-toast-tools">
+            <button
+              type="button"
+              className="ui-toast-copy"
+              data-action="copy"
+              aria-label={tone === 'error' ? 'Copy error' : 'Copy text'}
+              title={tone === 'error' ? 'Copy error' : 'Copy text'}
+              onClick={() => void navigator.clipboard?.writeText(fullText).then(() => setCopied(true), () => {})}
+            >
+              {copied ? <Check size={12} strokeWidth={2} aria-hidden="true" /> : <Copy size={12} strokeWidth={2} aria-hidden="true" />}
+            </button>
+            {copied && <span className="ui-toast-copied" role="status">Copied</span>}
+          </span>
+        )}
       </span>
-      {onOpen ? (
-        <button type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} onClick={onOpen}>{text}</button>
-      ) : (
-        <span className="ui-toast-text">{text}</span>
-      )}
       {actions.length > 0 && (
         <span className="ui-toast-actions">
           {actions.map((action) => (
@@ -121,18 +207,30 @@ export function ToastView({
   /** The pointer or focus entered (true) or left (false) the toast, so a timer can wait. */
   onHoldChange?: (held: boolean) => void
 }) {
+  // A clicked-open toast keeps holding after the pointer and focus leave.
+  const pinnedRef = useRef(false)
+  const setHeld = (held: boolean) => onHoldChange?.(held || pinnedRef.current)
   return (
     <FloatingPortal>
       <section
         className="ui-toaster"
         aria-label="Notifications"
-        onPointerEnter={() => onHoldChange?.(true)}
-        onPointerLeave={() => onHoldChange?.(false)}
-        onFocus={() => onHoldChange?.(true)}
-        onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onHoldChange?.(false) }}
+        onPointerEnter={() => setHeld(true)}
+        onPointerLeave={() => setHeld(false)}
+        onFocus={() => setHeld(true)}
+        onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHeld(false) }}
       >
         <ol className="ui-toaster-list">
-          <li className="ui-toast-item ui-toast-item-front"><ToastCard {...card} /></li>
+          <li className="ui-toast-item ui-toast-item-front">
+            <ToastCard
+              {...card}
+              onPinnedChange={(next) => {
+                if (next === pinnedRef.current) return
+                pinnedRef.current = next
+                if (next) onHoldChange?.(true)
+              }}
+            />
+          </li>
         </ol>
       </section>
     </FloatingPortal>
@@ -378,13 +476,15 @@ function StackedToast({
   measure: (id: number, element: HTMLElement | null) => void
   now: number
 }) {
-  useToastTimer(toast.id, toast.durationMs ?? TOAST_MS, paused)
+  // A toast clicked open to read its full text waits until it is closed again.
+  const [pinned, setPinned] = useState(false)
+  useToastTimer(toast.id, toast.durationMs ?? TOAST_MS, paused || pinned)
   const [drag, setDrag] = useState(0)
   const dragStart = useRef<{ x: number; pointer: number } | null>(null)
   const ref = useCallback((element: HTMLDivElement | null) => measure(toast.id, element), [measure, toast.id])
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest('.ui-toast-action, .ui-toast-close')) return
+    if (event.button !== 0 || (event.target as HTMLElement).closest('.ui-toast-action, .ui-toast-close, .ui-toast-copy')) return
     dragStart.current = { x: event.clientX, pointer: event.pointerId }
   }
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -432,6 +532,7 @@ function StackedToast({
           }] : []}
           onDismiss={() => dismissToast(toast.id)}
           time={toast.title ? toastAge(toast.shownAt, now) : undefined}
+          onPinnedChange={setPinned}
         />
       </div>
     </li>
