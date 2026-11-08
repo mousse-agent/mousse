@@ -59,7 +59,7 @@ async function opened(o: Owner) {
   return { spawned, t, path, ptyId: (reply.result as { ptyId: string }).ptyId }
 }
 
-/** Another terminal of the device, in a thread of its own (a thread has one terminal at a time: it holds the thread's lease). */
+/** Another terminal of the device, in a thread of its own. */
 async function another(o: Owner) {
   const { t, path } = folderThread(o)
   const reply = await create(o, t.id)

@@ -11,6 +11,20 @@ import { ProjectTerminalPanel } from '../../src/renderer/components/ProjectTermi
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { LOADER_DELAY_MS } from '../../src/renderer/components/ui/DelayedLoader'
 
+// xterm draws on a canvas jsdom lacks; the panel's own show/hide logic is what these tests read.
+vi.mock('@xterm/xterm', () => ({
+  Terminal: class {
+    loadAddon() {}
+    open(parent: HTMLElement) { parent.appendChild(document.createElement('div')).className = 'xterm' }
+    onData() { return { dispose() {} } }
+    focus() {}
+    write() {}
+    dispose() {}
+  }
+}))
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 } } } }))
+vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
+
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 let host: HTMLDivElement
@@ -343,6 +357,125 @@ describe('terminal held on another computer', () => {
     await flush()
     expect(kill).toHaveBeenCalledTimes(2)
     expect(host.querySelector('.terminal-remote-holder')).toBeNull()
+  })
+
+  it('shows a live terminal reattached when the panel mounts again, instead of a blank pane', async () => {
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      app: { getFilesRoot: async () => '/work/app' },
+      pty: {
+        list: async () => [],
+        isAlive: async () => true,
+        create: vi.fn(),
+        resize: async () => undefined,
+        kill: async () => undefined,
+        onData: () => () => undefined,
+        onExit: () => () => undefined
+      }
+    }
+    // A reload or remount keeps the saved tab and its still-running shell.
+    useAppStore.setState({
+      activeThreadId: 't1',
+      mainView: 'terminal',
+      projectTerminalTabs: [{ id: 'tab-1', ownerThreadId: 't1', ptyId: 'pty-live', cwd: '/work/app', title: 'Terminal', exited: false }],
+      activeProjectTerminalTabByThread: { t1: 'tab-1' }
+    })
+    await act(async () => root.render(createElement(ProjectTerminalPanel)))
+    await flush()
+    await flush()
+    const wrapper = host.querySelector<HTMLElement>('.xterm-wrapper[data-pty-id="pty-live"]')
+    expect(wrapper).not.toBeNull()
+    expect(wrapper?.style.display).toBe('block')
+  })
+
+  it('says why a terminal could not start, does not retry it on its own, and starts it on Retry', async () => {
+    let refuse = true
+    const create = vi.fn(async () => {
+      if (refuse) throw new Error("Error invoking remote method 'pty:create': Error: Task writer is busy; wait for it to finish before opening a terminal")
+      return { ptyId: 'pty-2' }
+    })
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      app: { getFilesRoot: async () => '/work/app' },
+      pty: { list: async () => [], isAlive: async () => true, create, resize: async () => undefined, kill: async () => undefined, onData: () => () => undefined, onExit: () => () => undefined }
+    }
+    useAppStore.setState({
+      activeThreadId: 't1',
+      mainView: 'terminal',
+      threads: [{ id: 't1', projectId: 'p1', startedAt: '2026-11-08T00:00:00.000Z', name: 'Started' }] as never,
+      projectTerminalTabs: [{ id: 'tab-2', ownerThreadId: 't1', ptyId: null, title: 'Terminal', exited: false }],
+      activeProjectTerminalTabByThread: { t1: 'tab-2' }
+    })
+    await act(async () => root.render(createElement(ProjectTerminalPanel)))
+    await flush()
+    await flush()
+    expect(host.querySelector('[role="status"]')?.textContent).toContain('Task writer is busy')
+    expect(create).toHaveBeenCalledTimes(1)
+    // Another change to the tabs does not start it again.
+    await act(async () => { useAppStore.getState().updateProjectTerminalTab('tab-2', { title: 'Renamed' }) })
+    await flush()
+    expect(create).toHaveBeenCalledTimes(1)
+    refuse = false
+    await click(buttonByText('Retry'))
+    await flush()
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(host.querySelector('[role="status"]')).toBeNull()
+    expect(host.querySelector<HTMLElement>('.xterm-wrapper[data-pty-id="pty-2"]')?.style.display).toBe('block')
+  })
+
+  it('starts a terminal on its tab’s thread, and one kept in every thread on none', async () => {
+    const create = vi.fn(async (request: { agentId: string }) => ({ ptyId: `pty-${request.agentId.split(':')[1]}` }))
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      app: { getFilesRoot: async () => '/work/app' },
+      pty: { list: async () => [], isAlive: async () => true, create, resize: async () => undefined, kill: async () => undefined, onData: () => () => undefined, onExit: () => () => undefined }
+    }
+    useAppStore.setState({
+      activeThreadId: 't1',
+      mainView: 'terminal',
+      threads: [{ id: 't1', projectId: 'p1', startedAt: '2026-11-08T00:00:00.000Z', name: 'Started' }] as never,
+      projectTerminalTabs: [
+        { id: 'own', ownerThreadId: 't1', ptyId: null, title: 'Terminal', exited: false },
+        { id: 'every', ownerThreadId: null, ptyId: null, title: 'Terminal', exited: false }
+      ],
+      activeProjectTerminalTabByThread: { t1: 'own' }
+    })
+    await act(async () => root.render(createElement(ProjectTerminalPanel)))
+    await flush()
+    await flush()
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentId: '__project-shell__:own', threadId: 't1' }))
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentId: '__project-shell__:every', threadId: null }))
+  })
+
+  it('applies the project picked for a new chat before its terminal starts, and keeps the tab with the new thread', async () => {
+    const create = vi.fn(async () => ({ ptyId: 'pty-new' }))
+    const threadsCreate = vi.fn(async () => ({ id: 't-new', projectId: 'p1', worktreeEnabled: false }))
+    ;(window as unknown as { mousse: unknown }).mousse = {
+      app: { getFilesRoot: async () => '/home/user' },
+      threads: { create: threadsCreate, select: async () => undefined, setWorktreeEnabled: vi.fn() },
+      pty: { list: async () => [], isAlive: async () => true, create, resize: async () => undefined, kill: async () => undefined, onData: () => () => undefined, onExit: () => () => undefined }
+    }
+    // An empty draft with no project; the composer has project p1 picked.
+    useAppStore.setState({
+      profileId: 'default',
+      activeThreadId: 'draft',
+      mainView: 'terminal',
+      messages: [],
+      threads: [{ id: 'draft' }] as never,
+      projects: [{ id: 'p1', path: '/work/p1', name: 'p1' }] as never,
+      composerWorkspaceDrafts: { draft: { projectId: 'p1', worktreeEnabled: false } },
+      projectTerminalTabs: [{ id: 'tab-1', ownerThreadId: 'draft', ptyId: null, title: 'Terminal', exited: false }],
+      activeProjectTerminalTabByThread: { draft: 'tab-1' }
+    })
+    await act(async () => root.render(createElement(ProjectTerminalPanel)))
+    await flush()
+    await flush()
+    await flush()
+    expect(threadsCreate).toHaveBeenCalledWith(undefined, 'p1', expect.objectContaining({ worktreeEnabled: false }))
+    // The service starts it in the new thread's own folder: no folder of the draft is sent.
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create).toHaveBeenCalledWith({ agentId: '__project-shell__:tab-1', threadId: 't-new' })
+    const state = useAppStore.getState()
+    expect(state.activeThreadId).toBe('t-new')
+    expect(state.projectTerminalTabs).toEqual([expect.objectContaining({ id: 'tab-1', ownerThreadId: 't-new', ptyId: 'pty-new' })])
+    expect(state.activeProjectTerminalTabByThread['t-new']).toBe('tab-1')
   })
 
   it('shows no loading text while the folder is unknown, only the delayed loader', async () => {

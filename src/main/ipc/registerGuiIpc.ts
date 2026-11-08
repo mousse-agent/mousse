@@ -1897,14 +1897,19 @@ export function registerGuiIpc(
       request: {
         agentId: string
         cwd?: string
+        threadId?: unknown
         command?: string
         env?: Record<string, string>
         shellArgs?: string[]
       }
     ) => {
-      // Project terminals also exist before a thread is selected. Keep those
-      // sessions explicitly unbound instead of making the terminal silently fail.
-      const threadId = currentPresentation().getActiveThreadId() ?? '__unbound__'
+      // The terminal belongs to the thread its tab names, not to whichever thread the window shows when it starts.
+      // Project terminals also exist with no thread (null, or no thread selected). Keep those sessions explicitly
+      // unbound instead of making the terminal silently fail.
+      const named = request.threadId
+      if (named !== undefined && named !== null && (typeof named !== 'string' || !named || named.length > 256))
+        throw new Error('Invalid terminal thread')
+      const threadId = (named === undefined ? currentPresentation().getActiveThreadId() : named) ?? '__unbound__'
       // On another computer the terminal starts in the thread's own folder, in that computer's default shell:
       // this window names no folder of its own, no shell arguments and no environment.
       const remote = isQualifiedId(threadId)
