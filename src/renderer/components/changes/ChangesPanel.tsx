@@ -53,6 +53,7 @@ import {
   plural,
   revertAllowed,
   revertedWhat,
+  revertedWhen,
   reviewScopeFor,
   sameChanges,
   scopeEndpoints,
@@ -1107,8 +1108,8 @@ export function ChangesPanel() {
                 <div key={entry.revertId} className="changes-restore-row">
                   <span className="changes-restore-what">
                     <span className="changes-path" title={`${entry.oldPath ? `${entry.oldPath} → ` : ''}${entry.path} · kept until ${new Date(entry.keptUntil).toLocaleDateString()}`}>{entry.path}</span>
-                    <span className="changes-faint">
-                      {outcome === 'changed' ? 'Changed since' : outcome === 'expired' ? 'Expired' : `${revertedWhat(entry)} · ${new Date(entry.at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}`}
+                    <span className="changes-faint" title={outcome === undefined || outcome === 'pending' ? revertedWhen(entry.at, Date.now()).title : undefined}>
+                      {outcome === 'changed' ? 'Changed since' : outcome === 'expired' ? 'Expired' : `${revertedWhat(entry)} · ${revertedWhen(entry.at, Date.now()).label}`}
                     </span>
                   </span>
                   {outcome === 'changed' ? (

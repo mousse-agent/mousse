@@ -190,7 +190,8 @@ New field `selection?: { mode: 'all' } | { mode: 'chosen'; token: string }`.
 - The record `revertId → { kept ref, paths, post-revert digests and index entries, at }` is written to the owner's journal, so the list and restore work after a restart.
 - `git.restoreReverted({ threadId?, projectId?, revertId })` → `{ restored: true } | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }`.
   - Restores only if the paths still match what the revert left: the working tree, and in project folders also the index. (A thread's selection is not compared, so choosing another hunk of the same file doesn't block Undo.) Otherwise it returns blob ids for a comparison and writes nothing.
-  - Restored hunks come back as they were in project folders (the staged entry is restored). In threads the overlay entries from before the revert come back too, if nobody changed them since, so restored hunks keep their earlier choice. Chat Undo of a recorded revert behaves the same way.
+  - Restored hunks come back as they were in project folders (the staged entry is restored). In threads the overlay entries from before the revert come back too, if nobody changed them since, so restored hunks keep their earlier choice.
+  - Chat Undo of a recorded revert puts the files back but not the thread's earlier include/leave-out choices; pressing Restore afterwards brings them back (an undo-system change is left for later).
   - Idempotent: if the paths already equal the kept content (a retry, or chat Undo already put it back), returns `restored: true`.
   - `expired` when the kept ref is gone, whatever `keptUntil` said.
   - Uses the same re-checked write as revert (`writeBackKeptFiles` only creates missing files) and puts staged entries back from the kept ref; in the thread cases a restore that writes is a recorded thread action.

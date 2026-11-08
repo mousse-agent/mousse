@@ -29,6 +29,7 @@ import {
   parseScopeId,
   revertAllowed,
   revertedWhat,
+  revertedWhen,
   reviewScopeFor,
   sameChanges,
   scopeEndpoints,
@@ -534,6 +535,21 @@ describe('restore reverted', () => {
     expect(revertedWhat({ path: 'src/a.ts', summary: '1 line of src/a.ts' })).toBe('1 line')
     expect(revertedWhat({ path: 'src/a.ts', summary: 'src/a.ts' })).toBe('Whole file')
     expect(revertedWhat({ path: 'b.ts', oldPath: 'a.ts', summary: 'a.ts → b.ts' })).toBe('Whole file')
+  })
+
+  it('shows when a revert happened as a relative time, with the full date in the tooltip', () => {
+    const now = new Date(2026, 10, 9, 14, 31).getTime()
+    const minute = 60_000
+    const hour = 60 * minute
+    expect(revertedWhen(now - 30_000, now).label).toBe('just now')
+    expect(revertedWhen(now - 2 * minute, now).label).toBe('2m ago')
+    expect(revertedWhen(now - 5 * hour, now).label).toBe('5h ago')
+    expect(revertedWhen(now - 30 * hour, now).label).toBe('yesterday')
+    expect(revertedWhen(now - 72 * hour, now).label).toBe('3d ago')
+    const title = revertedWhen(now - 2 * minute, now).title
+    expect(title).toContain('2026')
+    expect(title).toContain(':')
+    expect(revertedWhen(Number.NaN, now)).toEqual({ label: '', title: '' })
   })
 })
 

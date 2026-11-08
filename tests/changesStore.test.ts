@@ -88,8 +88,8 @@ describe('changes store', () => {
 describe('review whitespace setting', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('ignores leading and trailing whitespace by default', () => {
-    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(true)
+  it('shows every whitespace change by default', () => {
+    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(false)
   })
 
   it('persists per profile with the rest of the personal workspace', () => {
@@ -104,13 +104,13 @@ describe('review whitespace setting', () => {
     const { activateProfile } = useAppStore.getState()
 
     activateProfile('alpha')
-    useAppStore.getState().setReviewIgnoreWhitespace(false)
-    expect(JSON.parse(saved.get('mousse-profile-alpha-workspace')!)).toMatchObject({ reviewIgnoreWhitespace: false })
+    useAppStore.getState().setReviewIgnoreWhitespace(true)
+    expect(JSON.parse(saved.get('mousse-profile-alpha-workspace')!)).toMatchObject({ reviewIgnoreWhitespace: true })
 
     // Another profile starts from the default, and the first one gets its choice back.
     activateProfile('beta')
-    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(true)
-    activateProfile('alpha')
     expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(false)
+    activateProfile('alpha')
+    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(true)
   })
 })

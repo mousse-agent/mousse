@@ -3,6 +3,7 @@
 // tests can load it.
 import type { ReviewFileEntry, ReviewFileResult, ReviewFilesResult, ReviewScope, ReviewSide } from '../../../shared/review'
 import type { TurnChoice } from '../review/reviewModel'
+import { formatAgo } from '../../lib/formatAgo'
 import type { ChangesResult } from './changesApi'
 
 /** What the scope menu offers: Last turn (pinned to one turn), This thread, Uncommitted, or one turn. */
@@ -455,6 +456,14 @@ export function revertedWhat(entry: { path: string; oldPath?: string; summary: s
   const suffix = ` of ${name}`
   if (entry.summary.endsWith(suffix)) return entry.summary.slice(0, -suffix.length)
   return entry.summary === name ? 'Whole file' : entry.summary
+}
+
+/** When a listed revert happened: "5m ago" or "yesterday" in the row, the full date and time in the tooltip. */
+export function revertedWhen(at: number, now: number): { label: string; title: string } {
+  if (!Number.isFinite(at)) return { label: '', title: '' }
+  const hours = (now - at) / 3_600_000
+  const label = hours >= 24 && hours < 48 ? 'yesterday' : formatAgo(at, now)
+  return { label, title: new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) }
 }
 
 /** Revert is allowed only on the uncommitted diff, and on Last turn while it is identical to it. */
