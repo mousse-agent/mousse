@@ -28,7 +28,7 @@ vi.mock('../../src/renderer/stores/pullRequestStore', async (importOriginal) => 
 }))
 
 const { PullRequestPanel } = await import('../../src/renderer/components/PullRequestPanel')
-const { WhitespaceToggle } = await import('../../src/renderer/components/review/ReviewDiffPane')
+const { DiffOptionsMenu } = await import('../../src/renderer/components/review/ReviewDiffPane')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -176,21 +176,25 @@ describe('a Merge or Close question in the pull request panel', () => {
   })
 })
 
-describe('the whitespace switch', () => {
-  it('is the app’s switch, labelled, and toggles the setting', async () => {
+describe('the diff options menu', () => {
+  it('opens from the "Diff options" button and toggles Ignore whitespace, staying open', async () => {
     useAppStore.setState({ reviewIgnoreWhitespace: false })
-    await act(async () => root.render(createElement(WhitespaceToggle)))
-    expect(host.querySelector('input[type="checkbox"]')).toBeNull()
-    const toggle = host.querySelector('[role="switch"]')
-    expect(toggle?.getAttribute('aria-label')).toBe('Ignore leading/trailing whitespace')
-    expect(toggle?.getAttribute('aria-checked')).toBe('false')
+    await act(async () => root.render(createElement(DiffOptionsMenu)))
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="Diff options"]')
+    expect(trigger?.getAttribute('aria-haspopup')).toBe('menu')
+    expect(host.querySelector('[role="switch"]')).toBeNull()
 
-    await click(toggle)
+    await click(trigger)
+    const item = () => document.querySelector('[role="menuitemcheckbox"]')
+    expect(item()?.textContent).toContain('Ignore whitespace')
+    expect(item()?.getAttribute('aria-checked')).toBe('false')
+
+    await click(item())
     expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(true)
-    expect(host.querySelector('[role="switch"]')?.getAttribute('aria-checked')).toBe('true')
+    expect(item()?.getAttribute('aria-checked')).toBe('true')
 
-    // The text label toggles it too.
-    await click(host.querySelector('.review-toggle span'))
-    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(false)
+    await act(async () => { item()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(item()).toBeNull()
+    expect(trigger?.getAttribute('aria-expanded')).toBe('false')
   })
 })

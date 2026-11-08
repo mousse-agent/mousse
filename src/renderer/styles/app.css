@@ -4408,7 +4408,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
-/* The diff header: the open file, then the whitespace switch and Push, Commit and Create PR. */
+/* The diff header: the open file, then the diff options button and Push, Commit and Create PR. */
 .git-diff-toolbar {
   flex-wrap: wrap;
   row-gap: 6px;
@@ -5013,20 +5013,14 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   width: auto;
 }
 
-.review-toggle-row {
-  flex-shrink: 0;
-  padding: 6px 12px;
-  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+.diff-options-trigger.open {
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
-.review-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
+.diff-options-menu {
+  width: auto;
+  min-width: 240px;
 }
 
 .review-banner {

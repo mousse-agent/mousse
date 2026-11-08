@@ -1,6 +1,6 @@
 import { useCallback, type KeyboardEvent, type RefObject } from 'react'
 
-const ITEM_SELECTOR = '[role="menuitem"], [role="menuitemradio"]'
+const ITEM_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]'
 
 /**
  * Items the keyboard can reach, in document order. Rows marked `aria-disabled`
