@@ -8,7 +8,7 @@ import { getMousseHomeDir } from './paths'
 import { trustRepositoryPrograms } from '../git/repoPrograms'
 import { retireProjectSnapshots } from '../workspace/SnapshotWorkspace'
 import type { ProjectIconChoice } from '../../shared/projectIcon'
-import { toStoredIconPath } from './projectIcon'
+import { PROJECT_ICON_DETECTOR_VERSION, toStoredIconPath } from './projectIcon'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -128,6 +128,7 @@ export class ProjectManager {
     if (path) project.detectedIconPath = path
     else delete project.detectedIconPath
     project.iconDetectedAt = new Date().toISOString()
+    project.iconDetector = PROJECT_ICON_DETECTOR_VERSION
     this.persist()
   }
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   detectProjectIcon,
   imageMime,
+  PROJECT_ICON_DETECTOR_VERSION,
   projectIconCandidates,
   projectIconFor,
   readIconFile,
@@ -83,7 +84,7 @@ describe('project icon detection', () => {
       put('assets/real/favicon.svg', SVG)
       symlinkSync(join(root, 'assets', 'real'), join(root, 'static'), 'junction')
       expect((await detectProjectIcon(root))?.path).toBe('static/favicon.svg')
-      const recorded: Project = { id: 'p1', name: 'p', path: root, createdAt: '', order: 0, detectedIconPath: 'public/favicon.svg', iconDetectedAt: new Date().toISOString() }
+      const recorded: Project = { id: 'p1', name: 'p', path: root, createdAt: '', order: 0, detectedIconPath: 'public/favicon.svg', iconDetectedAt: new Date().toISOString(), iconDetector: PROJECT_ICON_DETECTOR_VERSION }
       expect(await projectIconFor(recorded, { recordDetectedIcon: () => undefined })).toMatchObject({ path: 'static/favicon.svg' })
     } finally {
       rmSync(outside, { recursive: true, force: true })
@@ -158,10 +159,10 @@ describe('project icon choice', () => {
     expect(first.calls).toEqual(['favicon.svg'])
     const now = Date.now()
     const fresh = recorder()
-    expect(await projectIconFor(project({ iconDetectedAt: new Date(now).toISOString() }), fresh, now)).toBeNull()
+    expect(await projectIconFor(project({ iconDetectedAt: new Date(now).toISOString(), iconDetector: PROJECT_ICON_DETECTOR_VERSION }), fresh, now)).toBeNull()
     expect(fresh.calls).toEqual([])
     const stale = recorder()
-    await projectIconFor(project({ iconDetectedAt: new Date(now - 7 * 3600_000).toISOString() }), stale, now)
+    await projectIconFor(project({ iconDetectedAt: new Date(now - 7 * 3600_000).toISOString(), iconDetector: PROJECT_ICON_DETECTOR_VERSION }), stale, now)
     expect(stale.calls).toEqual(['favicon.svg'])
   })
 })

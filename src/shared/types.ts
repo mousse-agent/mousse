@@ -992,6 +992,8 @@ export interface Project {
   detectedIconPath?: string
   /** When the folder was last looked at for an icon; absent until then, and cleared when the project is opened again. */
   iconDetectedAt?: string
+  /** The version of the detection rules that looked; a result of older rules is looked for again at once. */
+  iconDetector?: number
 }
 
 /**

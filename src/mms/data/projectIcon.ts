@@ -3,9 +3,16 @@ import { open, readdir, realpath } from 'fs/promises'
 import { isAbsolute, join, relative, resolve } from 'path'
 import type { Project } from '../../shared/types'
 import { PROJECT_ICON_MAX_BYTES, type ProjectIconImage } from '../../shared/projectIcon'
+import { appFolders, manifestFiles, withSvgSiblings } from './projectIconManifests'
 
 /** How long a found icon (or finding none) is trusted before the folder is looked at again. */
 export const PROJECT_ICON_DETECT_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * The version of the detection rules. A result found by older rules (or none found) is looked for again at once,
+ * instead of waiting out {@link PROJECT_ICON_DETECT_TTL_MS}. Raise it whenever the rules find more.
+ */
+export const PROJECT_ICON_DETECTOR_VERSION = 2
 
 /** Formats in the order they are preferred: a vector icon stays sharp at any size; an ICO is the last resort. */
 const FORMATS = ['svg', 'png', 'ico'] as const
@@ -25,8 +32,23 @@ const STEMS: readonly string[] = [
   // A touch icon, Tauri and Android launcher icons.
   ...['', 'public/', 'static/'].map((dir) => `${dir}apple-touch-icon`),
   'src-tauri/icons/icon',
-  'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher'
+  'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher',
+  // Expo's default icons, and Flutter's web icons.
+  'assets/images/icon',
+  'assets/images/favicon',
+  'assets/adaptive-icon',
+  'web/icons/Icon-192',
+  'web/icons/Icon-512'
 ]
+
+/** The standard places in a monorepo's app folder: its web favicon and its app icon. */
+const APP_STEMS: readonly string[] = ['public/favicon', 'favicon', 'assets/icon', 'assets/images/icon']
+
+/** Most folders listed and manifest files read for one project, so a large or odd folder stays cheap. */
+const MAX_LISTINGS = 48
+const MAX_MANIFEST_READS = 12
+/** The largest manifest read. */
+const MAX_MANIFEST_BYTES = 256 * 1024
 
 /** A logo file in the project's own name at its root, such as `mousse_logo_icon.svg` or `acme-logo.svg`. */
 const ROOT_LOGO_ICON = /^[\w.-]*logo[_-]?icon\.svg$/i
@@ -35,6 +57,11 @@ const ROOT_NAMED_LOGO = /^[\w.-]+[_-]logo[\w.-]*\.svg$/i
 /** The standard icon paths, relative to the project folder, in the order they are tried (the root logo files aside). */
 export function projectIconCandidates(): string[] {
   return FORMATS.flatMap((format) => STEMS.map((stem) => `${stem}.${format}`))
+}
+
+/** The standard icon paths in a monorepo's app folder (`web`, a workspace), in the order they are tried. */
+export function appIconCandidates(appRoot: string): string[] {
+  return FORMATS.flatMap((format) => APP_STEMS.map((stem) => `${appRoot}/${stem}.${format}`))
 }
 
 /** The root logo files among a folder's entries, best first: a logo icon before a plain named logo, shorter first. */
@@ -98,6 +125,34 @@ export async function readProjectIconFile(root: string, path: string, realRoot?:
   }
 }
 
+/** Reads a text file of the project (a manifest), or null when it is missing, too large or, through a symlink, outside it. */
+async function readProjectText(root: string, path: string, realRoot: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    const real = await realpath(join(root, path))
+    const inside = relative(realRoot, real)
+    if (!inside || inside.startsWith('..') || isAbsolute(inside)) return null
+    handle = await open(real, OPEN_FLAGS)
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > MAX_MANIFEST_BYTES) return null
+    const buffer = Buffer.alloc(info.size)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    return buffer.toString('utf8', 0, bytesRead)
+  } catch {
+    return null
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+function parseJson(text: string | null): unknown {
+  try {
+    return text ? JSON.parse(text.replace(/^\uFEFF/, '')) : null
+  } catch {
+    return null
+  }
+}
+
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 /** The image type of a file's bytes, by their content and never by the file's extension; null when not an image shown. */
@@ -121,32 +176,77 @@ function isSvg(bytes: Buffer): boolean {
   return /^(?:<\?xml[^>]*\?>\s*)?(?:(?:<!--[\s\S]*?-->|<!DOCTYPE[^>]*>)\s*)*<svg[\s>]/i.test(head)
 }
 
-/** The first icon found at a standard place in the folder, or null. Looks only at fixed paths, never through the tree. */
+/**
+ * The first icon found in the folder, or null. In order: a logo file in the project's name at its root; the icons
+ * its manifests declare (Expo, web app manifest, `index.html`, electron-builder, Tauri), at its root and then in its
+ * monorepo app folders; the standard places at its root; the standard places in its app folders. Looks only at
+ * fixed paths and the files they name, never through the tree, within a fixed number of listings and reads.
+ */
 export async function detectProjectIcon(root: string): Promise<ProjectIconImage | null> {
+  const realRoot = await realpath(root).catch(() => null)
+  if (!realRoot) return null
   // Each folder is listed once, so names match whatever their case.
   const listings = new Map<string, Promise<Map<string, string>>>()
   const list = (dir: string) => {
     let listing = listings.get(dir)
     if (!listing) {
-      listing = readdir(join(root, dir)).then(
-        (names) => new Map(names.map((name) => [name.toLowerCase(), name])),
-        () => new Map<string, string>()
-      )
+      listing = listings.size >= MAX_LISTINGS
+        ? Promise.resolve(new Map<string, string>())
+        : readdir(join(root, dir)).then(
+          (names) => new Map(names.map((name) => [name.toLowerCase(), name])),
+          () => new Map<string, string>()
+        )
       listings.set(dir, listing)
     }
     return listing
   }
-  const realRoot = await realpath(root).catch(() => null)
-  if (!realRoot) return null
-  const ordered = [...rootLogoCandidates([...(await list('')).values()]), ...projectIconCandidates()]
-  for (const candidate of ordered) {
+  /** The path as it is on disk, or null when its folder does not list it. */
+  const listed = async (candidate: string): Promise<string | null> => {
     const slash = candidate.lastIndexOf('/')
     const dir = slash < 0 ? '' : candidate.slice(0, slash)
     const name = (await list(dir)).get(candidate.slice(slash + 1).toLowerCase())
-    if (!name) continue
-    const path = dir ? `${dir}/${name}` : name
+    return name ? (dir ? `${dir}/${name}` : name) : null
+  }
+  let reads = 0
+  const declared = async (appRoot: string): Promise<string[]> => {
+    const found: string[] = []
+    for (const manifest of manifestFiles(appRoot)) {
+      if (reads >= MAX_MANIFEST_READS) break
+      const path = await listed(manifest.path)
+      if (!path) continue
+      reads += 1
+      const text = await readProjectText(root, path, realRoot)
+      if (text) found.push(...withSvgSiblings(manifest.parse(text)))
+    }
+    return found
+  }
+  const rootNames = await list('')
+  const rootPackage = rootNames.has('package.json') ? parseJson(await readProjectText(root, rootNames.get('package.json')!, realRoot)) : null
+  const apps = appFolders(rootPackage, new Set(rootNames.keys()))
+  const tried = new Set<string>()
+  const attempt = async (candidate: string): Promise<ProjectIconImage | null> => {
+    const path = await listed(candidate)
+    if (!path || tried.has(path)) return null
+    tried.add(path)
     const image = await readProjectIconFile(root, path, realRoot)
-    if (image) return { dataUrl: image.dataUrl, source: 'auto', path }
+    return image ? { dataUrl: image.dataUrl, source: 'auto', path } : null
+  }
+  const stages: Array<() => Promise<string[]> | string[]> = [
+    () => rootLogoCandidates([...rootNames.values()]),
+    () => declared(''),
+    async () => {
+      const found: string[] = []
+      for (const app of apps) found.push(...(await declared(app)))
+      return found
+    },
+    () => projectIconCandidates(),
+    () => apps.flatMap(appIconCandidates)
+  ]
+  for (const stage of stages) {
+    for (const candidate of await stage()) {
+      const image = await attempt(candidate)
+      if (image) return image
+    }
   }
   return null
 }
@@ -180,7 +280,9 @@ export async function projectIconFor(project: Project, recorder: DetectedIconRec
     return image ? { dataUrl: image.dataUrl, source: 'custom', path: project.iconPath } : null
   }
   const checkedAt = project.iconDetectedAt ? Date.parse(project.iconDetectedAt) : Number.NaN
-  if (Number.isFinite(checkedAt) && now - checkedAt >= 0 && now - checkedAt < PROJECT_ICON_DETECT_TTL_MS) {
+  // A result of older detection rules, or none found by them, is looked for again now.
+  const current = project.iconDetector === PROJECT_ICON_DETECTOR_VERSION
+  if (current && Number.isFinite(checkedAt) && now - checkedAt >= 0 && now - checkedAt < PROJECT_ICON_DETECT_TTL_MS) {
     if (!project.detectedIconPath) return null
     const image = await readProjectIconFile(project.path, project.detectedIconPath)
     if (image) return { dataUrl: image.dataUrl, source: 'auto', path: project.detectedIconPath }
