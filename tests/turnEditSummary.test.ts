@@ -4,9 +4,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { UIMessage } from 'ai'
 import { TurnEditSummary } from '../src/renderer/chat/components/agent-elements/turn-edit-summary'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
-import { openTurnInReview } from '../src/renderer/components/review/openReview'
+import { openTurnInChanges } from '../src/renderer/components/changes/openChanges'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import { useReviewStore } from '../src/renderer/stores/reviewStore'
+import { useChangesStore } from '../src/renderer/stores/changesStore'
 import { setTurnChangedFiles } from '../src/renderer/lib/turnChangedFilesSetting'
 import type { ChatMessage } from '../src/shared/types'
 import type { ActivityFileChange } from '../src/shared/agentActivity'
@@ -89,7 +89,7 @@ describe('turn edit summary', () => {
   })
 })
 
-describe('opening a turn in Review', () => {
+describe('opening a turn in the Changes tab', () => {
   const getStatus = vi.fn()
   const ownWorktree = {
     metadata: { lifecycle: 'ready' },
@@ -99,44 +99,44 @@ describe('opening a turn in Review', () => {
   beforeEach(() => {
     getStatus.mockReset()
     vi.stubGlobal('window', { localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined }, mousse: { workspace: { getStatus } } })
-    useReviewStore.setState({ byThread: {} })
+    useChangesStore.setState({ byThread: {} })
     useAppStore.setState({ mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false })
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('shows the turn in Review', async () => {
+  it('shows the turn in the Changes tab', async () => {
     getStatus.mockResolvedValue(ownWorktree)
-    await openTurnInReview('t1', 'run:thread:t1:ordinal:3')
-    expect(useReviewStore.getState().byThread.t1.scope).toEqual({ kind: 'turn', turnId: 'run:thread:t1:ordinal:3' })
-    expect(useAppStore.getState()).toMatchObject({ mainView: 'review', mainAreaOpen: true, openedSurfaceKinds: ['review'] })
+    await openTurnInChanges('t1', 'run:thread:t1:ordinal:3')
+    expect(useChangesStore.getState().byThread.t1.requested).toBe('turn:run:thread:t1:ordinal:3')
+    expect(useAppStore.getState()).toMatchObject({ mainView: 'git', mainAreaOpen: true, openedSurfaceKinds: ['git'] })
   })
 
   it('opens the turn at the clicked file', async () => {
     getStatus.mockResolvedValue(ownWorktree)
-    await openTurnInReview('t1', 'run:thread:t1:ordinal:3', '/wt/t1/src/app.ts')
-    expect(useReviewStore.getState().byThread.t1).toMatchObject({
-      scope: { kind: 'turn', turnId: 'run:thread:t1:ordinal:3' },
+    await openTurnInChanges('t1', 'run:thread:t1:ordinal:3', '/wt/t1/src/app.ts')
+    expect(useChangesStore.getState().byThread.t1).toMatchObject({
+      requested: 'turn:run:thread:t1:ordinal:3',
       pendingFile: { path: '/wt/t1/src/app.ts' }
     })
-    expect(useAppStore.getState().mainView).toBe('review')
+    expect(useAppStore.getState().mainView).toBe('git')
   })
 
   it('falls back to the whole thread when the row has no turn id', async () => {
     getStatus.mockResolvedValue(ownWorktree)
-    await openTurnInReview('t1', undefined)
-    expect(useReviewStore.getState().byThread.t1.scope).toEqual({ kind: 'thread' })
-    expect(useAppStore.getState().mainView).toBe('review')
+    await openTurnInChanges('t1', undefined)
+    expect(useChangesStore.getState().byThread.t1.requested).toBe('thread')
+    expect(useAppStore.getState().mainView).toBe('git')
   })
 
   it('opens the Git surface for a thread without a worktree of its own', async () => {
     getStatus.mockResolvedValue({ metadata: null, execution: { lifecycle: 'unprovisioned', workspacePath: '/repo', primaryPath: '/repo' } })
-    await openTurnInReview('t1', 'run:thread:t1:ordinal:3')
-    expect(useReviewStore.getState().byThread.t1).toBeUndefined()
+    await openTurnInChanges('t1', 'run:thread:t1:ordinal:3')
+    expect(useChangesStore.getState().byThread.t1).toBeUndefined()
     expect(useAppStore.getState().mainView).toBe('git')
   })
 
   it('opens the Git surface when no thread is active', async () => {
-    await openTurnInReview(null, 'run:1')
+    await openTurnInChanges(null, 'run:1')
     expect(getStatus).not.toHaveBeenCalled()
     expect(useAppStore.getState().mainView).toBe('git')
   })

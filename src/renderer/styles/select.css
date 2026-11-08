@@ -237,3 +237,29 @@
 html .ui-select-menu .composer-workspace-menu-item.active { background: var(--ui-hover); }
 .ui-select-menu .composer-workspace-menu-item.selected { color: var(--accent); font-weight: inherit; }
 .ui-select-menu .composer-workspace-menu-item.disabled { opacity: 0.5; cursor: default; }
+
+/* Type-to-filter for a long list: what was typed, in a quiet row above the options. */
+.ui-select-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 2px var(--ui-menu-row-x) 4px 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.ui-select-filter[data-empty] {
+  color: var(--text-secondary);
+}
+
+.ui-select-filter svg {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.ui-select-empty {
+  padding: 6px var(--ui-menu-row-x);
+  color: var(--text-secondary);
+  font-size: 12px;
+}

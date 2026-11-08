@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GitOperationStatusView } from '../src/renderer/components/git/GitOperationStatus'
-import { runSync } from '../src/renderer/components/git/gitPanelActions'
+import { runSync } from '../src/renderer/components/git/gitSyncActions'
 import {
   applyOperationEvent,
   describeOperation,
@@ -22,7 +22,7 @@ import {
   useGitOperationStore
 } from '../src/renderer/stores/gitOperationStore'
 import type { GitOperationEvent, GitOperationKind } from '../src/shared/types'
-import type { SyncActivity } from '../src/renderer/components/git/gitPanelLogic'
+import type { SyncActivity } from '../src/renderer/components/git/gitSyncLogic'
 
 const event = (patch: Partial<GitOperationEvent> & Pick<GitOperationEvent, 'phase'>): GitOperationEvent => ({
   operationId: 'op-1', kind: 'push', path: '/repo', at: 1_000, ...patch

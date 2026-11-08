@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { runRowAction, runSync, whileFolder } from '../src/renderer/components/git/gitPanelActions'
+import { runSync, whileFolder } from '../src/renderer/components/git/gitSyncActions'
 import { refreshGitStatus, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
-import type { SyncActivity } from '../src/renderer/components/git/gitPanelLogic'
+import type { SyncActivity } from '../src/renderer/components/git/gitSyncLogic'
 import type { GitFileChange, GitScope, GitStatusSnapshot } from '../src/shared/types'
 
 const PATH = '/repo/a'
@@ -57,130 +57,6 @@ const install = (patch: Partial<GitMock> = {}, confirm: Mock = vi.fn(() => true)
 const daemonError = (code: string, message: string) => Object.assign(new Error(message), { code })
 
 const GIT_SCOPE = { projectId: 'project-1', workspaceThreadId: null }
-
-describe('row actions', () => {
-  beforeEach(() => {
-    useGitStatusStore.setState({ entries: {} })
-  })
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  it('stages and unstages the paths of the rows, then refreshes', async () => {
-    const { git } = install()
-    await refreshGitStatus(PATH, { scope: GIT_SCOPE })
-    expect(await runRowAction(PATH, project, { action: 'stage', files: [file('a.ts'), file('src/b.ts')] })).toEqual({ kind: 'done' })
-    expect(git.stage).toHaveBeenCalledWith(project, { paths: ['a.ts', 'src/b.ts'] })
-    expect(await runRowAction(PATH, project, { action: 'unstage', files: [file('a.ts', { staged: true })] })).toEqual({ kind: 'done' })
-    expect(git.unstage).toHaveBeenCalledWith(project, { paths: ['a.ts'] })
-    expect(await runRowAction(PATH, project, { action: 'unstage', files: 'all' })).toEqual({ kind: 'done' })
-    expect(git.unstage).toHaveBeenLastCalledWith(project, { all: true })
-    // The first load plus one refresh per action.
-    expect(git.status).toHaveBeenCalledTimes(4)
-  })
-
-  it('sends a path once when it is listed on both sides', async () => {
-    const { git } = install()
-    await runRowAction(PATH, project, { action: 'stage', files: [file('mm.ts', { staged: true }), file('mm.ts')] })
-    expect(git.stage).toHaveBeenCalledWith(project, { paths: ['mm.ts'] })
-  })
-
-  it('asks before discarding, naming what is lost and how long its copy is kept, and discards only after a yes', async () => {
-    const confirm = vi.fn(() => true)
-    const { git } = install({}, confirm)
-    const files = [file('a.ts'), file('new.ts', { status: 'untracked' })]
-    expect(await runRowAction(PATH, project, { action: 'discard', files }, { discardKeptForMs: 30 * 24 * 60 * 60 * 1000 })).toEqual({ kind: 'done' })
-    expect(confirm).toHaveBeenCalledTimes(1)
-    const prompt = String(confirm.mock.calls[0]?.[0])
-    expect(prompt).toContain('a.ts')
-    expect(prompt).toContain('new.ts (untracked, will be deleted)')
-    expect(prompt).toContain('A copy is kept for 30 days.')
-    expect(git.discard).toHaveBeenCalledWith(project, ['a.ts', 'new.ts'])
-  })
-
-  it('returns what the daemon says about the copy it kept, for the panel to show', async () => {
-    const { git } = install({}, vi.fn(() => true))
-    const notice = 'A copy is kept under refs/mousse/preserved/x-0123456789ab for 30 days.'
-    git.discard.mockResolvedValueOnce({ status: repoStatus(), kept: { ref: 'refs/mousse/preserved/x-0123456789ab', windowMs: 1, notice } })
-    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done', notice })
-  })
-
-  it('passes on the line naming files the discard left as they are', async () => {
-    const { git } = install({}, vi.fn(() => true))
-    const notice = 'A copy is kept under refs/mousse/preserved/x-0123456789ab for 30 days.'
-    const left = 'a.ts changed after you pressed Discard, so it was left as it is.'
-    git.discard.mockResolvedValueOnce({ status: repoStatus(), kept: { ref: 'refs/mousse/preserved/x-0123456789ab', windowMs: 1, notice, left } })
-    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done', notice, left })
-  })
-
-  it('does nothing when the discard is declined: no daemon call, no refresh', async () => {
-    const { git, confirm } = install({}, vi.fn(() => false))
-    await refreshGitStatus(PATH, { scope: GIT_SCOPE })
-    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'cancelled' })
-    expect(confirm).toHaveBeenCalledTimes(1)
-    expect(git.discard).not.toHaveBeenCalled()
-    expect(git.status).toHaveBeenCalledTimes(1)
-  })
-
-  it('uses a confirmation passed in, so the dialog can be replaced', async () => {
-    const { git, confirm } = install()
-    const ask = vi.fn(() => false)
-    await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] }, { confirm: ask })
-    expect(ask).toHaveBeenCalledWith('Discard changes to a.ts?\n\nA copy is kept in Git.')
-    expect(confirm).not.toHaveBeenCalled()
-    expect(git.discard).not.toHaveBeenCalled()
-  })
-
-  it('waits for a confirmation that answers later, and discards nothing until it says yes', async () => {
-    const { git } = install()
-    let answer: (yes: boolean) => void = () => undefined
-    const asked = new Promise<boolean>((resolve) => { answer = resolve })
-    const outcome = runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] }, { confirm: () => asked })
-    await Promise.resolve()
-    expect(git.discard).not.toHaveBeenCalled()
-    answer(true)
-    expect(await outcome).toEqual({ kind: 'done' })
-    expect(git.discard).toHaveBeenCalledWith(project, ['a.ts'])
-    const declined = runRowAction(PATH, project, { action: 'discard', files: [file('b.ts')] }, { confirm: async () => false })
-    expect(await declined).toEqual({ kind: 'cancelled' })
-    expect(git.discard).toHaveBeenCalledTimes(1)
-  })
-
-  it("refuses stage and unstage in a thread's own worktree before asking the daemon, and still discards", async () => {
-    const { git } = install()
-    expect(await runRowAction(PATH, thread, { action: 'stage', files: [file('a.ts')] })).toEqual({ kind: 'failed', message: "Not available in this thread's worktree" })
-    expect(await runRowAction(PATH, thread, { action: 'unstage', files: 'all' })).toEqual({ kind: 'failed', message: "Not available in this thread's worktree" })
-    expect(git.stage).not.toHaveBeenCalled()
-    expect(git.unstage).not.toHaveBeenCalled()
-    expect(await runRowAction(PATH, thread, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done' })
-    expect(git.discard).toHaveBeenCalledWith(thread, ['a.ts'])
-  })
-
-  it('reports the daemon\'s reason when an action fails, and refreshes the folder anyway', async () => {
-    const { git } = install({
-      stage: vi.fn(async () => { throw daemonError('git_path_outside', 'That path is outside the project folder') }),
-      discard: vi.fn(async () => { throw new Error("Error invoking remote method 'git:discard': Error: Git is busy with another action") })
-    })
-    await refreshGitStatus(PATH, { scope: GIT_SCOPE })
-    expect(await runRowAction(PATH, project, { action: 'stage', files: [file('../x.ts')] })).toEqual({ kind: 'failed', message: 'That path is outside the project folder' })
-    expect(git.status).toHaveBeenCalledTimes(2)
-    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'failed', message: 'Git is busy with another action' })
-    expect(git.status).toHaveBeenCalledTimes(3)
-  })
-
-  it('refreshes the shown status after a stage so the row moves', async () => {
-    let staged = false
-    const { git } = install({
-      status: vi.fn(async () => repoStatus({ changes: [file('a.ts', { staged })] })),
-      stage: vi.fn(async () => { staged = true; return { status: repoStatus() } })
-    })
-    await refreshGitStatus(PATH, { scope: GIT_SCOPE })
-    expect(useGitStatusStore.getState().entries[PATH]?.status?.changes).toEqual([file('a.ts', { staged: false })])
-    await runRowAction(PATH, project, { action: 'stage', files: [file('a.ts')] })
-    expect(git.status).toHaveBeenCalledTimes(2)
-    expect(useGitStatusStore.getState().entries[PATH]?.status?.changes).toEqual([file('a.ts', { staged: true })])
-  })
-})
 
 describe('sync actions', () => {
   beforeEach(() => {

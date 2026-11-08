@@ -388,13 +388,15 @@ let profileActivated = false
 const DEFAULT_MAIN_VIEW: MainView = 'browser'
 
 /** Workspaces saved before the Agents tab was removed still name it as the view or an open surface,
+ * ones saved before Diff and Review became the Changes tab may name Review (now Changes, `git`),
  * and ones saved before the composer mode picker was removed may hold Plan or Build with no way back. */
 export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSurfaceKinds: MainView[]; chatMode?: ChatMode }>(workspace: T): T {
   const retired = (view: unknown) => view === 'agents'
+  const renamed = (view: MainView): MainView => ((view as string) === 'review' ? 'git' : view)
   const openedSurfaceKinds = Array.isArray(workspace.openedSurfaceKinds)
-    ? workspace.openedSurfaceKinds.filter((kind) => !retired(kind))
+    ? [...new Set(workspace.openedSurfaceKinds.filter((kind) => !retired(kind)).map(renamed))]
     : []
-  const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : workspace.mainView
+  const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : renamed(workspace.mainView)
   // Older workspaces kept the conversation's share in percent (`sidebarWidth`); the panel area now keeps
   // its own width, so that share is dropped and a saved width that is not a usable number becomes the default.
   const { sidebarWidth: _legacyShare, ...rest } = workspace as T & { sidebarWidth?: unknown }
@@ -481,7 +483,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
-  reviewIgnoreWhitespace: true,
+  reviewIgnoreWhitespace: false,
   setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
@@ -718,7 +720,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
-      reviewIgnoreWhitespace: true,
+      reviewIgnoreWhitespace: false,
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],

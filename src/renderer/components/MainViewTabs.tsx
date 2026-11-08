@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { MainView } from '../../shared/types'
-import { BrowserTab, Eye, FileText, FolderOpen, GitBranch, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
+import { BrowserTab, FileText, FolderOpen, GitCompare, GitPullRequest, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
@@ -14,8 +14,7 @@ const TAB_ICONS = {
   browser: Globe,
   terminal: Terminal,
   files: FolderOpen,
-  git: GitBranch,
-  review: Eye,
+  git: GitCompare,
   pullRequest: GitPullRequest,
   documents: FileText
 } as const

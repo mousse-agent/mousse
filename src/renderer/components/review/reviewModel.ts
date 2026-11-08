@@ -1,57 +1,8 @@
-// Pure helpers for the Review surface. No Monaco or React imports, so tests can load it.
+// Pure helpers for the Changes tab's turns and placeholders. No React imports, so tests can load it.
 import { extractChatReferences } from '../../../shared/chatReferences'
-import type { ReviewFileEntry, ReviewFileSide, ReviewFileStatus, ReviewScope } from '../../../shared/review'
+import type { ReviewFileSide, ReviewFileStatus } from '../../../shared/review'
 import type { ChatMessage } from '../../../shared/types'
 import type { ThreadAction } from '../../../shared/threadActions'
-
-export type TreeNode =
-  | { kind: 'folder'; name: string; path: string; children: TreeNode[] }
-  | { kind: 'file'; name: string; path: string; entry: ReviewFileEntry }
-
-interface MutableFolder {
-  name: string
-  path: string
-  folders: Map<string, MutableFolder>
-  files: TreeNode[]
-}
-
-const byName = (a: TreeNode, b: TreeNode) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-
-function finish(folder: MutableFolder): TreeNode[] {
-  const children: TreeNode[] = []
-  for (const sub of folder.folders.values()) {
-    // A folder whose only child is another folder reads as `a/b/c`, as editors show it.
-    let node = sub
-    let name = sub.name
-    while (node.files.length === 0 && node.folders.size === 1) {
-      node = node.folders.values().next().value as MutableFolder
-      name = `${name}/${node.name}`
-    }
-    children.push({ kind: 'folder', name, path: node.path, children: finish(node) })
-  }
-  children.sort(byName)
-  return [...children, ...folder.files.sort(byName)]
-}
-
-/** Folders first, then files, each sorted by name. One pass over the list plus the sort per folder. */
-export function buildFileTree(files: readonly ReviewFileEntry[]): TreeNode[] {
-  const root: MutableFolder = { name: '', path: '', folders: new Map(), files: [] }
-  for (const entry of files) {
-    const parts = entry.path.split('/')
-    const name = parts.pop() as string
-    let folder = root
-    for (const part of parts) {
-      let next = folder.folders.get(part)
-      if (!next) {
-        next = { name: part, path: folder.path ? `${folder.path}/${part}` : part, folders: new Map(), files: [] }
-        folder.folders.set(part, next)
-      }
-      folder = next
-    }
-    folder.files.push({ kind: 'file', name, path: entry.path, entry })
-  }
-  return finish(root)
-}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -92,6 +43,14 @@ export function isPlaceholderSide(side: ReviewFileSide): boolean {
 export interface TurnChoice {
   turnId: string
   label: string
+  /** The user's prompt words alone, for the header ("Last turn · add login errors"). */
+  prompt: string
+  /** 1-based position among the thread's turns that changed files, for "Turn 13 finished". */
+  number: number
+  /** When the turn ended (ms); null while it runs or when not recorded. */
+  endedAt: number | null
+  /** Files the turn changed, for "Last turn: 3 files". */
+  files: number
   /** The turn was undone (or is being undone); its changes may no longer be in the working tree. */
   undone: boolean
   running: boolean
@@ -138,67 +97,10 @@ export function turnChoices(
     const prompt = firstWords(extractChatReferences(prompts.get(action.turnId) ?? '').text) || `Turn ${index + 1}`
     const time = timeLabel(action.createdAt)
     const suffix = running ? ' (in progress)' : undone ? ' (undone)' : ''
-    return { turnId: action.turnId, label: `${prompt}${time ? ` · ${time}` : ''}${suffix}`, undone, running, at: Date.parse(action.createdAt) || 0, index }
+    const endedAt = running || !action.completedAt ? null : Date.parse(action.completedAt) || null
+    return { turnId: action.turnId, label: `${prompt}${time ? ` · ${time}` : ''}${suffix}`, prompt, number: index + 1, endedAt, files: action.changedPaths.length, undone, running, at: Date.parse(action.createdAt) || 0, index }
   })
   // Newest first; the original order breaks ties so equal timestamps keep their sequence.
   choices.sort((a, b) => b.at - a.at || b.index - a.index)
-  return choices.map(({ turnId, label, undone, running }) => ({ turnId, label, undone, running }))
-}
-
-/** The picker's value for a scope: `worktree`, `thread` or `turn:<id>` (everything after the first colon). */
-export function scopeOptionValue(scope: ReviewScope): string {
-  if (scope.kind === 'worktree' && scope.staged) return 'worktree:staged'
-  return scope.kind === 'turn' ? `turn:${scope.turnId}` : scope.kind
-}
-
-export function scopeFromOptionValue(value: string): ReviewScope {
-  if (value.startsWith('turn:')) return { kind: 'turn', turnId: value.slice('turn:'.length) }
-  if (value === 'worktree:staged') return { kind: 'worktree', staged: true }
-  return value === 'thread' ? { kind: 'thread' } : { kind: 'worktree' }
-}
-
-export function scopeLabel(scope: ReviewScope, choices: readonly TurnChoice[]): string {
-  if (scope.kind === 'thread') return 'Whole thread'
-  if (scope.kind === 'worktree') return scope.staged ? 'Staged changes' : 'Working tree'
-  return choices.find((choice) => choice.turnId === scope.turnId)?.label ?? 'Turn'
-}
-
-/** Monaco's `ILineChange`, without importing Monaco. An end of 0 means that side has no lines in the change. */
-export interface LineChangeLike {
-  originalStartLineNumber: number
-  originalEndLineNumber: number
-  modifiedStartLineNumber: number
-  modifiedEndLineNumber: number
-}
-
-/** "12 changed lines in view", counted by Monaco and so following the whitespace toggle. Null until Monaco has diffed. */
-export function viewChangeLabel(lineChanges: readonly LineChangeLike[] | null | undefined): string | null {
-  if (!lineChanges) return null
-  let lines = 0
-  for (const change of lineChanges) {
-    const added = change.modifiedEndLineNumber === 0 ? 0 : change.modifiedEndLineNumber - change.modifiedStartLineNumber + 1
-    const removed = change.originalEndLineNumber === 0 ? 0 : change.originalEndLineNumber - change.originalStartLineNumber + 1
-    lines += Math.max(added, removed)
-  }
-  if (lines === 0) return 'No changed lines in view'
-  return `${lines.toLocaleString('en-US')} changed line${lines === 1 ? '' : 's'} in view`
-}
-
-export const STATUS_BADGES: Record<ReviewFileStatus, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  typechange: 'T',
-  untracked: 'U'
-}
-
-export function totalCounts(files: readonly ReviewFileEntry[]): { additions: number; deletions: number } {
-  let additions = 0
-  let deletions = 0
-  for (const file of files) {
-    additions += file.additions
-    deletions += file.deletions
-  }
-  return { additions, deletions }
+  return choices.map(({ turnId, label, prompt, number, endedAt, files, undone, running }) => ({ turnId, label, prompt, number, endedAt, files, undone, running }))
 }

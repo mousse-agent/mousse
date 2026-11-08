@@ -1,20 +1,16 @@
 // @vitest-environment jsdom
 /**
- * Git and pull request actions next to the diff, mounted: Discard waits behind a file's More menu and asks in the
- * app's own dialog, the Create PR form shows only in the surface whose button opened it, the pull request panel offers
- * Create PR for a branch with none, the Commit popover belongs to one folder, and the Start from pull request list picks
- * with Enter before it starts.
+ * Git and pull request actions, mounted: the Create PR form shows only in the surface whose button opened it, the pull
+ * request panel offers Create PR for a branch with none, the commit message belongs to one folder, and the Start from
+ * pull request list picks with Enter before it starts.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DiscardConfirmDialog } from '../../src/renderer/components/git/DiscardConfirmDialog'
-import { GitActionButtons } from '../../src/renderer/components/git/GitActionButtons'
-import { GitChangesList } from '../../src/renderer/components/git/GitChangesList'
+import { ChangesFooter } from '../../src/renderer/components/changes/ChangesFooter'
 import { PullRequestPanelView } from '../../src/renderer/components/PullRequestPanel'
 import { gitActionRowModel } from '../../src/renderer/components/sideCard/gitSectionLogic'
 import { StartFromPullRequestDialog } from '../../src/renderer/components/StartFromPullRequestDialog'
-import { EMPTY_GIT_ENTRY, type GitStatusView } from '../../src/renderer/stores/gitStatusStore'
 import { openCreatePullRequestForm, useGitPullRequestStore } from '../../src/renderer/stores/pullRequestStore'
 import type { PullRequestListItem } from '../../src/shared/pullRequests'
 import type { GitFileChange, GitScope, GitStatusSnapshot } from '../../src/shared/types'
@@ -70,101 +66,32 @@ afterEach(async () => {
   openThreadFromPullRequest.mockClear()
 })
 
-describe('discarding a file from the Git panel', () => {
-  const list = (onRowAction = vi.fn()) => createElement(GitChangesList, {
-    changes: [change('a.ts'), change('new.ts', { status: 'untracked' })],
-    selected: null,
-    onSelect: () => undefined,
-    scope: project,
-    busy: false,
-    onRowAction,
-    onSectionAction: () => undefined,
-    flex: { conflicts: 1, staged: 1, changes: 1, untracked: 1, commits: 1 },
-    onDividerResize: () => undefined
-  })
-
-  it('offers Discard only from the More menu, and gives focus back to it once chosen', async () => {
-    const onRowAction = vi.fn()
-    await render(list(onRowAction))
-    const more = host.querySelector<HTMLButtonElement>('[aria-label="More actions for a.ts"]')
-    await click(more)
-    const item = document.body.querySelector('[role="menuitem"][aria-label="Discard changes to a.ts"]')
-    expect(item?.textContent).toBe('Discard changes…')
-    await click(item)
-    expect(onRowAction).toHaveBeenCalledWith('discard', expect.objectContaining({ path: 'a.ts' }))
-    expect(document.activeElement).toBe(more)
-    await click(host.querySelector('[aria-label="More actions for new.ts"]'))
-    expect(document.body.querySelector('[role="menuitem"][aria-label="Delete untracked file new.ts"]')?.textContent).toBe('Delete file…')
-  })
-
-  it('moves a focused divider with the arrow keys', async () => {
-    const onDividerResize = vi.fn()
-    await render(createElement(GitChangesList, {
-      changes: [change('a.ts'), change('b.ts', { staged: true })],
-      selected: null,
-      onSelect: () => undefined,
-      scope: project,
-      busy: false,
-      onRowAction: () => undefined,
-      onSectionAction: () => undefined,
-      flex: { conflicts: 1, staged: 1, changes: 1, untracked: 1, commits: 1 },
-      onDividerResize
-    }))
-    const divider = host.querySelector('[aria-label="Resize Staged and Changes sections"]')
-    await key(divider, 'ArrowDown')
-    // The list hands over the key; the panel measures the sections first, then moves the pair.
-    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', 'ArrowDown')
-    await key(divider, 'Home')
-    expect(onDividerResize).toHaveBeenLastCalledWith('staged', 'changes', 'Home')
-    const calls = onDividerResize.mock.calls.length
-    await key(divider, 'Enter')
-    expect(onDividerResize).toHaveBeenCalledTimes(calls)
-  })
-
-  it('asks in the app dialog with the kept-copy line, focus off the confirming button, and Escape answers no', async () => {
-    const onAnswer = vi.fn()
-    await render(createElement(DiscardConfirmDialog, {
-      question: { message: 'Delete new.ts?\n\nIt is not tracked by Git, so it will be deleted.\n\nA copy is kept for 30 days.', action: 'Delete' },
-      onAnswer
-    }))
-    const dialog = document.body.querySelector('[role="dialog"][aria-label="Delete new.ts?"]')
-    expect(dialog?.textContent).toContain('A copy is kept for 30 days.')
-    const confirm = [...(dialog?.querySelectorAll('button') ?? [])].find((button) => button.textContent === 'Delete')
-    expect(confirm).toBeDefined()
-    expect(document.activeElement).not.toBe(confirm)
-    await key(document.activeElement, 'Escape')
-    expect(onAnswer).toHaveBeenLastCalledWith(false)
-    await click(confirm)
-    expect(onAnswer).toHaveBeenLastCalledWith(true)
-  })
-})
-
 describe('the Create PR form in the surface that opened it', () => {
-  const view = (): GitStatusView => ({ ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: status({ changes: [] }) })
   const model = () => gitActionRowModel({
     path: 'k1',
     scope: project,
     projectId: 'p1',
     ownThreadId: 't1',
-    status: status({ changes: [] }),
+    status: status({ changes: [], ahead: 0 }),
     commitCount: 1,
     pullRequest: { state: 'none', isDefaultBranch: false }
   })
-  const row = (hostName: 'side-card' | 'git-panel') => createElement(GitActionButtons, {
-    host: hostName,
+  const footer = () => createElement(ChangesFooter, {
+    state: { kind: 'create-pr' },
     path: 'k1',
     scope: project,
-    git: view(),
+    commits: [],
     model: model(),
     running: null,
     begin: () => true,
     end: () => undefined,
-    onActionError: () => undefined,
-    onNotice: () => undefined
+    onReviewUncommitted: () => undefined,
+    onResolveConflicts: () => undefined,
+    onRetry: () => undefined
   })
 
   beforeEach(() => {
-    useGitPullRequestStore.setState({ createForm: null, createFormHost: 'side-card' })
+    useGitPullRequestStore.setState({ createForm: null, createFormHost: 'changes' })
     vi.stubGlobal('mousse', {
       pullRequests: {
         draft: vi.fn(() => new Promise(() => {})),
@@ -174,35 +101,34 @@ describe('the Create PR form in the surface that opened it', () => {
     })
   })
 
-  it('opens the form from the diff toolbar there, and never a second copy in the side card', async () => {
-    await render(createElement('div', null, row('side-card'), row('git-panel')))
-    const createButtons = host.querySelectorAll('.side-card-git-pr-create')
-    expect(createButtons).toHaveLength(2)
-    await click(createButtons[1])
-    expect(useGitPullRequestStore.getState().createFormHost).toBe('git-panel')
+  it('opens the form from the Changes footer, there', async () => {
+    await render(footer())
+    const create = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Create PR')
+    await click(create)
+    expect(useGitPullRequestStore.getState().createFormHost).toBe('changes')
     expect(document.body.querySelectorAll('[role="dialog"][aria-label="Create pull request"]')).toHaveLength(1)
   })
 
-  it('keeps a form the side card opened out of the diff toolbar', async () => {
-    await render(row('git-panel'))
-    await act(async () => openCreatePullRequestForm(model().createScope!, 'side-card'))
+  it('keeps a form the pull request panel opened out of the Changes footer', async () => {
+    await render(footer())
+    await act(async () => openCreatePullRequestForm(model().createScope!, 'pull-request-panel'))
     expect(document.body.querySelector('[role="dialog"][aria-label="Create pull request"]')).toBeNull()
   })
 })
 
-describe('the Commit popover and its folder', () => {
-  const view = (): GitStatusView => ({ ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: status() })
-  const row = (path: string, scope: GitScope) => createElement(GitActionButtons, {
-    host: 'side-card',
+describe('the commit message and its folder', () => {
+  const footer = (path: string, scope: GitScope) => createElement(ChangesFooter, {
+    state: { kind: 'commit', placeholder: 'Commit to feature/login', tinted: false, label: 'Commit all 1', disabled: false },
     path,
     scope,
-    git: view(),
+    commits: [],
     model: gitActionRowModel({ path, scope, projectId: scope.projectId, ownThreadId: 't1', status: status(), commitCount: 1, pullRequest: null }),
     running: null,
     begin: () => true,
     end: () => undefined,
-    onActionError: () => undefined,
-    onNotice: () => undefined
+    onReviewUncommitted: () => undefined,
+    onResolveConflicts: () => undefined,
+    onRetry: () => undefined
   })
 
   beforeEach(() => {
@@ -212,21 +138,18 @@ describe('the Commit popover and its folder', () => {
     })
   })
 
-  it('closes and drops the draft when another folder on the same branch is shown', async () => {
-    await render(row('k1', project))
-    await click(host.querySelector('.side-card-git-commit-button'))
-    const message = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')
-    expect(message).not.toBeNull()
+  it('names the branch in the placeholder and drops the draft when another folder is shown', async () => {
+    await render(footer('k1', project))
+    const message = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')
+    expect(message?.placeholder).toBe('Commit to feature/login')
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
       setter?.call(message, 'fix the login')
       message?.dispatchEvent(new Event('input', { bubbles: true }))
     })
-
-    await render(row('k2', { projectId: 'p2', workspaceThreadId: null }))
-    expect(document.body.querySelector('textarea[aria-label="Commit message"]')).toBeNull()
-    await click(host.querySelector('.side-card-git-commit-button'))
-    expect(document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')?.value).toBe('')
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')?.value).toBe('fix the login')
+    await render(footer('k2', { projectId: 'p2', workspaceThreadId: null }))
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')?.value).toBe('')
   })
 })
 

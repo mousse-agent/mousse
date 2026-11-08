@@ -14,7 +14,10 @@ describe('sanitizeSavedWorkspace', () => {
     ['agents is the view beside other surfaces', legacy('agents', ['agents', 'terminal', 'files']), { mainView: 'terminal', openedSurfaceKinds: ['terminal', 'files'] }],
     ['agents sits in the middle of the open surfaces', legacy('files', ['terminal', 'agents', 'files']), { mainView: 'files', openedSurfaceKinds: ['terminal', 'files'] }],
     ['no agents anywhere', legacy('git', ['files', 'git']), { mainView: 'git', openedSurfaceKinds: ['files', 'git'] }],
-    ['open surfaces were never saved as a list', legacy('agents', undefined), { mainView: 'browser', openedSurfaceKinds: [] }]
+    ['open surfaces were never saved as a list', legacy('agents', undefined), { mainView: 'browser', openedSurfaceKinds: [] }],
+    // Diff and Review became one Changes tab, `git`.
+    ['review is the view and open beside the diff', legacy('review', ['files', 'git', 'review']), { mainView: 'git', openedSurfaceKinds: ['files', 'git'] }],
+    ['review is open without the diff', legacy('files', ['review', 'files']), { mainView: 'files', openedSurfaceKinds: ['git', 'files'] }]
   ])('%s', (_name, saved, expected) => {
     expect(sanitizeSavedWorkspace(saved)).toMatchObject(expected)
   })
