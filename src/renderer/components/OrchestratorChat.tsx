@@ -74,8 +74,10 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
-import { errorText, sendErrorLine } from '../lib/errorText'
-import { PromptUndoNotice } from './PromptUndoControls'
+import { errorText, readableError, sendErrorLine } from '../lib/errorText'
+import { showToast } from './ui/Toast'
+import { editablePrompt, PromptUndoNotice } from './PromptUndoControls'
+import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
@@ -971,6 +973,26 @@ export function OrchestratorChat() {
       send: (content, images) => {
         if (resendBusy || !useAppStore.getState().workspaceReady) return
         void sendMessage(content, chatMode, images, activeThreadId)
+      },
+      // An edited prompt: a conversation branch that starts before its turn, with the files from then, made active,
+      // then the edited text sent there with the prompt's images. The original stays a version to switch back to.
+      editPrompt: async (promptId, turnId, text) => {
+        try {
+          if (resendBusy) throw new Error('Wait for the current turn to finish before editing a message.')
+          const history = await readThreadActionHistory(activeThreadId, true)
+          const action = editablePrompt(history, turnId)
+          if (!action) throw new Error("This message can't be edited now.")
+          const { branch } = await window.mousse.actions.fork({
+            threadId: activeThreadId, actionId: action.id, at: 'start', name: 'Edited', expectedJournalGeneration: history.journalGeneration
+          }) as { branch: { id: string } }
+          await window.mousse.actions.activateBranch({ threadId: activeThreadId, conversationBranchId: branch.id })
+          invalidateThreadActionHistory(activeThreadId)
+          const images = useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')?.images?.filter((image) => image.data)
+          await sendMessage(text, chatMode, images?.length ? images : undefined, activeThreadId)
+        } catch (error) {
+          showToast({ tone: 'error', message: readableError(error, "The edited message wasn't sent. Try again.") })
+          throw error
+        }
       }
     })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])

@@ -419,27 +419,31 @@ export class ConversationBranchService {
     actionId: string,
     name: string,
     expectedJournalRevision?: number,
-    codeMode: 'historical' | 'current' = 'historical'
+    codeMode: 'historical' | 'current' = 'historical',
+    at: 'start' | 'end' = 'end'
   ): Promise<ConversationBranch> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
       this.actions.assertExpectedRevision(expectedJournalRevision)
       const action = this.actions.get(actionId)
       if (action?.scope === 'conversation') throw new Error('Conversation-only turns have no repository snapshot to fork.')
-      if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')
+      // A branch after a turn needs the turn to have finished well; one before it (an edited prompt) only needs it to
+      // have finished, so a prompt after a stopped turn, or the first prompt, can be edited.
+      if (!action || (at === 'end' ? action.state !== 'completed' : action.state === 'running')) throw new Error(at === 'end' ? 'Fork requires a completed action.' : 'Wait for the turn to finish before editing its prompt.')
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       if (codeMode === 'historical') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
       if (action.conversationBranchId !== sourceBranchId) throw new Error('Action does not belong to the source conversation branch.')
-      if (!action.nativeContextBoundary.safeBoundaryProof) throw new Error('The selected turn has no validated native-context boundary.')
+      const boundary = at === 'start' ? action.nativeContextStartBoundary : action.nativeContextBoundary
+      if (!boundary?.safeBoundaryProof || (at === 'start' && boundary.fidelity === 'legacy')) throw new Error('The selected turn has no validated native-context boundary.')
       const id = randomUUID()
       const operationId = randomUUID()
       const retainedRef = `refs/mousse/conversation-branches/${id}`
       const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
-      const codeSha = codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : action.endSha
+      const codeSha = codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : at === 'start' ? action.startSha : action.endSha
       this.journal.append({
         operationId,
         operationType: 'conversation-fork',
         state: 'running',
-        expectedPreState: { sourceBranchId, actionId, codeMode, codeSha }
+        expectedPreState: { sourceBranchId, actionId, codeMode, codeSha, at }
       })
       try {
         await gitAsync(workspacePath, ['update-ref', '--no-deref', retainedRef, codeSha])
@@ -448,10 +452,11 @@ export class ConversationBranchService {
           name,
           parentBranchId: sourceBranchId,
           parentTurnId: action.turnId,
+          ...(at === 'start' ? { at } : {}),
           // Conversation branches share the worktree and its Git branch; they differ in the snapshot they own.
           gitBranch: metadata?.branch ?? '',
           retainedRef,
-          contextBoundary: action.nativeContextBoundary,
+          contextBoundary: boundary,
           lifecycle: 'inactive',
           creationReason: 'fork',
           createdAt: new Date().toISOString()

@@ -142,6 +142,11 @@ export interface ConversationBranch {
   name: string
   parentBranchId?: ConversationBranchId
   parentTurnId?: TurnId
+  /**
+   * Where in `parentTurnId` the branch starts: `end` (after the turn, the default) or `start` (before it, an edited
+   * prompt). Branches made at the start of the same turn, with the branch that turn ran on, are versions of its prompt.
+   */
+  at?: 'start' | 'end'
   gitBranch: string
   retainedRef: string
   activeActionId?: ActionId

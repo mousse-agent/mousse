@@ -11,6 +11,8 @@ export interface ThreadActionHistory {
   journalGeneration: number
   activeBranchId?: string
   retentionPolicy?: UndoRetentionPolicy
+  /** The versions of each edited prompt the conversation shows (`turnId`), oldest first; `current` is the shown one. */
+  promptVersions?: Array<{ turnId: string; versions: string[]; current: number }>
 }
 const reads = new Map<string, { at: number; promise: Promise<ThreadActionHistory> }>()
 let profileEpoch = 0

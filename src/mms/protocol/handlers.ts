@@ -454,6 +454,41 @@ function conversationStatePath(threadDirectory: string, branchId: string): strin
   return join(threadDirectory, 'conversation-contexts', `${encodeURIComponent(branchId)}.json`)
 }
 
+/**
+ * The versions of each edited prompt the conversation now shows. Editing a prompt makes a branch that starts before
+ * its turn (`at: 'start'`); the branch that turn ran on and every such branch of the same turn are its versions,
+ * oldest first. A version is shown on the active branch's own prompt: the edited turn on the branch it ran on, or the
+ * first turn of an edited version. A version with no turn yet (the edit was never sent) shows nowhere.
+ */
+export function promptVersionsOf(
+  branches: readonly import('../../shared/threadActions').ConversationBranch[],
+  actions: readonly ThreadAction[],
+  activeBranchId: string
+): Array<{ turnId: string; versions: string[]; current: number }> {
+  const groups = new Map<string, string[]>()
+  for (const branch of branches) {
+    if (branch.at !== 'start' || !branch.parentTurnId || branch.lifecycle === 'tombstoned') continue
+    const original = actions.find((action) => action.turnId === branch.parentTurnId)?.conversationBranchId
+    if (!original) continue
+    const versions = groups.get(branch.parentTurnId) ?? [original]
+    versions.push(branch.id)
+    groups.set(branch.parentTurnId, versions)
+  }
+  const shown: Array<{ turnId: string; versions: string[]; current: number }> = []
+  for (const [turnId, versions] of groups) {
+    const current = versions.indexOf(activeBranchId)
+    if (current < 0) continue
+    const onBranch = current === 0 ? turnId : actions.find((action) => action.conversationBranchId === activeBranchId)?.turnId
+    if (onBranch) shown.push({ turnId: onBranch, versions, current })
+  }
+  return shown
+}
+
+/** Refuses a change of conversation history (a branch made or switched to) while the thread's turn or queue is busy. */
+function assertHistoryIdle(ctx: HandlerContext, threadId: string): void {
+  if (ctx.mms.orchestrator.isConversationHistoryBusy(threadId)) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
+}
+
 function saveConversationState(
   ctx: HandlerContext,
   threadId: string,
@@ -3203,7 +3238,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? { actionId: latest.id, turnId: latest.turnId, journalGeneration: operation.currentGeneration } : undefined
       // A folder Mousse cannot snapshot (too large) says so where Undo would have been offered.
       const filesOff = snapshotsOffReason(operation.threadDirectory)
-      return { actions, retentionPolicy: retention.policy(), receipts, activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
+      const promptVersions = promptVersionsOf(new ConversationBranchService(operation.threadDirectory).list(), actions, activeBranchId)
+      return { actions, retentionPolicy: retention.policy(), receipts, activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget, promptVersions,
         undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : filesOff && latest?.scope === 'conversation' ? filesOff : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
     }
     case 'actions.sweepRetention':
@@ -3355,14 +3391,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
       if (!action) throw new DomainRpcError('action_not_found', `Action not found: ${actionId}`)
-      saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
       if (p.codeMode !== undefined && p.codeMode !== 'current' && p.codeMode !== 'historical') throw new DomainRpcError('invalid_params', 'Invalid fork code mode')
-      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical')
-      saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, {
-        presentationEnd: action.presentationMessageEnd,
-        nativeEnd: action.nativeContextBoundary.messageIndex,
-        boundary: action.nativeContextBoundary
-      })
+      // `start`: the branch begins before the action's turn, as an edited version of its prompt; `end` (default): after it.
+      if (p.at !== undefined && p.at !== 'start' && p.at !== 'end') throw new DomainRpcError('invalid_params', "at must be 'start' or 'end'")
+      const at = p.at === 'start' ? 'start' as const : 'end' as const
+      assertHistoryIdle(ctx, operation.threadId)
+      saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
+      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical', at)
+      saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, at === 'start'
+        ? { presentationEnd: action.presentationMessageStart, nativeEnd: branch.contextBoundary.messageIndex, boundary: branch.contextBoundary }
+        : { presentationEnd: action.presentationMessageEnd, nativeEnd: action.nativeContextBoundary.messageIndex, boundary: action.nativeContextBoundary })
       return { branch }
     }
     case 'actions.activateBranch': {
@@ -3374,6 +3412,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
       const leaving = workspace.conversationBranchId ?? FIRST_BRANCH_ID
+      // A switch while a turn runs would wait for its lease and land after it; and once the files have switched, the
+      // running turn would refuse the conversation swap and leave the thread waiting for recovery.
+      assertHistoryIdle(ctx, operation.threadId)
       // A branch with no record, a removed one, or one whose conversation was never saved or can't be read is refused
       // before anything changes. The branch being left has its conversation saved by the switch itself.
       const unavailable = (message = `Conversation branch ${branchId} is not available to switch to. Nothing was changed.`) => new DomainRpcError('conversation_branch_unavailable', message, { branchId })

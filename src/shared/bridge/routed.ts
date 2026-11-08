@@ -425,9 +425,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   }),
   'actions.fork': write(
     'thread',
-    ['threadId', 'conversationBranchId', 'actionId', 'name', 'codeMode', GEN],
+    ['threadId', 'conversationBranchId', 'actionId', 'name', 'codeMode', 'at', GEN],
     {
-      required: ['actionId']
+      required: ['actionId'],
+      version: 2,
+      since: { at: 2 }
     }
   ),
   'actions.pin': write('thread', ['threadId', 'actionId', 'pinned', 'reason', GEN], {

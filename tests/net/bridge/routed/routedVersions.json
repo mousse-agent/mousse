@@ -10,8 +10,8 @@
     "security": "ceacd93869361a7a"
   },
   "actions.fork": {
-    "version": 1,
-    "digest": "f348edfcdb28ab57",
+    "version": 2,
+    "digest": "0232ecc072caf730",
     "security": "ceacd93869361a7a"
   },
   "actions.getAffectedFiles": {
