@@ -80,7 +80,7 @@ describe('thread switching terminal lifecycle', () => {
   it('does not kill all PTYs when the active thread project changes', () => {
     expect(panelSource).not.toMatch(/clearProjectTerminalTabs/)
     expect(panelSource).not.toMatch(/prevCwd/)
-    expect(panelSource).toMatch(/const cwd = tab\?\.cwd \|\| terminalCwd/)
+    expect(panelSource).toMatch(/let cwd = tab\?\.cwd \|\| terminalCwd/)
   })
 
   it('keeps the terminal and browser panel mounted while collapsed', () => {
@@ -101,7 +101,7 @@ describe('thread switching terminal lifecycle', () => {
       guiIpcSource.indexOf("'pty:create'"),
       guiIpcSource.indexOf("'pty:kill'")
     )
-    expect(createHandler).toMatch(/getActiveThreadId\(\) \?\? '__unbound__'/)
+    expect(createHandler).toMatch(/getActiveThreadId\(\) : named\) \?\? '__unbound__'/)
     expect(createHandler).not.toMatch(/if \(!threadId\) throw new Error\('No thread selected'\)/)
   })
 })
