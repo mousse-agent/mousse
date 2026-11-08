@@ -1,17 +1,21 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, existsSync, lstatSync, readlinkSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, existsSync, lstatSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { keptFilesFromListing, PRESERVED_REF_FORMAT, threadPreservedRefs } from '../src/mms/actions/preservedFiles'
+import { expirePreservedFiles, keptFilesFromListing, PRESERVED_REF_FORMAT, threadPreservedRefs } from '../src/mms/actions/preservedFiles'
+import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { GitService } from '../src/mms/git/GitService'
 import { userAction } from '../src/mms/git/gitPolicy'
+import { fileDigest, writeProven } from '../src/mms/git/gitRevert'
 import type { SelectionPlace } from '../src/mms/git/gitSelection'
 import type { GitChangedFile, GitChangesResult, GitRevertResult } from '../src/shared/types'
+import { DEFAULT_UNDO_RETENTION_POLICY } from '../src/shared/undoRetention'
 import { committedGitTemplate } from './support/gitBase'
 
-// A seam right after the copy is kept and before anything is written: a save that lands there must win.
-const seam = vi.hoisted(() => ({ afterKeep: undefined as undefined | (() => void) }))
+// A seam right after the copy is kept and before anything is written: a save that lands there must win. Another right
+// after the selection is written, which is after the revert wrote the files: a save there is newer work too.
+const seam = vi.hoisted(() => ({ afterKeep: undefined as undefined | (() => void), afterSelection: undefined as undefined | (() => void) }))
 vi.mock('../src/mms/actions/keptCopies', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/mms/actions/keptCopies')>()
   return {
@@ -24,7 +28,18 @@ vi.mock('../src/mms/actions/keptCopies', async (importOriginal) => {
   }
 })
 
+vi.mock('../src/mms/git/gitSelection', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/mms/git/gitSelection')>()
+  const after = <A extends unknown[], R>(write: (...args: A) => Promise<R>) => async (...args: A): Promise<R> => {
+    const result = await write(...args)
+    seam.afterSelection?.()
+    return result
+  }
+  return { ...actual, writeOverlay: after(actual.writeOverlay), recordMarker: after(actual.recordMarker), clearMarker: after(actual.clearMarker) }
+})
+
 const USER = userAction('button', 'Test action')
+const DAY = 24 * 3600_000
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
@@ -51,6 +66,7 @@ const projectPlace = (): Extract<SelectionPlace, { kind: 'project' }> => { const
 const threadPlace = (): Extract<SelectionPlace, { kind: 'thread' }> => ({ kind: 'thread', overlayFile: join(folder(), 'git-selection.json') })
 afterEach(() => {
   seam.afterKeep = undefined
+  seam.afterSelection = undefined
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -63,6 +79,11 @@ const fileIn = (result: GitChangesResult, path: string): GitChangedFile => {
 const listed = async (cwd: string, place: SelectionPlace, path: string) => fileIn(await service.readChanges(cwd, place), path)
 const read = (cwd: string, path: string) => readFileSync(join(cwd, path), 'utf8')
 const staged = (cwd: string, path: string) => git(cwd, 'show', `:${path}`)
+/** Stages `content` at `path` without touching the working file, as another program's `git add` of other bytes would. */
+const stageText = (cwd: string, path: string, content: string) => {
+  const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd, input: content, encoding: 'utf8' }).trim()
+  git(cwd, 'update-index', '--add', '--cacheinfo', `100644,${blob},${path}`)
+}
 const keptRefs = (cwd: string) => git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
 
 describe('revert in a project folder', () => {
@@ -306,6 +327,144 @@ describe('revert in a project folder', () => {
     expect(Math.abs(owned[0]!.keptAt! - (done.keptUntil - 30 * 24 * 3600_000))).toBeLessThan(60_000)
     expect(keptFilesFromListing(listing, owner)).toEqual([expect.objectContaining({ discardReason: expect.stringContaining('only copy') })])
   })
+
+  it('a rename with one side saved meanwhile records the other side only, and a restore keeps the save', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    git(cwd, 'mv', 'a.txt', 'c.txt')
+    const c = await listed(cwd, place, 'c.txt')
+    seam.afterKeep = () => writeFileSync(join(cwd, 'c.txt'), 'saved meanwhile\n')
+    const done = await service.revert(cwd, USER, place, { path: 'c.txt', version: c.version }, { owner })
+    seam.afterKeep = undefined
+    expect(done.left).toBe('Left as it was: c.txt (changed).')
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
+    expect(read(cwd, 'c.txt')).toBe('saved meanwhile\n')
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    // The side the revert wrote goes back (a.txt was renamed away), the side it left keeps the save and its staging.
+    expect(read(cwd, 'c.txt')).toBe('saved meanwhile\n')
+    expect(existsSync(join(cwd, 'a.txt'))).toBe(false)
+    expect(git(cwd, 'ls-files', '--', 'a.txt')).toBe('')
+    expect(staged(cwd, 'c.txt')).toBe(text(LINES).trimEnd())
+  })
+
+  it('a whole file staged anew while it was reverted: a restore puts the file back and keeps the newer staging', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25]))
+    let racing = true
+    const staging = new GitService({ beforeDiscardUnlink: () => { if (racing) { racing = false; stageText(cwd, 'a.txt', 'staged meanwhile\n') } } })
+    const a = await listed(cwd, place, 'a.txt')
+    const done = await staging.revert(cwd, USER, place, { path: 'a.txt', version: a.version }, { owner })
+    expect(done.left).toBe('Left as it was: a.txt (restaged).')
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
+    expect(staged(cwd, 'a.txt')).toBe('staged meanwhile')
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe('staged meanwhile')
+  })
+
+  it('takes a save or a staging that lands right after the write for newer work: a restore says changed and keeps both', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25]))
+    const a = await listed(cwd, place, 'a.txt')
+    seam.afterSelection = () => { writeFileSync(join(cwd, 'a.txt'), 'saved right after\n'); stageText(cwd, 'a.txt', 'staged right after\n') }
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version }, { owner })
+    seam.afterSelection = undefined
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toMatchObject({ restored: false, reason: 'changed' })
+    expect(read(cwd, 'a.txt')).toBe('saved right after\n')
+    expect(staged(cwd, 'a.txt')).toBe('staged right after')
+    // The index alone, after a hunk revert of a chosen index: someone's staging is not taken for the revert's.
+    const other = repo(), otherPlace = projectPlace()
+    writeFileSync(join(other, 'a.txt'), changed([3, 25])); writeFileSync(join(other, 'b.txt'), 'b changed\n')
+    await service.include(other, USER, otherPlace, { path: 'b.txt', version: (await listed(other, otherPlace, 'b.txt')).version, include: false })
+    const hunks = await listed(other, otherPlace, 'a.txt')
+    seam.afterSelection = () => stageText(other, 'a.txt', 'staged right after\n')
+    const partly = await service.revert(other, USER, otherPlace, { path: 'a.txt', version: hunks.version, hunks: [hunks.hunks[0]!.id] }, { owner })
+    seam.afterSelection = undefined
+    expect(await service.restoreReverted(other, USER, otherPlace, partly.revertId, { owner })).toMatchObject({ restored: false, reason: 'changed' })
+    expect(read(other, 'a.txt')).toBe(changed([25]))
+    expect(staged(other, 'a.txt')).toBe('staged right after')
+  })
+
+  it('reverts lines of a deleted file and of a new file, and restores both', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    unlinkSync(join(cwd, 'a.txt')); writeFileSync(join(cwd, 'new.txt'), 'x\ny\n')
+    const deleted = await listed(cwd, place, 'a.txt')
+    const first = deleted.hunks[0]!.lines.findIndex((line) => line.kind === '-' && line.text === 'line 1')
+    const back = await service.revert(cwd, USER, place, { path: 'a.txt', version: deleted.version, lines: [{ hunk: deleted.hunks[0]!.id, indexes: [first] }] }, { owner })
+    expect(read(cwd, 'a.txt')).toBe('line 1\n')
+    const added = await listed(cwd, place, 'new.txt')
+    const y = added.hunks[0]!.lines.findIndex((line) => line.kind === '+' && line.text === 'y')
+    const gone = await service.revert(cwd, USER, place, { path: 'new.txt', version: added.version, lines: [{ hunk: added.hunks[0]!.id, indexes: [y] }] }, { owner })
+    expect(read(cwd, 'new.txt')).toBe('x\n')
+    expect(await service.restoreReverted(cwd, USER, place, back.revertId, { owner })).toEqual({ restored: true })
+    expect(existsSync(join(cwd, 'a.txt'))).toBe(false)
+    expect(await service.restoreReverted(cwd, USER, place, gone.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'new.txt')).toBe('x\ny\n')
+  })
+
+  it('restores a file over the link a whole revert put back', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    try { symlinkSync('b.txt', join(cwd, 'link')) } catch { return } // No links here (Windows without the right).
+    git(cwd, 'add', 'link'); git(cwd, 'commit', '-qm', 'link')
+    unlinkSync(join(cwd, 'link')); writeFileSync(join(cwd, 'link'), 'a file now\n')
+    const done = await service.revert(cwd, USER, place, { path: 'link', version: (await listed(cwd, place, 'link')).version }, { owner })
+    expect(readlinkSync(join(cwd, 'link'))).toBe('b.txt')
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(lstatSync(join(cwd, 'link')).isFile()).toBe(true)
+    expect(read(cwd, 'link')).toBe('a file now\n')
+  })
+
+  it('restores a file under a filter: the revert names what Git wrote, filters applied', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    git(cwd, 'config', 'filter.upper.clean', 'tr a-z A-Z'); git(cwd, 'config', 'filter.upper.smudge', 'tr A-Z a-z')
+    writeFileSync(join(cwd, '.gitattributes'), 'filtered.txt filter=upper\n'); writeFileSync(join(cwd, 'filtered.txt'), text(LINES))
+    git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'filtered')
+    writeFileSync(join(cwd, 'filtered.txt'), changed([3]))
+    const done = await service.revert(cwd, USER, place, { path: 'filtered.txt', version: (await listed(cwd, place, 'filtered.txt')).version }, { owner })
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'filtered.txt')).toBe(changed([3]))
+  })
+
+  it('restores nothing while another Git command holds the index, and everything once it is free', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25])); writeFileSync(join(cwd, 'b.txt'), 'b changed\n')
+    await service.include(cwd, USER, place, { path: 'b.txt', version: (await listed(cwd, place, 'b.txt')).version, include: false })
+    const a = await listed(cwd, place, 'a.txt')
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })
+    const lock = join(cwd, '.git', 'index.lock')
+    writeFileSync(lock, '')
+    await expect(service.restoreReverted(cwd, USER, place, done.revertId, { owner })).rejects.toMatchObject({ code: 'git_index_locked' })
+    expect(read(cwd, 'a.txt')).toBe(changed([3]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3]).trimEnd())
+    unlinkSync(lock)
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3, 25]).trimEnd())
+    // The new files were made in the Git folder, never next to the working ones.
+    expect(readdirSync(cwd).filter((name) => name.startsWith('mousse-revert-') || name.startsWith('.mousse-revert-'))).toEqual([])
+  })
+
+  it('after the Undo window the sweep expires the copy: the list empties and a restore says expired', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    const start = Date.now()
+    await new UndoRetentionService(owner, () => start).sweep(cwd)
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25]))
+    const a = await listed(cwd, place, 'a.txt')
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[0]!.id] }, { owner })
+    const advance = async (from: number, to: number) => {
+      for (let now = from; now < to; now = Math.min(to, now + 6 * DAY)) await new UndoRetentionService(owner, () => now).sweep(cwd)
+      await new UndoRetentionService(owner, () => to).sweep(cwd)
+    }
+    const almost = start + DEFAULT_UNDO_RETENTION_POLICY.windowMs - 3600_000
+    await advance(start, almost)
+    expect((await expirePreservedFiles(owner, cwd, { now: () => almost })).expiredRefs).toEqual([])
+    expect((await service.revertedList(cwd, owner)).map((item) => item.revertId)).toEqual([done.revertId])
+    const past = start + DEFAULT_UNDO_RETENTION_POLICY.windowMs + 3600_000
+    await advance(almost, past)
+    expect((await expirePreservedFiles(owner, cwd, { now: () => past })).expiredRefs).toHaveLength(1)
+    expect(await service.revertedList(cwd, owner)).toEqual([])
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: false, reason: 'expired' })
+    expect(read(cwd, 'a.txt')).toBe(changed([25]))
+  })
 })
 
 describe('revert in a thread worktree', () => {
@@ -339,5 +498,65 @@ describe('revert in a thread worktree', () => {
     expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
     expect((await listed(cwd, place, 'a.txt')).hunks.map((hunk) => hunk.included)).toEqual(['yes', 'no'])
     expect((await listed(cwd, place, 'b.txt')).included).toBe('no')
+  })
+  it('files put back another way (chat Undo): a restore gives the overlay back too, once', async () => {
+    const cwd = repo(), place = threadPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 15, 25]))
+    let a = await listed(cwd, place, 'a.txt')
+    await service.include(cwd, USER, place, { path: 'a.txt', version: a.version, include: false, hunks: [a.hunks[2]!.id] })
+    a = await listed(cwd, place, 'a.txt')
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[0]!.id] }, { owner })
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 15, 25]))
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect((await listed(cwd, place, 'a.txt')).hunks.map((hunk) => hunk.included)).toEqual(['yes', 'yes', 'no'])
+    // A choice made after it stays: a retry puts nothing back.
+    const now = await listed(cwd, place, 'a.txt')
+    await service.include(cwd, USER, place, { path: 'a.txt', version: now.version, include: true, hunks: [now.hunks[2]!.id] })
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect((await listed(cwd, place, 'a.txt')).hunks.map((hunk) => hunk.included)).toEqual(['yes', 'yes', 'yes'])
+  })
+
+  it('a save that lands right after a whole revert wrote the file is newer work: a restore says changed and keeps it', async () => {
+    const cwd = repo(), place = threadPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25]))
+    let a = await listed(cwd, place, 'a.txt')
+    await service.include(cwd, USER, place, { path: 'a.txt', version: a.version, include: false, hunks: [a.hunks[1]!.id] })
+    a = await listed(cwd, place, 'a.txt')
+    seam.afterSelection = () => writeFileSync(join(cwd, 'a.txt'), 'saved right after\n')
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version }, { owner })
+    seam.afterSelection = undefined
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toMatchObject({ restored: false, reason: 'changed' })
+    expect(read(cwd, 'a.txt')).toBe('saved right after\n')
+  })
+})
+
+describe('proven writes', () => {
+  it('make every write of a batch or none: one path changed stops all of them', async () => {
+    const cwd = repo()
+    const scratch = join(cwd, '.git')
+    const before = fileDigest(readFileSync(join(cwd, 'a.txt')))
+    const stopped = await writeProven(cwd, scratch, [
+      { path: 'a.txt', expected: before, next: { kind: 'file', bytes: Buffer.from('new a\n'), mode: 0o644 } },
+      { path: 'b.txt', expected: fileDigest(Buffer.from('not what is there\n')), next: { kind: 'absent' } }
+    ])
+    expect(stopped).toBe('b.txt')
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
+    expect(read(cwd, 'b.txt')).toBe('b\n')
+    expect(readdirSync(scratch).filter((name) => name.startsWith('mousse-revert-'))).toEqual([])
+    expect(await writeProven(cwd, scratch, [
+      { path: 'a.txt', expected: before, next: { kind: 'file', bytes: Buffer.from('new a\n'), mode: 0o644 } },
+      { path: 'b.txt', expected: fileDigest(Buffer.from('b\n')), next: { kind: 'absent' } }
+    ])).toBeUndefined()
+    expect(read(cwd, 'a.txt')).toBe('new a\n')
+    expect(existsSync(join(cwd, 'b.txt'))).toBe(false)
+  })
+
+  it('a link that cannot be made changes nothing', async () => {
+    const cwd = repo()
+    const before = fileDigest(readFileSync(join(cwd, 'a.txt')))
+    // The link is made aside first; where that fails (here: no such folder; on Windows: no right to make links), the
+    // file it would replace is still there.
+    await expect(writeProven(cwd, join(cwd, 'no-such-folder'), [{ path: 'a.txt', expected: before, next: { kind: 'link', target: Buffer.from('b.txt') } }])).rejects.toThrow()
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
   })
 })

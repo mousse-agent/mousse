@@ -5,6 +5,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import type { GitChangesResult, GitRestoreRevertedResult, GitRevertedItem, GitRevertResult } from '../src/shared/types'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -110,6 +111,33 @@ describe('Revert through the daemon', () => {
     vi.spyOn(mms.orchestrator, 'isConversationHistoryBusy').mockReturnValue(true)
     await expect(client.request('git.revert', { projectId: project.id, path: 'a.txt', version: p.version })).rejects.toMatchObject({ code: 'thread_busy' })
     expect(readFileSync(join(f.repo, 'a.txt'), 'utf8')).toBe(changed([3]))
+  })
+
+  it('in a project folder a thread works in, lists and restores a revert whichever journal recorded it', async () => {
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('In the folder', project.id, undefined, { worktreeEnabled: false })
+    const directory = mms.threads.getThreadDir(thread.id)
+    const inThread = { threadId: thread.id }, inProject = { projectId: project.id }
+    writeFileSync(join(f.repo, 'a.txt'), changed([3, 25]))
+    // Made in the thread, ready in the folder: its own journal records it.
+    const a = await fileOf(inThread, 'a.txt')
+    const byThread = await client.request<GitRevertResult>('git.revert', { ...inThread, path: 'a.txt', version: a.version, hunks: [a.hunks[0]!.id] })
+    // The thread's first Git action set up its place in the folder.
+    expect(new ThreadWorkspaceManager(directory).load()).toMatchObject({ kind: 'project-folder', lifecycle: 'ready' })
+    expect(existsSync(join(directory, 'journal'))).toBe(true)
+    // Made from the project: the project's journal records it.
+    const p = await fileOf(inProject, 'a.txt')
+    const byProject = await client.request<GitRevertResult>('git.revert', { ...inProject, path: 'a.txt', version: p.version })
+    expect(readFileSync(join(f.repo, 'a.txt'), 'utf8')).toBe(text(LINES))
+    const ids = async (scope: Record<string, unknown>) => (await client.request<GitRevertedItem[]>('git.revertedList', scope)).map((item) => item.revertId)
+    expect(await ids(inThread)).toEqual([byProject.revertId, byThread.revertId])
+    expect(await ids(inProject)).toEqual([byProject.revertId])
+    // The thread restores the project's revert, then its own.
+    expect(await client.request<GitRestoreRevertedResult>('git.restoreReverted', { ...inThread, revertId: byProject.revertId })).toEqual({ restored: true })
+    expect(readFileSync(join(f.repo, 'a.txt'), 'utf8')).toBe(changed([25]))
+    expect(await client.request<GitRestoreRevertedResult>('git.restoreReverted', { ...inThread, revertId: byThread.revertId })).toEqual({ restored: true })
+    expect(readFileSync(join(f.repo, 'a.txt'), 'utf8')).toBe(changed([3, 25]))
+    expect(await ids(inThread)).toEqual([])
   })
 
   it('from another computer, refuses a path that leads out of the folder through a link or junction', async () => {
