@@ -1,6 +1,7 @@
 import { Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from '../../lib/icons'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { ArchiveDefinitionDialog, FixIssuesLink, SaveStateLabel } from '../automations/EditorParts'
+import { ArchiveDefinitionDialog, FixIssuesLink, PublishImpactDialog, SaveFailed, SaveStateLabel, useAutosave, type PublishUser } from '../automations/EditorParts'
+import { parseWorkflowCommand } from '../../../shared/workflows/workflowCommand'
 import { definitionSaveState, publishBlockReason } from '../automations/editorState'
 import { RowMenu } from '../integrations/RowMenu'
 import { openAutomationCreate } from '../../stores/automationCreateStore'
@@ -112,6 +113,10 @@ export function WorkflowEditor({
   const [history, setHistory] = useState<BoundedHistory<DraftState>>(() => createBoundedHistory<DraftState>())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  /** The last save failed: its message, shown with Retry. */
+  const [saveError, setSaveError] = useState<string | null>(null)
+  /** Automations that run this workflow, asked about before Publish. */
+  const [publishUsers, setPublishUsers] = useState<PublishUser[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
@@ -248,11 +253,11 @@ export function WorkflowEditor({
     return () => window.clearTimeout(handle)
   }, [active, draft, profileId, definitionId])
 
-  const saveDraft = async () => {
-    if (!document || !draft) return
+  const saveDraft = async (): Promise<boolean> => {
+    if (!document || !draft) return false
     if (sourceError && view === 'source') {
       setError('Fix invalid source before saving.')
-      return
+      return false
     }
     setSaving(true)
     setError(null)
@@ -268,19 +273,44 @@ export function WorkflowEditor({
         bundle,
         visualOnly
       })
-      if (!shouldApplyAsyncResult(started, gate.current.current())) return
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return false
       applyDocument(next)
+      setSaveError(null)
+      return true
     } catch (caught) {
-      if (!shouldApplyAsyncResult(started, gate.current.current())) return
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return false
       if (isRevisionConflict(caught)) setConflictMessage(isWorkflowClientError(caught) ? caught.message : 'Draft changed elsewhere.')
-      else setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+      else setSaveError(isWorkflowClientError(caught) ? caught.message : String(caught))
+      return false
     } finally {
       if (shouldApplyAsyncResult(started, gate.current.current())) setSaving(false)
     }
   }
 
-  const publish = async () => {
+  // Edits save themselves once typing pauses; invalid source waits until it is fixed, and a failed save for Retry.
+  useAutosave(draft, { dirty, canSave: Boolean(document && draft) && !readOnly && !sourceError && !saving && !archiving && !conflictMessage, save: saveDraft })
+
+  /** The automations that run this workflow: they get what is published on their next run. */
+  const usersOf = async (): Promise<PublishUser[]> => {
+    if (!document) return []
+    try {
+      const jobs = await window.mousse?.scheduled?.list?.() ?? []
+      return jobs.filter((job) => parseWorkflowCommand(job.prompt)?.slug === document.slug).map((job) => ({ id: job.id, name: job.name }))
+    } catch {
+      return []
+    }
+  }
+
+  const publish = async (confirmed = false) => {
     if (!document || dirty || blocking.length > 0) return
+    if (!confirmed) {
+      const users = await usersOf()
+      if (users.length) {
+        setPublishUsers(users)
+        return
+      }
+    }
+    setPublishUsers(null)
     setSaving(true)
     setError(null)
     const started = gate.current.current()
@@ -426,7 +456,7 @@ export function WorkflowEditor({
     dirty,
     matchesPublished: document.head ? document.head.semanticHash === document.semanticHash : null
   })
-  const publishReason = publishBlockReason({ state: saveState, busy: saving, readOnly, invalidSource: Boolean(sourceError), blocking })
+  const publishReason = publishBlockReason({ busy: saving, dirty, saveFailed: Boolean(saveError), readOnly, invalidSource: Boolean(sourceError), blocking })
   // Opens Validation on the first blocking error, selects its node, and moves focus to the error.
   const showBlockingIssue = () => {
     const first = blocking[0]
@@ -519,9 +549,9 @@ export function WorkflowEditor({
             Published revision, read-only
           </span>
         ) : (
-          <SaveStateLabel state={saveState} extra={sourceError ? 'Invalid source' : null} />
+          <SaveStateLabel state={saveState} extra={sourceError ? 'Invalid source' : saving ? 'Saving…' : null} />
         )}
-        {!readOnly && saveState !== 'unsaved' ? <FixIssuesLink issues={blocking} onShow={showBlockingIssue} /> : null}
+        {!readOnly && !dirty ? <FixIssuesLink issues={blocking} onShow={showBlockingIssue} /> : null}
         <div className="wf-actions">
           {readOnly ? (
             <button type="button" className="btn btn-sm" data-action="view-draft" onClick={() => { setRevisionView('draft'); void load() }}>
@@ -571,15 +601,6 @@ export function WorkflowEditor({
           </button>
           <button
             type="button"
-            className="btn btn-sm"
-            data-action="save-draft"
-            disabled={saving || archiving || !dirty || readOnly}
-            onClick={() => void saveDraft()}
-          >
-            {saving ? 'Saving…' : 'Save draft'}
-          </button>
-          <button
-            type="button"
             className="btn btn-primary btn-sm"
             data-action="publish"
             disabled={saving || archiving || !canPublish || readOnly}
@@ -615,6 +636,8 @@ export function WorkflowEditor({
           />
         </div>
       </header>
+      {saveError ? <SaveFailed message={saveError} busy={saving} onRetry={() => void saveDraft()} /> : null}
+      {publishUsers ? <PublishImpactDialog users={publishUsers} onCancel={() => setPublishUsers(null)} onPublish={() => void publish(true)} /> : null}
       {error ? (
         <div className="wf-banner wf-banner--error" role="alert">
           {error}

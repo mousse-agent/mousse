@@ -24,6 +24,9 @@ export interface AgentSettingsFormProps {
   onSettingsChange: (settings: AgentDefinitionSettings) => void
   onSystemPromptChange: (value: string) => void
   onSave?: () => void
+  /** The rest of the settings, past Name, Instructions, Model and What it may use, show only when this is true. */
+  moreOpen?: boolean
+  onMoreOpenChange?: (open: boolean) => void
 }
 
 function patch<K extends keyof AgentDefinitionSettings>(
@@ -43,7 +46,9 @@ export function AgentSettingsForm({
   disabled,
   onSettingsChange,
   onSystemPromptChange,
-  onSave
+  onSave,
+  moreOpen = false,
+  onMoreOpenChange
 }: AgentSettingsFormProps) {
   const identity = settings.identity
   const promptPath = `agent-definitions/${definitionId}/system.md`
@@ -123,7 +128,7 @@ export function AgentSettingsForm({
 
       <SettingGroup
         pointer="/settings/instructions"
-        title="System prompt"
+        title="Instructions"
         lead="Pinned when a run starts. Switching Source and Preview keeps the exact text."
       >
         <p>
@@ -156,6 +161,145 @@ export function AgentSettingsForm({
         />
       </SettingGroup>
 
+      <div className="agent-settings-use" data-agent-use="">
+        <h3 className="agent-settings-use-title">What it may use</h3>
+      <SettingGroup pointer="/settings/skills" title="Skills" lead="Inherit profile skills or pick a specific set. A missing skill keeps the draft but blocks publish/run.">
+        <Field id="skills-mode" label="Selection">
+          <FieldSelect
+            field="skills-mode"
+            value={settings.skills.mode}
+            onChange={(mode) => onSettingsChange(patch(settings, 'skills', { ...settings.skills, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile skills' },
+              { value: 'explicit', label: 'Only skills I enable' }
+            ]}
+          />
+        </Field>
+        {catalogs.skills.map((skill) => {
+          const selection = settings.skills.selections.find((item) => item.skillId === skill.id)
+          const enabled = selection ? selection.enabled : settings.skills.mode === 'inherit'
+          return (
+            <div key={skill.id}>
+              <CheckRow
+                id={`skill-${skill.id}`}
+                checked={enabled}
+                onChange={(next) => {
+                  const selections = settings.skills.selections.filter((item) => item.skillId !== skill.id)
+                  selections.push({ skillId: skill.id, enabled: next, pinRevision: selection?.pinRevision })
+                  onSettingsChange(patch(settings, 'skills', { ...settings.skills, selections }))
+                }}
+              >
+                {skill.name}
+                {!skill.available ? ' (unavailable)' : ''}
+                {settings.skills.mode === 'inherit' && !selection ? ' · inherited' : ''}
+              </CheckRow>
+            </div>
+          )
+        })}
+      </SettingGroup>
+
+      <SettingGroup pointer="/settings/mcp" title="MCP tools" lead="Turning on a server is not permission for future tools. Name the tools this agent may use.">
+        <Field id="mcp-mode" label="Selection">
+          <FieldSelect
+            field="mcp-mode"
+            value={settings.mcp.mode}
+            onChange={(mode) => onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile tools' },
+              { value: 'explicit', label: 'Only tools I enable' }
+            ]}
+          />
+        </Field>
+        {catalogs.mcpServers.map((server) => {
+          const current = settings.mcp.servers.find((item) => item.serverId === server.serverId)
+          return (
+            <div key={server.serverId}>
+              <CheckRow
+                id={`mcp-${server.serverId}`}
+                checked={current?.enabled ?? settings.mcp.mode === 'inherit'}
+                onChange={(enabled) => {
+                  const servers = settings.mcp.servers.filter((item) => item.serverId !== server.serverId)
+                  servers.push({
+                    serverId: server.serverId,
+                    enabled,
+                    tools: current?.tools ?? server.tools.map((tool) => ({ toolName: tool.toolName, enabled: false }))
+                  })
+                  onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, servers }))
+                }}
+              >
+                {server.name}
+              </CheckRow>
+              {server.tools.map((tool) => {
+                const selected = current?.tools.find((item) => item.toolName === tool.toolName)?.enabled ?? false
+                return (
+                  <CheckRow
+                    key={tool.toolName}
+                    id={`mcp-${server.serverId}-${tool.toolName}`}
+                    checked={selected}
+                    onChange={(enabled) => {
+                      const others = (current?.tools ?? []).filter((item) => item.toolName !== tool.toolName)
+                      const servers = settings.mcp.servers.filter((item) => item.serverId !== server.serverId)
+                      servers.push({
+                        serverId: server.serverId,
+                        enabled: current?.enabled ?? true,
+                        tools: [...others, { toolName: tool.toolName, enabled }]
+                      })
+                      onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, servers }))
+                    }}
+                  >
+                    {tool.toolName}
+                    {!tool.available ? ' (unavailable)' : ''}
+                  </CheckRow>
+                )
+              })}
+            </div>
+          )
+        })}
+      </SettingGroup>
+
+      <SettingGroup pointer="/settings/tools" title="Built-in tools">
+        <Field id="tools-mode" label="Selection">
+          <FieldSelect
+            field="tools-mode"
+            value={settings.tools.mode}
+            onChange={(mode) => onSettingsChange(patch(settings, 'tools', { ...settings.tools, mode }))}
+            options={[
+              { value: 'inherit', label: 'Inherit profile tools' },
+              { value: 'explicit', label: 'Only tools I enable' }
+            ]}
+          />
+        </Field>
+        {catalogs.builtinTools.map((tool) => (
+          <CheckRow
+            key={tool.id}
+            id={`tool-${tool.id}`}
+            checked={settings.tools.allowlist.includes(tool.id)}
+            onChange={(enabled) => {
+              const allowlist = enabled
+                ? [...settings.tools.allowlist, tool.id]
+                : settings.tools.allowlist.filter((id) => id !== tool.id)
+              onSettingsChange(patch(settings, 'tools', { ...settings.tools, allowlist }))
+            }}
+          >
+            {tool.label}
+          </CheckRow>
+        ))}
+      </SettingGroup>
+
+      </div>
+
+      <button
+        type="button"
+        className="agent-settings-more-toggle"
+        data-testid="agent-editor-more"
+        aria-expanded={moreOpen}
+        aria-controls={`agent-more-${definitionId}`}
+        onClick={() => onMoreOpenChange?.(!moreOpen)}
+      >
+        {moreOpen ? 'Less' : 'More'}
+        <span className="agent-settings-more-hint">capability models · fallbacks · style · what it reads · memory · browser · delegation · workspace · scripts · asking · limits · recovery · examples</span>
+      </button>
+      <div id={`agent-more-${definitionId}`} className="agent-settings-more" data-agent-more="" hidden={!moreOpen}>
       <SettingGroup
         pointer="/settings/primaryModel/capabilityOverrides"
         title="Capability-specific models"
@@ -429,129 +573,6 @@ export function AgentSettingsForm({
             }
           />
         </Field>
-      </SettingGroup>
-
-      <SettingGroup pointer="/settings/skills" title="Skills" lead="Inherit profile skills or pick a specific set. A missing skill keeps the draft but blocks publish/run.">
-        <Field id="skills-mode" label="Selection">
-          <FieldSelect
-            field="skills-mode"
-            value={settings.skills.mode}
-            onChange={(mode) => onSettingsChange(patch(settings, 'skills', { ...settings.skills, mode }))}
-            options={[
-              { value: 'inherit', label: 'Inherit profile skills' },
-              { value: 'explicit', label: 'Only skills I enable' }
-            ]}
-          />
-        </Field>
-        {catalogs.skills.map((skill) => {
-          const selection = settings.skills.selections.find((item) => item.skillId === skill.id)
-          const enabled = selection ? selection.enabled : settings.skills.mode === 'inherit'
-          return (
-            <div key={skill.id}>
-              <CheckRow
-                id={`skill-${skill.id}`}
-                checked={enabled}
-                onChange={(next) => {
-                  const selections = settings.skills.selections.filter((item) => item.skillId !== skill.id)
-                  selections.push({ skillId: skill.id, enabled: next, pinRevision: selection?.pinRevision })
-                  onSettingsChange(patch(settings, 'skills', { ...settings.skills, selections }))
-                }}
-              >
-                {skill.name}
-                {!skill.available ? ' (unavailable)' : ''}
-                {settings.skills.mode === 'inherit' && !selection ? ' · inherited' : ''}
-              </CheckRow>
-            </div>
-          )
-        })}
-      </SettingGroup>
-
-      <SettingGroup pointer="/settings/mcp" title="MCP tools" lead="Turning on a server is not permission for future tools. Name the tools this agent may use.">
-        <Field id="mcp-mode" label="Selection">
-          <FieldSelect
-            field="mcp-mode"
-            value={settings.mcp.mode}
-            onChange={(mode) => onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, mode }))}
-            options={[
-              { value: 'inherit', label: 'Inherit profile tools' },
-              { value: 'explicit', label: 'Only tools I enable' }
-            ]}
-          />
-        </Field>
-        {catalogs.mcpServers.map((server) => {
-          const current = settings.mcp.servers.find((item) => item.serverId === server.serverId)
-          return (
-            <div key={server.serverId}>
-              <CheckRow
-                id={`mcp-${server.serverId}`}
-                checked={current?.enabled ?? settings.mcp.mode === 'inherit'}
-                onChange={(enabled) => {
-                  const servers = settings.mcp.servers.filter((item) => item.serverId !== server.serverId)
-                  servers.push({
-                    serverId: server.serverId,
-                    enabled,
-                    tools: current?.tools ?? server.tools.map((tool) => ({ toolName: tool.toolName, enabled: false }))
-                  })
-                  onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, servers }))
-                }}
-              >
-                {server.name}
-              </CheckRow>
-              {server.tools.map((tool) => {
-                const selected = current?.tools.find((item) => item.toolName === tool.toolName)?.enabled ?? false
-                return (
-                  <CheckRow
-                    key={tool.toolName}
-                    id={`mcp-${server.serverId}-${tool.toolName}`}
-                    checked={selected}
-                    onChange={(enabled) => {
-                      const others = (current?.tools ?? []).filter((item) => item.toolName !== tool.toolName)
-                      const servers = settings.mcp.servers.filter((item) => item.serverId !== server.serverId)
-                      servers.push({
-                        serverId: server.serverId,
-                        enabled: current?.enabled ?? true,
-                        tools: [...others, { toolName: tool.toolName, enabled }]
-                      })
-                      onSettingsChange(patch(settings, 'mcp', { ...settings.mcp, servers }))
-                    }}
-                  >
-                    {tool.toolName}
-                    {!tool.available ? ' (unavailable)' : ''}
-                  </CheckRow>
-                )
-              })}
-            </div>
-          )
-        })}
-      </SettingGroup>
-
-      <SettingGroup pointer="/settings/tools" title="Built-in tools">
-        <Field id="tools-mode" label="Selection">
-          <FieldSelect
-            field="tools-mode"
-            value={settings.tools.mode}
-            onChange={(mode) => onSettingsChange(patch(settings, 'tools', { ...settings.tools, mode }))}
-            options={[
-              { value: 'inherit', label: 'Inherit profile tools' },
-              { value: 'explicit', label: 'Only tools I enable' }
-            ]}
-          />
-        </Field>
-        {catalogs.builtinTools.map((tool) => (
-          <CheckRow
-            key={tool.id}
-            id={`tool-${tool.id}`}
-            checked={settings.tools.allowlist.includes(tool.id)}
-            onChange={(enabled) => {
-              const allowlist = enabled
-                ? [...settings.tools.allowlist, tool.id]
-                : settings.tools.allowlist.filter((id) => id !== tool.id)
-              onSettingsChange(patch(settings, 'tools', { ...settings.tools, allowlist }))
-            }}
-          >
-            {tool.label}
-          </CheckRow>
-        ))}
       </SettingGroup>
 
       <SettingGroup pointer="/settings/browser" title="Browser" lead="Off for a new generic agent. Turn this on only when the agent should use a browser.">
@@ -915,6 +936,7 @@ export function AgentSettingsForm({
           Add example
         </button>
       </SettingGroup>
+      </div>
     </div>
   )
 }

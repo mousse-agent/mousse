@@ -277,10 +277,6 @@
   color: var(--ad-accent);
 }
 
-.agent-editor[data-dirty="true"] [data-action="save-draft"] {
-  font-weight: 600;
-}
-
 @media (max-width: 1099px) {
   .agent-editor {
     overflow-y: auto;
@@ -319,3 +315,22 @@
   white-space: pre-wrap;
   font-size: 12px;
 }
+
+/* The editor shows Name, Instructions, Model and What it may use; the rest folds behind More. */
+.agent-settings-use-title { margin: 18px 0 2px; font-size: 13px; font-weight: 600; }
+.agent-settings-more-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  margin: 14px 0 4px;
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-settings-more-hint { color: var(--text-secondary); font-weight: 400; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

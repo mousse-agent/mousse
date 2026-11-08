@@ -31,7 +31,7 @@ export function AgentCard({
           {item.modelLabel ? <span className="agent-chip">{item.modelLabel}</span> : null}
           <span className="agent-chip">{item.enabled ? 'Enabled' : 'Disabled'}</span>
           <span className="agent-chip">
-            {state === 'published' ? 'Published' : state === 'unpublished-changes' ? 'Draft changes' : 'Draft'}
+            {state === 'published' ? 'Live' : 'Changes not live'}
           </span>
           {item.favorite ? <span className="agent-chip">Favorite</span> : null}
           {issueCount > 0 ? (

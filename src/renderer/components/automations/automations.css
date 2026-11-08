@@ -24,9 +24,8 @@
   flex-shrink: 0;
 }
 
-.automation-save-state[data-state='unsaved']::before { background: var(--warning, #d4b06a); }
-.automation-save-state[data-state='unpublished']::before { background: var(--accent, #b5c9fa); }
-.automation-save-state[data-state='published']::before { background: var(--success, #7ec99a); }
+.automation-save-state[data-state='changes']::before { background: var(--accent, #b5c9fa); }
+.automation-save-state[data-state='live']::before { background: var(--success, #7ec99a); }
 
 .automation-issue-link {
   border: 0;
@@ -63,3 +62,18 @@
   gap: 12px;
   flex-wrap: wrap;
 }
+
+/* A save that failed: one line and Retry, never a silent state. */
+.automation-save-failed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-radius: var(--ui-control-radius, 6px);
+  background: color-mix(in srgb, var(--danger, #e06c75) 14%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.publish-impact-list { margin: 8px 0 0; padding-left: 18px; color: var(--text-secondary); }

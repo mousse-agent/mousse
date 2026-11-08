@@ -1,6 +1,6 @@
 import { Star } from '../../lib/icons'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { ArchiveDefinitionDialog, FixIssuesLink, SaveStateLabel } from '../automations/EditorParts'
+import { ArchiveDefinitionDialog, FixIssuesLink, PublishImpactDialog, SaveFailed, SaveStateLabel, useAutosave, type PublishUser } from '../automations/EditorParts'
 import { definitionSaveState, publishBlockReason } from '../automations/editorState'
 import { RowMenu } from '../integrations/RowMenu'
 import { openAutomationCreate } from '../../stores/automationCreateStore'
@@ -85,6 +85,11 @@ export function AgentEditor({
   const [baseline, setBaseline] = useState<DraftSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  /** The last save failed: its message, shown with Retry. */
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [moreOpen, setMoreOpen] = useState(false)
+  /** Automations that use this agent, asked about before Publish. */
+  const [publishUsers, setPublishUsers] = useState<PublishUser[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
@@ -191,7 +196,7 @@ export function AgentEditor({
   const blocking = issues.filter((issue) => issue.blocking)
   const canPublish = Boolean(record && draft && !dirty && runtimeChecked && blocking.length === 0)
   const saveState = definitionSaveState({ dirty, matchesPublished: record ? matchesPublished(record) : null })
-  const publishReason = publishBlockReason({ state: saveState, busy: saving, blocking, checking: !runtimeChecked })
+  const publishReason = publishBlockReason({ busy: saving, dirty, saveFailed: Boolean(saveError), blocking, checking: !runtimeChecked })
   const canRun = Boolean(record && draft && !dirty && blocking.length === 0)
 
   const requestLeave = (action: () => void) => {
@@ -210,8 +215,8 @@ export function AgentEditor({
     setDraft(keepLocal ?? snap)
   }
 
-  const saveDraft = async () => {
-    if (!record || !draft) return
+  const saveDraft = async (): Promise<boolean> => {
+    if (!record || !draft) return false
     setSaving(true)
     setError(null)
     const started = gate.current.current()
@@ -227,22 +232,52 @@ export function AgentEditor({
         visual: draft.visual,
         flags: { enabled: draft.flags.enabled, favorite: draft.flags.favorite }
       })
-      if (!shouldApplyAsyncResult(started, gate.current.current())) return
-      applyRecord(next)
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return false
+      // Edits made while it saved stay on screen; the next autosave takes them.
+      const sent = draft
+      setRecord(next)
+      const snap = snapshotFromRecord(next)
+      setBaseline(snap)
+      setDraft((current) => (current === sent ? snap : current))
+      setSaveError(null)
+      return true
     } catch (caught) {
-      if (!shouldApplyAsyncResult(started, gate.current.current())) return
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return false
       if (isAgentDefinitionClientError(caught) && caught.code === 'REVISION_CONFLICT') {
         setConflictMessage(caught.message)
       } else {
-        setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+        setSaveError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
       }
+      return false
     } finally {
       if (shouldApplyAsyncResult(started, gate.current.current())) setSaving(false)
     }
   }
 
-  const publish = async () => {
+  // Edits save themselves; a failed save waits for Retry or the next edit.
+  useAutosave(draft, { dirty, canSave: Boolean(record && draft) && !saving && !archiving && !conflictMessage, save: saveDraft })
+
+  /** The automations whose Who is this agent: they get what is published on their next run. */
+  const usersOf = async (): Promise<PublishUser[]> => {
+    if (!record) return []
+    try {
+      const jobs = await window.mousse?.scheduled?.list?.() ?? []
+      return jobs.filter((job) => job.agent?.definitionId === record.id).map((job) => ({ id: job.id, name: job.name }))
+    } catch {
+      return []
+    }
+  }
+
+  const publish = async (confirmed = false) => {
     if (!record || !canPublish) return
+    if (!confirmed) {
+      const users = await usersOf()
+      if (users.length) {
+        setPublishUsers(users)
+        return
+      }
+    }
+    setPublishUsers(null)
     setSaving(true)
     setError(null)
     const started = gate.current.current()
@@ -269,6 +304,12 @@ export function AgentEditor({
   }
 
   const focusIssue = (fieldId: string) => {
+    // An issue in a setting behind More opens More first.
+    if (document.getElementById(fieldId)?.closest('[data-agent-more]')?.hasAttribute('hidden')) {
+      setMoreOpen(true)
+      requestAnimationFrame(() => focusIssue(fieldId))
+      return
+    }
     document.getElementById(fieldId)?.scrollIntoView({ block: 'center' })
     const focusable = document.getElementById(fieldId)?.querySelector<HTMLElement>('input, textarea, select, button')
     focusable?.focus()
@@ -347,8 +388,8 @@ export function AgentEditor({
           ← Agents
         </button>
         <span className="agent-defs__title">{draft.settings.identity.name || 'Untitled agent'}</span>
-        <SaveStateLabel state={saveState} extra={runsOn ? `Runs on ${runsOn}` : null} />
-        {saveState !== 'unsaved' ? <FixIssuesLink issues={blocking} onShow={() => focusIssue(blocking[0].fieldId)} /> : null}
+        <SaveStateLabel state={saveState} extra={saving ? 'Saving…' : runsOn ? `Runs on ${runsOn}` : null} />
+        {!dirty ? <FixIssuesLink issues={blocking} onShow={() => focusIssue(blocking[0].fieldId)} /> : null}
         <div className="agent-defs__actions">
           <button
             type="button"
@@ -360,15 +401,6 @@ export function AgentEditor({
             onClick={() => setDraft({ ...draft, flags: { ...draft.flags, favorite: !draft.flags.favorite } })}
           >
             <Star size={14} fill={draft.flags.favorite ? 'currentColor' : 'none'} />
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            data-action="save-draft"
-            disabled={saving || archiving || !dirty}
-            onClick={() => void saveDraft()}
-          >
-            {saving ? 'Saving…' : 'Save draft'}
           </button>
           <button
             type="button"
@@ -412,6 +444,8 @@ export function AgentEditor({
           />
         </div>
       </header>
+      {saveError ? <SaveFailed message={saveError} busy={saving} onRetry={() => void saveDraft()} /> : null}
+      {publishUsers ? <PublishImpactDialog users={publishUsers} onCancel={() => setPublishUsers(null)} onPublish={() => void publish(true)} /> : null}
       {error ? (
         <div className="agent-banner agent-banner--error" role="alert">
           {error}
@@ -463,6 +497,8 @@ export function AgentEditor({
             onSettingsChange={(settings) => setDraft({ ...draft, settings })}
             onSystemPromptChange={(systemPrompt) => setDraft({ ...draft, systemPrompt })}
             onSave={() => void saveDraft()}
+            moreOpen={moreOpen}
+            onMoreOpenChange={setMoreOpen}
           />
           <TryRunPanel
             profileId={profileId}

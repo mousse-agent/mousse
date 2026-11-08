@@ -514,10 +514,6 @@
   clip: rect(0 0 0 0);
 }
 
-.wf-editor[data-dirty="true"] [data-action="save-draft"] {
-  font-weight: 600;
-}
-
 @media (max-width: 1099px) and (min-width: 761px) {
   .wf-editor__body { grid-template-columns: 170px minmax(0, 1fr) 250px; }
   .wf-editor > .wf-header .wf-actions { margin-left: 0; width: 100%; }

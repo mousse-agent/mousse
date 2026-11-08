@@ -18,9 +18,9 @@ import {
 } from './libraryFilter'
 
 const STATUS_LABELS: Record<Exclude<WorkflowLibraryStatus, 'all'>, string> = {
-  draft: 'Draft',
-  published: 'Published',
-  'unpublished-changes': 'Unpublished changes',
+  draft: 'Never published',
+  published: 'Live',
+  'unpublished-changes': 'Changes not live',
   unsupported: 'Unsupported nodes'
 }
 import { WORKFLOW_TEMPLATES } from './templates'

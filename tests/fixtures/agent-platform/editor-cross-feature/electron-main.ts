@@ -96,10 +96,10 @@ async function run(): Promise<void> {
         await win.webContents.insertText(prompt); await delay(150)
       }
       await waitFor('document.querySelector("[aria-label=\\"Agent appearance\\"]")?.tagName === "SECTION"', 'accessible agent appearance')
-      await click('[data-action="save-draft"]')
-      await waitFor('document.querySelector("[data-action=publish]")?.disabled === false', 'agent save')
+      // Edits save themselves; Publish turns on once they have.
+      await waitFor('document.querySelector("[data-action=publish]")?.disabled === false', 'agent autosave')
       await click('[data-action="publish"]')
-      await waitFor('document.querySelector("[data-editor-status]")?.textContent.includes("Published")', 'agent publish')
+      await waitFor('document.querySelector("[data-editor-status]")?.textContent.includes("Live")', 'agent publish')
       await delay(100)
       const agentRows = await gui.runWithSender(win.webContents, () => gui.request<Array<{ id: string; name: string }>>('agentDefinitions.list', { profileId: config.profileId }))
       const agentId = agentRows.find((row) => row.name === 'Renderer production agent')?.id
@@ -118,10 +118,9 @@ async function run(): Promise<void> {
       const manifest = JSON.parse(raw); manifest.name = 'Renderer production workflow'; manifest.slug = 'renderer-production-workflow'
       await input('[data-source-text]', JSON.stringify(manifest, null, 2))
       await click('[data-action="view-canvas"]'); await delay(150)
-      await click('[data-action="save-draft"]')
-      await waitFor('document.querySelector("[data-action=publish]")?.disabled === false', 'workflow save')
+      await waitFor('document.querySelector("[data-action=publish]")?.disabled === false', 'workflow autosave')
       await click('[data-action="publish"]')
-      await waitFor('document.querySelector("[data-editor-status]")?.textContent.includes("Published")', 'workflow publish')
+      await waitFor('document.querySelector("[data-editor-status]")?.textContent.includes("Live")', 'workflow publish')
       const workflowId = await js<string>('document.querySelector("[data-workflow-editor]").getAttribute("data-definition-id")')
       const semantic = await js<string>('document.querySelector("[data-semantic-identity]").textContent')
       await click('[aria-label="Workflow actions"]')
