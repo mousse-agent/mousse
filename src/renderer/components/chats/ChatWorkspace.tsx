@@ -16,7 +16,6 @@ import type { BotLook } from '../../../shared/bots/personal/look'
 import { useBotsPolling, useBotsStore } from '../../stores/botsStore'
 import { BotChatView } from '../bots/BotChatView'
 import { BotDialogs } from '../bots/BotDialogs'
-import { NewBotDialog } from '../bots/NewBotDialog'
 import { BotFace } from '../bots/face/BotFace'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
@@ -32,7 +31,6 @@ export function ChatWorkspace() {
   const newChatOpen = useChatsStore((s) => s.newChatOpen)
   const activeBotId = useChatsStore((s) => s.activeBotId)
   const bots = useBotsStore((s) => s.bots)
-  const newBotOpen = useBotsStore((s) => s.newBotOpen)
   const bot = activeBotId ? bots.find((entry) => entry.id === activeBotId) : undefined
   useBotsPolling()
   const draft = useChatsStore((s) => s.drafts[activeId || ''] || '')
@@ -53,8 +51,9 @@ export function ChatWorkspace() {
     if (element) element.scrollTop = element.scrollHeight
   }, [activeId, messages?.length, network?.records.length, running])
   const setDraft = (value: string) => { if (activeId) useChatsStore.getState().setDraft(activeId, value) }
-  const newBot = () => useBotsStore.setState({ newBotOpen: true, error: null })
-  const dialogs = <>{newChatOpen && <NewChatDialog />}{newBotOpen && <NewBotDialog />}<BotDialogs /></>
+  const newBot = () => useBotsStore.getState().openNewBot()
+  // New bot is not here: `NewBotDialogHost` in App keeps it open whichever pane shows.
+  const dialogs = <>{newChatOpen && <NewChatDialog />}<BotDialogs /></>
   if (bot) return <main className="chat-workspace" aria-label="Chats workspace"><BotChatView key={bot.id} bot={bot} />{dialogs}</main>
   // Nothing to talk to yet: the first bot is one click away (bot-ui §4.1).
   const firstBot = !chat && !snapshot.chats.length && !bots.length && !loading
