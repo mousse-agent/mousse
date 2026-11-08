@@ -984,6 +984,14 @@ export interface Project {
   offline?: true
   /** Set while the computer that holds the project has stopped sharing its threads with this one (it blocked this computer or turned sharing off). */
   notShared?: true
+  /** The icon file the user chose: relative to `path` when inside the folder, else absolute. Overrides the found one. */
+  iconPath?: string
+  /** The user turned icons off for this project: it always shows the folder glyph. */
+  iconOff?: true
+  /** The icon found at a standard place in the folder, relative to it; absent when none was found. */
+  detectedIconPath?: string
+  /** When the folder was last looked at for an icon; absent until then, and cleared when the project is opened again. */
+  iconDetectedAt?: string
 }
 
 /**

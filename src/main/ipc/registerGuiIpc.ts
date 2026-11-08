@@ -23,6 +23,7 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { daemonGitParams } from './daemonGitParams'
+import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -1426,6 +1427,38 @@ export function registerGuiIpc(
   registerHandler('projects:trustGitSettings', async (_e, projectId: string) =>
     guiMms.request<{ filters: string[] }>('projects.trustGitSettings', { projectId })
   )
+  // A project's icon: the daemon reads and checks the file and answers a data URL, so the window never reads files.
+  registerHandler('projects:icon', async (_e, projectId: string) => {
+    try {
+      const res = await guiMms.request<{ icon: ProjectIconImage | null }>('projects.icon', { projectId })
+      return res.icon ?? null
+    } catch (error) {
+      // A daemon from before project icons: the folder glyph.
+      if ((error as { code?: unknown } | null)?.code === 'method_not_allowed') return null
+      throw error
+    }
+  })
+  registerHandler('projects:setIcon', async (_e, projectId: string, choice: ProjectIconChoice) => {
+    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>('projects.setIcon', {
+      projectId,
+      mode: choice?.mode,
+      ...(choice?.mode === 'custom' ? { path: choice.path } : {})
+    })
+    broadcast('projects:updated', res.projects)
+    return res.project
+  })
+  /** The icon file picker, starting in the project's folder. */
+  registerHandler('projects:pickIcon', async (_e, defaultPath: unknown) => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an icon',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: [...PROJECT_ICON_EXTENSIONS] }],
+      ...(typeof defaultPath === 'string' && defaultPath.length <= 4096 ? { defaultPath } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds

@@ -7,6 +7,7 @@ import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
+import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -769,6 +770,12 @@ const api = {
       ipcRenderer.invoke('projects:reorder', projectIds),
     trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>
       ipcRenderer.invoke('projects:trustGitSettings', projectId),
+    /** The project's icon as a checked data URL, or null for the folder glyph. */
+    icon: (projectId: string): Promise<ProjectIconImage | null> => ipcRenderer.invoke('projects:icon', projectId),
+    setIcon: (projectId: string, choice: ProjectIconChoice): Promise<Project> =>
+      ipcRenderer.invoke('projects:setIcon', projectId, choice),
+    /** Opens the icon file picker in `defaultPath`; null when cancelled. */
+    pickIcon: (defaultPath?: string): Promise<string | null> => ipcRenderer.invoke('projects:pickIcon', defaultPath),
     listThreads: (projectId: string): Promise<Thread[]> =>
       ipcRenderer.invoke('projects:threads', projectId),
     onUpdated: (cb: (projects: Project[]) => void): (() => void) => {

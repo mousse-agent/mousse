@@ -221,6 +221,8 @@ export const PROTOCOL_METHODS = [
   'projects.pin',
   'projects.reorder',
   'projects.trustGitSettings',
+  'projects.icon',
+  'projects.setIcon',
   'threads.list',
   'threads.get',
   'threads.create',

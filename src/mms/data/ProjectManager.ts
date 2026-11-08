@@ -7,6 +7,8 @@ import { atomicWriteJsonSync, quarantineUnreadableFileSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
 import { trustRepositoryPrograms } from '../git/repoPrograms'
 import { retireProjectSnapshots } from '../workspace/SnapshotWorkspace'
+import type { ProjectIconChoice } from '../../shared/projectIcon'
+import { toStoredIconPath } from './projectIcon'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -33,7 +35,14 @@ export class ProjectManager {
 
   openProject(folderPath: string): Project {
     const existing = this.projects.find((p) => p.path === folderPath)
-    if (existing) return existing
+    if (existing) {
+      // Opening a project again looks for its icon again.
+      if (existing.iconDetectedAt) {
+        delete existing.iconDetectedAt
+        this.persist()
+      }
+      return existing
+    }
 
     const now = new Date().toISOString()
     const project: Project = {
@@ -98,6 +107,28 @@ export class ProjectManager {
 
     this.persist()
     return project
+  }
+
+  /** Sets what the project's icon is: found in the folder, the user's file, or the folder glyph. */
+  setProjectIcon(id: string, choice: ProjectIconChoice): Project {
+    const project = this.getProject(id)
+    if (!project) throw new Error(`Project not found: ${id}`)
+    delete project.iconPath
+    delete project.iconOff
+    if (choice.mode === 'off') project.iconOff = true
+    else if (choice.mode === 'custom') project.iconPath = toStoredIconPath(project.path, choice.path)
+    this.persist()
+    return project
+  }
+
+  /** Remembers the icon found in the project's folder (or that there was none) and when it was looked for. */
+  recordDetectedIcon(id: string, path: string | null): void {
+    const project = this.getProject(id)
+    if (!project) return
+    if (path) project.detectedIconPath = path
+    else delete project.detectedIconPath
+    project.iconDetectedAt = new Date().toISOString()
+    this.persist()
   }
 
   reorderProjects(projectIds: string[]): Project[] {

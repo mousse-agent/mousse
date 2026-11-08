@@ -816,6 +816,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'Repository identity and trust of a folder are about a local folder; other computers match projects through projects.match.'
   },
   {
+    methods: ['projects.icon', 'projects.setIcon'],
+    reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
+  },
+  {
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
