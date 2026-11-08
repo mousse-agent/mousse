@@ -34,6 +34,11 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitChangesResult,
+  GitIncludeRequest,
+  GitIncludeResult,
+  GitSelectionState,
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
@@ -499,8 +504,23 @@ const api = {
       storageInvoke('git:checkout', scope, branch, options),
     commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
       storageInvoke('git:commit', scope, message, options),
-    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string; selection?: GitCommitSelection }): Promise<GitCommitSuggestion> =>
       storageInvoke('git:suggestCommitMessage', scope, options),
+    /** HEAD → working tree as hunks, and what of it the next commit takes. */
+    changes: (scope: GitScope, options?: { paths?: string[] }): Promise<GitChangesResult> =>
+      storageInvoke('git:changes', scope, options),
+    /** Includes or leaves out a file, some of its hunks or lines, or everything. */
+    include: (scope: GitScope, input: GitIncludeRequest | { all: true; include: boolean }): Promise<GitIncludeResult | { selection: GitSelectionState }> =>
+      storageInvoke('git:include', scope, input),
+    /** Undoes the last local commit of a project folder; its changes stay in the files and the index. */
+    undoLastCommit: (scope: GitScope, expectedHead: string): Promise<GitMutationResult> =>
+      storageInvoke('git:undoLastCommit', scope, expectedHead),
+    /** Another view changed what the next commit takes in a thread's or project's folder. */
+    onSelectionChanged: (cb: (event: { threadId?: string; projectId?: string }) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { threadId?: string; projectId?: string }): void => cb(payload)
+      ipcRenderer.on('git:selectionChanged', handler)
+      return () => ipcRenderer.removeListener('git:selectionChanged', handler)
+    },
     push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
       storageInvoke('git:push', scope, options),
     init: (scope: GitScope): Promise<GitMutationResult> =>

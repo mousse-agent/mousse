@@ -1,7 +1,8 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
@@ -13,7 +14,8 @@ import { discardProvenAsync, IndexLockedError, stagedEntryDigests, stagedModes, 
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
-import { explicitActionGitEnv } from './gitEnv'
+import { explicitActionGitEnv, privateIndexEnv } from './gitEnv'
+import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
@@ -32,6 +34,10 @@ import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
   GitBranchOptions,
+  GitChangesResult,
+  GitIncludeRequest,
+  GitIncludeResult,
+  GitSelectionState,
   GitCheckoutOptions,
   GitCheckoutResult,
   GitCommit,
@@ -392,10 +398,10 @@ function pathExists(path: string): Promise<boolean> {
   return access(path).then(() => true, () => false)
 }
 
-async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
+async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number, env: Record<string, string> = {}): Promise<string> {
   let guarded: string[]
   try {
-    guarded = await withoutRepoProgramsAsync(cwd, args)
+    guarded = await withoutRepoProgramsAsync(cwd, args, { env })
   } catch (error) {
     if (error instanceof GitPolicyError) throw error
     return ''
@@ -403,7 +409,7 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
   return new Promise((resolvePromise) => {
     const child = spawn('git', guarded, {
       cwd,
-      env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' }),
+      env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...env }),
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true
     })
@@ -436,6 +442,21 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
   })
 }
 
+/** Where `git.stage`, `git.unstage` and `git.discard` keep a project folder's "everything left out" marker. */
+export interface MarkerOptions { markerFile: string }
+
+/** The listed file a path names, as its path or a rename's old path. */
+function fileOf(view: SelectionView, path: string): FileView | undefined {
+  return view.files.find((item) => item.paths.includes(path))
+}
+
+/** The entries a whole-file choice makes: the working tree's for every path the file covers, or HEAD's. */
+function wholeEntries(target: FileView, include: boolean): Map<string, Entry | null> {
+  const entries = new Map<string, Entry | null>([[target.file.path, include ? target.work : target.head]])
+  if (target.file.oldPath !== undefined) entries.set(target.file.oldPath, include ? target.oldWork : target.oldHead)
+  return entries
+}
+
 /** What a Discard kept, and the paths it left as they are because they changed after the person pressed Discard. */
 export type DiscardedCopy = KeptCopy & { left: LeftAsItIs[] }
 
@@ -455,6 +476,8 @@ export class GitService {
     liveOutput?: { intervalMs?: number; maxLines?: number }
     /** Test seam: runs right before each entry a Discard removes gets its last check. */
     beforeDiscardUnlink?: (path: string) => void
+    /** Overrides how many changed files `git.changes` lists; for tests. */
+    selectionMaxFiles?: number
   } = {}) {}
 
   /** Every Git command here runs no program the repository configures (`repoPrograms`). */
@@ -862,59 +885,70 @@ export class GitService {
   }
 
   /** Stages the working tree state of these paths, including deletions and new files. Paths with nothing to stage are skipped. */
-  stage(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
-    return this.asUser(userRequested, () => this.stageNow(cwd, paths))
+  stage(cwd: string, userRequested: UserAction, paths: readonly string[], marker?: MarkerOptions): Promise<void> {
+    return this.asUser(userRequested, () => this.stageNow(cwd, paths, marker))
   }
 
-  private async stageNow(cwd: string, paths: readonly string[]): Promise<void> {
+  private async stageNow(cwd: string, paths: readonly string[], marker?: MarkerOptions): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
-      const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.workdir !== '')
-      await this.withPathspecFile(top, ['add'], targets.map((entry) => entry.path))
+      await this.keepingMarker(top, marker, async () => {
+        const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.workdir !== '')
+        await this.withPathspecFile(top, ['add'], targets.map((entry) => entry.path))
+      })
     })
   }
 
-  stageAll(cwd: string, userRequested: UserAction): Promise<void> {
-    return this.asUser(userRequested, () => this.stageAllNow(cwd))
+  stageAll(cwd: string, userRequested: UserAction, marker?: MarkerOptions): Promise<void> {
+    return this.asUser(userRequested, () => this.stageAllNow(cwd, marker))
   }
 
-  private async stageAllNow(cwd: string): Promise<void> {
+  private async stageAllNow(cwd: string, marker?: MarkerOptions): Promise<void> {
     await this.serialized(cwd, async () => {
-      const run = await this.runGit(await this.toplevel(cwd), ['add', '-A'], { userAction: true })
-      if (!run.ok) throw failure('git_failed', run)
+      const top = await this.toplevel(cwd)
+      await this.keepingMarker(top, marker, async () => {
+        const run = await this.runGit(top, ['add', '-A'], { userAction: true })
+        if (!run.ok) throw failure('git_failed', run)
+      })
     })
   }
 
   /** Takes these paths out of the index and leaves the working tree alone. A staged rename is unstaged on both names. */
-  unstage(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
-    return this.asUser(userRequested, () => this.unstageNow(cwd, paths))
+  unstage(cwd: string, userRequested: UserAction, paths: readonly string[], marker?: MarkerOptions): Promise<void> {
+    return this.asUser(userRequested, () => this.unstageNow(cwd, paths, marker))
   }
 
-  private async unstageNow(cwd: string, paths: readonly string[]): Promise<void> {
+  private async unstageNow(cwd: string, paths: readonly string[], marker?: MarkerOptions): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
-      const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.index !== '' && entry.index !== '?' && !isConflicted(entry))
-      const names = new Set<string>()
-      for (const entry of targets) {
-        names.add(entry.path)
-        if (entry.index === 'R' && entry.from) names.add(entry.from)
-      }
-      const unborn = !await this.hasHead(top)
-      // `-f` lets `rm --cached` drop an index entry whose content differs from the file; the file itself is kept.
-      await this.withPathspecFile(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch'] : ['restore', '--staged'], [...names])
+      await this.keepingMarker(top, marker, () => this.unstagePaths(top, paths))
     })
   }
 
-  unstageAll(cwd: string, userRequested: UserAction): Promise<void> {
-    return this.asUser(userRequested, () => this.unstageAllNow(cwd))
+  private async unstagePaths(top: string, paths: readonly string[]): Promise<void> {
+    const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.index !== '' && entry.index !== '?' && !isConflicted(entry))
+    const names = new Set<string>()
+    for (const entry of targets) {
+      names.add(entry.path)
+      if (entry.index === 'R' && entry.from) names.add(entry.from)
+    }
+    const unborn = !await this.hasHead(top)
+    // `-f` lets `rm --cached` drop an index entry whose content differs from the file; the file itself is kept.
+    await this.withPathspecFile(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch'] : ['restore', '--staged'], [...names])
   }
 
-  private async unstageAllNow(cwd: string): Promise<void> {
+  unstageAll(cwd: string, userRequested: UserAction, marker?: MarkerOptions): Promise<void> {
+    return this.asUser(userRequested, () => this.unstageAllNow(cwd, marker))
+  }
+
+  private async unstageAllNow(cwd: string, marker?: MarkerOptions): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
-      const unborn = !await this.hasHead(top)
-      const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'], { userAction: true })
-      if (!run.ok) throw failure('git_failed', run)
+      await this.keepingMarker(top, marker, async () => {
+        const unborn = !await this.hasHead(top)
+        const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'], { userAction: true })
+        if (!run.ok) throw failure('git_failed', run)
+      })
     })
   }
 
@@ -931,72 +965,76 @@ export class GitService {
    * something changed after the copy was read, or was saved again after it was emptied, is left as it is, with its
    * staged version, and named in `left`. The caller confirms first.
    */
-  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
-    return this.asUser(userRequested, () => this.discardNow(cwd, paths, keep))
+  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }, marker?: MarkerOptions): Promise<DiscardedCopy | undefined> {
+    return this.asUser(userRequested, () => this.discardNow(cwd, paths, keep, marker))
   }
 
-  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
+  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }, marker?: MarkerOptions): Promise<DiscardedCopy | undefined> {
     return await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
-      const selected = selectEntries(await this.statusEntries(top), paths)
-      if (!selected.length) return undefined
-      const unborn = !await this.hasHead(top)
-      const restore = new Set<string>()
-      const remove = new Set<string>()
-      const untracked: string[] = []
-      for (const entry of selected) {
-        if (isUntracked(entry)) {
-          // A repository of its own is left alone, as `git clean -d` leaves it: its history is never removed.
-          if (!existsSync(join(top, entry.path, '.git'))) untracked.push(entry.path)
-          continue
-        }
-        const pair = `${entry.index || ' '}${entry.workdir || ' '}`
-        // A path added to the index (also intent-to-add), the new name of a rename or copy, or a conflict whose "us" side lacks the path has no version in HEAD.
-        const absent = unborn || ABSENT_FROM_HEAD_PAIRS.has(pair) || (!isConflicted(entry) && (entry.index === 'A' || entry.index === 'R' || entry.index === 'C' || (entry.index === '' && entry.workdir === 'A')))
-        if (absent) remove.add(entry.path)
-        else restore.add(entry.path)
-        if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
-      }
-      if (!restore.size && !remove.size && !untracked.length) return undefined
-      const run: DiscardGit = async (args, options = {}) => {
-        const ran = await this.runGit(top, args, { ...(options.write ? { userAction: true } : {}), ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { input: options.input } : {}) })
-        return { status: ran.code, stdout: ran.stdout, stderr: ran.output }
-      }
-      // What the index holds now, to tell later whether someone staged something meanwhile.
-      const indexBefore = await this.indexEntries(top)
-      // A submodule is changed in the index only: its folder is never walked, removed or written. One staged where HEAD
-      // has a file is in the way of that file, and the copy refuses it.
-      const headModes = unborn ? new Map<string, string>() : await modesIn(top, 'HEAD', [...restore])
-      const indexModes = stagedModes(indexBefore)
-      const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
-      // Another Git command holding the index refuses the discard before anything is kept or removed.
-      try { await waitForIndexAsync(top, run) } catch (error) { throw this.indexLocked(error) }
-      // Every path the discard writes or removes, as it is now, before any of it changes.
-      let kept: KeptCopy
-      try {
-        // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
-        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
-      } catch (error) {
-        throw keepRefusal(error)
-      }
-      try {
-        const { left } = await discardProvenAsync({
-          top,
-          ...(unborn ? {} : { head: 'HEAD' }),
-          restore: [...restore].filter((path) => !submodule(path)),
-          remove: [...remove].filter((path) => !submodule(path)),
-          untracked,
-          indexOnly: [...restore, ...remove].filter(submodule),
-          stagedBefore: stagedEntryDigests(indexBefore),
-          digests: kept.digests,
-          discardGit: run,
-          ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
-        })
-        return { ...kept, left }
-      } catch (error) {
-        throw error instanceof IndexLockedError ? this.indexLocked(error) : error
-      }
+      return this.keepingMarker(top, marker, () => this.discardPaths(top, paths, keep))
     })
+  }
+
+  private async discardPaths(top: string, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
+    const selected = selectEntries(await this.statusEntries(top), paths)
+    if (!selected.length) return undefined
+    const unborn = !await this.hasHead(top)
+    const restore = new Set<string>()
+    const remove = new Set<string>()
+    const untracked: string[] = []
+    for (const entry of selected) {
+      if (isUntracked(entry)) {
+        // A repository of its own is left alone, as `git clean -d` leaves it: its history is never removed.
+        if (!existsSync(join(top, entry.path, '.git'))) untracked.push(entry.path)
+        continue
+      }
+      const pair = `${entry.index || ' '}${entry.workdir || ' '}`
+      // A path added to the index (also intent-to-add), the new name of a rename or copy, or a conflict whose "us" side lacks the path has no version in HEAD.
+      const absent = unborn || ABSENT_FROM_HEAD_PAIRS.has(pair) || (!isConflicted(entry) && (entry.index === 'A' || entry.index === 'R' || entry.index === 'C' || (entry.index === '' && entry.workdir === 'A')))
+      if (absent) remove.add(entry.path)
+      else restore.add(entry.path)
+      if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
+    }
+    if (!restore.size && !remove.size && !untracked.length) return undefined
+    const run: DiscardGit = async (args, options = {}) => {
+      const ran = await this.runGit(top, args, { ...(options.write ? { userAction: true } : {}), ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { input: options.input } : {}) })
+      return { status: ran.code, stdout: ran.stdout, stderr: ran.output }
+    }
+    // What the index holds now, to tell later whether someone staged something meanwhile.
+    const indexBefore = await this.indexEntries(top)
+    // A submodule is changed in the index only: its folder is never walked, removed or written. One staged where HEAD
+    // has a file is in the way of that file, and the copy refuses it.
+    const headModes = unborn ? new Map<string, string>() : await modesIn(top, 'HEAD', [...restore])
+    const indexModes = stagedModes(indexBefore)
+    const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
+    // Another Git command holding the index refuses the discard before anything is kept or removed.
+    try { await waitForIndexAsync(top, run) } catch (error) { throw this.indexLocked(error) }
+    // Every path the discard writes or removes, as it is now, before any of it changes.
+    let kept: KeptCopy
+    try {
+      // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
+      kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
+    } catch (error) {
+      throw keepRefusal(error)
+    }
+    try {
+      const { left } = await discardProvenAsync({
+        top,
+        ...(unborn ? {} : { head: 'HEAD' }),
+        restore: [...restore].filter((path) => !submodule(path)),
+        remove: [...remove].filter((path) => !submodule(path)),
+        untracked,
+        indexOnly: [...restore, ...remove].filter(submodule),
+        stagedBefore: stagedEntryDigests(indexBefore),
+        digests: kept.digests,
+        discardGit: run,
+        ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
+      })
+      return { ...kept, left }
+    } catch (error) {
+      throw error instanceof IndexLockedError ? this.indexLocked(error) : error
+    }
   }
 
   /** The refusal when another Git command keeps the index locked: nothing was discarded. */
@@ -1333,28 +1371,30 @@ export class GitService {
    * of `maxBytes` at most, binary files as "Binary files differ", files that changed a great many lines
    * left out of the patch (they stay in the summary), and each list capped.
    */
-  async describeCommitInput(cwd: string, options: { all?: boolean; maxBytes?: number } = {}): Promise<CommitInput> {
+  async describeCommitInput(cwd: string, options: { all?: boolean; maxBytes?: number; indexOnly?: boolean; indexFile?: string } = {}): Promise<CommitInput> {
     if (!await this.isRepo(cwd)) return EMPTY_COMMIT_INPUT
     const limits = COMMIT_SUGGESTION_LIMITS
     const maxBytes = options.maxBytes ?? limits.diff
     // From the top, like the commit: paths and pathspecs below are relative to it, not to a project subfolder.
     const top = await this.toplevel(cwd)
-    const staged = !options.all && await readBoundedGit(top, ['diff', ...NO_DIFF_PROGRAMS, '--cached', '--name-only', '-z'], 64) !== ''
+    // `indexOnly`: exactly what the index (or the private `indexFile`) holds, as a chosen commit takes it.
+    const env = options.indexFile ? privateIndexEnv(options.indexFile) : {}
+    const staged = options.indexOnly || (!options.all && await readBoundedGit(top, ['diff', ...NO_DIFF_PROGRAMS, '--cached', '--name-only', '-z'], 64) !== '')
     const against = staged || !await this.hasHead(top) ? ['--cached'] : ['HEAD']
     // A repository's configuration must not run programs here: no external diff driver, no text conversion.
     const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
     const scope = options.all ? [':(exclude).mousse/**'] : []
 
     const numstatLimit = 64 * 1024
-    const numstatRaw = await readBoundedGit(top, [...diff, '--numstat', '-z', ...against, '--', '.', ...scope], numstatLimit)
+    const numstatRaw = await readBoundedGit(top, [...diff, '--numstat', '-z', ...against, '--', '.', ...scope], numstatLimit, env)
     const entries = parseNumstat(numstatRaw)
     const huge = entries.filter((entry) => (entry.added ?? 0) + (entry.deleted ?? 0) > limits.hugeFileLines)
     const excluded = huge.slice(0, limits.excludedFiles).map((entry) => `:(exclude,literal)${entry.path}`)
 
     const patchLimit = 3 * maxBytes
     const [statRaw, patchRaw, untrackedRaw] = await Promise.all([
-      readBoundedGit(top, [...diff, '--stat=120', `--stat-count=${limits.excludedFiles}`, ...against, '--', '.', ...scope], 2 * limits.stat),
-      readBoundedGit(top, [...diff, '--unified=3', ...against, '--', '.', ...scope, ...excluded], patchLimit),
+      readBoundedGit(top, [...diff, '--stat=120', `--stat-count=${limits.excludedFiles}`, ...against, '--', '.', ...scope], 2 * limits.stat, env),
+      readBoundedGit(top, [...diff, '--unified=3', ...against, '--', '.', ...scope, ...excluded], patchLimit, env),
       // Only a commit that stages everything takes new files; the index alone never does.
       staged ? Promise.resolve('') : readBoundedGit(top, ['ls-files', '--others', '--exclude-standard', '-z'], numstatLimit)
     ])
@@ -1549,11 +1589,11 @@ export class GitService {
    * loses its skip-worktree marks in that restore, and an intent-to-add entry comes back
    * as an untracked file.
    */
-  commit(cwd: string, userRequested: UserAction, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
+  commit(cwd: string, userRequested: UserAction, message: string, options: GitCommitOptions & GitOperationRequest & { place?: SelectionPlace } = {}): Promise<void> {
     return this.asUser(userRequested, () => this.commitNow(cwd, message, options))
   }
 
-  private async commitNow(cwd: string, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
+  private async commitNow(cwd: string, message: string, options: GitCommitOptions & GitOperationRequest & { place?: SelectionPlace } = {}): Promise<void> {
     await this.runOperation(cwd, 'commit', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
@@ -1561,38 +1601,144 @@ export class GitService {
       // `add -A` would record unresolved conflict markers as resolved.
       if ((await this.statusEntries(cwd)).some(isConflicted)) throw gitErrors.create('git_merge_unresolved')
       if (options.amend) await this.assertAmendable(git)
-
-      let snapshot: string | null = null
-      if (options.all || !await this.hasStagedChanges(cwd)) {
-        const tree = await this.runGit(cwd, ['write-tree'])
-        if (!tree.ok) throw failure('git_commit_failed', tree)
-        snapshot = tree.stdout.trim()
-        // From the top of the repository: the project can be a subfolder, and the checkpoint that follows sweeps the whole tree.
-        const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])], { userAction: true })
-        if (!add.ok) {
-          await this.restoreIndex(cwd, snapshot, add)
-          throw failure('git_commit_failed', add)
-        }
-        // Nothing to commit is not an error, except that finishing a merge needs a commit even when the tree is unchanged.
-        if (!options.amend && !await this.hasStagedChanges(cwd) && await this.inProgress(cwd) !== 'merge') return
-      }
-
+      const { place, selection } = options
+      const top = await this.toplevel(cwd)
       const headBefore = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
-      const lock = await this.indexLock(cwd)
-      const lockedBefore = lock !== null && existsSync(lock)
-      const run = await this.runLive(cwd, ['commit', ...(options.amend ? ['--amend'] : []), '-m', message], live, { env: explicitActionGitEnv(), silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS, hooks: true })
-      if (run.ok) return
-      // The commit was recorded and only something after it failed or was stopped (a slow post-commit hook). Putting the old index back now would stage the commit's reversal.
-      if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore) return
-      let restoreError: unknown = null
-      if (snapshot !== null) await this.restoreIndex(cwd, snapshot, run).catch((error: unknown) => { restoreError = error })
-      // A Git stopped by force can leave its index lock behind (Windows cannot end a process gently). Whose lock it is cannot be told:
-      // Git does not hold it while a hook runs, and a terminal or an editor may have taken it meanwhile. It is never deleted here.
-      if ((run.cancelled || run.stalled) && lock !== null && !lockedBefore && existsSync(lock)) throw gitErrors.create('git_index_locked', restoreError, { path: lock })
-      if (restoreError) throw restoreError
+      if (selection?.mode === 'chosen') {
+        if (!place) throw gitErrors.create('git_failed', "A chosen commit needs its folder's selection.")
+        place.assertIdle?.()
+        // Checked against the whole selection, so a change made since it was shown (a terminal `git add -A`, an agent's commit) refuses.
+        const view = await this.readView(top, place, place.kind === 'thread' ? {} : { paths: [] })
+        if (view.selection.token !== selection.token) throw selectionErrors.create('stale')
+        if (place.kind === 'thread') await this.commitThreadSelection(top, message, view, live)
+        else {
+          // Exactly the index: never `add -A`, so nothing the person left out comes along.
+          if (!options.amend && view.collected.indexEqualsHead && await this.inProgress(cwd) !== 'merge') throw selectionErrors.create('nothing_selected')
+          await this.commitIndex(cwd, message, { ...options, all: false, indexOnly: true }, live)
+        }
+      } else await this.commitIndex(cwd, message, { ...options, all: options.all || selection?.mode === 'all' }, live)
+      // After any commit the selection starts over: the marker goes, and so do a thread's choices, made against the old HEAD.
+      if (place && await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore) await this.selectionCommitted(place)
+    }, live.signal))
+  }
+
+  /** The commit itself: the index when anything is staged (always, with `indexOnly`), else everything. */
+  private async commitIndex(cwd: string, message: string, options: GitCommitOptions & { indexOnly?: boolean }, live: Live): Promise<void> {
+    let snapshot: string | null = null
+    if (!options.indexOnly && (options.all || !await this.hasStagedChanges(cwd))) {
+      const tree = await this.runGit(cwd, ['write-tree'])
+      if (!tree.ok) throw failure('git_commit_failed', tree)
+      snapshot = tree.stdout.trim()
+      // From the top of the repository: the project can be a subfolder, and the checkpoint that follows sweeps the whole tree.
+      const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])], { userAction: true })
+      if (!add.ok) {
+        await this.restoreIndex(cwd, snapshot, add)
+        throw failure('git_commit_failed', add)
+      }
+      // Nothing to commit is not an error, except that finishing a merge needs a commit even when the tree is unchanged.
+      if (!options.amend && !await this.hasStagedChanges(cwd) && await this.inProgress(cwd) !== 'merge') return
+    }
+
+    const headBefore = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    const lock = await this.indexLock(cwd)
+    const lockedBefore = lock !== null && existsSync(lock)
+    const run = await this.runLive(cwd, ['commit', ...(options.amend ? ['--amend'] : []), '-m', message], live, { env: explicitActionGitEnv(), silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS, hooks: true })
+    if (run.ok) return
+    // The commit was recorded and only something after it failed or was stopped (a slow post-commit hook). Putting the old index back now would stage the commit's reversal.
+    if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore) return
+    let restoreError: unknown = null
+    if (snapshot !== null) await this.restoreIndex(cwd, snapshot, run).catch((error: unknown) => { restoreError = error })
+    // A Git stopped by force can leave its index lock behind (Windows cannot end a process gently). Whose lock it is cannot be told:
+    // Git does not hold it while a hook runs, and a terminal or an editor may have taken it meanwhile. It is never deleted here.
+    if ((run.cancelled || run.stalled) && lock !== null && !lockedBefore && existsSync(lock)) throw gitErrors.create('git_index_locked', restoreError, { path: lock })
+    if (restoreError) throw restoreError
+    if (run.cancelled) throw cancelledError()
+    throw run.stalled ? gitErrors.create('git_silence_timeout') : failure('git_commit_failed', run)
+  }
+
+  /**
+   * A thread's chosen commit, through a commit index built fresh from the current HEAD (`buildCommitIndex`), so it never
+   * reverses a newer commit. Hooks run with that index, as `git commit -- <paths>` runs them. The real index changes only
+   * when HEAD moved: it then goes to the new HEAD (mixed), the working tree untouched.
+   */
+  private async commitThreadSelection(top: string, message: string, view: SelectionView, live: Live): Promise<void> {
+    const stale = view.all.filter((item) => item.staleChoice).map((item) => item.file.path)
+    if (stale.length) throw selectionErrors.create('stale', undefined, { paths: stale })
+    const index = await this.buildCommitIndex(top, view, true)
+    try {
+      const env = privateIndexEnv(index)
+      const tree = await this.runGit(top, ['write-tree'], { env })
+      if (!tree.ok) throw failure('git_commit_failed', tree)
+      const headTree = await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD^{tree}']) ?? await emptyTree(top)
+      if (tree.stdout.trim() === headTree) throw selectionErrors.create('nothing_selected')
+      const headBefore = await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+      const run = await this.runLive(top, ['commit', '-m', message], live, { env: { ...explicitActionGitEnv(), ...env }, silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS, hooks: true })
+      const moved = run.ok || await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore
+      if (moved) {
+        // Mixed: the real index matches the new HEAD, so `git status` does not show the commit reversed.
+        const reset = await this.runGit(top, ['reset', '-q'], { userAction: true }).catch((error: unknown) => ({ ok: false, output: error instanceof Error ? error.message : String(error) }))
+        if (!reset.ok) console.warn('after a chosen commit the index could not be reset to the new HEAD; git status shows the commit reversed until it is', { top, error: reset.output.trim() })
+        return
+      }
       if (run.cancelled) throw cancelledError()
       throw run.stalled ? gitErrors.create('git_silence_timeout') : failure('git_commit_failed', run)
-    }, live.signal))
+    } finally {
+      await rm(index, { force: true }).catch(() => undefined)
+      await rm(`${index}.lock`, { force: true }).catch(() => undefined)
+    }
+  }
+
+  /**
+   * The index a thread's chosen commit takes, in a private file of the worktree's Git folder: the current HEAD, then the
+   * working tree of every path the overlay does not name (leaving out `.mousse/`, as a commit of everything does), then
+   * the overlay's entries; a left-out path takes the current HEAD's version. `asPerson` runs the working tree's add as
+   * the person's own (their filters run), for the commit itself.
+   */
+  private async buildCommitIndex(top: string, view: SelectionView, asPerson: boolean): Promise<string> {
+    const gitDir = await this.read(top, ['rev-parse', '--absolute-git-dir'])
+    if (!gitDir) throw gitErrors.create('git_failed')
+    await sweepSelectionIndexes(gitDir)
+    const file = join(gitDir, `${SELECTION_INDEX_PREFIX}${randomUUID()}.index`)
+    try {
+      const real = await this.read(top, ['rev-parse', '--git-path', 'index'])
+      // A copy keeps the stat data, so only files that changed are read again.
+      if (real && existsSync(resolve(top, real))) await copyFile(resolve(top, real), file)
+      const env = privateIndexEnv(file)
+      const head = view.collected.head
+      let reset = await this.runGit(top, head ? ['read-tree', '-m', head] : ['read-tree', '--empty'], { env })
+      if (!reset.ok) {
+        await rm(file, { force: true })
+        reset = await this.runGit(top, head ? ['read-tree', head] : ['read-tree', '--empty'], { env })
+        if (!reset.ok) throw failure('git_commit_failed', reset)
+      }
+      const overlay = view.overlay?.entries ?? {}
+      const specs = ['.', ':(exclude).mousse/**', ...Object.keys(overlay).map((path) => `:(exclude,literal)${path}`)]
+      const dir = await mkdtemp(join(tmpdir(), 'mousse-pathspec-'))
+      try {
+        const list = join(dir, 'paths')
+        await writeFile(list, `${specs.join('\0')}\0`)
+        const add = await this.runGit(top, ['add', '-A', `--pathspec-from-file=${list}`, '--pathspec-file-nul'], { env, ...(asPerson ? { userAction: true } : {}) })
+        if (!add.ok) throw failure('git_commit_failed', add)
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined)
+      }
+      const entries = new Map<string, Entry | null>()
+      for (const [path, entry] of Object.entries(overlay)) {
+        const state = view.collected.paths.get(path)
+        entries.set(path, entry.chosen ?? (state ? state.head : await headEntryOf(this.selectionGit(top), head, path)))
+      }
+      await this.writeIndexEntries(top, entries, env)
+      return file
+    } catch (error) {
+      await rm(file, { force: true }).catch(() => undefined)
+      throw error
+    }
+  }
+
+  /** After a commit moved HEAD: the marker is cleared, and a thread's overlay emptied (its revision still grows). */
+  private async selectionCommitted(place: SelectionPlace): Promise<void> {
+    if (place.kind === 'project') await clearMarker(place.markerFile)
+    else await writeOverlay(place.overlayFile, await readOverlay(place.overlayFile), {})
   }
 
   /** Where Git keeps the lock it holds while writing this folder's index. */
@@ -1606,6 +1752,287 @@ export class GitService {
     const run = await this.runGit(cwd, ['read-tree', tree], { userAction: true })
     if (!run.ok) throw gitErrors.create('git_index_restore_failed', redactGitText(`${cause.output}
 ${run.output}`))
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // The selection: what the next commit takes (`gitSelection.ts`)
+
+  /** Reads the changes and the selection of `top` (`readSelection`). */
+  private readView(top: string, place: SelectionPlace, options: { paths?: readonly string[] }): Promise<SelectionView> {
+    return readSelection(this.selectionGit(top), top, place, { ...options, ...(this.options.selectionMaxFiles !== undefined ? { maxFiles: this.options.selectionMaxFiles } : {}) })
+  }
+
+  /**
+   * Runs a Git action that can move HEAD (switch branch, pull, abort a merge or rebase). When HEAD moved, the project's
+   * "everything left out" marker goes: any HEAD change ends it. Returns whether HEAD moved.
+   */
+  async clearingMarkerWhenHeadMoves<T>(cwd: string, marker: MarkerOptions | undefined, work: () => Promise<T>): Promise<{ result: T; moved: boolean }> {
+    if (!marker) return { result: await work(), moved: false }
+    const head = () => this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']).catch(() => null)
+    const before = await head()
+    let moved = false
+    let result: T
+    try {
+      result = await work()
+    } finally {
+      // Also when the action failed part way, after HEAD moved (a pull that stopped in a conflict).
+      moved = await head() !== before
+      if (moved) await clearMarker(marker.markerFile).catch(() => undefined)
+    }
+    return { result, moved }
+  }
+
+  /** How the selection code runs Git in `top`: as Mousse's own commands. */
+  private selectionGit(top: string): SelectionGit {
+    return {
+      read: (args, options) => this.runGit(top, args, { ...(options?.env ? { env: options.env } : {}), ...(options?.input !== undefined ? { input: options.input } : {}) }),
+      bytes: (args, options) => this.runBytes(top, args, options)
+    }
+  }
+
+  /** One of Mousse's own Git commands with binary input and output (blobs). */
+  private async runBytes(cwd: string, args: readonly string[], options: { env?: Record<string, string>; input?: Buffer } = {}): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
+    const guarded = await withoutRepoProgramsAsync(cwd, args, { env: options.env })
+    return new Promise((resolvePromise) => {
+      const child = spawn('git', guarded, {
+        cwd,
+        env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...options.env }),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      })
+      const out: Buffer[] = []
+      const err: Buffer[] = []
+      child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
+      child.stderr.on('data', (chunk: Buffer) => err.push(chunk))
+      child.stdin.on('error', () => undefined)
+      child.stdin.end(options.input ?? Buffer.alloc(0))
+      child.on('error', (error) => resolvePromise({ ok: false, stdout: Buffer.alloc(0), stderr: error.message }))
+      child.on('close', (code) => resolvePromise({ ok: code === 0, stdout: Buffer.concat(out), stderr: Buffer.concat(err).toString('utf8') }))
+    })
+  }
+
+  /** HEAD → working tree as hunks, and what of it the selection holds (`git.changes`). Reads only; blobs are stored. */
+  async readChanges(cwd: string, place: SelectionPlace, options: { paths?: readonly string[] } = {}): Promise<GitChangesResult> {
+    if (!await this.isRepo(cwd)) return { files: [], selection: { state: 'untouched', token: '' }, truncated: false }
+    const top = await this.toplevel(cwd)
+    const view = await this.readView(top, place, options)
+    return { files: view.files.map((item) => item.file), selection: view.selection, truncated: view.truncated }
+  }
+
+  /**
+   * Includes or leaves out one file, or some of its hunks or lines (`git.include`). Refused with `stale` when the file's
+   * `version` is not what was shown, `whole_file_only` for hunks of a file only whole can be chosen in, and
+   * `git_merge_unresolved` for a conflict.
+   */
+  include(cwd: string, userRequested: UserAction, place: SelectionPlace, request: GitIncludeRequest): Promise<GitIncludeResult> {
+    return this.asUser(userRequested, () => this.serialized(cwd, async () => {
+      place.assertIdle?.()
+      const top = await this.toplevel(cwd)
+      const git = this.selectionGit(top)
+      const read = () => this.readView(top, place, { paths: [request.path] })
+      let view = await read()
+      let target = fileOf(view, request.path)
+      if (!target || target.file.version !== request.version) throw selectionErrors.create('stale')
+      if (target.file.change === 'conflict') throw gitErrors.create('git_merge_unresolved')
+      const partial = Boolean(request.hunks?.length || request.lines?.length)
+      if (partial && target.file.wholeFileOnly) throw selectionErrors.create('whole_file_only')
+      if (place.kind === 'project' && view.selection.state === 'untouched') {
+        if (view.collected.unmerged) throw gitErrors.create('git_merge_unresolved')
+        // The first choice starts from everything included, as `Commit all` showed it. The index equals HEAD here, so
+        // nothing staged elsewhere is written over.
+        await this.stageEverything(top)
+        view = await read()
+        target = fileOf(view, request.path)
+        if (!target) throw selectionErrors.create('stale')
+      }
+      const wanted = partial ? await this.chosenEntries(git, target, request) : wholeEntries(target, request.include)
+      if (place.kind === 'project') await this.writeProjectSelection(top, place, target, wanted, request.include && !partial)
+      else await this.writeThreadSelection(place, view, wanted)
+      const after = await read()
+      const file = fileOf(after, request.path)?.file
+      return { path: target.file.path, version: file?.version ?? '', included: file?.included ?? (request.include ? 'yes' : 'no'), selection: after.selection }
+    }))
+  }
+
+  /** Includes or leaves out everything (`git.include({ all: true })`). */
+  includeAll(cwd: string, userRequested: UserAction, place: SelectionPlace, include: boolean): Promise<{ selection: GitSelectionState }> {
+    return this.asUser(userRequested, () => this.serialized(cwd, async () => {
+      place.assertIdle?.()
+      const top = await this.toplevel(cwd)
+      const view = await this.readView(top, place, {})
+      if (view.collected.unmerged) throw gitErrors.create('git_merge_unresolved')
+      if (place.kind === 'project') {
+        await this.keepDiverged(top, place, view.all.filter((item) => item.file.indexDiverged), include ? 'Include all' : 'Leave out all')
+        if (include) {
+          await this.stageEverything(top)
+          await this.settleMarker(top, place.markerFile, false)
+        } else {
+          const unborn = !view.collected.head
+          const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '-q', '--ignore-unmatch', '--', '.'] : ['reset', '-q', '--', '.'], { userAction: true })
+          if (!run.ok) throw failure('git_failed', run)
+          await this.settleMarker(top, place.markerFile, true)
+        }
+      } else {
+        const entries: Record<string, OverlayEntry> = {}
+        if (!include) {
+          // Every changed file, listed or past the limit: nothing unseen comes along after "Leave out all".
+          for (const item of view.all) {
+            for (const path of item.paths) {
+              const state = view.collected.paths.get(path)
+              entries[path] = { head: state?.head ?? null, working: state?.work ?? null, chosen: null }
+            }
+          }
+        }
+        await writeOverlay(place.overlayFile, view.overlay!, entries)
+      }
+      return { selection: (await this.readView(top, place, { paths: [] })).selection }
+    }))
+  }
+
+  /** `git add -A` from the top, leaving out `.mousse/`: everything included. */
+  private async stageEverything(top: string): Promise<void> {
+    const run = await this.runGit(top, ['add', '-A', '--', '.', ':(exclude).mousse/**'], { userAction: true })
+    if (!run.ok) throw failure('git_failed', run)
+  }
+
+  /** The entries a choice of hunks or lines makes: the working tree's when all is chosen, HEAD's when nothing is, else a new blob. */
+  private async chosenEntries(git: SelectionGit, target: FileView, request: GitIncludeRequest): Promise<Map<string, Entry | null>> {
+    const text = target.text
+    if (!text?.choices) throw selectionErrors.create('whole_file_only')
+    const choices: Choices = text.choices.map((row) => [...row])
+    const byId = new Map(text.hunks.map((hunk, index) => [hunk.id, index]))
+    for (const id of request.hunks ?? []) {
+      const index = byId.get(id)
+      if (index === undefined) throw selectionErrors.create('stale')
+      choices[index] = text.hunks[index]!.lines.map((line) => (line.kind === ' ' ? true : request.include))
+    }
+    for (const pick of request.lines ?? []) {
+      const index = byId.get(pick.hunk)
+      if (index === undefined) throw selectionErrors.create('stale')
+      const hunk = text.hunks[index]!
+      if (hunk.block) throw selectionErrors.create('whole_file_only')
+      for (const at of pick.indexes) {
+        const line = hunk.lines[at]
+        if (!line || line.kind === ' ') throw new AppError({ code: 'invalid_params', message: 'lines must name added or removed lines of the hunk.', errorInfo: { category: 'invalid', retryable: false } })
+        choices[index]![at] = request.include
+      }
+    }
+    const changed = (hunk: number, line: number) => text.hunks[hunk]!.lines[line]!.kind !== ' '
+    const all = choices.every((row, hunk) => row.every((value, line) => value || !changed(hunk, line)))
+    const none = choices.every((row, hunk) => row.every((value, line) => !value || !changed(hunk, line)))
+    if (all) return new Map([[target.file.path, target.work]])
+    if (none) return new Map([[target.file.path, target.head]])
+    const oid = await storeBlob(git, applyChoices(text.head, text.hunks, choices))
+    return new Map([[target.file.path, { mode: (target.work ?? target.head)!.mode, oid }]])
+  }
+
+  /**
+   * Writes a project folder's choice into the real index. A whole file included is staged by Git itself (its filters
+   * run, as `git add` does); every other entry is written as chosen. A staged version Mousse cannot explain is kept as a
+   * copy first, since this replaces it.
+   */
+  private async writeProjectSelection(top: string, place: Extract<SelectionPlace, { kind: 'project' }>, target: FileView, wanted: Map<string, Entry | null>, wholeInclude: boolean): Promise<void> {
+    if (target.file.indexDiverged) await this.keepDiverged(top, place, [target], wholeInclude ? 'Include' : 'Leave out')
+    if (wholeInclude) await this.withPathspecFile(top, ['add', '-A'], target.paths)
+    else await this.writeIndexEntries(top, wanted)
+    // Choosing in Mousse records the marker: an index equal to HEAD now means everything left out.
+    await this.settleMarker(top, place.markerFile, true)
+  }
+
+  /** Keeps the staged and working versions of files whose staged version is about to be replaced. */
+  private async keepDiverged(top: string, place: Extract<SelectionPlace, { kind: 'project' }>, files: readonly FileView[], action: string): Promise<void> {
+    if (!files.length) return
+    if (!place.keepOwner) throw gitErrors.create('keep_copy_refused')
+    try {
+      await keepCopy({ owner: place.keepOwner, top, operationType: 'git-discard', action, paths: files.flatMap((item) => item.paths) })
+    } catch (error) {
+      throw keepRefusal(error)
+    }
+  }
+
+  /** Writes a thread's choice into its overlay. A path chosen as the working tree has it leaves the overlay. */
+  private async writeThreadSelection(place: Extract<SelectionPlace, { kind: 'thread' }>, view: SelectionView, wanted: Map<string, Entry | null>): Promise<void> {
+    const entries = { ...view.overlay!.entries }
+    for (const [path, entry] of wanted) {
+      const state = view.collected.paths.get(path)
+      const head = state?.head ?? null
+      const work = state?.work ?? null
+      if (sameEntry(entry, work)) delete entries[path]
+      else entries[path] = { head, working: work, chosen: sameEntry(entry, head) ? null : entry }
+    }
+    await writeOverlay(place.overlayFile, view.overlay!, entries)
+  }
+
+  /** Sets index entries (`update-index --index-info`); null removes the path. `env` names a private index. */
+  private async writeIndexEntries(top: string, entries: Map<string, Entry | null>, env?: Record<string, string>): Promise<void> {
+    if (!entries.size) return
+    const sha256 = (await this.read(top, ['rev-parse', '--show-object-format'])) === 'sha256'
+    const zero = '0'.repeat(sha256 ? 64 : 40)
+    const input = [...entries].map(([path, entry]) => (entry ? `${entry.mode} ${entry.oid}\t${path}` : `0 ${zero}\t${path}`)).join('\0') + '\0'
+    const run = await this.runGit(top, ['update-index', '-z', '--index-info'], { input, ...(env ? { env } : { userAction: true }) })
+    if (!run.ok) throw gitFailure(run, 'Git could not write the selection.')
+  }
+
+  /**
+   * Runs an index write Mousse makes for the person (`git.stage`, `git.unstage`, `git.discard`) so it keeps the marker
+   * only when it held right before the write: a terminal's `git add -A` is never taken for the person's choice.
+   */
+  private async keepingMarker<T>(top: string, marker: MarkerOptions | undefined, work: () => Promise<T>): Promise<T> {
+    if (!marker) return work()
+    const before = await indexState(this.selectionGit(top))
+    const held = await markerMatches(marker.markerFile, top, before.head, before.indexDigest)
+    const result = await work()
+    await this.settleMarker(top, marker.markerFile, held)
+    return result
+  }
+
+  /** Records the marker for the index as it is now when `chosen` and the index equals HEAD; otherwise clears it. */
+  private async settleMarker(top: string, markerFile: string, chosen: boolean): Promise<void> {
+    const now = await indexState(this.selectionGit(top))
+    if (chosen && now.indexEqualsHead) await recordMarker(markerFile, top, now.head, now.indexDigest)
+    else await clearMarker(markerFile)
+  }
+
+  /**
+   * Undoes the last commit of a project folder (`git.undoLastCommit`): a soft reset, so the working tree and the index
+   * keep its changes. Only a local, unpushed commit with one parent, while no merge or rebase is under way, and only the
+   * commit the person saw (`expectedHead`).
+   */
+  undoLastCommit(cwd: string, userRequested: UserAction, expectedHead: string, place?: SelectionPlace): Promise<void> {
+    return this.asUser(userRequested, () => this.serialized(cwd, async () => {
+      place?.assertIdle?.()
+      const top = await this.toplevel(cwd)
+      const head = await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+      if (!head) throw gitErrors.create('git_amend_no_commit')
+      if (head !== expectedHead) throw selectionErrors.create('stale')
+      if (await this.inProgress(top) || (await this.statusEntries(top)).some(isConflicted)) throw gitErrors.create('git_merge_unresolved')
+      const parents = (await this.read(top, ['rev-list', '--parents', '-n', '1', head]))?.split(/\s+/).filter(Boolean) ?? []
+      if (parents.length <= 1) throw selectionErrors.create('git_undo_root')
+      if (parents.length > 2) throw selectionErrors.create('git_undo_merge')
+      await this.assertAmendable(this.gitFor(top))
+      const run = await this.runGit(top, ['reset', '--soft', `${head}^`], { userAction: true })
+      if (!run.ok) throw failure('git_failed', run)
+      if (place?.kind === 'project') await clearMarker(place.markerFile)
+    }))
+  }
+
+  /**
+   * What a chosen commit would take, described for a commit message (`git.suggestCommitMessage` with `selection`):
+   * the index in a project folder, the commit index a thread's overlay builds in a thread. `stale` when the token is old.
+   */
+  async describeSelection(cwd: string, place: SelectionPlace, token: string): Promise<CommitInput> {
+    if (!await this.isRepo(cwd)) return EMPTY_COMMIT_INPUT
+    const top = await this.toplevel(cwd)
+    const view = await this.readView(top, place, place.kind === 'thread' ? {} : { paths: [] })
+    if (view.selection.token !== token) throw selectionErrors.create('stale')
+    if (place.kind === 'project') return this.describeCommitInput(cwd, { indexOnly: true })
+    if (view.all.some((item) => item.staleChoice)) throw selectionErrors.create('stale')
+    const index = await this.buildCommitIndex(top, view, false)
+    try {
+      return await this.describeCommitInput(cwd, { indexOnly: true, indexFile: index })
+    } finally {
+      await rm(index, { force: true }).catch(() => undefined)
+    }
   }
 
   async lastCommitMessage(cwd: string): Promise<string | null> {

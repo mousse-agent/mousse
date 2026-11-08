@@ -222,7 +222,8 @@ import {
   COMMIT_SUGGESTION_SYSTEM,
   buildCommitSuggestionPrompt,
   commitSuggestionErrors,
-  parseCommitSuggestion
+  parseCommitSuggestion,
+  type CommitInput
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
@@ -7845,10 +7846,12 @@ export class OrchestratorService extends EventEmitter {
     /** The thread whose worktree this is, when it is one; names the provider's cache session. */
     threadId: string | null
     branch?: string | null
+    /** Reads what the commit takes instead (a chosen selection); it may refuse (`stale`). */
+    describe?: () => Promise<CommitInput>
   }): Promise<{ message: string; truncated: boolean }> {
     const titleSettings = this.settingsStore.get().title
     if (!titleSettings.llmProvider?.trim() || !titleSettings.model?.trim()) throw commitSuggestionErrors.create('git_suggest_no_model')
-    const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
+    const input = params.describe ? await params.describe() : await this.gitService?.describeCommitInput(params.root, { all: params.all })
     if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
     try {
       const prompt = buildCommitSuggestionPrompt(input, params.branch)

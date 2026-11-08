@@ -226,6 +226,10 @@ export const GIT_ACCESS = {
   'git.deleteBranch': 'userRequested',
   'git.init': 'userRequested',
   'git.cancelOperation': 'none',
+  // Reads, and may restore a retired worktree first, like `git.status`. Stores blobs of the files it reads.
+  'git.changes': 'owned',
+  'git.include': 'userRequested',
+  'git.undoLastCommit': 'userRequested',
   'github.status': 'read',
   'github.createRepository': 'userRequested',
   'github.cloneRepository': 'userRequested',

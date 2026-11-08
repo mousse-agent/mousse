@@ -52,6 +52,7 @@ export const PRIVATE_DELTA_TYPES = [
   'pullRequests.updated',
   'actions.updated',
   'workspace.updated',
+  'git.selectionChanged',
   'thread.title-generation-failed'
 ] as const
 export interface ThreadDisplayEvent {

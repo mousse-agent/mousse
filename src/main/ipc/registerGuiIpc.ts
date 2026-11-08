@@ -118,6 +118,8 @@ import type {
   GitCheckoutOptions,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitIncludeRequest,
   GitDiffStats,
   GitStatusSnapshot,
   GitDeleteBranchOptions,
@@ -2342,9 +2344,13 @@ export function registerGuiIpc(
     )
   }
   gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty, operationId: options?.operationId }))
-  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId, selection: options?.selection }))
   // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
-  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string; selection?: GitCommitSelection }) => ({ expectedBranch: options?.expectedBranch, selection: options?.selection }))
+  // What the next commit takes: read as hunks, include or leave out, and undo the last commit of a project folder.
+  gitMutation('git:changes', 'git.changes', (options?: { paths?: string[] }) => ({ paths: options?.paths }))
+  gitMutation('git:include', 'git.include', (input: GitIncludeRequest | { all: true; include: boolean }) => ({ ...input }))
+  gitMutation('git:undoLastCommit', 'git.undoLastCommit', (expectedHead: string) => ({ expectedHead }))
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))

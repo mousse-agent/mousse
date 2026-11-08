@@ -1526,6 +1526,89 @@ export interface GitCommitOptions {
   expectedBranch?: string
   /** Names the action so its live output reaches the caller and Cancel can find it. */
   operationId?: string
+  /**
+   * What the commit takes. `all`: every change (`add -A`, leaving out `.mousse/`). `chosen`: exactly the selection
+   * (`git.changes`), refused with `stale` when `token` is not the current selection's. Unset: the older rule above.
+   */
+  selection?: GitCommitSelection
+}
+
+/** What a commit takes when the client says so (`GitCommitOptions.selection`). */
+export type GitCommitSelection = { mode: 'all' } | { mode: 'chosen'; token: string }
+
+/** One line of a hunk: context, removed from HEAD, or added in the working tree. Numbers are 1-based. */
+export interface GitChangeLine {
+  kind: ' ' | '-' | '+'
+  text: string
+  oldNo?: number
+  newNo?: number
+}
+
+/** Whether a hunk or file goes into the next commit. */
+export type GitIncluded = 'yes' | 'no' | 'partial'
+
+/** One hunk of HEAD → working tree, in Git's clean form, with 3 lines of context. */
+export interface GitChangeHunk {
+  /** A hash of `oldStart` and the hunk's lines; unique within the file. */
+  id: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: GitChangeLine[]
+  included: GitIncluded
+}
+
+/** One changed file of `git.changes`. A rename is one entry covering both paths. */
+export interface GitChangedFile {
+  path: string
+  oldPath?: string
+  change: 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict'
+  kind: 'file' | 'symlink' | 'submodule'
+  binary: boolean
+  /** Set when the mode changed; such a change has no hunks of its own. */
+  mode?: { old: string; new: string }
+  /** Only the whole file can be included or left out (binary, link, submodule, mode, rename, too large, conflict, diverged, or bytes that may not round-trip). */
+  wholeFileOnly: boolean
+  /** The selection holds content that is neither HEAD nor HEAD plus some of these hunks, or was chosen against an older HEAD. */
+  indexDiverged: boolean
+  /** Listed without hunks: a side is over the size or line limit, or the answer already carries as many hunk lines as one answer holds. */
+  tooLarge: boolean
+  /** Changes whenever this path's HEAD entry, selection entries, working-tree content or the selection state change. */
+  version: string
+  hunks: GitChangeHunk[]
+  included: GitIncluded
+}
+
+/** The selection a commit with `selection: { mode: 'chosen' }` takes. `untouched`: nothing chosen yet, so everything is included. */
+export interface GitSelectionState {
+  state: 'untouched' | 'chosen'
+  token: string
+}
+
+/** `git.changes`' answer. */
+export interface GitChangesResult {
+  files: GitChangedFile[]
+  selection: GitSelectionState
+  /** More files changed than are listed. */
+  truncated: boolean
+}
+
+/** `git.include` for one path: which hunks or lines (by index into `hunk.lines`) of it; neither means the whole file. */
+export interface GitIncludeRequest {
+  path: string
+  version: string
+  include: boolean
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.include`'s answer for one path. */
+export interface GitIncludeResult {
+  path: string
+  version: string
+  included: GitIncluded
+  selection: GitSelectionState
 }
 
 /** A proposed commit message; the user edits it before committing. */

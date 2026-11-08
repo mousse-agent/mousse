@@ -169,7 +169,7 @@ export class MmsThreadSource implements ThreadSourcePort {
     // Saves, Undo and workspace changes raise these through the protocol server, whichever window or computer asked.
     on(s.events, 'thread:event', (event: { type?: string; data?: unknown; threadId?: string }) => {
       if (event?.threadId !== threadId) return
-      if (event.type === 'actions.updated' || event.type === 'workspace.updated')
+      if (event.type === 'actions.updated' || event.type === 'workspace.updated' || event.type === 'git.selectionChanged')
         deliver(event.type, event.data, true)
     })
     return disposers

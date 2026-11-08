@@ -192,6 +192,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     required: ['scope', 'path']
   }),
   'git.status': read('folder', [...FOLDER]),
+  // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
+  'git.changes': read('folder', [...FOLDER, 'paths']),
   'git.diff': read('folder', [...FOLDER, 'path', 'staged'], { required: ['path'] }),
   'git.log': read('folder', [...FOLDER, 'limit']),
   'git.branches': read('folder', [...FOLDER]),
@@ -457,11 +459,17 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'git.checkout': write('folder', [...FOLDER, 'operationId', 'dirty', 'branch'], {
     required: ['branch']
   }),
-  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch'], {
-    required: ['message']
+  // `selection` (version 2): an owner from before it refuses the key (`computerOutdated`), so a chosen commit never
+  // becomes a commit of everything there.
+  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch', 'selection'], {
+    required: ['message'],
+    version: 2,
+    since: { selection: 2 }
   }),
   'git.push': write('folder', [...FOLDER, 'operationId', 'expectedBranch']),
-  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch']),
+  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch', 'selection'], { version: 2, since: { selection: 2 } }),
+  'git.include': write('folder', [...FOLDER, 'path', 'version', 'include', 'hunks', 'lines', 'all'], { required: ['include'] }),
+  'git.undoLastCommit': write('folder', [...FOLDER, 'expectedHead'], { required: ['expectedHead'] }),
   'git.stage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.unstage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.discard': write('folder', [...FOLDER, 'paths'], { required: ['paths'] }),
@@ -619,6 +627,7 @@ export const ROUTED_LARGE_READS: readonly string[] = [
   'files.read',
   'files.readAsset',
   'git.diff',
+  'git.changes',
   'review.file',
   'runs.events'
 ]
