@@ -585,7 +585,7 @@ export class ManagedSession {
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
-      await this.glideCursor(request, tab, target, abort.signal)
+      if (!humanLease) await this.glideCursor(request, tab, target, abort.signal)
       this.inFlight.dispatched = true
       dispatched = true
       this.journal.append({

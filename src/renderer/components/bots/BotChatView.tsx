@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { ArrowUp, CircleAlert, Loader2, Paperclip, Square, X } from '../../lib/icons'
 import type { BotChatMessage, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -9,6 +9,8 @@ import { BotChips, BotChipView } from './BotChips'
 import { BotAskCard } from './BotAskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel } from './BotAboutPanel'
+import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
+import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 
 const EMPTY: BotChatMessage[] = []
 
@@ -39,7 +41,7 @@ function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: 
   </article>
 }
 
-function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }) {
+function BotMessage({ bot, message, onAction, browser }: { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode }) {
   const store = useBotsStore.getState
   return <article className="chat-participant-message from-agent" data-message-id={message.id}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
@@ -48,6 +50,7 @@ function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotC
       <div className="chat-message-meta"><strong>{bot.name}</strong><time dateTime={message.at}>{botMessageTime(message.at)}</time></div>
       {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" />}
       <BotChips chips={message.chips} />
+      {browser}
       {message.ask && <BotAskCard botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
         onAnswer={(answer) => store().answer(bot.id, message.ask!.askId, answer)}
         onExport={() => store().exportMemory(bot.id, message.ask!.askId)} />}
@@ -79,6 +82,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const firstId = messages[0]?.id
   const files = attachments ?? []
   const canSend = !!draft.trim() || files.length > 0
+  // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
+  const browser = useBotBrowser(bot.id, true)
+  const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
+  const browserRun = browser?.activations.at(-1)
+  const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
+  const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
 
   // This window shows the bot's chat: its replies only sound while it is on screen.
   useEffect(() => {
@@ -131,9 +140,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
         {messages.map((message) => message.author === 'owner'
           ? <OwnerMessage key={message.id} message={message} pending={false} />
-          : <BotMessage key={message.id} bot={bot} message={message} onAction={act} />)}
+          : <BotMessage key={message.id} bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} />)}
         {pending.map((message) => <OwnerMessage key={message.id} message={message} pending />)}
         {working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{live?.chip && <BotChipView chip={{ ...live.chip, live: true }} />}</div>}
+        {/* A run still working before its reply: the preview follows it here. */}
+        {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       {error && <p role="alert" className="chat-error chat-composer-error">{error}</p>}
@@ -152,6 +163,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </div>
       </form>
     </section>
+    {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
   </>
 }

@@ -26,7 +26,7 @@ export interface BotChipCall {
 
 /** What a call does, for its words and how it rolls up. */
 type ChipKind =
-  | 'search' | 'fetch' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'schedules'
+  | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile'
 
 interface Classified {
@@ -123,6 +123,19 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       const domain = domainOf(args.url)
       return { kind: 'fetch', icon: 'web', live: 'reading a page', ...(domain ? { detail: domain } : {}) }
     }
+    case 'browser_open':
+    case 'browser_tabs':
+    case 'browser_observe':
+    case 'browser_screenshot':
+    case 'browser_find':
+    case 'browser_act':
+    case 'browser_wait':
+    case 'browser_extract': {
+      // The page it goes to, when the call names one: a browser_open, a new tab or a navigate action.
+      const action = record(args.action)
+      const domain = domainOf(args.url) ?? (action.type === 'navigate' ? domainOf(action.url) : undefined)
+      return { kind: 'browse', icon: 'web', live: 'using the browser', ...(domain ? { detail: domain } : {}) }
+    }
     case 'bot_schedule_add': return { kind: 'schedule', icon: 'schedule', live: 'setting a schedule' }
     case 'bot_schedule_remove': return { kind: 'unschedule', icon: 'schedule', live: 'removing a schedule' }
     case 'bot_schedule_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its schedules' }
@@ -209,6 +222,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
   switch (kind) {
     case 'search': return chip('searched the web', n === 1 ? details[0] : String(n))
     case 'fetch': return chip(n === 1 ? 'read a page' : `read ${n} pages`, listed(details))
+    case 'browse': return chip('used the browser', listed(details))
     case 'read': return chip('read files', listed(details))
     case 'change': return chip('changed files', listed(details))
     case 'save': return chip(n === 1 ? 'saved a file' : `saved ${n} files`, listed(details))

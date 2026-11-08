@@ -18,6 +18,8 @@ import {
 import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
+import type { BrowserAgentCursor } from '../../shared/browser/agentCursor'
+import { AgentCursor } from './browser/AgentCursor'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
@@ -235,12 +237,14 @@ interface BrowserWebviewProps {
   profileId: string
   active: boolean
   agentControlled: boolean
+  /** Where the agent acts in this tab: drawn over the page, never in it. */
+  agentCursor?: BrowserAgentCursor
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
   onState: (id: string, patch: Partial<BrowserTabState>) => void
   onNavState: (id: string, nav: WebviewNavState) => void
 }
 
-function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onState, onNavState }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   // src is the mount URL. Observed URLs (including redirects) must never be
   // written back to src: doing so starts a second, competing guest navigation.
@@ -353,6 +357,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onSt
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
       {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
+      {!blank && <AgentCursor cursor={agentCursor} />}
     </KeepMounted>
   )
 }
@@ -401,6 +406,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const provisionedRequests = useRef(new Set<string>())
   const agentTabByThread = useRef(new Map<string, { tabId: string; sessionId?: string }>())
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
+  const [cursorByTab, setCursorByTab] = useState<Record<string, BrowserAgentCursor>>({})
   const [browserBusy, setBrowserBusy] = useState(false)
   const [notice, setNotice] = useState<BrowserNoticeState | null>(null)
   const [confirmClearCookies, setConfirmClearCookies] = useState(false)
@@ -461,6 +467,11 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     if (known?.tabId === state.uiTabId && known.sessionId === state.sessionId) return
     agentTabByThread.current.set(threadId, { tabId: state.uiTabId, sessionId: state.sessionId })
     if (state.owner === 'agent') showAgentTab(threadId, state.uiTabId)
+  }), [profileId])
+  // The agent cursor of each tab: main sends where an agent is about to act in it.
+  useEffect(() => window.mousse?.inAppBrowser?.onCursor?.((event) => {
+    if (event.profileId !== profileId) return
+    setCursorByTab((previous) => ({ ...previous, [event.uiTabId]: event.cursor }))
   }), [profileId])
   useEffect(() => {
     // Returning to a thread whose agent is still working in the browser shows its tab again.
@@ -782,6 +793,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             profileId={profileId}
             active={tab.id === activeTab?.id}
             agentControlled={controlByTab[tab.id]?.owner === 'agent'}
+            agentCursor={cursorByTab[tab.id]}
             onReady={registerWebview}
             onState={handleWebviewState}
             onNavState={handleNavState}

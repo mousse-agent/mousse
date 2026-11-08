@@ -1,3 +1,4 @@
+import type { BrowserAgentCursor } from '../../../shared/browser/agentCursor'
 import { randomUUID } from 'node:crypto'
 import { validateBrowserWorkerRequest, validateBrowserWorkerResponse } from '../../../shared/browser/envelope'
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../../shared/browser/types'
@@ -40,6 +41,7 @@ export class ElectronAttachedBrowserBackend {
   private readonly openingTabs = new Map<string, Promise<unknown>>()
   private readonly operations = new Map<string, Promise<unknown>>()
   private readonly controlListeners = new Set<(state: AttachedControlState) => void>()
+  private readonly cursorListeners = new Set<(event: { uiTabId: string; cursor: BrowserAgentCursor }) => void>()
   private accepting = true
   private shutdownWork: Promise<void> | null = null
   private readonly stopRevoke: () => void
@@ -269,7 +271,8 @@ export class ElectronAttachedBrowserBackend {
       artifacts: this.config.artifacts,
       browserVersion: this.config.browserVersion,
       interceptCommand: this.config.interceptCommand,
-      onControlStateChange: (state) => this.emitControl(state)
+      onControlStateChange: (state) => this.emitControl(state),
+      onAgentCursor: (event) => this.emitCursor(event)
     })
     try {
       const record = await session.start(url)
@@ -294,6 +297,18 @@ export class ElectronAttachedBrowserBackend {
     const result = await session.handle(request.method, request.params, signal)
     if (request.method === 'session.close') this.sessions.delete(sessionId)
     return result ?? { ok: true }
+  }
+
+  /** Where an agent acts in an attached tab, for the window that shows it (`agentCursor.ts`). */
+  onAgentCursor(listener: (event: { uiTabId: string; cursor: BrowserAgentCursor }) => void): () => void {
+    this.cursorListeners.add(listener)
+    return () => this.cursorListeners.delete(listener)
+  }
+
+  private emitCursor(event: { uiTabId: string; cursor: BrowserAgentCursor }): void {
+    for (const listener of this.cursorListeners) {
+      try { listener(event) } catch { /* listener isolation */ }
+    }
   }
 
   private emitControl(state: AttachedControlState): void {
