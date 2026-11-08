@@ -75,6 +75,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const transcript = useRef<HTMLDivElement>(null)
   const messages = chat?.messages ?? EMPTY
   const working = bot.state === 'working'
+  // Working, but waiting for the internet: no spinner, and the header says so.
+  const offline = working && bot.waiting === 'internet'
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? []
@@ -118,7 +120,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={40} view="head" />
-          <div><h1>{bot.name}</h1><span>{bot.description}</span></div>
+          <div><h1>{bot.name}</h1><span>{offline ? bot.stateText : bot.description}</span></div>
         </button>
         <BotMenu bot={bot} />
       </header>
@@ -133,7 +135,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           ? <OwnerMessage key={message.id} message={message} pending={false} />
           : <BotMessage key={message.id} bot={bot} message={message} onAction={act} />)}
         {pending.map((message) => <OwnerMessage key={message.id} message={message} pending />)}
-        {working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{live?.chip && <BotChipView chip={{ ...live.chip, live: true }} />}</div>}
+        {offline
+          ? <div className="chat-run-status bot-offline-status" role="status">{bot.stateText}</div>
+          : working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{live?.chip && <BotChipView chip={{ ...live.chip, live: true }} />}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       {error && <p role="alert" className="chat-error chat-composer-error">{error}</p>}

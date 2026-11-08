@@ -500,7 +500,7 @@ No build has ever run a bot (`BOT_RUNTIME_GAPS`), so only definitions, approvals
    - `role` = description;
    - `main.agent.instructions` = `BOT_BASE_INSTRUCTIONS` (§5.10) plus the description;
    - model `{auto, normal}`;
-   - the **starter manifest**: tools `read, list, search, edit, write` (only the files folder, §5.10), app tools = `BOT_DEFAULT_APP_TOOLS`, no workspace, budget 15 minutes per activation.
+   - the **starter manifest**: tools `read, list, search, edit, write` (only the files folder, §5.10), app tools = `BOT_DEFAULT_APP_TOOLS`, no workspace, budget an hour per activation (15 minutes before; grants still on 15 minutes are upgraded when the profile opens).
 4. **Grant.** Publish and approve the starter grant in one transaction. Pressing Create bot is the approval of this floor, and nothing outside the bot's own files folder, its memory tools and the web is in it.
 5. **Home thread.** Create it with `ensureExecutionThread('bot:<id>')`.
 6. **First message.** Enqueue a `chat` activation with the input `[Mousse] The owner just created you. Their description: "…". In one or two sentences say what you understood. If you will need a permission, ask for the first one now (escalate). If the description is unclear, ask one question instead.`
@@ -565,7 +565,7 @@ If no runtime can run the bot, the activation fails before dispatch. The bot the
 | Folder, read | "read files in ~/Documents/Invoices" | "Only this folder. It can't change anything." |
 | Folder, write | "change files in ~/Notes" | |
 | Skill | "use the <name> skill" | |
-| Budget | "work for up to 30 minutes per run" | |
+| Budget | "work for up to 2 hours per run" | |
 
 **Raising an ask.**
 
@@ -1547,7 +1547,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 | WP1 slips, and every bot says "can't run yet" | Gap items are removed one by one. The minimum slice is Pi only (§7.2). |
 | Prompt injection through web pages makes the bot read an allowed folder and send it out with `web_fetch` | Folders are only read when the owner allowed them. The Phase 2 domain grant closes this; until then, `BOT_BASE_INSTRUCTIONS` (§5.10) tells the bot never to fetch URLs built from file contents. **Accepted for Phase 1, and stated in the PR.** |
 | A bot on Codex reads outside its folders with commands Codex runs without asking | Accepted by the owner (revision 4): Codex's sandbox blocks writes and the network. Exact control for Codex stays an open question (§12.3). |
-| Hidden models hide cost on metered Pi keys | Subscription first. Depth defaults to normal. The 15-minute active-time budget applies to each run. |
+| Hidden models hide cost on metered Pi keys | Subscription first. Depth defaults to normal. The one-hour active-time budget applies to each run. |
 | Faces cost GPU | One shared context, observers, a frame cap, and the still fallback. WP5's frame-time check. |
 | Two lanes save memory at the same time | Writes go through `BotMemoryStore` in `bots.db` transactions. `replaces` must name the current version or gets `stale`, so concurrent edits can't overwrite each other (bot-context.md §7). |
 | Capture misses rows after a crash | Cursors per thread, `catchUp` before admission, and idempotent `source_key`s. A journal write failure stops the bot rather than running unrecorded. |
@@ -1567,11 +1567,11 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 - The memory tables go into the same v4 migration as the rest of Phase 1 (not a v5).
 - A deleted bot is kept, archived, for 30 days with no restore UI in Phase 1.
 - The `setsid` sweep moves to Phase 2 (a known gap for Pi bots with "run commands" since revision 5).
-- 15 minutes of active time per activation, chat or run.
+- An hour of active time per activation, chat or run. Time spent waiting for the internet is not charged (docs/bots.md, No internet).
 - Minimum schedule interval 5 minutes; at most 8 schedules per bot.
 - Not now on a run ask: no new ask for 24 hours.
 - Pause stops schedules only. Chat works while paused.
-- Three failed runs pause schedules. Chat failures, refused asks and usage-limit pauses don't count.
+- Three failed runs pause schedules. Chat failures, refused asks, usage-limit pauses and waiting for the internet don't count.
 - Old Automations → Bots drafts are migrated, not deleted.
 
 ---
