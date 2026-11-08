@@ -179,6 +179,17 @@ The usage-window reserve is deferred to Phase 2, and a computer other than this 
 
 **Action for the orchestrating thread:** update #673's "Done when" to match, or reopen the UI decision. This plan writes nothing to GitHub.
 
+### 3.7 Changed in revision 6: "use the browser"
+
+The owner's decisions after a bot asked for `browser_act` and the card ended in "A bot can't be given the Mousse tool browser_act":
+
+- **"Use the browser" is one grantable permission** (`browser` in the grant), asked for once and remembered, covering every browser tool but `browser_request_human`. Any browser tool's ask is this ask; its card reads "use the browser". Other Mousse tools stay refused, and `escalate` refuses one no bot can hold before any card is shown.
+- **The bot's own browser:** one managed Chromium session per bot, without a window, on a persistent Chromium profile of its own (`botbrowser_<botId>`), owned by the bot's home thread so both lanes share it and nothing else reaches it; a tab per activation; tabs close when the activation ends and the browser after two idle minutes. Managed Chromium was chosen over a per-bot in-app tab because a run must work with no app open, and the managed backend already has persistent workspaces and a viewer.
+- **The owner's view:** a live preview in the reply, Expand to a split view beside the chat, Take over and Give back (`bots.browser.*`, `src/mms/bots/browser/`).
+- **The agent cursor** for every agent acting in a Mousse browser tab, drawn above the page and never in it (`src/shared/browser/agentCursor.ts`).
+
+Details as built: `docs/bots.md`, Use the browser.
+
 ### 3.6 Changed in revision 5: "run commands"
 
 The owner's decisions after the first bots ran on their own entries:

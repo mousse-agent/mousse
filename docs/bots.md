@@ -8,7 +8,7 @@ A bot is an agent a person makes from a **look** and one sentence ("What should 
 
 - The definition is format 2 (`src/shared/bots/personal/definition.ts`): name, description, look, role, the main thread spec with its model choice, and the grant (`permissions`). `owner` and `placement` are reserved for Teams and bot servers. Format 1 files are upgraded on read.
 - `bots.create` names the bot with one short model call (5 seconds at most). When that fails, a name made from the description is used, and the bot picks its own in its first turn. The bot's first message is produced at once, as a chat activation.
-- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and 15 minutes of work per activation.
+- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and 15 minutes of work per activation. The browser is asked for separately (see Use the browser).
 
 ## Lanes
 
@@ -49,6 +49,20 @@ An ask is a request for one permission, shown as a card with Allow and Not now (
 - **Pi**: with `shell` the turn offers Pi's `bash` tool; it runs in the locked environment, from the bot's files folder, with no sandbox.
 
 So a command can read, and on Pi or an unsandboxed Claude Code change, files outside the bot's folders. The card's note says so.
+
+## Use the browser
+
+"Use the browser" is one permission for every browser tool (`browser` in the grant, `BOT_BROWSER_PERMISSION`). The bot asks for it once (a card reading "use the browser"); an ask for any single browser tool, such as `browser_act`, is the same ask, and its card never names a tool. After Allow, `compileBotThread` turns it into the browser tools (all but `browser_request_human`: the bot asks its owner in its reply instead) and the bot has them in every chat and run, with no new ask. Not now, About → Remove and the ask caps work as for every other permission. Other Mousse tools stay refused: an `escalate` for one no bot can hold is refused at once, with no card.
+
+The browser is the bot's own (`src/mms/bots/browser/BotBrowsers.ts`), never the owner's tabs or a thread's:
+
+- **One managed Chromium session per bot**, without a window, so a scheduled run works with no app open. It runs on a persistent Chromium profile of its own (`botbrowser_<botId>` under the profile's managed browser data), so sites the owner signs in to for the bot stay signed in for that bot only, and the bot never uses the owner's other sign-ins. A deleted bot's browser closes at once; its profile is erased with the 30-day purge.
+- **Owned by the bot's home thread, with no run**, in the browser inventory: both lanes share the session, and no thread's agent or the owner's in-app browser reaches it (another owner is refused).
+- **A tab per activation.** Each activation opens and uses only its own tabs; another activation's tab is refused, and a tab list shows its own. When an activation ends, its tabs close; when the last one ends, the browser closes after two idle minutes, unless the owner is watching it or holds it.
+- **Stop and limits.** Every call carries the activation's signal: a stop, a wall or the deadline ends it. A stopped activation can't use the browser.
+- **The owner's view** (`bots.browser.*`, apart from the required Bot UI methods, so an older daemon simply shows none): `get` returns the followed tab's URL and title, the activations that used the browser and, when asked, a fresh JPEG of the tab (`frame` in the browser worker: not an observation, never sent to a model) with the agent cursor; `control` hands the browser to the owner (the bot's actions wait) and back; `input` sends the owner's clicks, scrolling, typing, keys and navigation; `open` opens the browser for the owner, under their control, to sign in to a site for the bot.
+
+In the bot chat, the reply of the last activation that used the browser shows a small live preview: the picture, the page's title and site, and the agent cursor. While that activation still works, the preview sits under the working line. Hovering it shows Expand, which opens the split view: the bot's browser beside its chat, following the same tab, with Take over and Give back, back, forward, reload and an address field. Activity chips read "using the browser" and "used the browser · example.com".
 
 ## Schedules
 
@@ -121,6 +135,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Chips | `src/shared/bots/personal/chips.ts`, `src/mms/bots/activity/BotActivitySink.ts` |
 | Instructions | `src/mms/bots/instructions.ts` |
 | Bot app tools | `src/mms/run/mcp/appTools/bots.ts`, `src/mms/run/mcp/appTools/botMemory.ts` |
+| The bot's own browser, its methods | `src/mms/bots/browser/`, `src/shared/bots/personal/browser.ts` |
 | Memory and context | `src/mms/bots/memory/` |
 | Wiring | `src/mms/MmsProfileServices.ts` |
-| Renderer: chat, ask cards, menu, About, New bot, faces | `src/renderer/components/bots/`, `src/renderer/stores/botsStore.ts`, `src/renderer/services/personalBotsClient.ts` |
+| Renderer: chat, ask cards, menu, About, New bot, faces, browser preview and split view | `src/renderer/components/bots/`, `src/renderer/stores/botsStore.ts`, `src/renderer/stores/botBrowserStore.ts`, `src/renderer/services/personalBotsClient.ts` |
