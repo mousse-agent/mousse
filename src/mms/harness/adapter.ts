@@ -39,7 +39,7 @@ export interface ProviderCapabilities {
   fork: 'native' | 'portable'
   /** `CommandPolicy.heartbeatToleranceMs`: sparse event streams get 6x the heartbeat window. */
   events: 'rich' | 'sparse'
-  /** `featureGates.restoreMode` (Phase 6): weak containment never auto-restores. */
+  /** `featureGates.restoreMode` (Phase 6): weak containment restores the worktree's files only. */
   containment: 'strong' | 'weak'
   /** `featureGates.handoffDelivery` (Phase 6). */
   historyInjection: 'native' | 'prompt'
