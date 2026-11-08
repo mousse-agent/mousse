@@ -38,12 +38,14 @@ import {
   defaultScope,
   fileSignature,
   folderTurnRunning,
+  hunkLineCounts,
   footerState,
   includeValueForLines,
   KEY_HELP,
   latestEndedTurn,
   lineChoicesFor,
   matchDaemonHunk,
+  mergeUncommittedLists,
   newerTurnNotice,
   nextUnviewed,
   orderRows,
@@ -68,6 +70,7 @@ import {
   viewedState,
   type ChangesScopeId,
   type HunkRange,
+  type UncommittedParts,
   type ViewedState
 } from './changesModel'
 import { ChangesDiff, type HunkActions, type LineRange } from './ChangesDiff'
@@ -91,6 +94,24 @@ interface Row extends ReviewFileEntry {
   signature: string
   /** The daemon's hunks and include state for this file, on the uncommitted diff. */
   api?: ChangedFile
+  /** On Uncommitted: which of Git's two diffs the file is in, so its card reads both ends. */
+  parts?: UncommittedParts
+}
+
+interface ScopeList {
+  result: ReviewFilesResult
+  /** Uncommitted only: per path, whether it is staged, unstaged or both. */
+  parts: Map<string, UncommittedParts> | null
+}
+
+/** Reads a scope's list. Uncommitted is HEAD → working tree, so Git's staged and unstaged diffs are read together. */
+async function readScopeList(target: { threadId?: string; projectId?: string }, scope: ReviewScope): Promise<ScopeList> {
+  if (scope.kind !== 'worktree') return { result: await window.mousse.review.files({ ...target, scope }), parts: null }
+  const [unstaged, staged] = await Promise.all([
+    window.mousse.review.files({ ...target, scope: { kind: 'worktree' } }),
+    window.mousse.review.files({ ...target, scope: { kind: 'worktree', staged: true } }).catch(() => null)
+  ])
+  return mergeUncommittedLists(unstaged, staged)
 }
 
 /** A POSIX, drive-letter or UNC path; anything else is relative to the worktree. */
@@ -138,7 +159,10 @@ export function ChangesPanel() {
   const platform = useAppStore((s) => s.appInfo?.platform ?? '')
   const source = useActiveThreadPullRequest(threadId)
   const { location, git, path: folderId, projectId, ownThreadId } = source
-  const gitScope = useMemo(() => gitScopeFor(location), [location])
+  // By its ids: `location` is a new object on most renders, and every read and listener below hangs off this scope.
+  const scopeProjectId = location.projectId
+  const scopeThreadId = location.workspaceThreadId
+  const gitScope = useMemo(() => gitScopeFor({ projectId: scopeProjectId, workspaceThreadId: scopeThreadId }), [scopeProjectId, scopeThreadId])
   const stateKey = threadId ?? (folderId ? `folder:${folderId}` : null)
   const threadState = useChangesStore((s) => (stateKey ? s.byThread[stateKey] : undefined))
   const viewed = useChangesStore((s) => s.viewed)
@@ -152,10 +176,12 @@ export function ChangesPanel() {
 
   const [availability, setAvailability] = useState<{ threadId: string; value: WorkspaceAvailability } | null>(null)
   const [choices, setChoices] = useState<{ threadId: string; list: TurnChoice[] } | null>(null)
-  const [list, setList] = useState<{ key: string; result: ReviewFilesResult } | null>(null)
+  const [list, setList] = useState<{ key: string; list: ScopeList } | null>(null)
   const [listError, setListError] = useState<{ key: string; message: string } | null>(null)
   const [uncommittedList, setUncommittedList] = useState<{ key: string; files: ReviewFileEntry[] } | null>(null)
   const [apiResult, setApiResult] = useState<{ key: string; result: ChangesResult } | null>(null)
+  /** The folder whose hunks could not be read (an older computer, a failed read): Choose what to commit says so. */
+  const [apiFailed, setApiFailed] = useState<string | null>(null)
   const [version, setVersion] = useState(0)
   const [hunks, setHunks] = useState<{ path: string; list: HunkRange[] }>({ path: '', list: [] })
   const [focusedHunk, setFocusedHunk] = useState<number | null>(null)
@@ -170,8 +196,28 @@ export function ChangesPanel() {
   const [reverting, setReverting] = useState<string | null>(null)
   const [activity, setActivity] = useState<SyncActivity>(IDLE_SYNC_ACTIVITY)
   const [message, setMessage] = useState<{ text: string; tone: 'error' | 'notice' } | null>(null)
-  /** Bumped by every selection write, so a read that started before it never overwrites what the write shows. */
-  const apiSeq = useRef(0)
+  /** Each file's version as the newest read or write left it, and the selection's state: what the next queued write sends. */
+  const versions = useRef(new Map<string, string>())
+  const selectionState = useRef<SelectionState['state'] | null>(null)
+  /** The selection writes in flight, one after another. */
+  const writes = useRef<Promise<unknown>>(Promise.resolve())
+  /** Orders reads against writes: a read lands unless a write started after it or a newer read already landed. */
+  const apiOrder = useRef({ next: 0, write: 0, landed: 0 })
+  /** Starts a read; its `lands()` says whether its answer may still be shown, and claims the slot when it may. */
+  const startRead = () => {
+    const order = apiOrder.current
+    const seq = ++order.next
+    const write = order.write
+    return () => {
+      if (order.write !== write || order.landed > seq) return false
+      order.landed = seq
+      return true
+    }
+  }
+  /** A write began: answers of reads started before it are out of date. */
+  const startWrite = () => {
+    apiOrder.current.write++
+  }
   const selectionRef = useRef<LineRange | null>(null)
   const folderRef = useRef(folderId)
   folderRef.current = folderId
@@ -261,9 +307,9 @@ export function ChangesPanel() {
     const id = ++requestId.current
     const key = listKey
     try {
-      const result = await window.mousse.review.files({ ...(JSON.parse(targetJson) as object), scope: JSON.parse(scopeJson) as ReviewScope })
+      const read = await readScopeList(JSON.parse(targetJson) as object, JSON.parse(scopeJson) as ReviewScope)
       if (id !== requestId.current) return
-      setList({ key, result })
+      setList({ key, list: read })
       setListError(null)
       setVersion((value) => value + 1)
     } catch (error) {
@@ -276,8 +322,8 @@ export function ChangesPanel() {
   const loadUncommitted = useCallback(async () => {
     if (!targetJson || showsWorktree || uncommitted === 0 || !isRepo) return
     try {
-      const result = await window.mousse.review.files({ ...(JSON.parse(targetJson) as object), scope: { kind: 'worktree' } })
-      setUncommittedList({ key: uncommittedKey, files: result.files })
+      const read = await readScopeList(JSON.parse(targetJson) as object, { kind: 'worktree' })
+      setUncommittedList({ key: uncommittedKey, files: read.result.files })
     } catch {
       setUncommittedList(null)
     }
@@ -287,13 +333,19 @@ export function ChangesPanel() {
   const hasFolder = gitScope.projectId !== null || gitScope.workspaceThreadId !== null
   const loadApi = useCallback(async () => {
     if (!hasFolder || !folderId || !isRepo || uncommitted === 0) return
-    const seq = ++apiSeq.current
+    const lands = startRead()
     try {
       const result = await changesApi.changes(gitScope)
-      if (seq === apiSeq.current) setApiResult({ key: apiKey, result })
+      if (!lands()) return
+      for (const file of result.files) versions.current.set(file.path, file.version)
+      selectionState.current = result.selection.state
+      setApiResult({ key: apiKey, result })
+      setApiFailed(null)
     } catch {
       // Without hunks (an older computer, a read that failed) the tab still shows the diff; Include and Revert stay off.
-      if (seq === apiSeq.current) setApiResult((current) => (current?.key === apiKey ? null : current))
+      if (!lands()) return
+      setApiResult((current) => (current?.key === apiKey ? null : current))
+      setApiFailed(apiKey)
     }
   }, [hasFolder, gitScope, folderId, isRepo, uncommitted, apiKey])
   // Another window, computer or view changed the selection of this folder.
@@ -324,7 +376,8 @@ export function ChangesPanel() {
     setChoosing(false)
   }, [folderId])
 
-  const result = list?.key === listKey ? list.result : null
+  const result = list?.key === listKey ? list.list.result : null
+  const listParts = list?.key === listKey ? list.list.parts : null
   const error = listError?.key === listKey ? listError.message : null
   const api = apiResult?.key === apiKey ? apiResult.result : null
 
@@ -337,10 +390,20 @@ export function ChangesPanel() {
       result.files.map((entry) => {
         const apiFile = apiByPath.get(entry.path)
         const conflict = showsWorktree && (conflicted.has(entry.path) || apiFile?.change === 'conflict')
-        return { ...entry, conflict, signature: fileSignature({ ...entry, version: apiFile?.version }), ...(apiFile ? { api: apiFile } : {}) }
+        const parts = listParts?.get(entry.path)
+        // Staged and unstaged counts only add up; the daemon's hunks are HEAD → working tree.
+        const counts = apiFile && parts?.staged && parts.unstaged ? hunkLineCounts(apiFile) : null
+        return {
+          ...entry,
+          ...(counts ? { ...counts, countsExact: true } : {}),
+          conflict,
+          signature: fileSignature({ ...entry, version: apiFile?.version }),
+          ...(apiFile ? { api: apiFile } : {}),
+          ...(parts ? { parts } : {})
+        }
       })
     )
-  }, [result, api, showsWorktree, conflicted])
+  }, [result, listParts, api, showsWorktree, conflicted])
   const paths = useMemo(() => rows.map((row) => row.path), [rows])
   const endpoints = result ? scopeEndpoints(result) : ''
   const markKey = useCallback((path: string) => viewedKey(stateKey ?? '', endpoints, path), [stateKey, endpoints])
@@ -396,7 +459,8 @@ export function ChangesPanel() {
   const canInclude = api !== null && showsUncommitted && !folderBusy && !ignoreWhitespace
   /** Why Include and Revert are off where the scope would allow them; a tooltip says it. */
   const offReason = folderBusy ? 'Off while a turn runs' : ignoreWhitespace ? 'Off while ignoring whitespace' : null
-  const showChecks = showIncludeChecks({ canInclude, choosing, selection })
+  // The boxes show what a partial selection holds even while Include is off; they are disabled then.
+  const showChecks = showIncludeChecks({ canInclude: api !== null && showsUncommitted, choosing, selection })
 
   // ---- Actions
   const refreshAll = useCallback(() => {
@@ -456,55 +520,77 @@ export function ChangesPanel() {
     void loadApi()
   }, [loadApi])
 
-  /** Re-reads the given paths after a write and keeps the rest in place; the daemon's write results stay small for Bridge. */
-  const refreshPaths = useCallback(async (paths: string[], selection: SelectionState) => {
-    const seq = ++apiSeq.current
+  /**
+   * Re-reads after a write and shows it unless a newer choice is already on screen: the given paths in place, or
+   * everything. Notes each file's version either way, so the next queued write sends the current one.
+   */
+  const reread = useCallback(async (paths?: string[]) => {
+    const lands = startRead()
     try {
       const fresh = await changesApi.changes(gitScope, paths)
-      if (seq !== apiSeq.current) return
+      for (const file of fresh.files) versions.current.set(file.path, file.version)
+      if (!paths) selectionState.current = fresh.selection.state
+      if (!lands()) return
       setApiResult((current) => {
+        if (!paths) return { key: apiKey, result: fresh }
         if (!current || current.key !== apiKey) return current
-        return { ...current, result: { ...current.result, selection, files: mergeFiles(current.result.files, paths, fresh.files) } }
+        return { ...current, result: { ...current.result, selection: fresh.selection, files: mergeFiles(current.result.files, paths, fresh.files) } }
       })
     } catch {
       void loadApi()
     }
   }, [gitScope, apiKey, loadApi])
 
+  /**
+   * Selection writes run one at a time, each with the file's version as the last write left it: a quick second click on
+   * the same file is never refused as `stale` because the first one's answer had not been read yet.
+   */
+  const queueWrite = useCallback((task: () => Promise<void>): Promise<void> => {
+    const next = writes.current.then(task, task)
+    writes.current = next.catch(() => undefined)
+    return next
+  }, [])
+  const latest = useCallback((file: ChangedFile): ChangedFile => ({ ...file, version: versions.current.get(file.path) ?? file.version }), [])
+
   /** Applies a change to the shown files at once (the next frame), before Git confirms it. */
   const showAtOnce = useCallback((change: (result: ChangesResult) => ChangesResult) => {
-    apiSeq.current++
+    startWrite()
     setApiResult((current) => (current && current.key === apiKey ? { ...current, result: change(current.result) } : current))
   }, [apiKey])
 
-  const include = useCallback(async (file: ChangedFile, value: boolean, choice: FileChoice = {}) => {
-    const before = api?.selection.state
+  const include = useCallback((file: ChangedFile, value: boolean, choice: FileChoice = {}) => {
     setChoosing(true)
     showAtOnce((current) => ({
       ...current,
       selection: { ...current.selection, state: 'chosen' },
       files: current.files.map((item) => (item.path === file.path ? withInclude(item, value, choice) : item))
     }))
-    try {
-      const outcome = await changesApi.include(gitScope, file, value, choice)
-      // The first choice changes every file's version (everything gets staged first in a project folder): read them all.
-      if (before !== outcome.selection.state) void loadApi()
-      else await refreshPaths([file.path, ...(file.oldPath ? [file.oldPath] : [])], outcome.selection)
-    } catch (includeError) {
-      writeFailed(includeError)
-    }
-  }, [api, gitScope, showAtOnce, loadApi, refreshPaths, writeFailed])
+    return queueWrite(async () => {
+      const before = selectionState.current
+      try {
+        const outcome = await changesApi.include(gitScope, latest(file), value, choice)
+        selectionState.current = outcome.selection.state
+        // The first choice changes every file's version (everything gets staged first in a project folder): read them all.
+        await reread(before !== outcome.selection.state ? undefined : [file.path, ...(file.oldPath ? [file.oldPath] : [])])
+      } catch (includeError) {
+        writeFailed(includeError)
+      }
+    })
+  }, [gitScope, showAtOnce, queueWrite, latest, reread, writeFailed])
 
-  const includeAll = useCallback(async (value: boolean) => {
+  const includeAll = useCallback((value: boolean) => {
     setChoosing(true)
     showAtOnce((current) => ({ ...current, selection: { ...current.selection, state: 'chosen' }, files: current.files.map((item) => withInclude(item, value)) }))
-    try {
-      await changesApi.includeAll(gitScope, value)
-    } catch (includeError) {
-      if (changesErrorCode(includeError) !== 'stale') setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: 'error' })
-    }
-    void loadApi()
-  }, [gitScope, showAtOnce, loadApi])
+    return queueWrite(async () => {
+      try {
+        const selection = await changesApi.includeAll(gitScope, value)
+        selectionState.current = selection.state
+      } catch (includeError) {
+        if (changesErrorCode(includeError) !== 'stale') setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: 'error' })
+      }
+      await reread()
+    })
+  }, [gitScope, showAtOnce, queueWrite, reread])
 
   /** Puts a revert back. Reports what happened so Restore reverted… can say it on the entry. */
   const restore = useCallback(async (revertId: string): Promise<RestoreOutcome | 'restored' | 'failed'> => {
@@ -530,11 +616,12 @@ export function ChangesPanel() {
     else if (outcome === 'expired') setMessage({ text: 'The kept copy is gone', tone: 'notice' })
   }, [restore])
 
-  const revert = useCallback(async (file: ChangedFile, choice: FileChoice = {}) => {
+  const revert = useCallback((file: ChangedFile, choice: FileChoice = {}) => queueWrite(async () => {
     setReverting(file.path)
-    apiSeq.current++
+    startWrite()
     try {
-      const outcome = await changesApi.revert(gitScope, file, choice)
+      const outcome = await changesApi.revert(gitScope, latest(file), choice)
+      versions.current.set(outcome.path, outcome.version)
       if (folderId) useChangesStore.getState().pushRevert(folderId, outcome.revertId)
       showToast({ message: 'Reverted', action: { label: 'Undo', run: () => void undoRevert(outcome.revertId) }, key: `${REVERT_TOAST}:${outcome.revertId}` })
       if (outcome.left) setMessage({ text: outcome.left, tone: 'notice' })
@@ -544,7 +631,7 @@ export function ChangesPanel() {
     } finally {
       setReverting(null)
     }
-  }, [gitScope, folderId, undoRevert, refreshAll, writeFailed])
+  }), [queueWrite, gitScope, latest, folderId, undoRevert, refreshAll, writeFailed])
 
   const undoLastCommit = useCallback(async () => {
     const head = git.commits[0]
@@ -568,7 +655,8 @@ export function ChangesPanel() {
   const hunkActions: HunkActions = {
     canRevert: canRevert && hunkChoices,
     revertOff: revertScope && hunkChoices && !canRevert ? offReason : null,
-    canInclude: canInclude && showChecks && hunkChoices,
+    canInclude: showChecks && hunkChoices,
+    includeOff: canInclude ? null : offReason,
     includedOf: (hunk) => daemonHunk(hunk)?.included ?? null,
     onRevert: (hunk) => {
       const match = daemonHunk(hunk)
@@ -719,13 +807,14 @@ export function ChangesPanel() {
   const newer = newerTurnNotice({ scopeId, pinnedTurnId, choices: turnList })
   const menu = [
     // Choosing needs every whitespace change on screen, so it turns Ignore whitespace off.
-    ...(api !== null && showsUncommitted
+    // Shown from the start and enabled once the hunks are read, so the menu does not change under the pointer.
+    ...(showsUncommitted && uncommitted > 0
       ? [{
         label: 'Choose what to commit',
         hint: 'Space',
         checked: showChecks,
-        disabled: folderBusy,
-        title: folderBusy ? 'Off while a turn runs' : undefined,
+        disabled: folderBusy || api === null,
+        title: folderBusy ? 'Off while a turn runs' : api !== null ? undefined : apiFailed === apiKey ? 'Not available for this folder' : 'Reading the changes…',
         onSelect: () => {
           if (ignoreWhitespace) setIgnoreWhitespace(false)
           setChoosing(!showChecks)
@@ -866,6 +955,8 @@ export function ChangesPanel() {
                     className="changes-row-check"
                     aria-label={`Include ${row.path}`}
                     checked={included === 'yes'}
+                    disabled={!canInclude}
+                    title={canInclude ? undefined : offReason ?? undefined}
                     ref={(element) => {
                       if (element) element.indeterminate = included === 'partial'
                     }}
@@ -931,6 +1022,7 @@ export function ChangesPanel() {
                     target={{ ...target, scope: reviewScope }}
                     path={row.path}
                     oldPath={row.oldPath}
+                    parts={row.parts}
                     version={version}
                     ignoreWhitespace={ignoreWhitespace}
                     split={split && width >= SPLIT_MIN_WIDTH}
@@ -990,7 +1082,7 @@ export function ChangesPanel() {
           comments: commentsPerFile.get(row.path) ?? 0,
           included: row.api ? row.api.included !== 'no' : null
         }))}
-        showIncluded={canInclude}
+        showIncluded={api !== null && showsUncommitted}
         onPick={(path) => setOpen(path)}
         onClose={() => setJumpOpen(false)}
       />

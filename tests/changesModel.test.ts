@@ -9,8 +9,10 @@ import {
   commentTarget,
   defaultScope,
   fileSignature,
+  combineUncommittedSides,
   folderTurnRunning,
   footerState,
+  hunkLineCounts,
   headerFit,
   hunkAnchor,
   hunkAtLine,
@@ -20,6 +22,7 @@ import {
   lineChoicesFor,
   lineIndexesIn,
   matchDaemonHunk,
+  mergeUncommittedLists,
   newerTurnNotice,
   nextUnviewed,
   orderRows,
@@ -251,6 +254,7 @@ describe('what a commit takes', () => {
     expect(selectionFromStatus({ stagedCount: 2, changedCount: 5 }, true)).toEqual({ kind: 'all', total: 5 })
     expect(commitLabel({ kind: 'all', total: 5 })).toBe('Commit all 5')
     expect(commitLabel({ kind: 'some', included: 2, total: 3 })).toBe('Commit 2 of 3')
+    expect(commitLabel({ kind: 'some', included: 3, total: 3 })).toBe('Commit part of 3')
     expect(commitLabel({ kind: 'none', total: 3 })).toBe('Include something to commit')
   })
 })
@@ -530,5 +534,63 @@ describe('restore reverted', () => {
     expect(revertedWhat({ path: 'src/a.ts', summary: '1 line of src/a.ts' })).toBe('1 line')
     expect(revertedWhat({ path: 'src/a.ts', summary: 'src/a.ts' })).toBe('Whole file')
     expect(revertedWhat({ path: 'b.ts', oldPath: 'a.ts', summary: 'a.ts → b.ts' })).toBe('Whole file')
+  })
+})
+
+describe('Uncommitted as HEAD → working tree', () => {
+  const entry = (path: string, status: ReviewFileEntry['status'], additions: number, deletions = 0, extra: Partial<ReviewFileEntry> = {}): ReviewFileEntry =>
+    ({ path, status, additions, deletions, binary: false, countsExact: true, ...extra })
+  const list = (files: ReviewFileEntry[], range: { from: unknown; to: unknown }) =>
+    ({ root: '/repo', scope: { kind: 'worktree' }, range, files, truncated: false, mergeCommits: 0 }) as never
+
+  it("joins Git's staged and unstaged lists by path and remembers where each file came from", () => {
+    const unstaged = list([entry('a.ts', 'modified', 1), entry('new.ts', 'untracked', 4)], { from: { kind: 'index' }, to: { kind: 'worktree' } })
+    const staged = list([entry('a.ts', 'modified', 3, 1), entry('b.ts', 'added', 2), entry('c.ts', 'renamed', 0, 0, { oldPath: 'old.ts' })], { from: { kind: 'commit', sha: 'h' }, to: { kind: 'index' } })
+    const { result, parts } = mergeUncommittedLists(unstaged, staged)
+    expect(result.range).toEqual({ from: { kind: 'commit', sha: 'h' }, to: { kind: 'worktree' } })
+    expect(Object.fromEntries(result.files.map((file) => [file.path, [file.status, file.additions, file.deletions, file.countsExact]]))).toEqual({
+      'a.ts': ['modified', 4, 1, false],
+      'b.ts': ['added', 2, 0, true],
+      'c.ts': ['renamed', 0, 0, true],
+      'new.ts': ['untracked', 4, 0, true]
+    })
+    expect(parts.get('a.ts')).toEqual({ staged: true, unstaged: true })
+    expect(parts.get('b.ts')).toEqual({ staged: true, unstaged: false })
+    expect(parts.get('new.ts')).toEqual({ staged: false, unstaged: true })
+  })
+
+  it('keeps an added or renamed file so, and a file removed from the working tree is deleted', () => {
+    const unstaged = list([entry('b.ts', 'modified', 1), entry('c.ts', 'modified', 1), entry('d.ts', 'deleted', 0, 5)], { from: { kind: 'index' }, to: { kind: 'worktree' } })
+    const staged = list([entry('b.ts', 'added', 2), entry('c.ts', 'renamed', 0, 0, { oldPath: 'old.ts' }), entry('d.ts', 'modified', 1)], { from: null, to: { kind: 'index' } })
+    const files = mergeUncommittedLists(unstaged, staged).result.files
+    expect(files.find((file) => file.path === 'b.ts')?.status).toBe('added')
+    expect(files.find((file) => file.path === 'c.ts')).toMatchObject({ status: 'renamed', oldPath: 'old.ts' })
+    expect(files.find((file) => file.path === 'd.ts')?.status).toBe('deleted')
+  })
+
+  it('falls back to the unstaged list when the staged one could not be read', () => {
+    const unstaged = list([entry('a.ts', 'modified', 1)], { from: { kind: 'index' }, to: { kind: 'worktree' } })
+    const { result, parts } = mergeUncommittedLists(unstaged, null)
+    expect(result).toBe(unstaged)
+    expect(parts.get('a.ts')).toEqual({ staged: false, unstaged: true })
+  })
+
+  it('reads HEAD from the staged diff and the working tree from the unstaged one', () => {
+    const side = (content: string) => ({ content, size: content.length })
+    const fromHead = { root: '/r', path: 'a.ts', original: side('head'), modified: side('index') }
+    const fromIndex = { root: '/r', path: 'a.ts', original: side('index'), modified: side('work') }
+    expect(combineUncommittedSides({ staged: true, unstaged: true }, fromHead, fromIndex)).toMatchObject({ original: side('head'), modified: side('work') })
+    expect(combineUncommittedSides({ staged: true, unstaged: false }, fromHead, null)).toMatchObject({ original: side('head'), modified: side('index') })
+    expect(combineUncommittedSides({ staged: false, unstaged: true }, null, fromIndex)).toMatchObject({ original: side('index'), modified: side('work') })
+    // Added in the index: no HEAD side.
+    expect(combineUncommittedSides({ staged: true, unstaged: true }, { ...fromHead, original: null }, fromIndex)?.original).toBeNull()
+    expect(combineUncommittedSides({ staged: true, unstaged: true }, null, null)).toBeNull()
+  })
+
+  it("counts a file's lines from the daemon's hunks", () => {
+    const hunk = (...kinds: Array<' ' | '-' | '+'>) => ({ lines: kinds.map((kind) => ({ kind })) })
+    expect(hunkLineCounts({ hunks: [hunk(' ', '-', '+', '+'), hunk('+')] })).toEqual({ additions: 3, deletions: 1 })
+    expect(hunkLineCounts({ hunks: [] })).toBeNull()
+    expect(hunkLineCounts({ tooLarge: true, hunks: [hunk('+')] })).toBeNull()
   })
 })

@@ -480,6 +480,17 @@
   padding-block: 1px;
 }
 
+.changes-include[data-off],
+.changes-row-check:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.changes-include[data-off]:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
 .changes-include[data-included='no'] {
   color: var(--ui-faint);
 }

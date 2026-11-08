@@ -1,7 +1,7 @@
 // Pure rules of the Changes tab: scopes and their defaults, the footer's one next step, viewed marks,
 // what the header drops at narrow widths and the keyboard map. No React, Monaco or window access, so
 // tests can load it.
-import type { ReviewFileEntry, ReviewFilesResult, ReviewScope, ReviewSide } from '../../../shared/review'
+import type { ReviewFileEntry, ReviewFileResult, ReviewFilesResult, ReviewScope, ReviewSide } from '../../../shared/review'
 import type { TurnChoice } from '../review/reviewModel'
 import type { ChangesResult } from './changesApi'
 
@@ -240,6 +240,86 @@ export function sameChanges(a: readonly ReviewFileEntry[], b: readonly ReviewFil
 }
 
 // ---------------------------------------------------------------------------------------------
+// Uncommitted: HEAD → working tree, from Git's two diffs
+
+/** Which of Git's two diffs a file shows up in: staged (HEAD → index) and unstaged (index → working tree). */
+export interface UncommittedParts {
+  staged: boolean
+  unstaged: boolean
+}
+
+/**
+ * Uncommitted is HEAD → working tree, as the hunks Include and Revert act on. Reviews read it as two diffs, so the
+ * list is their union by path. A file in both gets its status from both ends; its line counts are only a sum, so the
+ * row takes them from the daemon's hunks when it has them.
+ */
+export function mergeUncommittedLists(unstaged: ReviewFilesResult, staged: ReviewFilesResult | null): { result: ReviewFilesResult; parts: Map<string, UncommittedParts> } {
+  const parts = new Map<string, UncommittedParts>()
+  if (!staged || staged.unavailable) {
+    for (const file of unstaged.files) parts.set(file.path, { staged: false, unstaged: true })
+    return { result: unstaged, parts }
+  }
+  const byPath = new Map<string, ReviewFileEntry>()
+  for (const file of staged.files) {
+    byPath.set(file.path, file)
+    parts.set(file.path, { staged: true, unstaged: false })
+  }
+  for (const file of unstaged.files) {
+    const before = byPath.get(file.path)
+    if (!before) {
+      byPath.set(file.path, file)
+      parts.set(file.path, { staged: false, unstaged: true })
+      continue
+    }
+    parts.set(file.path, { staged: true, unstaged: true })
+    // Added in the index stays added; removed in the working tree is deleted; a staged rename keeps its old path.
+    const status = before.status === 'added' ? (file.status === 'deleted' ? 'modified' : 'added') : file.status === 'deleted' ? 'deleted' : before.status
+    byPath.set(file.path, {
+      ...file,
+      status,
+      ...(before.oldPath ? { oldPath: before.oldPath } : {}),
+      additions: before.additions + file.additions,
+      deletions: before.deletions + file.deletions,
+      binary: before.binary || file.binary,
+      countsExact: false
+    })
+  }
+  return {
+    result: {
+      ...unstaged,
+      range: { from: staged.range.from, to: unstaged.range.to },
+      files: [...byPath.values()],
+      truncated: unstaged.truncated || staged.truncated
+    },
+    parts
+  }
+}
+
+/** A file's `+n −m` from the daemon's hunks; null when it has none to count (binary, too large, mode only). */
+export function hunkLineCounts(file: { tooLarge?: boolean; hunks: ReadonlyArray<{ lines: ReadonlyArray<{ kind: ' ' | '-' | '+' }> }> }): { additions: number; deletions: number } | null {
+  if (file.tooLarge || file.hunks.length === 0) return null
+  let additions = 0
+  let deletions = 0
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      if (line.kind === '+') additions++
+      else if (line.kind === '-') deletions++
+    }
+  }
+  return { additions, deletions }
+}
+
+/** One file's HEAD and working-tree sides from the staged read (HEAD → index) and the unstaged one (index → working tree). */
+export function combineUncommittedSides(parts: UncommittedParts, staged: ReviewFileResult | null, unstaged: ReviewFileResult | null): ReviewFileResult | null {
+  const base = unstaged ?? staged
+  if (!base) return null
+  // Not staged: the index is HEAD. Not unstaged: the working tree is the index.
+  const original = parts.staged ? staged?.original ?? null : unstaged?.original ?? null
+  const modified = parts.unstaged ? unstaged?.modified ?? null : staged?.modified ?? null
+  return { ...base, original, modified }
+}
+
+// ---------------------------------------------------------------------------------------------
 // What to commit
 
 export type CommitSelection =
@@ -268,7 +348,8 @@ export function selectionFromStatus(counts: { stagedCount: number; changedCount:
 
 export function commitLabel(selection: CommitSelection): string {
   if (selection.kind === 'none') return 'Include something to commit'
-  if (selection.kind === 'some') return `Commit ${selection.included} of ${selection.total}`
+  // Every file has something in, but not all of it: "5 of 5" would read as everything.
+  if (selection.kind === 'some') return selection.included >= selection.total ? `Commit part of ${selection.total}` : `Commit ${selection.included} of ${selection.total}`
   return `Commit all ${selection.total}`
 }
 

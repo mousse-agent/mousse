@@ -10,7 +10,7 @@ import { diffSurfaceStyle, diffUnsafeCSS, useDiffThemeType } from '../../lib/dif
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { commentsForFile } from '../review/reviewComments'
 import { isPlaceholderSide, placeholderFor } from '../review/reviewModel'
-import { commentTarget, contentHash, hunkAnchor, hunkAtLine, hunksFromMetadata, type HunkRange } from './changesModel'
+import { combineUncommittedSides, commentTarget, contentHash, hunkAnchor, hunkAtLine, hunksFromMetadata, type HunkRange, type UncommittedParts } from './changesModel'
 import type { IncludeState } from './changesApi'
 
 const NO_REFERENCES: ChatReference[] = []
@@ -28,6 +28,8 @@ export interface HunkActions {
   revertOff: string | null
   /** The Include checkboxes show: every hunk carries one, not only the hovered or focused one. */
   canInclude: boolean
+  /** The boxes show but are off for now (a turn runs, whitespace is ignored): the reason, on the disabled box. */
+  includeOff: string | null
   /** The hunk's include state from the daemon, or null when it is not known. */
   includedOf: (hunk: HunkRange) => IncludeState | null
   onRevert: (hunk: HunkRange) => void
@@ -52,6 +54,8 @@ export interface ChangesDiffProps {
   target: DiffTarget
   path: string
   oldPath?: string
+  /** Uncommitted only: which of Git's two diffs the file is in. A staged file reads HEAD from the staged diff. */
+  parts?: UncommittedParts
   /** Changes when the list was re-read: the open file is read again in place, without a loading state. */
   version: number
   ignoreWhitespace: boolean
@@ -112,6 +116,7 @@ export function ChangesDiff({
   target,
   path,
   oldPath,
+  parts,
   version,
   ignoreWhitespace,
   split,
@@ -127,7 +132,9 @@ export function ChangesDiff({
 }: ChangesDiffProps) {
   const { threadId, projectId, scope } = target
   const scopeJson = JSON.stringify(scope)
-  const key = `${threadId ?? ''}\0${projectId ?? ''}\0${scopeJson}\0${path}\0${oldPath ?? ''}`
+  const staged = parts?.staged === true
+  const unstaged = parts ? parts.unstaged : true
+  const key = `${threadId ?? ''}\0${projectId ?? ''}\0${scopeJson}\0${path}\0${oldPath ?? ''}\0${staged}\0${unstaged}`
   const [loaded, setLoaded] = useState<{ key: string; result: ReviewFileResult } | null>(null)
   const [failed, setFailed] = useState<{ key: string; message: string } | null>(null)
   const [retry, setRetry] = useState(0)
@@ -145,8 +152,14 @@ export function ChangesDiff({
 
   useEffect(() => {
     let cancelled = false
-    window.mousse.review
-      .file({ threadId, projectId, scope: JSON.parse(scopeJson) as ReviewScope, path, oldPath })
+    const scope = JSON.parse(scopeJson) as ReviewScope
+    const read = (side: ReviewScope) => window.mousse.review.file({ threadId, projectId, scope: side, path, oldPath })
+    // Uncommitted is HEAD → working tree: a staged file's HEAD side comes from the staged diff (HEAD → index).
+    const reading = scope.kind === 'worktree' && staged
+      ? Promise.all([read({ kind: 'worktree', staged: true }), unstaged ? read({ kind: 'worktree' }) : Promise.resolve(null)])
+        .then(([fromHead, fromIndex]) => combineUncommittedSides({ staged, unstaged }, fromHead, fromIndex)!)
+      : read(scope)
+    reading
       .then((result) => {
         if (cancelled) return
         setLoaded({ key, result })
@@ -160,7 +173,7 @@ export function ChangesDiff({
     }
     // `key` is derived from the other dependencies.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, projectId, scopeJson, path, oldPath, version, retry])
+  }, [threadId, projectId, scopeJson, path, oldPath, staged, unstaged, version, retry])
 
   const current = loaded?.key === key ? loaded.result : null
   const error = failed?.key === key ? failed.message : null
@@ -330,10 +343,11 @@ export function ChangesDiff({
       const included = actions.canInclude ? actions.includedOf(hunk) : null
       if (included === null) return null
       return (
-        <label className="changes-include" data-included={included} title="Include in the commit (Space)">
+        <label className="changes-include" data-included={included} data-off={actions.includeOff ? true : undefined} title={actions.includeOff ?? 'Include in the commit (Space)'}>
           <input
             type="checkbox"
             checked={included === 'yes'}
+            disabled={actions.includeOff !== null}
             ref={(element) => {
               if (element) element.indeterminate = included === 'partial'
             }}
