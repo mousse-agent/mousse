@@ -21,6 +21,8 @@ export function openPersonalBots(
     const engine = new BotEngine({ ...host, ...seams?.({ store: opened, definitions }), store: opened, definitions })
     // Definitions of the form editor become format 2 once, before anything reads them (Bot Phase 1 §5.2).
     engine.upgradeDefinitions()
+    // File access is one permission: an older build's open folder asks become the one file ask.
+    engine.upgradeFileAsks()
     return { store: opened, engine }
   } catch (error) {
     try { store?.close() } catch { /* already unusable */ }

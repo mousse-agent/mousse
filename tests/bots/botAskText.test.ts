@@ -3,19 +3,32 @@
  */
 import { describe, expect, it } from 'vitest'
 import { askText } from '../../src/shared/bots/personal/askText'
+import { filesAsk, filesAskOf, pathRoot } from '../../src/shared/bots/personal/escalation'
 
 describe('askText', () => {
-  it('folders by access, shortened to ~', () => {
-    expect(askText({ path: '/home/me/Documents/Invoices', access: 'read' }, { home: '/home/me' })).toEqual({ title: 'read files in ~/Documents/Invoices', note: "Only this folder. It can't change anything." })
-    expect(askText({ path: '/home/me/Notes', access: 'write' }, { home: '/home/me' })).toEqual({ title: 'change files in ~/Notes', note: 'Only this folder.' })
+  it('file access is one permission, whatever folder an ask names', () => {
+    const files = { title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data." }
+    expect(askText(filesAsk())).toEqual(files)
+    // Rows an older build wrote name the folder they were about; Allow grants the same.
+    expect(askText({ path: '/home/me/Documents/Invoices', access: 'read' })).toEqual(files)
+    expect(askText({ path: '/home/me/Notes', access: 'write' })).toEqual(files)
+  })
+
+  it('the one file ask: every folder asks the same, at the top of the file system', () => {
+    expect(filesAsk()).toEqual({ path: process.platform === 'win32' ? expect.stringMatching(/^[A-Z]:\\$/) : '/', access: 'write' })
+    expect(filesAskOf({ path: '/home/me/.claude/projects/x/s/tool-results', access: 'read' })).toEqual(filesAsk())
+    expect(filesAskOf({ tool: 'shell' })).toEqual({ tool: 'shell' })
+    expect(pathRoot('/home/me')).toBe('/')
+    expect(pathRoot('d:\\Work\\x')).toBe('D:\\')
+    expect(pathRoot('\\\\server\\share\\docs')).toBe('\\\\server\\share\\')
   })
 
   it('tools, skills and MCP tools in words', () => {
     expect(askText({ tool: 'web_fetch' }).title).toBe('read web pages')
     expect(askText({ tool: 'read' }).title).toBe('read files')
     expect(askText({ tool: 'shell' }).title).toBe('run commands')
-    // One permission for any command: the note says where they start and that they are not held to the folders.
-    expect(askText({ tool: 'shell' }).note).toBe('Any command, started in its files folder. Commands can reach files outside the folders you allow.')
+    // One permission for any command: the note says where they start and that they reach other files.
+    expect(askText({ tool: 'shell' }).note).toBe('Any command, started in its files folder. Commands can reach other files on this computer.')
     expect(askText({ tool: 'some_tool' }).title).toBe('use the some tool tool')
     expect(askText({ skill: 'release-notes' })).toEqual({ title: 'use the release-notes skill', note: '' })
     expect(askText({ mcp: { serverId: 'github', tool: 'create_issue' } }).title).toBe('use create_issue from github')

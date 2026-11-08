@@ -102,14 +102,14 @@ describe('the Bots section', () => {
 
   it('merges bot chats into Recent by their last message, with the state in words', async () => {
     await show([
-      summary('a', { name: 'Inbox helper', state: 'needs_you', stateText: 'Wants to read files in ~/Invoices', last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
+      summary('a', { name: 'Inbox helper', state: 'needs_you', stateText: 'Wants to use files on this computer', last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
       summary('b', { name: 'Flight deals', state: 'paused', stateText: 'Paused', last: { text: 'Found one', at: '2026-11-07T10:00:00.000Z', author: 'bot' } })
     ], [direct('c1', 'Reviewer', '2026-11-07T09:00:00.000Z')])
     expect(headings()).toEqual(['Bots', 'Groups', 'Recent'])
     const rows = [...host.querySelectorAll('.chat-recent-section .chat-list-row')]
     expect(rows.map((element) => element.querySelector('.chat-list-name')?.textContent)).toEqual(['Flight deals', 'Reviewer', 'Inbox helper'])
     expect(rows[0]!.querySelector('.chat-list-preview')?.textContent).toBe('Paused')
-    expect(rows[2]!.querySelector('.chat-list-preview')?.textContent).toBe('Wants to read files in ~/Invoices')
+    expect(rows[2]!.querySelector('.chat-list-preview')?.textContent).toBe('Wants to use files on this computer')
     expect(rows[2]!.querySelector('.bot-face')?.getAttribute('width')).toBe('40')
   })
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
@@ -9,6 +9,8 @@ import {
   BOT_ASK_DENY_COOLDOWN_MS,
   MAX_BOT_WALLS,
   askProblem,
+  filesAsk,
+  filesAskOf,
   isSpecialAsk,
   permissionText,
   withPermission,
@@ -19,7 +21,7 @@ import {
   type BotPermissionRequest,
   type BotWallKind
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -162,6 +164,8 @@ export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } f
 export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped.'
 /** What a run's call or `escalate` is refused with once its asks reached their cap: no new ask is written. */
 export const BOT_ASK_ENOUGH_TEXT = 'You have asked the owner enough for now. Carry on without it and say in your report what you skipped.'
+/** What `escalate` for a folder answers a bot that may already use files on this computer. */
+export const BOT_FILES_HELD_TEXT = 'You can already use files anywhere on this computer, except Mousse\'s own data. Go ahead without asking.'
 /** What a run's ask for a skill or MCP tool that is not here is refused with. */
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** New asks one run may write; later ones are refused without asking. */
@@ -615,9 +619,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether a thread can hold `grant` at all: it compiles (no MCP, no folder that
-   * overlaps Mousse's data). Which runtime holds it is decided per activation, from the providers
-   * that can (`BotModelResolver`), and checked again at each dispatch.
+   * Whether a thread can hold `grant` at all: it compiles (no MCP, no app tool a bot may not
+   * hold). Which runtime holds it is decided per activation, from the providers that can
+   * (`BotModelResolver`), and checked again at each dispatch.
    */
   private checkThread(thread: BotThreadSpec, grant: BotManifest, botId?: string): BotThreadCheck {
     const base = { key: thread.key, instanceId: '', model: '' }
@@ -1551,10 +1555,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       escalate: (request) => {
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, a folder, a skill, an MCP tool, a limit, or to export your memory.`
+        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, an MCP tool, a limit, or to export your memory.`
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
         const asked = request.permission as BotAskRequest
+        // File access is one permission: a bot that has it has every folder already.
+        if ('path' in asked && base.workspace?.computer) return BOT_FILES_HELD_TEXT
         const reason = request.reason.trim() || 'The bot did not say why.'
         if (row.lane === 'run') {
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
@@ -1726,12 +1732,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
   private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    return askText(permission, { home: this.chat.home, ...(budget ? { budget } : {}) })
+    return askText(permission, budget ? { budget } : {})
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
   private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
-    const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
+    const input = { ...asked, permission: this.limitAsk(row.botId, filesAskOf(asked.permission)) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
     if (open) {
@@ -1820,7 +1826,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours. Later runs get the same refusal and no new ask.
    */
   private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
-    const permission = this.limitAsk(row.botId, asked)
+    const permission = this.limitAsk(row.botId, filesAskOf(asked))
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
     try {
@@ -1943,8 +1949,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.expiryTimers.get(escalation.id)?.clear()
     this.expiryTimers.delete(escalation.id)
     this.republishAsk(escalation.id)
+    const held = input.answer === 'allow_bot' && !special ? this.settleHeldAsks(row.botId) : []
     this.changed({ botId: row.botId, activationId: row.id })
     await this.advance(row.id)
+    for (const activationId of held) if (activationId !== row.id) await this.advance(activationId)
     return { escalation: this.escalationSummary(this.store.escalation(escalation.id)!), activation: this.activationSummary(this.store.activation(row.id)!) }
   }
 
@@ -1978,9 +1986,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     if (!answered) throw new BotEngineError('ask_answered', 'This was already answered.')
     const message = this.republishAsk(escalation.id)
+    const held = answer === 'allow' ? this.settleHeldAsks(botId) : []
     this.changed({ botId, activationId: escalation.activationId })
     if (escalation.mode === 'wall') await this.advance(escalation.activationId)
+    for (const activationId of held) if (activationId !== escalation.activationId) await this.advance(activationId)
     return message
+  }
+
+  /**
+   * The bot's open asks its grant now holds, settled as allowed with their cards updated: after an
+   * Allow (the other cards of the one file ask), and at startup for an older build's folder asks
+   * of a bot that has file access. Returns the activations whose walls this answered, to go on.
+   */
+  private settleHeldAsks(botId: string): string[] {
+    const grant = this.store.activeGrant(botId)
+    if (!grant) return []
+    const walls = new Set<string>()
+    for (const ask of this.store.openAsks(botId)) {
+      if (isSpecialAsk(ask.permission) || 'budget' in ask.permission) continue
+      if (!manifestSubset(withPermission(grant.manifest, ask.permission), grant.manifest)) continue
+      if (!this.store.answerEscalation(ask.id, 'allowed_bot')) continue
+      if (ask.mode === 'wall') walls.add(ask.activationId)
+      this.republishAsk(ask.id)
+    }
+    return [...walls]
+  }
+
+  /**
+   * An older build asked for one folder at a time; file access is now one permission (§3.7). Each
+   * open folder ask is worded as the one file ask, so its card and the bot's continuation say what
+   * Allow grants. A bot that has file access already has it: its folder asks are settled as allowed,
+   * and the startup pass continues the walls among them. Otherwise one stays open (the wall the
+   * chat waits at, else the oldest) and the rest are withdrawn: one ask per permission is open.
+   */
+  upgradeFileAsks(): void {
+    const ask = filesAsk()
+    const fingerprint = askFingerprintOf(ask)
+    const text = askText(ask)
+    const reworded = { permission: ask, fingerprint, title: text.title, note: text.note }
+    this.store.db.transaction(() => {
+      const older = this.store.escalations({ status: 'open' }).filter((row) => 'path' in row.permission && row.fingerprint !== fingerprint)
+      for (const botId of new Set(older.map((row) => row.botId))) {
+        const mine = older.filter((row) => row.botId === botId)
+        if (this.store.activeGrant(botId)?.manifest.workspace) {
+          // Settled first: only an open ask's fingerprint is unique.
+          for (const row of mine) if (this.store.answerEscalation(row.id, 'allowed_bot')) this.store.reword(row.id, reworded)
+          continue
+        }
+        const keep = this.store.openAsk(botId, fingerprint) ? undefined : mine.find((row) => row.mode === 'wall') ?? mine[0]
+        for (const row of mine) if (row !== keep) this.store.answerEscalation(row.id, 'withdrawn')
+        if (keep) this.store.reword(keep.id, reworded)
+      }
+    })
   }
 
   /** Every chat row carrying an ask's card, again (its status changed); the newest one is returned. */
@@ -3677,15 +3734,8 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
 /** What a gate refusal asks the owner for. */
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {
   switch (wall.kind) {
-    // A folder is asked for only by its absolute path: a relative one is refused, never resolved.
-    case 'path': {
-      // Only an absolute path is asked for, shown resolved (`..` removed); a relative one is refused.
-      if (!isAbsolute(wall.path)) return undefined
-      const path = resolve(wall.path)
-      // A file is asked for by its folder ("read files in ~/Documents/Invoices"), a folder as itself.
-      const folder = isDirectory(path) ? path : dirname(path)
-      return isAbsolutePath(folder) && folder !== dirname(folder) ? { path: folder, access: wall.access } : undefined
-    }
+    // File access is one permission (§3.7): any folder asks for all of them, once.
+    case 'path': return filesAsk()
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':
@@ -3716,14 +3766,6 @@ function contextKey(stored: string): [string, number] {
   const at = stored.lastIndexOf(':')
   const gen = at > 0 ? Number(stored.slice(at + 1)) : 1
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
-}
-
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
 }
 
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */

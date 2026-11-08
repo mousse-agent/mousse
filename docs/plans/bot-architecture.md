@@ -1,6 +1,6 @@
 # Bot Mode: architecture plan
 
-Plan slug: `bot-architecture`. **Revision 3 (7 Nov 2026): final for implementation of Phase 1.** Revision 3 integrates the context council's result, [`bot-context.md`](bot-context.md), as WP6 (§3.4). **Revision 4 (8 Nov 2026), the owner's decision:** bots run on the owner's own provider entries, and on Claude Code and Codex the runtime's approvals are answered by the bot's permissions (§3.5). Where this plan still describes the separate "Claude for bots" entry, §3.5 replaces it.
+Plan slug: `bot-architecture`. **Revision 3 (7 Nov 2026): final for implementation of Phase 1.** Revision 3 integrates the context council's result, [`bot-context.md`](bot-context.md), as WP6 (§3.4). **Revision 4 (8 Nov 2026), the owner's decision:** bots run on the owner's own provider entries, and on Claude Code and Codex the runtime's approvals are answered by the bot's permissions (§3.5). Where this plan still describes the separate "Claude for bots" entry, §3.5 replaces it. **Revision 6 (8 Nov 2026), the owner's decision:** file access is one permission, asked once for the whole computer, and a runtime reading its own storage never asks (§3.7). Where this plan still describes folders granted one by one, §3.7 replaces it.
 
 Status: planning only. No product code, issues or PRs. Checked against `origin/master` at `a6e46bbe`, read from the clean worktree `mousse-wt/personal-bots`. Revision 1 was checked at `e2015a41`. `origin/master` was still `a6e46bbe` when revision 3 was written.
 
@@ -179,6 +179,24 @@ The usage-window reserve is deferred to Phase 2, and a computer other than this 
 
 **Action for the orchestrating thread:** update #673's "Done when" to match, or reopen the UI decision. This plan writes nothing to GitHub.
 
+### 3.7 Changed in revision 6: file access is one permission
+
+A bot on the owner's Claude Code searched the web, then stopped to ask to "read files in ~/.claude/projects/…/tool-results": Claude Code had saved the search results there and was reading them back. Folder asks also came back for each new folder, blocking runs. The owner's decisions:
+
+- **File access is one permission, "use files on this computer"**, asked once and kept, like "run commands". Once allowed, the bot reads and changes any file or folder, and no file or folder is asked about again, read or write. It is not granular.
+- **Its form.** The grant's `workspace`: any non-null workspace is file access. Allow writes `{roots: [<top of the file system>], access: 'write'}`. Every file ask is the one ask `filesAsk()` (`{path: '/', access: 'write'}`, or the system drive on Windows), whatever folder a call or `escalate` named, so one is open per bot. A row an older build reads is a folder ask it can show and answer.
+- **Existing grants.** A workspace an older build wrote for some folders is kept as it is, so its digest stays approved, and compiles as file access (`compileBotThread`). No `bots.db` change. When bots open, `BotEngine.upgradeFileAsks` words each open folder ask as the file ask; for a bot that already has file access they are settled as allowed and its walled chat continues; otherwise one stays open (the chat's wall, else the oldest run ask) and the rest are withdrawn.
+- **The floor.** Mousse's own data stays closed to every bot: the Mousse home holding the profile (`mousseDataFolder`: every profile, the instances' sign-ins, Mousse's own sign-in and keys), except the bot's files folder and its scratch. This is the earlier refusal of a folder that overlaps Mousse's data, kept for the whole computer. A call there is refused with no ask (`closed`), as is a path the runtime rewrites, such as `~` (`path_form`). Git metadata is no longer special: the bot may change any file.
+- **Each runtime holds it:**
+
+| Runtime | File tools | Commands, with "run commands" | Where |
+|---|---|---|---|
+| Claude Code | The grant gate allows any path but Mousse's data (`BotAuthority.check`) | Sandbox: `allowWrite` the tops of the file system; `denyRead` Mousse's data with `allowRead` the files folder and scratch; `denyWrite` every entry in Mousse's data that does not lead to them (`entriesBeside`) | `claudeLockedSandbox` |
+| Codex | File changes accepted for any path but Mousse's data (`codexBotFileChange`) | `workspace-write` with writable roots every entry beside the way down to Mousse's data, plus the files folder and scratch; still no network | `codexBotSandbox` |
+| Pi | The gate allows any path but Mousse's data | `bash` has no sandbox, as before | `pi/engine.ts` gate |
+
+- **A runtime's own storage never asks**, with or without file access. Claude Code keeps the sessions of a working folder in `<Claude home>/projects/<folder as a name>/` and saves large tool output in `<session>/tool-results/`, then reads it back. The bot's working folder is its files folder (a locked entry's is the activation's scratch), so that project folder holds only this bot's sessions. Its gate recognises a file call whose every path is in it, named as Claude Code names it (`claudeOwnStorage`, `claudeProjectName`; a name over 200 characters is cut and given a hash, matched by its cut part), and the authority allows it (`NormalisedCall.own`). The sandbox can read it too. Codex keeps its sessions itself, outside any tool call, and Pi's bot turns keep no session (`--no-session`), so neither has storage a bot call reaches.
+
 ### 3.6 Changed in revision 5: "run commands"
 
 The owner's decisions after the first bots ran on their own entries:
@@ -189,8 +207,8 @@ The owner's decisions after the first bots ran on their own entries:
 
 | Runtime | Without `shell` | With `shell` | Where |
 |---|---|---|---|
-| Claude Code (owner's entry) | Bash is not offered | Bash is offered. In Claude Code's sandbox where it can run (bubblewrap and socat on Linux, Seatbelt on macOS): writable are the files folder, scratch and the folders the bot may change; home unreadable but for those; no network; `dangerouslyDisableSandbox` refused. Where it can't run, Bash runs without a sandbox, since the owner allowed commands as a whole. | `ClaudeLockedTurn.shellContained`/`shellOpen`, `claudeLockedSandbox`, `ClaudeSubscriptionAdapter` |
-| Codex | Read-only sandbox; a command approval is a wall or an ask | `workspace-write` over exactly the files folder, scratch and the folders the bot may change, no network, no temporary folder; approvals stay `untrusted` and the grant accepts every command; a retry outside the sandbox is declined | `codexTurnPolicy`, `codexBotSandbox`, `codexBotCommand` |
+| Claude Code (owner's entry) | Bash is not offered | Bash is offered. In Claude Code's sandbox where it can run (bubblewrap and socat on Linux, Seatbelt on macOS): writable are the files folder and scratch, and with file access the whole file system but Mousse's data (§3.7); without file access home is unreadable but for those; no network; `dangerouslyDisableSandbox` refused. Where it can't run, Bash runs without a sandbox, since the owner allowed commands as a whole. | `ClaudeLockedTurn.shellContained`/`shellOpen`, `claudeLockedSandbox`, `ClaudeSubscriptionAdapter` |
+| Codex | Read-only sandbox; a command approval is a wall or an ask | `workspace-write` over exactly the files folder and scratch, and with file access everything beside Mousse's data (§3.7), no network, no temporary folder; approvals stay `untrusted` and the grant accepts every command; a retry outside the sandbox is declined | `codexTurnPolicy`, `codexBotSandbox`, `codexBotCommand` |
 | Pi | `bash` is not offered | `bash` is offered, in the locked environment, with the files folder as the working directory; no sandbox | `pi/engine.ts` |
 
 - **The bot asks straight away.** Its instructions tell it to call `escalate` as soon as the owner wants something it has no permission for, then say it has asked, and never to ask the owner whether to ask. They also tell it that it can ask for "run commands".
@@ -252,8 +270,7 @@ What these runtimes run without asking is accepted as it is: Codex reads files w
 
 **What a Phase 1 bot can do on this computer:**
 - search the web and read web pages;
-- read, list and search files in folders the owner allowed;
-- edit and write files in folders the owner allowed for writing;
+- read, list, search, edit and write files anywhere on this computer but Mousse's own data, once the owner allows file access (§3.7);
 - remember things and search everything it has done (`memory_*` tools);
 - keep documents it makes in its files folder;
 - set, list and remove its own schedules;
@@ -336,8 +353,8 @@ export interface BotChip { icon: BotChipIcon; text: string; highlight?: string; 
 
 export interface BotAskCard {
   askId: string
-  title: string // "read files in ~/Documents/Invoices"
-  note: string  // one line on the limit: "Only this folder. It can't change anything."
+  title: string // "use files on this computer"
+  note: string  // one line on the limit: "Read and change any file or folder, except Mousse's own data."
   status: 'open' | 'allowed' | 'not_now' | 'withdrawn'
   kind?: 'permission' | 'export_memory' // export_memory: Allow opens the folder picker (§5.11)
 }
@@ -362,7 +379,7 @@ export interface BotSummary {
   description: string
   look: BotLook
   state: BotState
-  stateText: string            // Recent line: "Working…", "Wants to read files in …", "Paused"
+  stateText: string            // Recent line: "Working…", "Wants to use files on this computer", "Paused"
   error?: BotError
   last?: { text: string; at: string; author: 'owner' | 'bot' }
   lastOutcome?: 'ok' | 'failed' | 'stopped'   // the renderer plays "done" on working → idle with 'ok'
@@ -556,14 +573,13 @@ If no runtime can run the bot, the activation fails before dispatch. The bot the
 
 ### 5.4 Asks (C4)
 
-**Fingerprint.** `canonicalJSON(permission)` over the `withPermission` kinds (`escalation.ts:114-144`): tool, app tool, skill, MCP tool, folder plus access, budget kind.
+**Fingerprint.** `canonicalJSON(permission)` over the `withPermission` kinds (`escalation.ts:114-144`): tool, app tool, skill, MCP tool, file access (one fingerprint whatever the folder, §3.7), budget kind.
 
 **Title and note.** `askText(request, {home?, budget?}) → {title, note}` in `src/shared/bots/personal/askText.ts` (new). It is not called `permissionText`, because `escalation.ts` already exports a `permissionText` that returns one string.
 
 | Permission | Title | Note |
 |---|---|---|
-| Folder, read | "read files in ~/Documents/Invoices" | "Only this folder. It can't change anything." |
-| Folder, write | "change files in ~/Notes" | |
+| File access (any folder, §3.7) | "use files on this computer" | "Read and change any file or folder, except Mousse's own data." |
 | Skill | "use the <name> skill" | |
 | Budget | "work for up to 30 minutes per run" | |
 
@@ -1382,7 +1398,7 @@ Nothing in WP6's capture, packs, search or the five tools should be cut. "We sho
 - [ ] Every item in bot-ui §9 Phase 1.
 - [ ] Every work package's "Done when".
 - [ ] A bot created with "every morning at 8, give me three AI headlines" asks for nothing, sets a schedule when told "do that every day at 8", runs at 8:00 (simulated clock), and posts a run report with chips and a notification.
-- [ ] A bot asked to "tidy the notes in ~/Notes" shows an ask card "change files in ~/Notes". After Allow, it continues and changes only that folder. A later scheduled run uses the grant without asking.
+- [ ] A bot asked to "tidy the notes in ~/Notes" shows an ask card "use files on this computer". After Allow, it continues and changes the notes. A later scheduled run uses the grant without asking, in any folder (§3.7).
 - [ ] "Think harder about this" leads to a reply that says nothing about models, and the next dispatch uses a frontier model. This is visible only in the daemon log and tests.
 - [ ] Bot home and run threads don't appear in the Threads sidebar, search or the CLI thread list. Add a filter if a test shows they do.
 - [ ] **Memory across time.** Tell a bot "I'm vegetarian" in the chat (a memory chip appears). Then:
@@ -1545,7 +1561,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 | Risk | Mitigation |
 |---|---|
 | WP1 slips, and every bot says "can't run yet" | Gap items are removed one by one. The minimum slice is Pi only (§7.2). |
-| Prompt injection through web pages makes the bot read an allowed folder and send it out with `web_fetch` | Folders are only read when the owner allowed them. The Phase 2 domain grant closes this; until then, `BOT_BASE_INSTRUCTIONS` (§5.10) tells the bot never to fetch URLs built from file contents. **Accepted for Phase 1, and stated in the PR.** |
+| Prompt injection through web pages makes the bot read a file and send it out with `web_fetch` | Files outside its files folder are only read once the owner allowed file access (§3.7). The Phase 2 domain grant closes this; until then, `BOT_BASE_INSTRUCTIONS` (§5.10) tells the bot never to fetch URLs built from file contents. **Accepted for Phase 1, and stated in the PR.** |
 | A bot on Codex reads outside its folders with commands Codex runs without asking | Accepted by the owner (revision 4): Codex's sandbox blocks writes and the network. Exact control for Codex stays an open question (§12.3). |
 | Hidden models hide cost on metered Pi keys | Subscription first. Depth defaults to normal. The 15-minute active-time budget applies to each run. |
 | Faces cost GPU | One shared context, observers, a frame cap, and the still fallback. WP5's frame-time check. |

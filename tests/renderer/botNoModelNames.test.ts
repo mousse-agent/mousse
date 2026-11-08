@@ -49,7 +49,7 @@ const other = { ...summary('b2', { name: 'Garden', state: 'stuck', stateText: 'N
 const rows: BotChatMessage[] = [
   { ...message(1, { author: 'owner', text: 'Think harder about this.' }), ...leak } as BotChatMessage,
   { ...message(2, { text: 'Okay, I’ll take more time on this.', chips: [{ icon: 'think', text: 'taking more time', ...leak } as never] }), ...leak } as BotChatMessage,
-  { ...message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'read files in ~/Invoices', note: 'Only this folder.', status: 'open', ...leak } as never }), ...leak } as BotChatMessage,
+  { ...message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open', ...leak } as never }), ...leak } as BotChatMessage,
   { ...message(4, { kind: 'error', text: '', error: { text: 'Paused until 14:00 (your Claude usage limit)', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } }), ...leak } as BotChatMessage
 ]
 
@@ -70,7 +70,7 @@ beforeEach(async () => {
   fake = fakeBots({
     bots: [bot, other],
     chats: { b1: rows },
-    details: { b1: { summary: bot, permissions: [{ id: 'fp1', title: 'read files in ~/Invoices', note: '', grantedAt: '2026-11-06T10:00:00.000Z', ...leak } as never], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule', ...leak } as never] } }
+    details: { b1: { summary: bot, permissions: [{ id: 'fp1', title: 'use files on this computer', note: '', grantedAt: '2026-11-06T10:00:00.000Z', ...leak } as never], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule', ...leak } as never] } }
   })
   fake.live.b1 = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web', ...leak } as never }
   installPreload(fake)
