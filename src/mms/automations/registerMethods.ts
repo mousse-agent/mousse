@@ -5,7 +5,11 @@ import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../pro
 
 /** What the Automations methods need from the profile. */
 export interface AutomationsDomain {
-  index(): AutomationIndex
+  /**
+   * The list for who asks: a window of this computer gets the other computers' automations too; another computer
+   * (over Bridge) gets only what it may see; anyone else (the CLI) gets this computer's.
+   */
+  index(viewer: 'window' | 'computer' | 'local', signal?: AbortSignal): AutomationIndex | Promise<AutomationIndex>
   /** Allow or Not now on an agent's first-creation ask. */
   answerAsk(askId: string, answer: 'allow' | 'not_now'): AgentJobAsk
   /** Keep on an agent-added automation: removes only its end. */
@@ -30,8 +34,10 @@ export function registerAutomationMethods(
     scope: 'profile',
     capability: AUTOMATIONS_CAPABILITY,
     validate: (params) => domainObject(params ?? {}, ['profileId']),
-    async handle(_context, _params, binding) {
-      return (await bound(binding)).index()
+    async handle(context, _params, binding) {
+      const client = context.connection?.clientType
+      const viewer = client === 'gui' ? 'window' : client === 'bridge' ? 'computer' : 'local'
+      return (await bound(binding)).index(viewer, context.connection?.lifetime)
     }
   })
   domains.register({

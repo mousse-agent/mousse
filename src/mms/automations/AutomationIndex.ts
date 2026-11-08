@@ -17,6 +17,7 @@ import { tellMeOf, type ScheduledJob, type Thread } from '../../shared/types'
 import type { BotAutomationFacts, BotAutomationRunStatus } from '../bots/chat/BotChatService'
 import type { AgentJobAsk } from './AgentJobAsks'
 import { describeSchedule } from '../../shared/scheduleLabel'
+import type { RemoteAutomationsPart } from '../protocol/remoteAutomationsPort'
 
 /** How many runs of each automation the list carries (the job keeps at most 20). */
 const RUNS_PER_ITEM = 10
@@ -317,4 +318,18 @@ export function buildAutomationIndex(sources: AutomationIndexSources): Automatio
     }
   }
   return { items, computer: { name: computerName, timeZone }, unavailable, generatedAt: now.toISOString() }
+}
+
+/**
+ * This computer's list with the other computers' automations after it, the way their threads merge into the
+ * sidebar: each row keeps its computer (with its zone), and an offline computer's rows are its last copy.
+ */
+export function mergeRemoteAutomations(local: AutomationIndex, parts: readonly RemoteAutomationsPart[]): AutomationIndex {
+  if (!parts.length) return local
+  return {
+    ...local,
+    items: [...local.items, ...parts.flatMap((part) => part.items)],
+    computers: parts.map((part) => part.computer),
+    remoteJobs: parts.flatMap((part) => part.jobs)
+  }
 }

@@ -24,11 +24,13 @@ export function glyphOf(item: AutomationItem): { glyph: string; kind: string; ti
  * "…". A selected row is tinted; nothing marks its edge. An ask Needs you answers in place is the ask card's row
  * (`AskCard`), not this.
  */
-export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onPrimary }: {
+export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, onSelect, onPrimary }: {
   item: AutomationItem
   selected: boolean
   ctx: MetaContext
   menu: RowMenuItem[]
+  /** Why nothing can be done to it now (its computer is offline): its action and menu are off, with this as their tooltip. */
+  unreachable?: string
   onOpen: () => void
   /** ⇧ or ⌘/Ctrl click: extend or toggle the selection. */
   onSelect: (mode: 'range' | 'toggle') => void
@@ -49,6 +51,7 @@ export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onP
       data-key={item.key}
       data-kind={item.kind}
       data-selected={selected ? 'true' : undefined}
+      data-offline={unreachable ? 'true' : undefined}
       role="option"
       aria-selected={selected}
     >
@@ -71,11 +74,13 @@ export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onP
         className="settings-btn automation-primary"
         data-primary={primary.kind}
         onClick={onPrimary}
+        disabled={Boolean(unreachable)}
+        title={unreachable}
         aria-label={`${primary.label}: ${item.name}`}
       >
         {primary.label}
       </button>
-      <RowMenu label={`More actions for ${item.name}`} items={menu} />
+      <RowMenu label={`More actions for ${item.name}`} items={unreachable ? menu.map((entry) => ({ ...entry, disabled: true, title: unreachable })) : menu} />
     </div>
   )
 }

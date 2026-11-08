@@ -24,7 +24,7 @@ import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest
 import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
-import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, type MetaContext } from './automationList'
+import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
@@ -169,7 +169,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   const items = useMemo(() => index?.items ?? [], [index])
   const detailItem = detail ? items.find((item) => item.key === detail) : undefined
-  const detailJob = detailItem?.link.kind === 'job' ? jobs.find((job) => job.id === (detailItem.link as { jobId: string }).jobId) : undefined
+  // Another computer's automation is edited from the record it sent with its list.
+  const allJobs = useMemo(() => [...jobs, ...(index?.remoteJobs ?? [])], [jobs, index])
+  const detailJob = detailItem?.link.kind === 'job' ? allJobs.find((job) => job.id === (detailItem.link as { jobId: string }).jobId) : undefined
   const detailInitial = useMemo(() => (detailJob ? draftFromJob(detailJob, catalog, providers) : null), [detailJob, catalog, providers])
   const shown = useMemo(() => (query.trim() ? items.filter((item) => matchesSearch(item, query)) : items), [items, query])
   const now = new Date()
@@ -178,9 +180,10 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const visibleGroups = groups.filter((group) => group.key !== 'paused')
   const recent = useMemo(() => recentRuns(shown), [shown])
   const ordered = useMemo(() => [...visibleGroups.flatMap((group) => group.items), ...(pausedOpen ? pausedGroup?.items ?? [] : [])], [visibleGroups, pausedGroup, pausedOpen])
-  const jobOf = (item: AutomationItem) => (item.link.kind === 'job' ? jobs.find((job) => job.id === (item.link as { jobId: string }).jobId) : undefined)
+  const jobOf = (item: AutomationItem) => (item.link.kind === 'job' ? allJobs.find((job) => job.id === (item.link as { jobId: string }).jobId) : undefined)
   const owner = index?.computer ?? { name: 'This computer', timeZone: viewerZone }
-  const manyComputers = new Set(items.map((item) => item.computer.name)).size > 1
+  // Computer names show only when the person has more than one.
+  const manyComputers = (index?.computers?.length ?? 0) > 0
   const defaultAgent = settings ? agentNameOf(providers, { instanceId: settings.provider.instanceId, llmProvider: settings.provider.llmProvider }) ?? 'Default agent' : 'Default agent'
   const modelName = (item: AutomationItem) => {
     const job = jobOf(item)
@@ -194,7 +197,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   // A selection keeps only rows that still exist and that it can act on (scheduled jobs).
   useEffect(() => {
-    setSelected((current) => current.filter((key) => items.some((item) => item.key === key && item.kind === 'job')))
+    setSelected((current) => current.filter((key) => items.some((item) => item.key === key && item.kind === 'job' && !item.computer.offline)))
   }, [items])
 
   // ⌘A selects every scheduled job showing, unless a field has focus.
@@ -206,7 +209,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       if (target?.closest('input, textarea, [contenteditable="true"], .monaco-editor')) return
       if (!listRef.current?.isConnected || listRef.current.closest('[hidden]')) return
       event.preventDefault()
-      setSelected(ordered.filter((item) => item.kind === 'job').map((item) => item.key))
+      setSelected(ordered.filter((item) => item.kind === 'job' && !item.computer.offline).map((item) => item.key))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -311,7 +314,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   }
 
   const select = (item: AutomationItem, mode: 'range' | 'toggle') => {
-    if (item.kind !== 'job') return
+    // An offline computer's rows are its last copy: nothing can be done to them until it is back.
+    if (item.kind !== 'job' || item.computer.offline) return
     if (mode === 'toggle' || !anchor) {
       setSelected((current) => (current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key]))
       setAnchor(item.key)
@@ -320,7 +324,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     const keys = ordered.map((entry) => entry.key)
     const [from, to] = [keys.indexOf(anchor), keys.indexOf(item.key)].sort((a, b) => a - b)
     if (from < 0) { setSelected([item.key]); setAnchor(item.key); return }
-    setSelected(ordered.slice(from, to + 1).filter((entry) => entry.kind === 'job').map((entry) => entry.key))
+    setSelected(ordered.slice(from, to + 1).filter((entry) => entry.kind === 'job' && !entry.computer.offline).map((entry) => entry.key))
   }
 
   const pause = async (keys: string[], until: string | undefined) => {
@@ -509,6 +513,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
                     selected={selected.includes(item.key)}
                     ctx={ctx}
                     menu={menuOf(item)}
+                    unreachable={unreachableReason(item)}
                     onOpen={() => openItem(item)}
                     onSelect={(mode) => select(item, mode)}
                     onPrimary={() => primary(item)}
@@ -540,7 +545,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             <section className="automation-group" data-group="paused-rows" aria-label="Paused">
               <div className="automation-rows" role="listbox" aria-multiselectable="true" aria-label="Paused">
                 {pausedGroup.items.map((item) => (
-                  <AutomationRow key={item.key} item={item} selected={selected.includes(item.key)} ctx={ctx} menu={menuOf(item)} onOpen={() => openItem(item)} onSelect={(mode) => select(item, mode)} onPrimary={() => primary(item)} />
+                  <AutomationRow key={item.key} item={item} selected={selected.includes(item.key)} ctx={ctx} menu={menuOf(item)} unreachable={unreachableReason(item)} onOpen={() => openItem(item)} onSelect={(mode) => select(item, mode)} onPrimary={() => primary(item)} />
                 ))}
               </div>
             </section>

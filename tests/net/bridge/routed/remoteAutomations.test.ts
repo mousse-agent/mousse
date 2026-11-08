@@ -107,3 +107,55 @@ describe('one owning computer per automation', () => {
     expect(t.caller.scheduled.listJobs()).toHaveLength(before)
   }, 60_000)
 })
+
+describe('the merged list', () => {
+  it('lists the other computer’s automations after this one’s, with its computer and zone', async () => {
+    const weekly = t.owner.scheduled.createJob({ name: 'Deps bump', prompt: 'bump', schedule: { kind: 'cron', expr: '0 3 * * 1' } })
+    const secret = t.owner.threads.createThread('Hidden', undefined, undefined, { started: true, localOnly: true })
+    const hidden = t.owner.scheduled.createJob({ name: 'Hidden', prompt: 'x', schedule: { kind: 'manual' }, threadId: secret.id })
+    const mine = t.caller.scheduled.createJob({ name: 'Mine', prompt: 'x', schedule: { kind: 'manual' } })
+    const index = await t.dispatch('automations.list', {})
+    const row = index.items.find((item: { id: string }) => item.id === t.qualified(weekly.id))
+    expect(row).toMatchObject({
+      key: `job:${t.qualified(weekly.id)}`,
+      link: { kind: 'job', jobId: t.qualified(weekly.id) },
+      computer: { node: t.node, local: false, timeZone: expect.any(String) },
+      next: { at: expect.any(String) }
+    })
+    expect(row.computer.offline).toBeUndefined()
+    // This computer's rows come first and say so.
+    expect(index.items.find((item: { id: string }) => item.id === mine.id)).toMatchObject({ computer: { local: true } })
+    // A private thread's automation stays on its computer.
+    expect(index.items.some((item: { id: string }) => item.id === t.qualified(hidden.id))).toBe(false)
+    expect(index.computers).toEqual([expect.objectContaining({ node: t.node, local: false })])
+    // The record that edits it, named the same way.
+    expect(index.remoteJobs.find((job: { id: string }) => job.id === t.qualified(weekly.id))).toMatchObject({ name: 'Deps bump' })
+    // The CLI gets this computer's list only.
+    const cli = await t.dispatch('automations.list', {}, t.connection('cli-1', 'cli'))
+    expect(cli.items.some((item: { computer: { local: boolean } }) => !item.computer.local)).toBe(false)
+  }, 60_000)
+
+  it('keeps an offline computer’s rows from its last copy, waiting with the reason offline', async () => {
+    const weekly = t.owner.scheduled.createJob({ name: 'Weekly while away', prompt: 'x', schedule: { kind: 'cron', expr: '0 3 * * 1' } })
+    await t.dispatch('automations.list', {})
+    const index = await whileOffline(() => t.dispatch('automations.list', {}))
+    const row = index.items.find((item: { id: string }) => item.id === t.qualified(weekly.id))
+    expect(row).toMatchObject({ computer: { node: t.node, offline: true, seenAt: expect.any(String) }, active: { state: 'waiting', reason: 'offline' } })
+    expect(index.computers[0]).toMatchObject({ offline: true })
+    // The copy is on disk: a restart of this computer still lists it while the other is away.
+    const remote = t.caller.remoteAutomations as unknown as { cache?: unknown }
+    remote.cache = undefined
+    const again = await whileOffline(() => t.dispatch('automations.list', {}))
+    expect(again.items.some((item: { id: string }) => item.id === t.qualified(weekly.id))).toBe(true)
+  }, 60_000)
+
+  it('keeps nothing of another computer while routing is off', async () => {
+    t.routing(false)
+    try {
+      const index = await t.dispatch('automations.list', {})
+      expect(index.items.some((item: { computer: { local: boolean } }) => !item.computer.local)).toBe(false)
+    } finally {
+      t.routing(true)
+    }
+  }, 60_000)
+})

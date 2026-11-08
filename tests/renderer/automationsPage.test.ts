@@ -151,6 +151,16 @@ describe('the list as data', () => {
     expect(metaParts(items[1]!, { ...ctx, manyComputers: true }).map((part) => part.key)).toContain('computer')
   })
 
+  it('keeps an offline computer’s rows on their own time, waiting with the reason offline', () => {
+    const laptop = { name: 'Laptop', timeZone: ZONE, local: false, node: 'nod_laptop', offline: true as const }
+    const away = item({ key: 'job:nod_laptop:deps', computer: laptop, next: { at: friday, timeZone: ZONE }, active: { at: friday, state: 'waiting', reason: 'offline' } })
+    expect(groupAutomations([away], NOW).map((group) => group.key)).toEqual(['upcoming'])
+    const parts = metaParts(away, { now: NOW, viewerZone: ZONE, manyComputers: true }).map((part) => part.text)
+    expect(parts[0]).toBe(ownedWhenText(friday, NOW, laptop, ZONE))
+    expect(parts).toContain('Laptop')
+    expect(parts.at(-1)).toBe('offline')
+  })
+
   it('searches names and understands agent: and computer:', () => {
     const claude = item({ key: 'job:c', name: 'PR reviewer', who: { kind: 'agent', name: 'Claude' }, computer: { ...computer, name: 'Laptop' } })
     expect(matchesSearch(claude, 'review')).toBe(true)
@@ -287,8 +297,8 @@ function api(index: AutomationIndex, jobs: ScheduledJob[]) {
   }
 }
 
-async function mount(items: AutomationItem[], jobs: ScheduledJob[] = [], onOpenLibrary = vi.fn()) {
-  const mousse = api({ items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }, jobs)
+async function mount(items: AutomationItem[], jobs: ScheduledJob[] = [], onOpenLibrary = vi.fn(), extra: Partial<AutomationIndex> = {}) {
+  const mousse = api({ items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '', ...extra }, jobs)
   ;(window as unknown as { mousse: unknown }).mousse = mousse
   const { AutomationsList } = await import('../../src/renderer/components/automations/AutomationsList')
   await act(async () => root.render(createElement(AutomationsList, { active: true, onOpenLibrary })))
@@ -585,5 +595,25 @@ describe('the Automations page', () => {
     await click($('[data-testid="automation-more"]'))
     await click($('[data-testid="automation-keep"]'))
     expect(mousse.platformRequest.request.mock.calls.filter(([method]) => method === 'automations.keep')).toHaveLength(2)
+  })
+  it('lists another computer’s rows with their computer, and turns off the actions of an offline one', async () => {
+    const laptop = { name: 'Laptop', timeZone: ZONE, local: false, node: 'nod_laptop', offline: true as const }
+    const friday = new Date(2026, 10, 13, 16, 0).toISOString()
+    await mount([
+      item({ key: 'job:mine', name: 'Mine', trigger: 'on_demand' }),
+      item({ key: 'job:nod_laptop:deps', name: 'Deps bump', computer: laptop, next: { at: friday, timeZone: ZONE }, active: { at: friday, state: 'waiting', reason: 'offline' }, link: { kind: 'job', jobId: 'nod_laptop:deps' } })
+    ], [], vi.fn(), { computers: [laptop] })
+    const row = $('[data-key="job:nod_laptop:deps"]')!
+    expect(row.getAttribute('data-offline')).toBe('true')
+    expect(row.querySelector('[data-meta="computer"]')?.textContent).toBe('Laptop')
+    expect(row.querySelector('[data-meta="run"]')?.textContent).toBe('offline')
+    const primary = row.querySelector<HTMLButtonElement>('.automation-primary')!
+    expect(primary.disabled).toBe(true)
+    expect(primary.title).toBe('Laptop is offline.')
+    // It cannot be selected for Pause…, Resume or Delete.
+    await click(row.querySelector('.automation-row-main'), { metaKey: true })
+    expect($('[data-testid="automation-selection-bar"]')).toBeNull()
+    // This computer's row says which computer it is on too, now that there are two.
+    expect($('[data-key="job:mine"] [data-meta="computer"]')?.textContent).toBe('Desk')
   })
 })

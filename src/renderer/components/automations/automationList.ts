@@ -1,4 +1,4 @@
-import type { AutomationItem, AutomationRun } from '../../../shared/automations'
+import { offlineText, type AutomationItem, type AutomationRun } from '../../../shared/automations'
 import { describePermissionMode, normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { agoText, ownedWhenText, zonedDayOffset } from './automationTime'
@@ -31,7 +31,8 @@ export function groupOf(item: AutomationItem, now: Date): GroupKey {
   if (item.attention && (!item.paused || item.attention.kind === 'ask')) return 'needs'
   if (item.paused) return 'paused'
   if (item.trigger === 'thread_event' || item.trigger === 'request') return 'watching'
-  if (item.active) return 'today'
+  // A row of an offline computer waits for it on its own time, wherever that falls.
+  if (item.active && item.active.reason !== 'offline') return 'today'
   if (item.next) return zonedDayOffset(new Date(item.next.at), now, item.next.timeZone) <= 0 ? 'today' : 'upcoming'
   return 'on_demand'
 }
@@ -83,6 +84,14 @@ export function matchesSearch(item: AutomationItem, query: string): boolean {
   })
 }
 
+/**
+ * Why nothing can be done to a row now: its computer is offline (its row is the last copy that computer sent).
+ * Undefined for a row whose computer is reachable.
+ */
+export function unreachableReason(item: Pick<AutomationItem, 'computer'>): string | undefined {
+  return item.computer.offline ? offlineText(item.computer) : undefined
+}
+
 /** What one run says on a row: "failed · npm install exited 1", "waiting · usage limit until 14:00". */
 export function runText(run: AutomationRun, now: Date, owner: { name: string; timeZone: string }, viewerZone: string): string {
   const when = (iso: string) => ownedWhenText(iso, now, owner, viewerZone)
@@ -93,7 +102,7 @@ export function runText(run: AutomationRun, now: Date, owner: { name: string; ti
       return run.detail ? `running · ${run.detail.toLowerCase()}` : 'running'
     case 'waiting':
       if (run.reason === 'usage_limit') return run.until ? `waiting · usage limit until ${when(run.until)}` : 'waiting · usage limit'
-      if (run.reason === 'offline') return 'waiting · computer offline'
+      if (run.reason === 'offline') return 'offline'
       if (run.reason === 'behind') return 'waiting · behind another run'
       return run.detail ? `waiting · ${run.detail.toLowerCase()}` : 'waiting'
     case 'failed':

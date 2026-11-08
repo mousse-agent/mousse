@@ -217,16 +217,47 @@ export interface AutomationItem {
   attention?: AutomationAttention
   link: AutomationLink
   /** The computer that owns and runs it. */
-  computer: { name: string; timeZone: string; local: boolean }
+  computer: AutomationComputer
+}
+
+/** A computer that owns automations: this one (`local`), or another of the person's computers (`node`). */
+export interface AutomationComputer {
+  name: string
+  /** Its IANA time zone; its automations' times follow its clock. */
+  timeZone: string
+  local: boolean
+  /** Another computer's Net node; absent on this computer's own. */
+  node?: string
+  /** It cannot be reached now: its rows are the last copy it sent (`seenAt`), and nothing can be done to them. */
+  offline?: true
+  /** When the copy of an offline computer's automations was read. */
+  seenAt?: string
 }
 
 export interface AutomationIndex {
   items: AutomationItem[]
   /** This computer's name and IANA time zone. */
   computer: { name: string; timeZone: string }
+  /**
+   * The person's other computers that own automations, online or not, with their zones as each last said (absent
+   * until it has answered once). The Computer chip offers them; this computer is `computer`.
+   */
+  computers?: AutomationComputer[]
+  /**
+   * The full records of the other computers' automations (ids qualified `<node>:<id>`), so their detail can be edited
+   * here. Another computer's own answer carries its shareable records in `jobs` instead.
+   */
+  remoteJobs?: ScheduledJob[]
+  /** On the answer to another computer (`automations.list` over Bridge): the records of its job rows. */
+  jobs?: ScheduledJob[]
   /** Sources that could not be read now; their rows are missing, not empty. */
   unavailable: Array<'bots' | 'watches'>
   generatedAt: string
+}
+
+/** The words for an action on an automation of a computer that cannot be reached now. */
+export function offlineText(computer: Pick<AutomationComputer, 'name'>): string {
+  return `${computer.name} is offline.`
 }
 
 /**

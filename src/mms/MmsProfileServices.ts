@@ -124,7 +124,9 @@ import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
-import { buildAutomationIndex } from './automations/AutomationIndex'
+import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
+import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
+import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex } from '../shared/automations'
@@ -227,6 +229,8 @@ export class MmsProfileServices {
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
    */
   remoteLists?: RemoteListsPort
+  /** The automations of the user's other computers, for windows' Automations page. Set and cleared with `threadRouter`. */
+  remoteAutomations?: RemoteAutomationsPort
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
@@ -1338,6 +1342,40 @@ export class MmsProfileServices {
       },
       watchStatus: (threadId) => this.pullRequestWatch.status(threadId)
     })
+  }
+
+  /**
+   * The list another of the user's computers is given (`automations.list` over Bridge): only what it may see (no
+   * bot's automation, no agent's ask, nothing of a private thread), with the full records of its job rows so its
+   * window can edit them. Asks are answered on this computer, so nothing is answered in place from there.
+   */
+  automationIndexForComputer(): AutomationIndex {
+    const isPrivate = privateThreadOf(this.threads)
+    const index = this.automationIndex()
+    const jobs = this.scheduled.listJobs().filter((job) => jobSharedWithComputers(job, isPrivate))
+    const shared = new Set(jobs.map((job) => job.id))
+    const items = index.items
+      .filter((item) => (item.kind === 'job' ? shared.has(item.id) : item.kind === 'watch' ? !isPrivate(item.id) : false))
+      .map((item) => {
+        if (!item.attention?.answer) return item
+        const { answer: _answer, ...attention } = item.attention
+        return { ...item, attention }
+      })
+    return { ...index, items, jobs }
+  }
+
+  /** The list a window of this computer is given: this computer's automations, then the other computers'. */
+  async automationIndexForWindow(signal?: AbortSignal): Promise<AutomationIndex> {
+    const local = this.automationIndex()
+    const remote = this.remoteAutomations
+    if (!remote) return local
+    let parts: RemoteAutomationsPart[] = []
+    try {
+      parts = await remote.read(signal)
+    } catch {
+      // The other computers could not be read now: this computer's rows still show.
+    }
+    return mergeRemoteAutomations(local, parts)
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
