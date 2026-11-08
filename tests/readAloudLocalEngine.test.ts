@@ -305,25 +305,50 @@ describe('local read aloud keeps the model loaded between reads', () => {
 })
 
 describe('local read aloud when a read is cut short', () => {
-  it('keeps the workers when the read is stopped before any audio arrives', async () => {
+  it('stops the slot voicing the stopped read and starts a loaded replacement at once, which the next read uses', async () => {
     const read = startRead(SHORT)
     await flush()
-    const [slot] = engines
+    const [slot] = engines as FakeSlot[]
+    expect(slot.speakRequests()).toHaveLength(1)
 
     read.controller.abort()
     await read.done
     await flush()
 
-    expect(slot.terminated).toBe(0)
-    // A reply for the stopped read arrives late and must not start any sound.
-    slot.answerPending()
-    await flush()
+    expect(slot.terminated).toBe(1)
+    // The replacement is opened, which loads the model, before anyone asks for it.
+    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
+    expect(engines).toHaveLength(2)
+    // The stopped segment started no sound.
     expect(FakeAudioContext.sources).toHaveLength(0)
 
     const next = startRead(OTHER_SHORT)
-    expect(engines).toHaveLength(1)
+    await flush()
+    expect(engines).toHaveLength(2)
+    expect(engines[1].speakRequests()).toMatchObject([{ text: OTHER_SHORT }])
     await finishRead(next)
     expect(next.onPlaying).toHaveBeenCalledTimes(1)
+  })
+
+  it('replaces a stopped WebAssembly worker too, and tells the replacement which model to load', async () => {
+    const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
+    read.controller.abort()
+    await read.done
+
+    const [stopped, replacement] = workers()
+    expect(stopped.terminated).toBe(1)
+    expect(replacement.posted).toEqual([{ type: 'init', modelId: 'kitten-tts-micro' }])
+  })
+
+  it('keeps an idle slot that had nothing in flight when the read stopped', async () => {
+    await finishRead(startRead(SHORT))
+    const next = startRead(OTHER_SHORT)
+    await answerAll()
+    // Voiced and playing: nothing is in flight any more.
+    next.controller.abort()
+    await next.done
+    expect(engines).toHaveLength(1)
+    expect(engines[0].terminated).toBe(0)
   })
 
   it('starts no worker for empty text or a read that was already stopped', async () => {
@@ -344,6 +369,8 @@ describe('local read aloud when a read is cut short', () => {
     await outcome
 
     expect(worker.terminated).toBe(1)
+    // The failed worker is not replaced while the pool is dropped.
+    expect(engines).toHaveLength(1)
     await finishRead(startRead(OTHER_SHORT, new AbortController(), 'kitten-tts-micro'))
     expect(engines).toHaveLength(2)
   })
@@ -372,6 +399,18 @@ describe('local read aloud when a read is cut short', () => {
     expect(engines).toHaveLength(2)
   })
 
+  it('replaces nothing while the model is removed during a read', async () => {
+    const read = startRead(LONG)
+    await flush()
+    const outcome = expect(read.done).rejects.toThrow('unloaded')
+
+    engine.disposeLocalEngine()
+    await outcome
+    await flush()
+
+    expect(engines.map((entry) => entry.terminated)).toEqual([1, 1])
+    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('local synthesis for a phone', () => {
@@ -429,6 +468,33 @@ describe('local synthesis for a phone', () => {
     expect(onClip).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps a slot the phone still holds when a desktop read on it stops, and the phone job completes', async () => {
+    const text = Array.from({ length: 6 }, () => LONG).join('\n\n')
+    const gates: Array<() => void> = []
+    const phone = synthesize(text, () => new Promise<void>((resolve) => gates.push(resolve)))
+    // Both slots voice the phone's first two segments; the phone is busy receiving the first.
+    await answerAll()
+    expect(gates).toHaveLength(1)
+
+    // A desktop read on the same pool sends a segment to a slot the phone holds, then stops.
+    const read = startRead(SHORT)
+    await flush()
+    read.controller.abort()
+    await read.done
+    await flush()
+
+    expect(engines).toHaveLength(2)
+    expect(engines.map((entry) => entry.terminated)).toEqual([0, 0])
+    while (gates.length > 0) {
+      gates.shift()!()
+      await answerAll()
+    }
+    await phone
+    expect(engines.map((entry) => entry.terminated)).toEqual([0, 0])
+    // The stopped segment was voiced on the shared slot, but its audio was dropped.
+    expect(engines.flatMap((entry) => entry.speakRequests().map((request) => request.text))).toContain(SHORT)
+    expect(FakeAudioContext.sources).toHaveLength(0)
+  })
 })
 
 describe('local read aloud with more than one model', () => {
@@ -502,6 +568,8 @@ describe('local read aloud with more than one model', () => {
     await outcome
     await flush()
     expect(kokoro.map((entry) => entry.terminated)).toEqual([1, 1])
+    // No replacement is started for the dropped model.
+    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
     await answerAll()
     await phone
 

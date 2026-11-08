@@ -22,9 +22,14 @@ const LOOKAHEAD_SEGMENTS = 8
  */
 const IDLE_DISPOSE_MS = 5 * 60_000
 
-/** The workers of the model that was used last; another model replaces them. */
-let pool: { modelId: LocalTtsModelId; workers: TtsWorker[] } | null = null
-
+/**
+ * The workers of the model that was used last; another model replaces them. `leases` records which
+ * running reads and phone jobs use each worker, so a stopped one can tell whether a worker still
+ * voicing its segment is needed by anyone else.
+ */
+let pool: { model: LocalTtsModel; workers: TtsWorker[]; leases: Map<TtsWorker, Set<object>> } | null = null
+/** True while `disposeLocalEngine` ends the jobs; no worker is replaced meanwhile. */
+let disposing = false
 let lastRequestId = 0
 let activeSessions = 0
 /** Ends each running read or phone job with an error; its workers are about to be terminated. */
@@ -65,13 +70,41 @@ function createWebWorker(model: LocalTtsModel): Worker {
 /**
  * Starts workers for `model` for `segments` segments: one for a one-segment message, and never
  * more than the model allows. Another model's workers are replaced, ending the jobs using them.
+ * The returned workers are leased to `lease` until `releaseWorkers`.
  */
-function ensurePool(model: LocalTtsModel, segments: number): TtsWorker[] {
-  if (pool && pool.modelId !== model.id) disposeLocalEngine('Reading stopped because another voice model started')
-  pool ??= { modelId: model.id, workers: [] }
+function ensurePool(model: LocalTtsModel, segments: number, lease: object): TtsWorker[] {
+  if (pool && pool.model.id !== model.id) disposeLocalEngine('Reading stopped because another voice model started')
+  pool ??= { model, workers: [], leases: new Map() }
   const size = Math.min(model.maxWorkers ?? POOL_SIZE, segments)
   while (pool.workers.length < size) pool.workers.push(createWorker(model))
-  return pool.workers.slice(0, size)
+  const workers = pool.workers.slice(0, size)
+  for (const worker of workers) {
+    const holders = pool.leases.get(worker) ?? new Set<object>()
+    holders.add(lease)
+    pool.leases.set(worker, holders)
+  }
+  return workers
+}
+
+/**
+ * Ends `lease` on its workers. A worker still voicing one of its segments is terminated and
+ * replaced at once when no other running job holds it, because a running synthesis cannot be
+ * interrupted and the next read would wait behind it; the replacement loads the model before the
+ * next read needs it. A worker another job holds only gets `cancel`, which drops the result.
+ */
+function releaseWorkers(lease: object, workers: readonly TtsWorker[], inFlight: ReadonlyMap<number, { worker: TtsWorker }>): void {
+  const current = disposing ? null : pool
+  for (const worker of workers) current?.leases.get(worker)?.delete(lease)
+  for (const [id, { worker }] of inFlight) {
+    const index = current ? current.workers.indexOf(worker) : -1
+    if (current && index >= 0 && !current.leases.get(worker)?.size) {
+      current.leases.delete(worker)
+      worker.terminate()
+      current.workers[index] = createWorker(current.model)
+    } else {
+      send(worker, { type: 'cancel', id })
+    }
+  }
 }
 
 function cancelIdleDispose(): void {
@@ -93,9 +126,14 @@ function scheduleIdleDispose(): void {
  */
 export function disposeLocalEngine(reason = 'The voice model was unloaded while reading'): void {
   cancelIdleDispose()
-  for (const worker of pool?.workers ?? []) worker.terminate()
-  pool = null
-  for (const stop of [...sessionStops]) stop(new Error(reason))
+  disposing = true
+  try {
+    for (const worker of pool?.workers ?? []) worker.terminate()
+    pool = null
+    for (const stop of [...sessionStops]) stop(new Error(reason))
+  } finally {
+    disposing = false
+  }
 }
 
 interface SegmentState extends SegmentTiming {
@@ -118,7 +156,8 @@ export function speakWithLocalModel(
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(model, segments.length)
+    const lease = {}
+    const workers = ensurePool(model, segments.length, lease)
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)
@@ -153,7 +192,7 @@ export function speakWithLocalModel(
         worker.removeEventListener('message', onMessage)
         worker.removeEventListener('error', onWorkerError)
       }
-      for (const [id, { worker }] of inFlight) send(worker, { type: 'cancel', id })
+      releaseWorkers(lease, workers, inFlight)
       inFlight.clear()
       signal.removeEventListener('abort', onAbort)
       for (const source of sources) {
@@ -254,11 +293,8 @@ export function speakWithLocalModel(
       dispatch()
       drain()
     }
-    const onWorkerError = (event: ErrorEvent): void => {
-      const message = event.message || 'The local voice engine stopped unexpectedly'
-      settle(new Error(message))
-      disposeLocalEngine(message)
-    }
+    // Ends every job on the pool, this one included, without replacing the failed worker first.
+    const onWorkerError = (event: ErrorEvent): void => disposeLocalEngine(event.message || 'The local voice engine stopped unexpectedly')
     const onAbort = (): void => settle()
 
     for (const worker of workers) {
@@ -304,7 +340,8 @@ export function synthesizeWithLocalModel(
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(model, segments.length)
+    const lease = {}
+    const workers = ensurePool(model, segments.length, lease)
     const results: Array<{ samples: Float32Array; sampleRate: number } | undefined> = []
     const inFlight = new Map<number, { index: number; worker: TtsWorker }>()
     const busy = new Set<TtsWorker>()
@@ -323,7 +360,7 @@ export function synthesizeWithLocalModel(
         worker.removeEventListener('message', onMessage)
         worker.removeEventListener('error', onWorkerError)
       }
-      for (const [id, { worker }] of inFlight) send(worker, { type: 'cancel', id })
+      releaseWorkers(lease, workers, inFlight)
       inFlight.clear()
       signal.removeEventListener('abort', onAbort)
       if (error) reject(error)
@@ -377,11 +414,8 @@ export function synthesizeWithLocalModel(
         emitting = false
       }
     }
-    const onWorkerError = (event: ErrorEvent): void => {
-      const message = event.message || 'The local voice engine stopped unexpectedly'
-      settle(new Error(message))
-      disposeLocalEngine(message)
-    }
+    // Ends every job on the pool, this one included, without replacing the failed worker first.
+    const onWorkerError = (event: ErrorEvent): void => disposeLocalEngine(event.message || 'The local voice engine stopped unexpectedly')
     const onAbort = (): void => settle()
 
     for (const worker of workers) {
