@@ -36,8 +36,9 @@ function settleLoading(profileId: string, threadId: string | null, active: boole
  * On a new chat, applies the workspace picked in the composer or the side card
  * (project, new worktree) before the first send, like the composer does.
  * Returns the thread to send to, or null if the user moved away meanwhile.
+ * `beforeSwitch` runs with the new thread just before it is shown, when the pick needs a new thread.
  */
-async function threadForSend(profileId: string): Promise<string | null> {
+export async function threadForSend(profileId: string, beforeSwitch?: (threadId: string) => void): Promise<string | null> {
   const store = requireActiveProfile(profileId)
   const startId = store.activeThreadId
   const thread = store.threads.find((entry) => entry.id === startId)
@@ -63,6 +64,7 @@ async function threadForSend(profileId: string): Promise<string | null> {
         current.setComposerWorkspaceDraft(startId)
         targetId = created.id
         current.setWorkspacePending(profileId, created.id, true)
+        beforeSwitch?.(created.id)
         current.switchToThread(created.id)
       }
     })
