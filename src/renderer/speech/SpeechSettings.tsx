@@ -147,7 +147,7 @@ function ReadAloudSpeechSettings() {
               <button
                 type="button"
                 className="settings-icon-btn primary"
-                title={previewLoading ? 'Loading voice, click to stop' : previewing ? 'Stop sample' : 'Play sample'}
+                title={previewLoading ? 'Preparing audio, click to stop' : previewing ? 'Stop sample' : 'Play sample'}
                 aria-label={previewing ? 'Stop sample' : 'Play sample'}
                 aria-busy={previewLoading || undefined}
                 onClick={playSample}
