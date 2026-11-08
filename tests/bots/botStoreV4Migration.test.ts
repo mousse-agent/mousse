@@ -110,7 +110,7 @@ describe('bots.db v3 → v4', () => {
   it('copies the database first, withdraws open escalations, and adds the Phase 1 tables', () => {
     buildV3()
     store = new BotStore({ profileHome: profile })
-    const copy = join(profile, 'bots', 'bots.db.pre-v4')
+    const copy = join(profile, 'bots', `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`)
     expect(existsSync(copy)).toBe(true)
     const old = new DatabaseSync(copy)
     try {
@@ -119,7 +119,7 @@ describe('bots.db v3 → v4', () => {
     } finally {
       old.close()
     }
-    expect(store.db.userVersion()).toBe(4)
+    expect(store.db.userVersion()).toBe(BOTS_MIGRATIONS.at(-1)!.version)
     expect(store.escalation('esc_1')).toMatchObject({ botId: 'site-editor', status: 'withdrawn', mode: 'wall', answeredAt: expect.any(String) })
     expect(store.escalation('esc_0')).toMatchObject({ status: 'denied' })
     expect(store.activation('act_1')).toMatchObject({ status: 'cancelled', endReason: 'bots_upgraded', lane: 'run' })
@@ -149,14 +149,14 @@ describe('bots.db v3 → v4', () => {
     writeFileSync(join(dir, 'bots.db.pre-v2'), 'old')
     writeFileSync(join(dir, 'bots.db.pre-v3'), 'older build')
     store = new BotStore({ profileHome: profile })
-    expect(existsSync(join(dir, 'bots.db.pre-v4'))).toBe(true)
+    expect(existsSync(join(dir, `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`))).toBe(true)
     expect(existsSync(join(dir, 'bots.db.pre-v3'))).toBe(true)
     expect(existsSync(join(dir, 'bots.db.pre-v2'))).toBe(false)
   })
 
   it('makes no copy for a new database', () => {
     store = new BotStore({ profileHome: profile })
-    expect(existsSync(join(profile, 'bots', 'bots.db.pre-v4'))).toBe(false)
+    expect(existsSync(join(profile, 'bots', `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`))).toBe(false)
   })
 })
 
@@ -253,7 +253,7 @@ describe('contract version', () => {
   it('CONTRACT_VERSIONS.botsDb is the newest bots.db migration', async () => {
     const { CONTRACT_VERSIONS } = await import('../../src/mms/contractVersions')
     expect(CONTRACT_VERSIONS.botsDb).toBe(BOTS_MIGRATIONS.at(-1)!.version)
-    expect(CONTRACT_VERSIONS.botsDb).toBe(4)
+    expect(CONTRACT_VERSIONS.botsDb).toBe(5)
   })
 })
 

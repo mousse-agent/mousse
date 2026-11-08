@@ -22,6 +22,15 @@ export function botJobId(botId: string, scheduleId: string): string {
   return `${botId}--${scheduleId}`
 }
 
+/**
+ * The thread a bot's job names, which no thread ever has. This build never reads it: a bot's occurrence goes to the
+ * bot before any thread is looked at. A build from before the move, which knows no `bot` field, finds the thread gone
+ * and pauses the job with "Its thread was deleted" instead of running the bot's prompt outside the bot and its grant.
+ */
+export function botJobThreadGuard(botId: string): string {
+  return `bot-schedule:${botId}`
+}
+
 export function jobScheduleOf(when: BotSchedule['when']): JobSchedule {
   return when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr }
 }
@@ -194,6 +203,7 @@ export class BotScheduleBook {
       name: botJobName(prompt),
       prompt,
       schedule: jobScheduleOf(when),
+      threadId: botJobThreadGuard(botId),
       bot: { botId, scheduleId, createdBy }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()

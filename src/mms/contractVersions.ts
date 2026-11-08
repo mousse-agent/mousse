@@ -32,7 +32,7 @@ export const CONTRACT_VERSIONS = {
    * Written out rather than imported so the CLI doesn't load `node:sqlite` for it
    * (`tests/bots/botStoreV4Migration.test.ts` checks the two agree).
    */
-  botsDb: 4,
+  botsDb: 5,
   mousseConf: MOUSSE_CONF_VERSION,
   installation: INSTALLATION_SCHEMA_VERSION,
   profile: PROFILE_CONTRACT_VERSION,

@@ -89,6 +89,16 @@ A bot's schedule is an **automation whose Who is the bot**: an ordinary job in t
 - Pausing a row from the Automations page pauses that schedule only; the bot's own Pause stops all its schedules.
 - Schedules saved by earlier builds in `bots.db` (`bot_schedules`) are moved once into the shared store at profile open (`migrateBotSchedules`); see "Moving schedules".
 
+### Moving schedules
+
+Earlier builds kept schedules in `bots.db` (`bot_schedules`, with their next runs in `bot_schedule_state`) and ticked them with a scheduler of their own. At profile open, before anything ticks, `migrateBotSchedules` (`src/mms/scheduled/botScheduleMigration.ts`) moves them once:
+
+- Each schedule that is not removed becomes the job `<botId>--<scheduleId>` with its prompt, who added it, when it was made, and the next run the old scheduler had (a time edited since its last tick starts from now). A next run already due runs once, as it would have before.
+- `bots.db` v5 adds `migrated_at` and `migrated_job_id` to `bot_schedules`; each row is marked with its job after the job is saved. Rows are never deleted, and opening a v4 database first writes the copy `bots.db.pre-v5`.
+- It is idempotent: a job that is there already is only marked, so a move stopped part-way is finished at the next open and never makes a job twice. A moved schedule removed later is never moved back.
+- `unmigrateBotSchedules` undoes it (the jobs go, the marks are cleared); edits made after the move are not copied back.
+- A bot's job names a thread that does not exist (`bot-schedule:<botId>`). A build from before the move, which ignores the `bot` field (and cannot open a v5 `bots.db`), finds that thread gone and pauses the job with "Its thread was deleted" instead of running the bot's prompt without the bot. To go back to such a build, restore `bots.db.pre-v5`.
+
 ## No internet
 
 A bot activation (chat lane or run lane) waits when the internet is gone, instead of failing.
