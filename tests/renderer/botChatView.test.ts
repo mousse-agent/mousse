@@ -149,6 +149,17 @@ describe('while it works', () => {
     await click(button('Stop'))
     expect(fake.calls).toContainEqual(['stop', 'inbox'])
   })
+
+  it('says Waiting for internet in the header and the status line, with no spinner, and still offers Stop', async () => {
+    await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
+    expect(host.querySelector('.chat-conversation-header span')?.textContent).toBe('Waiting for internet')
+    const status = transcript().querySelector('.chat-run-status')!
+    expect(status.textContent).toBe('Waiting for internet')
+    expect(status.querySelector('.chat-spin')).toBeNull()
+    expect(transcript().textContent).not.toContain('is working')
+    await click(button('Stop'))
+    expect(fake.calls).toContainEqual(['stop', 'inbox'])
+  })
 })
 
 describe('the composer', () => {

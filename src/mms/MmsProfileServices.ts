@@ -47,6 +47,7 @@ import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
+import { botApiHost, createBotConnectivity } from './bots/activation/connectivity'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
 import { botFilesFolder } from './bots/grants/compile'
 import { botInstructions } from './bots/instructions'
@@ -638,6 +639,13 @@ export class MmsProfileServices {
       instructions: (bot) => botInstructions(bot),
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
+      // No internet: a bot waits instead of failing (a DNS lookup and a connection, never a model call).
+      connectivity: createBotConnectivity({
+        apiHost: (instanceId) => {
+          const driver = this.providerInstances.get(instanceId)?.driver
+          return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
+        }
+      }),
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true)
     }, ({ store }) => {
