@@ -22,8 +22,8 @@ export const SECRET_VISIBLE_MS = 5 * 60_000
 
 /** Why a job cannot take a webhook, or null. */
 export function webhookRefusal(job: ScheduledJob): string | null {
-  if (job.createdBy) return 'Tasks an agent added cannot have a webhook.'
-  if (job.schedule.kind === 'once') return 'A one-time task runs once, so it cannot have a webhook. Change its schedule to Manual first.'
+  if (job.createdBy) return 'Automations an agent added cannot have a webhook.'
+  if (job.schedule.kind === 'once') return 'A one-time automation runs once, so it cannot have a webhook. Change When to On demand first.'
   return null
 }
 
@@ -121,7 +121,7 @@ export function WebhookDialog({ job, api, onClose }: { job: ScheduledJob; api: W
       <div className="scheduled-webhook" data-testid="webhook-dialog">
         {!enabled ? (
           <>
-            <p>A signed request to a private address on this computer starts this task. Requests are checked with a secret that is shown once.</p>
+            <p>A signed request to a private address on this computer starts this automation. Requests are checked with a secret that is shown once.</p>
             {refusal ? <p className="scheduled-note" role="note">{refusal}</p> : null}
             <div className="scheduled-form-actions">
               <button

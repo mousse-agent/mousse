@@ -12,7 +12,7 @@ import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
-import { ScheduledPage } from './components/ScheduledPage'
+import { AutomationsPage } from './components/AutomationsPage'
 import { NavigationRail } from './components/NavigationRail'
 import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
@@ -488,7 +488,7 @@ export default function App() {
         <NavigationRail key={`${profileId}:${bootstrapAttempt}`}
           onMouseEnter={threadsPeek.enterRail} onMouseLeave={threadsPeek.leaveRail} onPointerDown={threadsPeek.cancelIntent} />
 
-        {profileReady && <ScheduledPage />}
+        {profileReady && <AutomationsPage />}
         {profileReady && usageOpen && <div className="usage-rail-page">
           <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />
         </div>}

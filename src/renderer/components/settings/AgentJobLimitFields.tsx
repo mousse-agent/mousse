@@ -12,22 +12,22 @@ const FIELDS: ReadonlyArray<{ key: AgentJobLimitKey; label: string; unit: string
     key: 'maxActive',
     label: 'At most',
     unit: 'active',
-    name: 'Most active tasks',
-    help: 'How many active tasks agents may have in this profile at once. Lowering it never pauses or deletes a task that exists: it only refuses new ones until there is room.'
+    name: 'Most active automations',
+    help: 'How many active automations agents may have in this profile at once. Lowering it never pauses or deletes one that exists: it only refuses new ones until there is room.'
   },
   {
     key: 'minIntervalMinutes',
     label: 'At least',
     unit: 'minutes apart',
     name: 'Fewest minutes between runs',
-    help: 'The fewest minutes between runs of a task an agent adds or changes. It applies to the next add or change; tasks that already exist keep the schedule they have.'
+    help: 'The fewest minutes between runs of an automation an agent adds or changes. It applies to the next add or change; existing ones keep their schedule.'
   },
   {
     key: 'lifetimeDays',
     label: 'End after',
     unit: 'days',
-    name: 'Days before a task ends',
-    help: 'How long a task an agent adds lasts unless you extend it. It applies to tasks added or extended from now on; the end date of an existing task does not change.'
+    name: 'Days before an automation ends',
+    help: 'How long an automation an agent adds lasts unless you extend it. It applies to ones added or extended from now on; an existing end date does not change.'
   }
 ]
 
@@ -38,7 +38,7 @@ interface Props {
 }
 
 /**
- * The limits on jobs agents create: rows under "Agents may create jobs" in the Scheduled settings, shown whether it is
+ * The limits on automations agents add: rows under "Agents may add automations" in Settings → Agent access, shown whether it is
  * on or off. A value is saved when the field is left or Enter is pressed; one that is not a whole number in range is
  * refused with the range.
  */
@@ -76,16 +76,16 @@ export function AgentJobLimitFields({ settings, save }: Props) {
         const id = `${idPrefix}-${key}`
         const invalid = problem?.key === key
         return (
-          <div key={key} className="settings-item scheduled-agent-limit" title={`${help} Whole number from ${min} to ${max}.`}>
+          <div key={key} className="settings-item agent-job-limit" title={`${help} Whole number from ${min} to ${max}.`}>
             <div className="settings-item-text">
               <label className="settings-item-title" htmlFor={id}>{label}</label>
               {invalid && problem ? (
-                <p id={`${id}-problem`} className="scheduled-field-error" role="alert">
+                <p id={`${id}-problem`} className="agent-job-limit-error" role="alert">
                   {problem.text}
                 </p>
               ) : null}
             </div>
-            <div className="settings-item-control scheduled-limit-control">
+            <div className="settings-item-control agent-job-limit-control">
               <input
                 id={id}
                 aria-label={name}
@@ -109,7 +109,7 @@ export function AgentJobLimitFields({ settings, save }: Props) {
                   if (event.key === 'Enter') commit(key)
                 }}
               />
-              <span className="scheduled-limit-unit" aria-hidden="true">{unit}</span>
+              <span className="agent-job-limit-unit" aria-hidden="true">{unit}</span>
             </div>
           </div>
         )

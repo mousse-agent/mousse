@@ -439,7 +439,6 @@ html.platform-darwin .overlay-titlebar {
 
 .overlay-page-drag-header .overlay-titlebar-back,
 .overlay-page-drag-header .settings-back-btn,
-.overlay-page-drag-header .scheduled-page-back-btn,
 .overlay-page-drag-header .overlay-page-back {
   cursor: pointer;
   -webkit-app-region: no-drag;

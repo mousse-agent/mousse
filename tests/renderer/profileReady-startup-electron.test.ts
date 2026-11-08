@@ -12,7 +12,7 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
   // I retain the real root, App, profile switcher and browser permission poll;
   // unrelated editors/transcripts are outside this check.
-  const displays = ['OrchestratorChat', 'ChatWorkspace', 'ThreadsSidebar', 'ProjectTerminalPanel', 'FilesPanel', 'ChangesPanel', 'DocumentPanel', 'SettingsPage', 'ScheduledPage']
+  const displays = ['OrchestratorChat', 'ChatWorkspace', 'ThreadsSidebar', 'ProjectTerminalPanel', 'FilesPanel', 'ChangesPanel', 'DocumentPanel', 'SettingsPage', 'AutomationsPage']
   try {
     await build({
       entryPoints: [resolve('tests/fixtures/renderer-startup/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',
@@ -29,8 +29,8 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
         builder.onResolve({ filter: new RegExp(`/(?:${displays.join('|')})$`) }, args => ({ path: args.path.split('/').at(-1)!, namespace: 'empty-display' }))
         builder.onLoad({ filter: /.*/, namespace: 'empty-display' }, args => ({ contents: args.path === 'OrchestratorChat'
           ? `import {createElement} from 'react'; export function OrchestratorChat(){return createElement('div',{className:'startup-transcript'})}`
-          : args.path === 'SettingsPage' || args.path === 'ScheduledPage'
-            ? `import {createElement} from 'react'; import {useAppStore} from './src/renderer/stores/appStore'; export function ${args.path}(){const open=useAppStore(s=>s.${args.path === 'SettingsPage' ? 'settingsOpen' : 'scheduledOpen'});return createElement('div',{className:'${args.path === 'SettingsPage' ? 'settings-page' : 'scheduled-page'} overlay-page',hidden:!open},createElement('header',{className:'overlay-titlebar'},'Page'))}`
+          : args.path === 'SettingsPage' || args.path === 'AutomationsPage'
+            ? `import {createElement} from 'react'; import {useAppStore} from './src/renderer/stores/appStore'; export function ${args.path}(){const open=useAppStore(s=>s.${args.path === 'SettingsPage' ? 'settingsOpen' : 'scheduledOpen'});return createElement('div',{className:'${args.path === 'SettingsPage' ? 'settings-page' : 'automations-page'} overlay-page',hidden:!open},createElement('header',{className:'overlay-titlebar'},'Page'))}`
             : `export function ${args.path}(){return null}`, loader: 'js', resolveDir: process.cwd() }))
       } }]
     })

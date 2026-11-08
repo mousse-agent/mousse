@@ -3532,8 +3532,7 @@ html[data-theme='high-contrast'] {
 
 .browser-panel,
 .files-panel,
-.git-panel,
-.scheduled-panel {
+.git-panel {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -6163,7 +6162,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 
 /* Rail destinations share the window chrome and navigation. */
-.scheduled-page[hidden] { display: none; }
+.automations-page[hidden] { display: none; }
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 

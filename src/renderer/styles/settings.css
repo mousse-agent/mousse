@@ -1640,3 +1640,26 @@ html[data-theme='high-contrast'] .notification-channel.on {
   outline: 1px solid var(--settings-focus);
   outline-offset: 0;
 }
+
+/* Agent access: the limits on automations agents add ("At most [10] active"). */
+.agent-job-limit-control .settings-input {
+  width: 64px;
+  height: var(--settings-control-h);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  font-size: var(--settings-fs-small);
+}
+
+.agent-job-limit-unit {
+  min-width: 88px;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.agent-job-limit-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}

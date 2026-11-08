@@ -3,7 +3,6 @@ import {
   describePermissionMode,
   isStricter,
   normalizePermissionMode,
-  PERMISSION_MODES,
   type PermissionMode
 } from '../../../shared/permissionMode'
 import { isExecutableJobEdit, isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
@@ -11,16 +10,17 @@ import { listingKey, listingServes, selectionFromListing, type ModelOverride } f
 import type { LlmProviderOption } from '../../../shared/settings'
 import { findListedModel, modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
 import type {
-  CreateScheduledJobInput,
   JobSchedule,
   Project,
   ScheduledJob,
   ScheduledJobPatch,
   ScheduledJobWorkspace,
   ScheduleKind,
+  TellMe,
   Thread
 } from '../../../shared/types'
-import { nameFromPrompt, parseSimpleCron, presetOf, SCHEDULE_PRESETS, type SchedulePreset } from './scheduledLabels'
+import { DEFAULT_TELL_ME, tellMeOf } from '../../../shared/types'
+import { parseSimpleCron } from './scheduledLabels'
 
 /** What the editor offers to choose from. */
 export interface ScheduledCatalog {
@@ -92,6 +92,8 @@ export interface JobDraft {
   threadId: string
   workspaceKind: WorkspaceKind
   worktreePath: string
+  /** When the person hears about a run. */
+  tellMe: TellMe
 }
 
 export function toLocalInput(iso: string | undefined, fallbackOffsetMs = 5 * 60_000): string {
@@ -116,7 +118,8 @@ export function newDraft(): JobDraft {
     projectId: '',
     threadId: '',
     workspaceKind: 'project',
-    worktreePath: ''
+    worktreePath: '',
+    tellMe: DEFAULT_TELL_ME
   }
 }
 
@@ -139,7 +142,8 @@ export function draftFromJob(job: ScheduledJob, catalog: ScheduledCatalog, provi
     projectId: job.projectId ?? '',
     threadId: job.threadId ?? '',
     workspaceKind: job.workspace?.kind ?? 'project',
-    worktreePath: job.workspace?.kind === 'worktree' ? job.workspace.path : ''
+    worktreePath: job.workspace?.kind === 'worktree' ? job.workspace.path : '',
+    tellMe: tellMeOf(job)
   }
 }
 
@@ -182,20 +186,6 @@ export function heldPermissionMode(draft: JobDraft, catalog: ScheduledCatalog, j
   return { mode: normalizePermissionMode(thread.permissionMode ?? catalog.defaultPermissionMode), exact: true }
 }
 
-/** The modes a job can run in: "Default" follows the thread up to the task's limit, and none is above what the person holds. */
-export function permissionChoices(draft: JobDraft, catalog: ScheduledCatalog, job?: ScheduledJob): Array<{ value: JobDraft['permissionMode']; label: string; disabled: boolean }> {
-  const held = heldPermissionMode(draft, catalog, job).mode
-  const followsThread = draft.threadId !== '' || (draft.workspaceKind === 'worktree' && draft.projectId !== '')
-  return [
-    {
-      value: '',
-      label: followsThread ? "Default (the thread's mode, up to the task's limit)" : "Default (the mode new threads start in, up to the task's limit)",
-      disabled: false
-    },
-    ...PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode), disabled: isStricter(held, mode) }))
-  ]
-}
-
 /**
  * What saving will do to a mode the job already has when the person now holds less (a stricter thread): the profile
  * brings it down to what they hold. Only for an edit that changes what the job does, and not when they are choosing a mode now.
@@ -212,33 +202,6 @@ export function workspaceChoices(draft: JobDraft): Array<{ value: WorkspaceKind;
   if (draft.mode !== 'plan') choices.push({ value: 'newWorktree', label: 'New worktree per run (recommended)' })
   choices.push({ value: 'worktree', label: 'Existing worktree' })
   return choices
-}
-
-/** The preset the draft's schedule matches, as it would be saved; anything else is custom. */
-export function draftPreset(draft: JobDraft): SchedulePreset {
-  if (draft.scheduleKind === 'interval') return presetOf({ kind: 'interval', minutes: Number(draft.minutes.trim()) })
-  if (draft.scheduleKind === 'cron') return presetOf({ kind: 'cron', expr: draft.expr })
-  return 'custom'
-}
-
-/** The draft fields a preset sets; the other schedule fields keep what was typed. */
-export function presetFields(preset: Exclude<SchedulePreset, 'custom'>): Partial<JobDraft> {
-  const schedule = SCHEDULE_PRESETS.find((item) => item.value === preset)!.schedule
-  return schedule.kind === 'interval' ? { scheduleKind: 'interval', minutes: String(schedule.minutes) } : { scheduleKind: 'cron', expr: schedule.expr }
-}
-
-/**
- * A new task from the quick-add line: what was typed, the chosen preset (none keeps the editor's 30-minute default),
- * the project, and a new worktree per run when the project is a Git repository, else its checkout.
- */
-export function quickDraft(prompt: string, preset: Exclude<SchedulePreset, 'custom'> | null, projectId: string, gitRepo: boolean): JobDraft {
-  return {
-    ...newDraft(),
-    prompt,
-    ...(preset ? presetFields(preset) : {}),
-    projectId,
-    workspaceKind: projectId && gitRepo ? 'newWorktree' : 'project'
-  }
 }
 
 /** The builder's plain cron forms: a time every day, or one day of the week at a time; anything else is typed as cron. */
@@ -294,7 +257,7 @@ export type DraftField = 'name' | 'prompt' | 'minutes' | 'expr' | 'runAt' | 'sch
  */
 export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; requireName: boolean; held?: PermissionMode }): Partial<Record<DraftField, string>> {
   const errors: Partial<Record<DraftField, string>> = {}
-  if (context.requireName && !draft.name.trim()) errors.name = 'Give the task a name.'
+  if (context.requireName && !draft.name.trim()) errors.name = 'Give the automation a name.'
   if (!draft.prompt.trim()) errors.prompt = 'Write what the agent should do.'
   if (draft.scheduleKind === 'interval') {
     const minutes = Number(draft.minutes)
@@ -305,14 +268,14 @@ export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; r
   }
   if (draft.scheduleKind === 'once' && Number.isNaN(new Date(draft.runAt).getTime())) errors.runAt = 'Pick the date and time to run.'
   if (draft.scheduleKind === 'once' && context.hasWebhook) {
-    errors.schedule = 'A task with a webhook cannot be one-time. Use Manual, or turn its webhook off first.'
+    errors.schedule = 'An automation with a webhook cannot be one-time. Use On demand, or turn its webhook off first.'
   }
   if (takesPermissionMode(draft) && draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
-    errors.permission = `A task cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
+    errors.permission = `An automation cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
   }
   if (showsWorkspace(draft) || draft.workspaceKind === 'worktree') {
     if (draft.workspaceKind === 'newWorktree' && draft.mode === 'plan') {
-      errors.workspace = 'A plan-mode task never creates a worktree. Choose Agent mode or the project checkout.'
+      errors.workspace = 'A plan-mode automation never creates a worktree. Choose Agent mode or the project checkout.'
     }
     if (draft.workspaceKind === 'worktree' && !draft.worktreePath.trim()) errors.worktreePath = 'Enter the path of the worktree.'
   }
@@ -336,24 +299,6 @@ const sameSchedule = (a: JobDraft, b: JobDraft): boolean => {
 const choiceOf = (draft: JobDraft, catalog: ScheduledCatalog): ModelChoice | undefined =>
   catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === draft.modelKey)
 
-/** The input for a new job. A job without a target thread gets a thread per run. */
-export function createInputOf(draft: JobDraft, catalog: ScheduledCatalog): CreateScheduledJobInput {
-  const workspace = workspaceOf(draft)
-  const thread = threadIsChosen(draft)
-  const choice = choiceOf(draft, catalog)
-  return {
-    name: draft.name.trim() || nameFromPrompt(draft.prompt) || 'Scheduled task',
-    prompt: draft.prompt.trim(),
-    schedule: scheduleOf(draft),
-    ...(draft.projectId ? { projectId: draft.projectId } : {}),
-    ...(thread ? { threadId: draft.threadId } : { createThread: true }),
-    ...(choice ? { selection: choice.selection } : {}),
-    ...(draft.mode ? { mode: draft.mode } : {}),
-    ...(draft.permissionMode && takesPermissionMode(draft) ? { permissionMode: draft.permissionMode } : {}),
-    ...(workspace ? { workspace } : {})
-  }
-}
-
 /** Only what the person changed, so saving never rewrites a field they did not touch. `null` clears. */
 export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCatalog): ScheduledJobPatch {
   const patch: ScheduledJobPatch = {}
@@ -366,6 +311,7 @@ export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCa
   const wantedPermission = takesPermissionMode(draft) ? draft.permissionMode : ''
   if (wantedPermission !== initial.permissionMode) patch.permissionMode = wantedPermission || null
   if (draft.projectId !== initial.projectId) patch.projectId = draft.projectId || null
+  if (draft.tellMe !== initial.tellMe) patch.tellMe = draft.tellMe
   const workspace = workspaceOf(draft) ?? null
   const workspaceChanged = JSON.stringify(workspace) !== JSON.stringify(workspaceOf(initial) ?? null)
   if (workspaceChanged) patch.workspace = workspace
