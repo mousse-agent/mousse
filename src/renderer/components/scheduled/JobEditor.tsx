@@ -20,6 +20,7 @@ import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { ScheduledJob, ScheduledJobRunRecord } from '../../../shared/types'
 import { Select, type SelectOption } from '../ui/Select'
+import { QUICK_ADD_PLACEHOLDER } from './automationsCopy'
 import {
   cronFormOf,
   cronOfForm,
@@ -58,8 +59,6 @@ const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
 
 export const MODE_NOTE =
   "Default uses the thread's own permission settings, and nobody is there to approve anything. Choose Plan for a task that must not change files."
-/** The Mode row's one line; MODE_NOTE is its tooltip. */
-export const MODE_SHORT = "The thread's permissions, with nobody there to approve"
 export const WORKFLOW_PERMISSION_NOTE =
   'A prompt that starts with / runs a workflow. Workflows do not run under a permission mode, so there is nothing to choose here.'
 export const PROJECT_WORKSPACE_WARNING =
@@ -71,12 +70,20 @@ const BUILDER_FIELDS = new Set<DraftField>(['minutes', 'expr', 'runAt', 'schedul
 const RECENT_RUNS = 3
 const HISTORY_ROWS = 10
 
-/** One row of Details: text left, one control right; anything longer sits under it. */
-function DetailRow({ title, htmlFor, description, descriptionTitle, control, children, field, testId }: {
+/** When: the presets, then Custom…, which opens the schedule builder. */
+const WHEN_OPTIONS: SelectOption<SchedulePreset>[] = [
+  ...SCHEDULE_PRESETS.map((item) => ({ value: item.value, label: item.label })),
+  { value: 'custom', label: 'Custom…' }
+]
+
+/** One row of Details: text left, one control right; anything longer sits under it. What needs explaining is the title's tooltip. */
+function DetailRow({ title, htmlFor, description, descriptionTitle, tip, tipTestId, control, children, field, testId }: {
   title: string
   htmlFor?: string
   description?: ReactNode
   descriptionTitle?: string
+  tip?: string
+  tipTestId?: string
   control?: ReactNode
   children?: ReactNode
   field?: DraftField
@@ -85,7 +92,9 @@ function DetailRow({ title, htmlFor, description, descriptionTitle, control, chi
   return (
     <div className="scheduled-detail-row" data-field={field} data-testid={testId}>
       <div className="scheduled-detail-text">
-        {htmlFor ? <label className="scheduled-detail-title" htmlFor={htmlFor}>{title}</label> : <span className="scheduled-detail-title">{title}</span>}
+        {htmlFor
+          ? <label className="scheduled-detail-title" htmlFor={htmlFor} title={tip} data-testid={tipTestId}>{title}</label>
+          : <span className="scheduled-detail-title" title={tip} data-testid={tipTestId}>{title}</span>}
         {description ? <div className="scheduled-detail-desc" title={descriptionTitle}>{description}</div> : null}
       </div>
       {control ? <div className="scheduled-detail-control">{control}</div> : null}
@@ -296,7 +305,7 @@ export function JobEditor({
       <textarea
         id={id('prompt')}
         className="scheduled-prompt"
-        placeholder="What should the agent do?"
+        placeholder={QUICK_ADD_PLACEHOLDER}
         rows={3}
         value={draft.prompt}
         data-first-field=""
@@ -307,21 +316,19 @@ export function JobEditor({
 
       <div className="scheduled-when">
         <span className="scheduled-when-label" id={id('when')}>When</span>
-        <div className="scheduled-chips" role="group" aria-labelledby={id('when')}>
-          {SCHEDULE_PRESETS.map((item) => (
-            <button key={item.value} type="button" className="scheduled-chip" aria-pressed={preset === item.value} onClick={() => choosePreset(item.value)}>
-              {item.label}
-            </button>
-          ))}
-          <button type="button" className="scheduled-chip" aria-pressed={preset === 'custom'} onClick={() => choosePreset('custom')}>
-            Custom…
-          </button>
-        </div>
-        <span className="scheduled-when-gap" />
+        <Select<SchedulePreset>
+          variant="menu"
+          ariaLabelledBy={id('when')}
+          data-testid="editor-when"
+          value={preset}
+          options={WHEN_OPTIONS}
+          renderValue={(option) => (option?.value === 'custom' ? 'Custom' : option?.label)}
+          onChange={choosePreset}
+        />
         <label className="scheduled-when-label" htmlFor={id('project')}>Where</label>
         <Select
           id={id('project')}
-          className="scheduled-select where"
+          variant="menu"
           value={draft.projectId}
           options={projectOptions}
           onChange={(projectId) => {
@@ -390,6 +397,7 @@ export function JobEditor({
                       aria-checked={builderKind === option.value}
                       tabIndex={builderKind === option.value ? 0 : -1}
                       className={`scheduled-segment${builderKind === option.value ? ' active' : ''}`}
+                      title={option.value === 'manual' ? `Runs only when you press Run now${job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}` : undefined}
                       onClick={() => chooseBuilderKind(option.value)}
                       onKeyDown={(event) => {
                         if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
@@ -421,7 +429,7 @@ export function JobEditor({
                         <label className="scheduled-label" htmlFor={id('day')}>Day</label>
                         <Select
                           id={id('day')}
-                          className="scheduled-select narrow"
+                          variant="menu"
                           value={parts.day}
                           options={WEEKDAY_OPTIONS}
                           onChange={(day) => patch({ expr: cronOfForm('weekly', parts.time, day) })}
@@ -462,7 +470,6 @@ export function JobEditor({
                   </div>
                 ) : null}
                 {fieldError('runAt')}
-                {builderKind === 'manual' ? <p className="scheduled-note">Runs only when you press Run now{job?.trigger?.webhook ? ' or its webhook is called' : ', or once you add a webhook'}.</p> : null}
               </div>
             ) : null}
           </DetailRow>
@@ -472,11 +479,11 @@ export function JobEditor({
               title="Runs in"
               htmlFor={id('workspace')}
               field="workspace"
-              description={workspaceNote}
+              tip={workspaceNote ?? undefined}
               control={
                 <Select<WorkspaceKind>
                   id={id('workspace')}
-                  className="scheduled-select"
+                  variant="menu"
                   value={draft.workspaceKind}
                   options={workspaceChoices(draft)}
                   {...selectField('workspace')}
@@ -507,7 +514,7 @@ export function JobEditor({
             control={
               <Select
                 id={id('thread')}
-                className="scheduled-select"
+                variant="menu"
                 value={threadLocked ? '' : draft.threadId}
                 options={threadOptions}
                 disabled={threadLocked}
@@ -519,17 +526,18 @@ export function JobEditor({
           <DetailRow
             title="Model"
             htmlFor={id('model')}
-            control={<Select id={id('model')} className="scheduled-select" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />}
+            control={<Select id={id('model')} variant="menu" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />}
           />
 
           <DetailRow
             title="Mode"
             htmlFor={id('mode')}
-            description={draft.mode === '' ? <span data-testid="mode-note" title={MODE_NOTE}>{MODE_SHORT}</span> : null}
+            tip={draft.mode === '' ? MODE_NOTE : undefined}
+            tipTestId={draft.mode === '' ? 'mode-note' : undefined}
             control={
               <Select<JobDraft['mode']>
                 id={id('mode')}
-                className="scheduled-select"
+                variant="menu"
                 value={draft.mode}
                 options={modeChoices(draft)}
                 onChange={(mode) => patch({ mode })}
@@ -542,11 +550,12 @@ export function JobEditor({
               title="Permissions"
               htmlFor={id('permission')}
               field="permission"
-              description={<span data-testid="permission-note" title={permissionHelp}>{permissionNote}</span>}
+              tip={`${permissionNote}. ${permissionHelp}`}
+              tipTestId="permission-note"
               control={
                 <Select<JobDraft['permissionMode']>
                   id={id('permission')}
-                  className="scheduled-select"
+                  variant="menu"
                   value={draft.permissionMode}
                   options={permissionChoices(draft, catalog, job)}
                   {...selectField('permission')}
@@ -558,7 +567,7 @@ export function JobEditor({
               {lowered ? <p className="scheduled-note warn" data-testid="permission-lowered">Saving lowers this task's mode from {describePermissionMode(draft.permissionMode as PermissionMode)} to {describePermissionMode(lowered)}, the most you hold for the thread you chose.</p> : null}
             </DetailRow>
           ) : (
-            <DetailRow title="Permissions" description={<span data-testid="workflow-permission-note">{WORKFLOW_PERMISSION_NOTE}</span>} />
+            <DetailRow title="Permissions" description="Not used" tip={WORKFLOW_PERMISSION_NOTE} tipTestId="workflow-permission-note" />
           )}
 
           {job && onWebhook ? (

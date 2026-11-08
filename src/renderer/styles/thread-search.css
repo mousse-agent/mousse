@@ -1,3 +1,8 @@
+/* The search and command palette: one of the app's lit surfaces, like the composer and the model
+   picker (raised material, strong hairline, the specular top light, glint and sheen from polish.css,
+   the menu drop shadow), over the same dim and blur as the other dialogs (--ui-dialog-*). It opens
+   with a quick fade and a slight rise, and closes with a shorter fade; both follow Animation speed
+   and reduced motion. */
 .thread-search-overlay {
   position: fixed;
   inset: 0;
@@ -6,8 +11,10 @@
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(var(--surface-base-rgb), 0.55);
-  backdrop-filter: blur(4px);
+  background: var(--ui-dialog-dim);
+  backdrop-filter: var(--ui-dialog-blur);
+  -webkit-backdrop-filter: var(--ui-dialog-blur);
+  animation: thread-search-dim-in calc(140ms * var(--ui-motion-scale)) ease-out both;
 }
 
 .thread-search-dialog {
@@ -15,11 +22,46 @@
   max-height: min(70vh, 560px);
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
+  border: 1px solid var(--ui-line-strong);
   border-radius: 16px;
-  background: rgba(var(--surface-strong-rgb), 0.98);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  /* The sheen and glint are background images (polish.css); only the colour is set here. */
+  background-color: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  color: var(--text-primary);
   overflow: hidden;
+  transform-origin: 50% 0;
+  animation: thread-search-in calc(140ms * var(--ui-motion-scale)) cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+.thread-search-overlay.is-closing {
+  pointer-events: none;
+  animation: thread-search-dim-out calc(90ms * var(--ui-motion-scale)) ease-in both;
+}
+
+.thread-search-overlay.is-closing .thread-search-dialog {
+  animation: thread-search-out calc(90ms * var(--ui-motion-scale)) ease-in both;
+}
+
+@keyframes thread-search-dim-in {
+  from { opacity: 0; }
+}
+
+@keyframes thread-search-dim-out {
+  to { opacity: 0; }
+}
+
+@keyframes thread-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+@keyframes thread-search-out {
+  to {
+    opacity: 0;
+    transform: scale(0.985);
+  }
 }
 
 .thread-search-input-row {
@@ -27,7 +69,7 @@
   align-items: center;
   gap: 10px;
   padding: 13px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--ui-line);
 }
 
 .thread-search-icon {
@@ -68,15 +110,13 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--ui-control-radius);
   color: var(--text-secondary);
-  border: 1px solid transparent;
-  transition: all 0.15s;
+  transition: background 0.12s, color 0.12s;
 }
 
 .thread-search-close:hover {
-  background: rgba(var(--accent-rgb), 0.12);
-  border-color: var(--border);
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
@@ -85,7 +125,7 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
   position: relative;
   box-sizing: border-box;
   overflow-y: auto;
-  padding: 6px 8px 10px;
+  padding: 4px 6px 8px;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -98,27 +138,31 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
 /* Muted text in the palette is the full secondary colour, never dimmed further: at least 4.5:1 in
    the light theme, on the dialog and on the highlighted row. */
 .thread-search-group-label {
-  padding: 10px 10px 4px;
-  font-size: 12px;
+  padding: 10px var(--ui-menu-row-x) 4px;
+  font-size: 11.5px;
   font-weight: 500;
   color: var(--text-secondary);
 }
 
+/* Rows in the menu style: a neutral background on hover, a firmer one on the highlighted row. */
 .thread-search-result {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 1px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 9px;
+  padding: 7px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
   text-align: left;
   transition: background 0.12s;
 }
 
-.thread-search-result:hover,
+.thread-search-result:hover {
+  background: var(--ui-hover);
+}
+
 .thread-search-result.active {
-  background: rgba(var(--accent-rgb), 0.12);
+  background: var(--ui-pressed);
 }
 
 /* Command palette rows: text on the left, a command's category and shortcut on the right. The
@@ -178,14 +222,21 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
   max-width: 100%;
 }
 
-.palette-result-shortcut {
+/* Key hints: the model picker's chips (.model-picker-shortcut), in the full secondary colour. */
+.palette-result-shortcut,
+.thread-search-hint kbd {
   flex-shrink: 0;
+  min-width: 18px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  border: 1px solid var(--ui-line);
+  border-radius: 4px;
+  background: transparent;
   font-family: inherit;
-  font-size: 10.5px;
-  padding: 1px 5px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: rgba(var(--surface-elevated-rgb), 0.5);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }
 
@@ -223,7 +274,7 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
   align-items: center;
   gap: 14px;
   padding: 9px 14px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--ui-line);
 }
 
 .thread-search-hint {
@@ -231,15 +282,5 @@ html[data-theme] .thread-search-input-row .thread-search-input:focus {
   align-items: center;
   gap: 4px;
   font-size: 11.5px;
-  color: var(--text-secondary);
-}
-
-.thread-search-hint kbd {
-  font-family: inherit;
-  font-size: 10.5px;
-  padding: 1px 5px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: rgba(var(--surface-elevated-rgb), 0.5);
   color: var(--text-secondary);
 }

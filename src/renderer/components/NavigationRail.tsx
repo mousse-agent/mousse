@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Gauge, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { Gauge, House, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
@@ -7,16 +7,25 @@ import { refreshStorageReview, useStorageReviewPending } from '../lib/storageRev
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
+import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
 
 /**
- * The rail opens pages over the workspace. The workspace has no item of its own: clicking the open
- * page's item again, or Escape on that page, returns to it.
+ * The rail opens pages over the workspace. Home, the open page's item again, or Escape on that page
+ * returns to it.
  */
-export function NavigationRail() {
+export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
+  /** Hovering the rail peeks the closed threads sidebar (App owns the timing). */
+  onMouseEnter?: () => void
+  onMouseLeave?: () => void
+  onPointerDown?: () => void
+} = {}) {
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
+  // The sidebar's footer shows the profile; while the sidebar is closed (a hover peek included) the rail does.
+  const profileShown = useAppStore((s) => !s.threadsSidebarOpen)
+  const profileReady = useAppStore((s) => s.profileReady)
   // In the Chats tab, Search finds agent chats.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
   const searchThreadsTitle = useShortcutTitle('Search threads', 'threads.search')
@@ -56,17 +65,29 @@ export function NavigationRail() {
   }
 
   return (
-    <nav className="navigation-rail" aria-label="Mousse navigation">
+    <nav className="navigation-rail" aria-label="Mousse navigation"
+      onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onPointerDown={onPointerDown}>
+      {/* The workspace: active while no rail page is open; a click there leaves the open page. */}
+      <button type="button" className={`navigation-rail-button${activePage === null ? ' active' : ''}`}
+        aria-label="Home" title="Home" aria-current={activePage === null ? 'page' : undefined}
+        onClick={() => void leaveRailPage()}>
+        <House size={18} strokeWidth={1.8} aria-hidden="true" />
+      </button>
       <button type="button" className="navigation-rail-button"
         aria-label={chatsMode ? 'Search chats' : 'Search threads'} title={chatsMode ? 'Search chats' : searchThreadsTitle}
         onClick={() => void search()}>
         <Search size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
       {shortcut('automations', 'Automations', Workflow)}
-      <div className="navigation-rail-separator" role="separator" />
-      {shortcut('usage', 'Subscription usage', Gauge)}
-      {shortcut('settings', 'Settings', Settings)}
-      <DownloadsIndicator variant="rail" />
+      {/* Pinned to the bottom; the empty space above it is still rail, so hovering it peeks. */}
+      <div className="navigation-rail-bottom">
+        <DownloadsIndicator variant="rail" />
+        {shortcut('usage', 'Subscription usage', Gauge)}
+        {shortcut('settings', 'Settings', Settings)}
+        {profileReady && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
+          <ProfileSwitcher variant="rail" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
+        </div>}
+      </div>
     </nav>
   )
 }

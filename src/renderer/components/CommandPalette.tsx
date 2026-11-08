@@ -16,8 +16,12 @@ import {
 import { useComputers } from '../lib/computers'
 import { readableError } from '../lib/errorText'
 import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
+import { motionScale, scaleMotionMs } from '../lib/motion'
 import { useAppStore } from '../stores/appStore'
 import '../styles/thread-search.css'
+
+/** The palette's fade-out, before the speed scale; matches its close animation in thread-search.css. */
+const PALETTE_EXIT_MS = 90
 
 export interface PaletteListItem {
   key: string
@@ -211,7 +215,8 @@ function useMessageSearch(text: string | null): { found: MessageSearch | null; p
   return { found, pending, error }
 }
 
-function PaletteDialog() {
+/** `closing`: fading out after the palette closed; it takes no input and leaves the keyboard alone. */
+function PaletteDialog({ closing = false }: { closing?: boolean }) {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
@@ -277,6 +282,7 @@ function PaletteDialog() {
 
   // Escape closes from anywhere in the palette, and nothing else sees the key.
   useEffect(() => {
+    if (closing) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (paletteKeyAction(event, 0, 0)?.type !== 'close') return
       event.preventDefault()
@@ -285,7 +291,7 @@ function PaletteDialog() {
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [])
+  }, [closing])
 
   // "+N more" shows the rest of that thread's hits in place; every other row closes the palette.
   const choose = (row: PaletteRow) => {
@@ -304,7 +310,12 @@ function PaletteDialog() {
   }
 
   return (
-    <div className="thread-search-overlay" onClick={() => dismissPalette()} role="presentation">
+    <div
+      className={`thread-search-overlay${closing ? ' is-closing' : ''}`}
+      onClick={closing ? undefined : () => dismissPalette()}
+      role="presentation"
+      aria-hidden={closing || undefined}
+    >
       <div
         className="thread-search-dialog"
         onClick={(event) => event.stopPropagation()}
@@ -377,5 +388,20 @@ function PaletteDialog() {
 export function CommandPalette() {
   const open = useAppStore((state) => state.paletteOpen)
   useCommandOverlay('palette', open)
-  return open ? <PaletteDialog /> : null
+  // After closing, the dialog stays a moment to fade out (none with motion off). Each opening is a
+  // fresh dialog, as before. Set while rendering, so it never unmounts for a frame in between.
+  const [session, setSession] = useState(0)
+  const [leaving, setLeaving] = useState(false)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (wasOpen !== open) {
+    setWasOpen(open)
+    if (open) setSession((count) => count + 1)
+    setLeaving(!open && motionScale() > 0)
+  }
+  useEffect(() => {
+    if (!leaving) return
+    const timer = setTimeout(() => setLeaving(false), scaleMotionMs(PALETTE_EXIT_MS))
+    return () => clearTimeout(timer)
+  }, [leaving])
+  return open || leaving ? <PaletteDialog key={session} closing={!open} /> : null
 }
