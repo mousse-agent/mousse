@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import type { SchedulerStatus, ScheduledJob, ScheduledOccurrenceResult, ScheduledWebhookDelivery } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledWebhookDelivery } from '../../shared/types'
+import { occurrenceOutcome, tellMeNotifies, type ScheduledRunEnded } from '../../shared/automations'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
@@ -97,6 +98,8 @@ export class ScheduledJobService extends EventEmitter {
   /** Why the webhook listener is not up (a taken port), shown with the scheduler's errors. */
   private webhookListenerError: string | null = null
   private lastPayloadSweepAt = 0
+  /** The last occurrence whose end was announced, per job: the turn's return and the run's end both report it. */
+  private readonly announced = new Map<string, string>()
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -333,9 +336,9 @@ export class ScheduledJobService extends EventEmitter {
     return deleted
   }
 
-  pauseJob(id: string, reason?: string): ScheduledJob | null {
+  pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.pauseJob(id, reason)
+    const job = this.store.pauseJob(id, reason, resumeAt)
     if (job) this.emitUpdated()
     return job
   }
@@ -389,13 +392,16 @@ export class ScheduledJobService extends EventEmitter {
     try {
       const before = this.store.getJob(event.jobId)
       const threadId = before?.pendingOccurrence?.occurrenceKey === event.occurrenceKey ? before.pendingOccurrence.threadId : before?.runClaim?.threadId
-      const silent = event.status === 'ok' && typeof event.text === 'string' && event.text.trim().startsWith('[SILENT]')
+      const silent = event.status === 'ok' && typeof event.text === 'string' && isSilentOutput(event.text)
       const job = this.store.completeOccurrence(
         event.jobId,
         event.occurrenceKey,
         { status: event.status, text: event.text, error: event.error, silent, ...(event.retryAt ? { retryAt: event.retryAt } : {}) },
         { runId: event.runId, ...(event.selection ? { selection: event.selection } : {}), ...(event.permissionMode ? { permissionMode: event.permissionMode } : {}) }
       )
+      // A job whose last repeat this was is gone by now; its run still ended.
+      const ours = before?.pendingOccurrence?.occurrenceKey === event.occurrenceKey || before?.runClaim?.occurrenceKey === event.occurrenceKey
+      if (before && ours && (job || !this.store.getJob(event.jobId))) this.announceRunEnd(before, event.occurrenceKey, { status: event.status, silent, ...(event.error ? { error: event.error } : {}), ...(threadId ? { threadId } : {}) })
       // A finished run on the project's checkout leaves nothing to keep open: its reply is in the run record and
       // the thread stays reachable from it. A new-worktree thread holds the run's work, so it stays open.
       if (threadId && (silent || (event.status === 'ok' && before?.workspace?.kind !== 'newWorktree'))) this.settlePerRunThread(event.jobId, threadId)
@@ -663,7 +669,7 @@ export class ScheduledJobService extends EventEmitter {
       // An agent may not start a slash workflow, however the job reached the store.
       if (job.createdBy && job.prompt.trim().startsWith('/')) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, 'Agent-created jobs cannot run workflows', false, claimToken)
+          this.failRun(job, claimToken, 'Agent-created jobs cannot run workflows')
         }
         return
       }
@@ -672,7 +678,7 @@ export class ScheduledJobService extends EventEmitter {
       const gone = this.goneThread(job)
       if (gone) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, gone, false, claimToken)
+          this.failRun(job, claimToken, gone)
           this.store.pauseJob(job.id, gone)
           this.emitUpdated()
         }
@@ -682,7 +688,7 @@ export class ScheduledJobService extends EventEmitter {
       const rendered = this.promptFor(job, claim)
       if (rendered.error !== undefined) {
         if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-          this.store.markJobRun(job.id, false, undefined, rendered.error, false, claimToken)
+          this.failRun(job, claimToken, rendered.error)
         }
         return
       }
@@ -727,6 +733,14 @@ export class ScheduledJobService extends EventEmitter {
 
       if (this.lifecycle.stopping) {
         this.interruptOwnedRun(job.id, claimToken, 'Interrupted by profile shutdown; external effects may have occurred')
+        return
+      }
+
+      // Its thread is running a turn: the occurrence waits behind it, keeps its repeat and starts on a later tick (#404).
+      if (result.status === 'busy') {
+        if (this.store.deferBusyClaim(job.id, claimToken, result.threadId ?? job.threadId ?? '')) this.ownedRunClaims.delete(job.id)
+        // Look again soon rather than at the next minute, so it follows the running turn closely.
+        this.scheduleCatchUp()
         return
       }
 
@@ -791,7 +805,8 @@ export class ScheduledJobService extends EventEmitter {
         }
       }
 
-      this.store.markJobRun(
+      const settled = this.store.getJob(job.id)?.runClaim?.settledResult
+      const recorded = this.store.markJobRun(
         job.id,
         !result.error && !result.waiting,
         result.text,
@@ -801,12 +816,19 @@ export class ScheduledJobService extends EventEmitter {
         result.waiting ? 'waiting' : undefined,
         details
       )
+      if (recorded || !this.store.getJob(job.id)) {
+        // The engine's own end wins over the turn's return, as the record does.
+        const outcome = settled && settled.status !== 'ok'
+          ? settled
+          : { status: result.waiting ? 'waiting' as const : result.error ? 'error' as const : 'ok' as const, silent, ...(result.error ? { error: result.error } : {}) }
+        this.announceRunEnd(job, occurrenceKey, { ...outcome, ...(result.threadId ? { threadId: result.threadId } : {}) })
+      }
       if (silent && result.threadId) this.settlePerRunThread(job.id, result.threadId)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
         if (this.lifecycle.stopping) this.interruptOwnedRun(job.id, claimToken, `Interrupted by profile shutdown: ${message}`)
-        else this.store.markJobRun(job.id, false, undefined, message, false, claimToken)
+        else this.failRun(job, claimToken, message)
       }
     } finally {
       try {
@@ -817,6 +839,41 @@ export class ScheduledJobService extends EventEmitter {
         // Retain ownership; shutdown retries exact-token finalization after the tick.
       }
       this.emitUpdated()
+    }
+  }
+
+  /** Records a run that failed before or instead of its turn, and announces it. */
+  private failRun(job: ScheduledJob, claimToken: string, error: string): void {
+    const occurrenceKey = job.runClaim?.occurrenceKey ?? job.nextRunAt ?? ''
+    const recorded = this.store.markJobRun(job.id, false, undefined, error, false, claimToken)
+    if (recorded || !this.store.getJob(job.id)) this.announceRunEnd(job, occurrenceKey, { status: 'error', error })
+  }
+
+  /**
+   * Tells listeners how an occurrence ended (`runEnded`), once per occurrence: what the outcome is in the Run contract
+   * and whether the job's Tell me lets it notify. A wait (a usage limit, a workflow waiting) has not ended.
+   */
+  private announceRunEnd(
+    job: Pick<ScheduledJob, 'id' | 'name' | 'tellMe' | 'threadId'>,
+    occurrenceKey: string,
+    result: { status: ScheduledOccurrenceResult['status']; silent?: boolean; error?: string; threadId?: string }
+  ): void {
+    const outcome = occurrenceOutcome(result.status, result.silent)
+    if (!outcome) return
+    if (this.announced.get(job.id) === occurrenceKey) return
+    this.announced.set(job.id, occurrenceKey)
+    const event: ScheduledRunEnded = {
+      jobId: job.id,
+      jobName: job.name,
+      outcome,
+      notify: tellMeNotifies(tellMeOf(job), outcome),
+      ...(result.threadId ?? job.threadId ? { threadId: result.threadId ?? job.threadId } : {}),
+      ...(result.error ? { error: result.error } : {})
+    }
+    try {
+      this.emit('runEnded', event)
+    } catch {
+      /* a listener never breaks the scheduler */
     }
   }
 

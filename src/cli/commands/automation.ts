@@ -1,22 +1,24 @@
-import type {
-  CreateScheduledJobInput,
-  JobSchedule,
-  ScheduledJob,
-  ScheduledJobWorkspace,
-  ScheduledWebhookDelivery
+import {
+  isTellMe,
+  type CreateScheduledJobInput,
+  type JobSchedule,
+  type ScheduledJob,
+  type ScheduledJobWorkspace,
+  type ScheduledWebhookDelivery
 } from '../../shared/types'
 import { isPermissionMode } from '../../shared/permissionMode'
 import type { ParsedArgs } from '../parseArgs'
 import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
 import { closeMmsContext, openMms } from '../mmsContext'
-import { SCHEDULE_HELP } from '../help'
+import { AUTOMATION_HELP } from '../help'
 
-export async function runSchedule(args: ParsedArgs): Promise<void> {
+/** `mousse-cli automation …` (and its alias `schedule`): the profile's scheduled automations. */
+export async function runAutomation(args: ParsedArgs): Promise<void> {
   const { globals, subcommand, positional, flags } = args
 
   if (!subcommand || subcommand === 'help' || globals.help) {
-    process.stdout.write(SCHEDULE_HELP)
+    process.stdout.write(AUTOMATION_HELP)
     return
   }
 
@@ -30,7 +32,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
         const jobs = res.jobs
         writeOutput(globals.mode, jobs, (data) => {
           const rows = data as ScheduledJob[]
-          if (rows.length === 0) return 'No scheduled jobs.'
+          if (rows.length === 0) return 'No automations.'
           return formatTable([
             ['ID', 'NAME', 'ENABLED', 'STATE', 'MODEL', 'BY', 'NEXT'],
             ...rows.map((job: ScheduledJob) => [
@@ -52,7 +54,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
         const name = flagString(flags, 'name') ?? positional[0]
         const prompt = flagString(flags, 'prompt') ?? positional[1]
         if (!name || !prompt) {
-          exitWithError('schedule add requires --name and --prompt.', globals.mode)
+          exitWithError('automation add requires --name and --prompt.', globals.mode)
         }
         const schedule = parseSchedule(flags, globals.mode)
         let input: CreateScheduledJobInput
@@ -67,25 +69,25 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
       }
       case 'remove': {
         const id = positional[0]
-        if (!id) exitWithError('schedule remove requires a job id.', globals.mode)
+        if (!id) exitWithError('automation remove requires an automation id.', globals.mode)
         const res = await client.request<{ ok: boolean }>('scheduled.delete', { id })
-        if (!res.ok) exitWithError(`Job not found: ${id}`, globals.mode)
+        if (!res.ok) exitWithError(`Automation not found: ${id}`, globals.mode)
         writeOutput(globals.mode, { removed: id })
         break
       }
       case 'run': {
         const id = positional[0]
-        if (!id) exitWithError('schedule run requires a job id.', globals.mode)
+        if (!id) exitWithError('automation run requires an automation id.', globals.mode)
         const res = await client.request<{ job: ScheduledJob | null }>('scheduled.run', {
           id
         })
-        if (!res.job) exitWithError(`Job not found: ${id}`, globals.mode)
+        if (!res.job) exitWithError(`Automation not found: ${id}`, globals.mode)
         writeOutput(globals.mode, res.job)
         break
       }
       case 'extend': {
         const id = positional[0]
-        if (!id) exitWithError('schedule extend requires a job id.', globals.mode)
+        if (!id) exitWithError('automation extend requires an automation id.', globals.mode)
         const days = flagString(flags, 'days')
         const res = await client.request<{ job: ScheduledJob }>('scheduled.extend', { id, ...(days ? { days: Number(days) } : {}) })
         writeOutput(globals.mode, res.job)
@@ -93,7 +95,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
       }
       case 'enable': {
         const id = positional[0]
-        if (!id) exitWithError('schedule enable requires a job id.', globals.mode)
+        if (!id) exitWithError('automation enable requires an automation id.', globals.mode)
         await client.request('scheduled.update', { id, patch: { enabled: true } })
         const res = await client.request<{ job: ScheduledJob }>('scheduled.resume', { id })
         writeOutput(globals.mode, res.job)
@@ -101,7 +103,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
       }
       case 'disable': {
         const id = positional[0]
-        if (!id) exitWithError('schedule disable requires a job id.', globals.mode)
+        if (!id) exitWithError('automation disable requires an automation id.', globals.mode)
         const res = await client.request<{ job: ScheduledJob }>('scheduled.update', {
           id,
           patch: { enabled: false }
@@ -112,7 +114,7 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
       case 'webhook': {
         const action = positional[0]
         const id = positional[1]
-        if (!action || !id) exitWithError('schedule webhook requires an action (enable, rotate, disable or deliveries) and a job id.', globals.mode)
+        if (!action || !id) exitWithError('automation webhook requires an action (enable, rotate, disable or deliveries) and an automation id.', globals.mode)
         switch (action) {
           case 'enable': {
             const port = flagString(flags, 'port')
@@ -181,7 +183,7 @@ function webhookSecretOutput(res: WebhookSecretResult): WebhookSecretOutput {
 
 function formatWebhookSecret(out: WebhookSecretOutput, verb: string): string {
   return [
-    out.secret ? `Webhook ${verb} for job ${out.id}.` : `Webhook listener updated for job ${out.id}; its secret is unchanged.`,
+    out.secret ? `Webhook ${verb} for automation ${out.id}.` : `Webhook listener updated for automation ${out.id}; its secret is unchanged.`,
     `URL:    ${out.url}`,
     ...(out.secret
       ? [
@@ -196,7 +198,7 @@ function formatWebhookSecret(out: WebhookSecretOutput, verb: string): string {
 }
 
 /**
- * The `scheduled.create` input for `schedule add`. The selection names the instance and model only: the
+ * The `scheduled.create` input for `automation add`. The selection names the instance and model only: the
  * profile fills in the provider when it resolves them. `--mode` is also the global output format
  * (`text|json`), so only `agent` and `plan` are the job's mode.
  */
@@ -229,6 +231,11 @@ export function buildScheduleAddInput(
   if (project) input.projectId = project
   const thread = flagString(flags, 'thread')
   if (thread) input.threadId = thread
+  const tellMe = flagString(flags, 'tell-me')
+  if (tellMe !== undefined) {
+    if (!isTellMe(tellMe)) throw new Error('--tell-me must be every, news or problems.')
+    input.tellMe = tellMe
+  }
   return input
 }
 
@@ -254,6 +261,6 @@ function parseSchedule(
     }
     return { kind: 'interval', minutes }
   }
-  exitWithError('Provide --cron, --every or --manual for schedule.', mode)
+  exitWithError('Provide --cron, --every or --manual for the automation.', mode)
   return { kind: 'interval', minutes: 60 }
 }

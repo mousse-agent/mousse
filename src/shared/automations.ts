@@ -1,0 +1,213 @@
+import type { BotLook } from './bots/personal/look'
+import type { PermissionMode } from './permissionMode'
+import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, TellMe } from './types'
+
+/**
+ * Automations: everything that runs on its own, in one list (the Automations page). Phase 1 reads three sources
+ * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
+ */
+
+export const AUTOMATIONS_METHODS = ['automations.list'] as const
+export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
+export const AUTOMATIONS_CAPABILITY = 'automations.v1'
+
+/** What an automation is, underneath: where its record lives and what opens it. */
+export type AutomationKind = 'job' | 'bot' | 'watch'
+
+/** What starts it: a time, a signed request (webhook), something on its thread (a pull request), or a person. */
+export type AutomationTrigger = 'time' | 'request' | 'thread_event' | 'on_demand'
+
+// ── The Run contract ──────────────────────────────────────────────────────────────────────────────
+
+/** A run that is not over: waiting to start, working, or held by something that clears by waiting. */
+export type RunActiveState = 'queued' | 'running' | 'waiting'
+/** How a run ended: did the work, had nothing new, stopped at a missing right, or failed. */
+export type RunEndState = 'done' | 'nothing_new' | 'incomplete' | 'failed'
+export type RunState = RunActiveState | RunEndState
+/** Why a run waits. Every reason clears by waiting, so a waiting run never needs the person. */
+export type RunWaitReason = 'usage_limit' | 'offline' | 'behind'
+
+export const RUN_END_STATES: readonly RunEndState[] = ['done', 'nothing_new', 'incomplete', 'failed']
+
+export function isRunEnded(state: RunState): state is RunEndState {
+  return (RUN_END_STATES as readonly string[]).includes(state)
+}
+
+/** One occurrence of an automation. */
+export interface AutomationRun {
+  /** When it started, or when it was recorded. */
+  at: string
+  state: RunState
+  reason?: RunWaitReason
+  /** With `waiting` for a usage limit: when the limit resets. */
+  until?: string
+  /** The error, or a one-line result. */
+  detail?: string
+  /** The thread the run's turn ran on; opening it lets the person continue the work. */
+  threadId?: string
+}
+
+/** How an occurrence that ended maps onto the contract; null while it waits (a usage limit, a waiting workflow). */
+export function occurrenceOutcome(status: ScheduledOccurrenceResult['status'] | ScheduledJobRunRecord['status'], silent?: boolean): RunEndState | null {
+  switch (status) {
+    case 'ok':
+      return silent ? 'nothing_new' : 'done'
+    case 'error':
+    case 'interrupted':
+    case 'uncertain':
+      return 'failed'
+    default:
+      return null
+  }
+}
+
+/** A workflow run that waits for the person's answer (an approval or input node), from its delivery text. */
+const WORKFLOW_ASK = /^State: waiting-(approval|input)$/m
+
+/** One of a job's run records in the contract. */
+export function jobRecordRun(record: ScheduledJobRunRecord): AutomationRun {
+  const base = { at: record.runAt, ...(record.threadId ? { threadId: record.threadId } : {}) }
+  const ended = occurrenceOutcome(record.status, record.silent)
+  if (ended) return { ...base, state: ended, ...(record.error ? { detail: record.error } : {}) }
+  if (record.status === 'queued') return { ...base, state: 'waiting', reason: 'behind' }
+  // `waiting`: a usage limit that resets, or a workflow that stopped at an approval or input node (it asks).
+  if (record.usageLimitUntil) return { ...base, state: 'waiting', reason: 'usage_limit', until: record.usageLimitUntil }
+  if (record.output && WORKFLOW_ASK.test(record.output)) return { ...base, state: 'incomplete', detail: 'Waiting for your answer' }
+  return { ...base, state: 'running' }
+}
+
+/** The occurrence of a job that is under way now, in the contract; undefined when nothing is. */
+export function jobActiveRun(job: ScheduledJob, now: Date = new Date()): AutomationRun | undefined {
+  const pending = job.pendingOccurrence
+  const live = job.liveThreadId ?? pending?.threadId ?? job.runClaim?.threadId
+  const at = job.runClaim?.claimedAt ?? now.toISOString()
+  if (job.liveStatus === 'running') return { at, state: 'running', ...(live ? { threadId: live } : {}) }
+  if (job.liveStatus === 'needs_answer') return { at, state: 'running', detail: 'Waiting for your answer', ...(live ? { threadId: live } : {}) }
+  if (pending?.state === 'queued') return { at, state: 'waiting', reason: 'behind', threadId: pending.threadId }
+  if (job.waitingBehind) return { at: job.waitingBehind.since, state: 'waiting', reason: 'behind', threadId: job.waitingBehind.threadId }
+  if (job.state === 'running' || pending) return { at, state: 'queued', ...(live ? { threadId: live } : {}) }
+  const last = job.runHistory?.[job.runHistory.length - 1]
+  if (last && (last.status === 'waiting' || last.status === 'queued')) {
+    const run = jobRecordRun(last)
+    if (!isRunEnded(run.state)) return run
+  }
+  return undefined
+}
+
+/** The newest run of a job that ended; the one Needs you and the row's "last run" read. */
+export function jobLastEndedRun(job: ScheduledJob): AutomationRun | undefined {
+  const history = job.runHistory ?? []
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const run = jobRecordRun(history[index]!)
+    if (isRunEnded(run.state)) return run
+  }
+  return undefined
+}
+
+// ── Tell me ───────────────────────────────────────────────────────────────────────────────────────
+
+/** Whether a run that ended this way tells the person, under `tellMe`. */
+export function tellMeNotifies(tellMe: TellMe, outcome: RunEndState): boolean {
+  if (tellMe === 'every') return true
+  if (tellMe === 'problems') return outcome === 'failed' || outcome === 'incomplete'
+  return outcome !== 'nothing_new'
+}
+
+export const TELL_ME_LABELS: Record<TellMe, string> = {
+  every: 'Every run',
+  news: 'Only news',
+  problems: 'Only problems'
+}
+
+/** What the scheduler tells listeners when an occurrence ends (`scheduled.runEnded`). */
+export interface ScheduledRunEnded {
+  jobId: string
+  jobName: string
+  outcome: RunEndState
+  /** The job's Tell me lets this run notify. */
+  notify: boolean
+  threadId?: string
+  error?: string
+}
+
+// ── The index ─────────────────────────────────────────────────────────────────────────────────────
+
+/** Who does the work: an agent (the job's model, or the default agent), or a bot with its look. */
+export type AutomationWho =
+  | { kind: 'agent'; name: string }
+  | { kind: 'bot'; name: string; look: BotLook }
+  | { kind: 'workflow'; name: string }
+  | { kind: 'none'; name: string }
+
+/** What opens it: the job's detail, the bot's chat, or the thread that watches. */
+export type AutomationLink =
+  | { kind: 'job'; jobId: string }
+  | { kind: 'bot'; botId: string; scheduleId: string }
+  | { kind: 'thread'; threadId: string }
+
+/** Why it needs the person: an open ask (answered where it was asked), or a run that ended Failed or Incomplete. */
+export interface AutomationAttention {
+  kind: 'ask' | 'failed' | 'incomplete'
+  text: string
+  threadId?: string
+}
+
+export interface AutomationItem {
+  /** Unique in the list: `job:<id>`, `bot:<botId>:<scheduleId>`, `watch:<threadId>`. */
+  key: string
+  kind: AutomationKind
+  id: string
+  name: string
+  trigger: AutomationTrigger
+  /** The saved schedule of a job; the row and detail word it in the owning computer's clock. */
+  schedule?: JobSchedule
+  /** The When as one short line, for sources without a job schedule ("every weekday · 09:00", "PR checks"). */
+  whenText: string
+  who: AutomationWho
+  where?: { projectId: string; name: string }
+  paused: boolean
+  /** A pause that ends by itself. */
+  pausedUntil?: string
+  pausedReason?: string
+  /** The next run, in the owning computer's time zone. */
+  next?: { at: string; timeZone: string }
+  active?: AutomationRun
+  last?: AutomationRun
+  /** Recent runs, newest first. */
+  runs: AutomationRun[]
+  /** The effective permission: the strictest of the automation's mode, its ceiling and its thread's. Absent for a workflow, a bot or a watch. */
+  may?: PermissionMode
+  /** A bot's May is its grant, shown in its chat. */
+  mayIsGrant?: true
+  tellMe?: TellMe
+  addedBy?: { threadId: string; threadName?: string }
+  expiresAt?: string
+  /** A watch that only notifies its thread and never starts a turn. */
+  notifyOnly?: true
+  /** Present exactly when the item is in Needs you. */
+  attention?: AutomationAttention
+  link: AutomationLink
+  /** The computer that owns and runs it. */
+  computer: { name: string; timeZone: string; local: boolean }
+}
+
+export interface AutomationIndex {
+  items: AutomationItem[]
+  /** This computer's name and IANA time zone. */
+  computer: { name: string; timeZone: string }
+  /** Sources that could not be read now; their rows are missing, not empty. */
+  unavailable: Array<'bots' | 'watches'>
+  generatedAt: string
+}
+
+/**
+ * Whether an item is in Needs you, from its runs and asks: an open ask, or a last ended run that is Failed or
+ * Incomplete. Waiting never counts, and a later run that succeeded clears an earlier failure.
+ */
+export function attentionOf(input: { ask?: { text: string; threadId?: string }; last?: AutomationRun }): AutomationAttention | undefined {
+  if (input.ask) return { kind: 'ask', text: input.ask.text, ...(input.ask.threadId ? { threadId: input.ask.threadId } : {}) }
+  const last = input.last
+  if (last?.state === 'failed') return { kind: 'failed', text: last.detail ?? 'Failed', ...(last.threadId ? { threadId: last.threadId } : {}) }
+  if (last?.state === 'incomplete') return { kind: 'incomplete', text: last.detail ?? 'Stopped at a missing permission', ...(last.threadId ? { threadId: last.threadId } : {}) }
+  return undefined
+}

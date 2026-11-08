@@ -7,7 +7,7 @@ import { exitWithError } from './output'
 import { ROOT_HELP, commandHelp } from './help'
 import { resolveMousseHome } from './paths'
 import { runChat } from './commands/chat'
-import { runSchedule } from './commands/schedule'
+import { runAutomation } from './commands/automation'
 import { runApprovals } from './commands/approvals'
 import { runWorkflow } from './commands/workflow'
 import { runBrowser } from './commands/browser'
@@ -82,8 +82,10 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'browser':
         await runBrowser(args)
         break
+      // `schedule` is the older name of `automation`, kept as an alias.
+      case 'automation':
       case 'schedule':
-        await runSchedule(args)
+        await runAutomation(args)
         break
       case 'approvals':
         await runApprovals(args)

@@ -16,6 +16,28 @@ import { grantedPermissions, permissionId, starterManifest, withoutPermission } 
  * `bots.db` by the projection, so no model or instance id reaches a client.
  */
 
+export type BotAutomationRunStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'
+
+/** One bot schedule, as the Automations page reads it (`automationSchedules`). */
+export interface BotAutomationSchedule {
+  botId: string
+  botName: string
+  look: BotLook
+  paused: boolean
+  pausedText?: string
+  scheduleId: string
+  /** "every weekday · 09:00". */
+  label: string
+  prompt: string
+  createdBy: 'owner' | 'bot'
+  nextAt?: string
+  lastSkip?: { at: string; reason: string }
+  /** Newest first. */
+  runs: Array<{ id: string; status: BotAutomationRunStatus; at: string; endedAt?: string; endReason?: string; threadId?: string }>
+  /** An open ask one of these runs raised; it is answered in the bot chat. */
+  ask?: { text: string; activationId: string }
+}
+
 /** How long naming a new bot may take before the description names it (§5.3.1). */
 export const BOT_NAMING_TIMEOUT_MS = 5_000
 
@@ -266,6 +288,63 @@ export class BotChatService {
   }
 
   /** `bots.schedules.remove`: About → Runs → Remove. */
+  /**
+   * Each bot's schedules as the Automations page lists them (read-only): the bot, the schedule, its next run, and the
+   * runs it started, newest first, with any open ask such a run raised. No model or instance id is included.
+   */
+  automationSchedules(runsPerSchedule = 10): BotAutomationSchedule[] {
+    const now = this.options.now()
+    const out: BotAutomationSchedule[] = []
+    for (const botId of this.engine.botIds()) {
+      let definition: BotDefinition
+      try {
+        definition = this.engine.definitionOf(botId)
+      } catch {
+        continue
+      }
+      const summary = this.engine.chat.summary(definition, now)
+      const states = new Map(this.store.scheduleStates(botId).map((state) => [state.scheduleId, state]))
+      const asks = this.store.openAsks(botId).filter((ask) => ask.messageId !== null)
+      const activations = this.store.all(
+        "SELECT * FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'schedule' ORDER BY created_at DESC, id DESC LIMIT 200",
+        botId
+      )
+      for (const schedule of this.store.schedules(botId)) {
+        const runs = activations
+          .filter((row) => {
+            try { return (JSON.parse(row.trigger_json as string) as { scheduleId?: string }).scheduleId === schedule.id } catch { return false }
+          })
+          .slice(0, runsPerSchedule)
+          .map((row) => ({
+            id: row.id as string,
+            status: row.status as BotAutomationRunStatus,
+            at: row.created_at as string,
+            ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
+            ...(typeof row.end_reason === 'string' ? { endReason: row.end_reason } : {}),
+            ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
+          }))
+        const ask = asks.find((entry) => runs.some((run) => run.id === entry.activationId))
+        const state = states.get(schedule.id)
+        out.push({
+          botId,
+          botName: definition.name,
+          look: summary.look,
+          paused: summary.state === 'paused',
+          ...(summary.state === 'paused' && summary.stateText.startsWith('Paused until') ? { pausedText: summary.stateText } : {}),
+          scheduleId: schedule.id,
+          label: schedule.label,
+          prompt: schedule.prompt,
+          createdBy: schedule.createdBy,
+          ...(state?.nextRunAt ? { nextAt: state.nextRunAt } : {}),
+          ...(state?.lastSkipReason ? { lastSkip: { at: state.lastSkipAt ?? '', reason: state.lastSkipReason } } : {}),
+          runs,
+          ...(ask ? { ask: { text: this.engine.chat.card(ask).title, activationId: ask.activationId } } : {})
+        })
+      }
+    }
+    return out
+  }
+
   removeSchedule(botId: string, scheduleId: string): BotDetail {
     if (!this.engine.removeSchedule(botId, scheduleId)) throw new BotEngineError('schedule_not_found', 'This bot has no such schedule.')
     return this.detailOf(botId)

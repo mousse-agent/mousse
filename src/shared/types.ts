@@ -8,6 +8,24 @@ export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' 
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
+/**
+ * When an automation tells the person about a run: every run, only runs with news (the default, and what a job
+ * saved before Tell me existed reads as), or only runs that failed or stopped short. The agent still says
+ * "nothing new" with `[SILENT]`; that stays internal and maps to the Nothing new outcome.
+ */
+export type TellMe = 'every' | 'news' | 'problems'
+export const TELL_ME_VALUES: readonly TellMe[] = ['every', 'news', 'problems']
+export const DEFAULT_TELL_ME: TellMe = 'news'
+
+export function isTellMe(value: unknown): value is TellMe {
+  return typeof value === 'string' && (TELL_ME_VALUES as readonly string[]).includes(value)
+}
+
+/** A job's Tell me; absent or unknown reads as Only news. */
+export function tellMeOf(job: { tellMe?: unknown }): TellMe {
+  return isTellMe(job.tellMe) ? job.tellMe : DEFAULT_TELL_ME
+}
+
 /** `manual` has no clock: the job runs only when started (Run now, or a later trigger). */
 export type ScheduleKind = 'once' | 'interval' | 'cron' | 'manual'
 
@@ -161,9 +179,18 @@ export interface ScheduledJob {
   lastError?: string
   pausedAt?: string
   pausedReason?: string
+  /** A pause with an end: the scheduler resumes the job at this time. Absent: paused until a person resumes it. */
+  resumeAt?: string
   threadId?: string
   projectId?: string
   createThread?: boolean
+  /** When the person hears about a run (absent reads as Only news). */
+  tellMe?: TellMe
+  /**
+   * Set while a due occurrence waits for its bound thread's running turn to end: it keeps its place and its repeat,
+   * and starts once the thread is free. Cleared when the occurrence starts.
+   */
+  waitingBehind?: { threadId: string; since: string }
   /** Provider instance and model every run uses; absent = the thread's model (bound) or the profile default. */
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
@@ -243,6 +270,7 @@ export interface CreateScheduledJobInput {
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   permissionMode?: PermissionMode
+  tellMe?: TellMe
   /** Daemon-only: the protocol refuses it, and the daemon sets it from the creator's mode. */
   permissionCeiling?: PermissionMode
   createdBy?: ScheduledJob['createdBy']
@@ -265,6 +293,7 @@ export interface ScheduledJobPatch {
   /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
+  tellMe?: TellMe
 }
 
 /**

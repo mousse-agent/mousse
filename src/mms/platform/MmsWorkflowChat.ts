@@ -46,8 +46,12 @@ export interface BackgroundWorkflowTurnResult {
   aborted?: boolean
   waiting?: boolean
   transcriptWritten?: boolean
-  /** `queued`: the occurrence waits behind a busy thread. `replayed`: the occurrence was already admitted; its run is observed. */
-  status?: 'queued' | 'replayed'
+  /**
+   * `queued`: the occurrence waits behind a busy thread. `replayed`: the occurrence was already admitted; its run is
+   * observed. `busy`: nothing was admitted because the thread is running a turn and the occurrence cannot queue (a
+   * workflow); the scheduler keeps it due and tries again.
+   */
+  status?: 'queued' | 'replayed' | 'busy'
   threadId?: string
   runId?: string
   queueItemId?: string

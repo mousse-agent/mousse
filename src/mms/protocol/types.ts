@@ -537,6 +537,7 @@ export type ProtocolEventType =
   | 'pty.created'
   | 'scheduled.updated'
   | 'scheduled.status'
+  | 'scheduled.runEnded'
   | 'stats.lineEdits.updated'
   | 'settings.changed'
   | 'providers.install-event'

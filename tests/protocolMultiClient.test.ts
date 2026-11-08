@@ -7,7 +7,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import { readStopRequest } from '../src/cli/mmsRuntime'
-import { buildScheduleAddInput } from '../src/cli/commands/schedule'
+import { buildScheduleAddInput } from '../src/cli/commands/automation'
 import { parseArgs } from '../src/cli/parseArgs'
 
 /**

@@ -657,6 +657,8 @@ const SCHEDULED_NEVER_STARTED = 'Interrupted: never started'
 
 /** Open per-run threads one scheduled job may have; settle or delete some, or bind the job to a thread. */
 const MAX_OPEN_SCHEDULED_THREADS = 10
+/** What a scheduled run's agent is told about saying nothing new; hidden from the thread. */
+export const SCHEDULED_SILENT_NOTICE = '[Mousse] The next message comes from a scheduled automation that runs on its own. If this run finds nothing new to report, reply with exactly [SILENT] and nothing else.'
 
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
 /** Thrown inside the thread write to leave the file untouched when the stale rows no longer need closing. */
@@ -1543,6 +1545,8 @@ export class OrchestratorService extends EventEmitter {
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
+  /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
+  private readonly scheduledTurnThreads = new Set<string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
@@ -8493,6 +8497,10 @@ export class OrchestratorService extends EventEmitter {
     const decisionNotice: ChatMessage | null = approvalNote
       ? { id: uuidv4(), role: 'user', content: approvalNote, timestamp: new Date().toISOString(), hidden: true }
       : null
+    // A scheduled run's agent says "nothing new" with [SILENT]; the person never writes it (Tell me decides who hears).
+    const silentNotice: ChatMessage | null = scheduled && displayUserMessage
+      ? { id: uuidv4(), role: 'user', content: SCHEDULED_SILENT_NOTICE, timestamp: new Date().toISOString(), hidden: true }
+      : null
     const addedMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -8525,6 +8533,10 @@ export class OrchestratorService extends EventEmitter {
     if (decisionNotice) {
       this.messages.push(decisionNotice)
       this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(decisionNotice.content))
+    }
+    if (silentNotice) {
+      this.messages.push(silentNotice)
+      this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(silentNotice.content))
     }
     this.messages.push(addedMessage)
     this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(userContent, images))
@@ -9648,6 +9660,8 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnResponse: OrchestratorResponse | undefined
     let turnFailure: unknown
+    // While a scheduled occurrence's turn runs, its thread's end-of-work notice is the automation's to give (Tell me).
+    if (opts?.schedule) this.scheduledTurnThreads.add(session.threadId)
     try {
       // A bot's turn is named by its thread, so a trash of that thread can tell it from other work.
       turnResponse = await this.lifecycle.run(opts?.bot ? `bot-turn:${session.threadId}` : 'turn', () => this.sessionAls
@@ -9664,6 +9678,7 @@ export class OrchestratorService extends EventEmitter {
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
       this.settleRunAfterTurn(opts?.runId, requeued, turnFailure)
       if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
+      if (opts?.schedule) this.scheduledTurnThreads.delete(session.threadId)
       this.releaseSessionExecutionLease(session)
       session.turnAdmitted = false
       session.admissionRunId = undefined
@@ -12373,12 +12388,18 @@ export class OrchestratorService extends EventEmitter {
 
   private async runIsolatedScheduledJobOwned(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult> {
     try {
-      const workflow = prompt.startsWith('/') && ingress
+      const workflowThreadId = prompt.startsWith('/') && ingress ? this.resolveScheduledWorkflowThread(ingress) : undefined
+      // A workflow starts as a turn of its own and cannot wait in the thread's queue: on a thread that is running a turn
+      // the occurrence waits for it instead of failing (#404). The scheduler keeps it due, with its repeat.
+      if (workflowThreadId && ingress?.resumeWaiting !== true && this.scheduledThreadBusy(workflowThreadId)) {
+        return { text: '', silent: false, status: 'busy', threadId: workflowThreadId }
+      }
+      const workflow = workflowThreadId && ingress
         ? await this.admitBackgroundWorkflowTurn({
             content: prompt,
             source: 'schedule',
             requestId: scheduleWorkflowInvocationId(ingress),
-            threadId: this.resolveScheduledWorkflowThread(ingress),
+            threadId: workflowThreadId,
             signal: this.lifecycle.signal,
             terminalOnly: ingress.resumeWaiting === true,
             onWorkflowPrepared: ingress.onWorkflowPrepared
@@ -12390,6 +12411,26 @@ export class OrchestratorService extends EventEmitter {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { text: '', silent: false, error: message }
+    }
+  }
+
+  /**
+   * Whether the thread's turn now is a scheduled occurrence's. Its end is announced by the automation, as its Tell me
+   * says, not as a thread finishing.
+   */
+  isScheduledTurn(threadId: string): boolean {
+    return this.scheduledTurnThreads.has(threadId)
+  }
+
+  /** Whether a thread has a turn admitted or running here, or a live peer holds its execution lease. */
+  private scheduledThreadBusy(threadId: string): boolean {
+    const session = this.sessions.get(threadId)
+    if (session && (session.turnAdmitted || session.isTurnRunning())) return true
+    try {
+      this.reclaimStaleThreadLease(threadId)
+      return this.isThreadLeaseHeldExternally(threadId, session?.executionLease?.owner.token)
+    } catch {
+      return false
     }
   }
 

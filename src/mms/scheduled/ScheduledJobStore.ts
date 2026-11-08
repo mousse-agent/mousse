@@ -227,24 +227,27 @@ function pauseIdleJob(job: ScheduledJob, reason: string): void {
  * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
  * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
  */
-function pauseFields(job: ScheduledJob, reason?: string): Partial<ScheduledJob> {
+function pauseFields(job: ScheduledJob, reason?: string, resumeAt?: string): Partial<ScheduledJob> {
   return {
     enabled: false,
     ...(job.state === 'running' ? {} : { state: 'paused' as const }),
     pausedAt: new Date().toISOString(),
-    pausedReason: reason
+    pausedReason: reason,
+    // A pause with an end resumes on its own then; a pause without one clears an earlier end.
+    resumeAt
   }
 }
 
 /** The fields that resume a job from its schedule. A running job stays running until its claim is finalized. */
 function resumeFields(job: ScheduledJob): Partial<ScheduledJob> {
-  if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined }
+  if (job.state === 'running') return { enabled: true, pausedAt: undefined, pausedReason: undefined, resumeAt: undefined }
   const nextRunAt = computeNextRun(job.schedule)
   return {
     enabled: true,
     state: nextRunAt || job.schedule.kind === 'manual' ? 'scheduled' : 'completed',
     pausedAt: undefined,
     pausedReason: undefined,
+    resumeAt: undefined,
     nextRunAt
   }
 }
@@ -263,6 +266,8 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     lastError: job.lastError,
     pausedAt: job.pausedAt,
     pausedReason: job.pausedReason,
+    resumeAt: job.resumeAt,
+    waitingBehind: job.waitingBehind,
     runHistory: labelAgentRuns(job),
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
@@ -293,6 +298,8 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     lastError: runtime?.lastError,
     pausedAt: runtime?.pausedAt,
     pausedReason: runtime?.pausedReason,
+    resumeAt: runtime?.resumeAt,
+    waitingBehind: runtime?.waitingBehind,
     runHistory: runtime?.runHistory ?? [],
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
@@ -466,6 +473,7 @@ export class ScheduledJobStore {
       workspace: input.workspace,
       permissionMode,
       permissionCeiling,
+      ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       createdBy: input.createdBy,
       accessCap: input.accessCap,
       expiresAt: input.expiresAt,
@@ -768,11 +776,12 @@ export class ScheduledJobStore {
     if (!options.keepPayload) removeTriggerPayload(this.homeDir, jobId, occurrenceId)
   }
 
-  pauseJob(id: string, reason?: string): ScheduledJob | null {
+  /** Pauses a job, until a person resumes it or, with `resumeAt`, until then. */
+  pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.getJob(id)
       if (!job) return null
-      return this.updateJob(id, pauseFields(job, reason))
+      return this.updateJob(id, pauseFields(job, reason, resumeAt))
     })
   }
 
@@ -836,6 +845,7 @@ export class ScheduledJobStore {
       state: 'scheduled',
       pausedAt: undefined,
       pausedReason: undefined,
+      resumeAt: undefined,
       nextRunAt: new Date().toISOString()
     })
   }
@@ -859,6 +869,11 @@ export class ScheduledJobStore {
       const droppedDeliveries: Array<{ jobId: string; occurrenceId: string }> = []
 
       for (const job of jobs) {
+        // A pause with an end is over once its time has come: the job resumes on its schedule from now.
+        if (job.state === 'paused' && job.resumeAt && Date.parse(job.resumeAt) <= now.getTime() && !job.runClaim) {
+          Object.assign(job, resumeFields(job), { updatedAt: now.toISOString() })
+          dirty = true
+        }
         // A delivery that was accepted and then the job was paused does not run later, when it is stale.
         if (job.pendingTrigger && (!job.enabled || job.state === 'paused') && job.state !== 'running' && !job.runClaim) {
           droppedDeliveries.push({ jobId: job.id, occurrenceId: job.pendingTrigger.occurrenceId })
@@ -1019,6 +1034,7 @@ export class ScheduledJobStore {
     job.lastError = result.status === 'ok' || waiting ? undefined : result.error
     job.runClaim = undefined
     job.pendingOccurrence = undefined
+    job.waitingBehind = undefined
     job.updatedAt = nowIso
 
     // A webhook delivery ends with its occurrence: its log row gets the outcome and its payload is deleted.
@@ -1100,17 +1116,42 @@ export class ScheduledJobStore {
 
   /** The claim records the run its admission created, before anything starts. */
   markOccurrenceAdmitted(id: string, claimToken: string, runId: string): boolean {
-    return this.updateClaim(id, claimToken, (claim) => { claim.runId = runId })
+    return this.updateClaim(id, claimToken, (claim, job) => {
+      claim.runId = runId
+      job.waitingBehind = undefined
+    })
   }
 
-  private updateClaim(id: string, claimToken: string, write: (claim: ScheduledJobRunClaim) => void): boolean {
+  private updateClaim(id: string, claimToken: string, write: (claim: ScheduledJobRunClaim, job: ScheduledJob) => void): boolean {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return false
-      write(job.runClaim)
+      write(job.runClaim, job)
       this.saveJobs(jobs)
       return true
+    })
+  }
+
+  /**
+   * The claimed occurrence could not start because its bound thread is running a turn (#404). The claim goes back
+   * without a run record: the job stays due with the same occurrence, keeps its repeat, and says it waits behind that
+   * thread's run until a tick finds the thread free. A webhook delivery goes back to waiting to start.
+   */
+  deferBusyClaim(id: string, claimToken: string, threadId: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      const claim = job?.runClaim
+      if (!job || !claim || job.state !== 'running' || claim.token !== claimToken || claim.runId) return null
+      const now = new Date().toISOString()
+      if (claim.webhookOccurrenceId) job.pendingTrigger = { occurrenceId: claim.webhookOccurrenceId, receivedAt: now }
+      job.runClaim = undefined
+      job.state = 'scheduled'
+      job.waitingBehind = { threadId, since: job.waitingBehind?.threadId === threadId ? job.waitingBehind.since : now }
+      job.updatedAt = now
+      this.saveJobs(jobs)
+      return job
     })
   }
 
@@ -1142,6 +1183,7 @@ export class ScheduledJobStore {
         state: queueItemId ? 'queued' : 'admitted'
       }
       job.runClaim = undefined
+      job.waitingBehind = undefined
       job.state = 'scheduled'
       job.updatedAt = now
       this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true, missingPlaceholders: details?.missingPlaceholders })

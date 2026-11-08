@@ -123,6 +123,8 @@ import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
+import { buildAutomationIndex } from './automations/AutomationIndex'
+import type { AutomationIndex } from '../shared/automations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
@@ -1229,6 +1231,20 @@ export class MmsProfileServices {
     // Its delete is over: the consent recorded for it can never be used again.
     if (record.state === 'active') this.threadDeletes.forgetIntent(taskId)
     return record
+  }
+
+  /** The Automations page's one list (`automations.list`): jobs, bot schedules and pull request watches. */
+  automationIndex(): AutomationIndex {
+    const bots = this.personalBots
+    return buildAutomationIndex({
+      jobs: () => this.scheduled.listJobs(),
+      thread: (id) => this.threads.getThread(id),
+      threads: () => this.threads.listAllThreads(),
+      projectName: (id) => this.projects.getProject(id)?.name,
+      threadMode: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
+      ...(bots ? { bots: () => bots.service.automationSchedules() } : {}),
+      watchStatus: (threadId) => this.pullRequestWatch.status(threadId)
+    })
   }
 
   getOwnerLease(): MmsOwnerHandle | null {

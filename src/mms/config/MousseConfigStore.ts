@@ -26,7 +26,7 @@ import type {
   ScheduledJobDefinition
 } from './types'
 import { MOUSSE_CONF_VERSION } from './types'
-import type { ScheduledJob } from '../../shared/types'
+import { isTellMe, type ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
 import { pathsEqual } from '../profiles/pathSafety'
 import {
@@ -139,6 +139,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createdBy: job.createdBy,
     accessCap: job.accessCap,
     expiresAt: job.expiresAt,
+    // Only a chosen value is written: a job without one keeps reading as Only news.
+    ...(isTellMe(job.tellMe) ? { tellMe: job.tellMe } : {}),
     trigger: job.trigger,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
@@ -313,7 +315,12 @@ export class MousseConfigStore {
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
         // A job's model with a level packed into it (written before #490) is upgraded.
-        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => (job?.selection ? { ...job, selection: upgradeSelection(job.selection) } : job)),
+        // A Tell me this version does not know is dropped, so the job reads as Only news (as every job saved before Tell me does).
+        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => {
+          if (!job) return job
+          const { tellMe, ...rest } = job.selection ? { ...job, selection: upgradeSelection(job.selection) } : job
+          return isTellMe(tellMe) ? { ...rest, tellMe } : rest
+        }),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
         ...savedAgentJobLimits(raw.scheduled)

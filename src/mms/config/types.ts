@@ -87,6 +87,7 @@ export interface ScheduledJobDefinition {
   createdBy?: ScheduledJob['createdBy']
   accessCap?: ScheduledJob['accessCap']
   expiresAt?: ScheduledJob['expiresAt']
+  tellMe?: ScheduledJob['tellMe']
   trigger?: ScheduledJob['trigger']
   repeat?: { times: number; completed?: number }
   createdAt: string
@@ -101,6 +102,8 @@ export interface ScheduledJobRuntime {
   lastError?: string
   pausedAt?: string
   pausedReason?: string
+  resumeAt?: string
+  waitingBehind?: ScheduledJob['waitingBehind']
   runHistory?: ScheduledJob['runHistory']
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']

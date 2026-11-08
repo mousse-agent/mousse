@@ -953,8 +953,9 @@ const api = {
         ipcRenderer.invoke('scheduled:webhook:deliveries', id)
     },
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('scheduled:delete', id),
-    pause: (id: string, reason?: string): Promise<ScheduledJob | null> =>
-      ipcRenderer.invoke('scheduled:pause', id, reason),
+    /** `until` (ISO): the pause ends by itself then; without it the job stays paused until resumed. */
+    pause: (id: string, reason?: string, until?: string): Promise<ScheduledJob | null> =>
+      ipcRenderer.invoke('scheduled:pause', id, reason, until),
     resume: (id: string): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:resume', id),
     run: (id: string): Promise<ScheduledJob | null> => ipcRenderer.invoke('scheduled:run', id),

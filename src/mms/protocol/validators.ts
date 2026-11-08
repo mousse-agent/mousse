@@ -5,7 +5,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  */
 
 import { isExpiryPreset } from '../../shared/threadExpiry'
-import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
+import { isTellMe, type ChatImageAttachment, type ChatMode, type ScheduledJobWorkspace, type TellMe } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
@@ -752,6 +752,7 @@ export type CreateScheduledJobInputValidated = {
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
+  tellMe?: TellMe
 }
 
 /** The provider instance and model a job runs on. The instance and model are checked against the profile later. */
@@ -785,6 +786,12 @@ export function asJobWorkspace(v: unknown, name = 'workspace'): ScheduledJobWork
   throw new Error(`${name}.kind must be project|newWorktree|worktree`)
 }
 
+/** A job's Tell me: every run, only news, or only problems. */
+export function asTellMe(v: unknown, name = 'tellMe'): TellMe {
+  if (!isTellMe(v)) throw new Error(`${name} must be every|news|problems`)
+  return v
+}
+
 export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputValidated {
   const o = asPlainObject(v, 'input')
   const input: CreateScheduledJobInputValidated = {
@@ -801,6 +808,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (o.mode !== undefined) input.mode = asJobMode(o.mode)
   if (o.permissionMode !== undefined) input.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
+  if (o.tellMe !== undefined) input.tellMe = asTellMe(o.tellMe)
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
@@ -818,7 +826,8 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'mode',
     'permissionMode',
     'workspace',
-    'repeat'
+    'repeat',
+    'tellMe'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`input.${key} is not allowed`)
@@ -839,6 +848,7 @@ export function asScheduledJobPatch(v: unknown): {
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
+  tellMe?: TellMe
 } {
   const o = asPlainObject(v, 'patch')
   const allowed = new Set([
@@ -853,7 +863,8 @@ export function asScheduledJobPatch(v: unknown): {
     'mode',
     'permissionMode',
     'workspace',
-    'repeat'
+    'repeat',
+    'tellMe'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`patch.${key} is not allowed`)
@@ -877,6 +888,7 @@ export function asScheduledJobPatch(v: unknown): {
   else if (o.permissionMode !== undefined) patch.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace === null) patch.workspace = null
   else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
+  if (o.tellMe !== undefined) patch.tellMe = asTellMe(o.tellMe)
   if (o.repeat === null) patch.repeat = null
   else if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')

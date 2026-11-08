@@ -650,7 +650,10 @@ export class MmsProtocolServer {
         activity?: Record<string, string>
       }) => {
         const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
-        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
+        // A scheduled occurrence's turn: its end is announced by `scheduled.runEnded` as the job's Tell me says, so
+        // clients do not also announce the thread finishing.
+        const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled ? { ...payload, scheduled: true } : payload, payload.threadId))
         if (payload.activity) {
           const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
@@ -715,6 +718,10 @@ export class MmsProtocolServer {
     })
     onEmitter(services.scheduled, 'status', (status: unknown) => {
       emitToSubscribers(this.ring.push('scheduled.status', { status }, undefined))
+    })
+    // How an automation's run ended and whether its Tell me lets it notify; the GUI shows the notification.
+    onEmitter(services.scheduled, 'runEnded', (event: { threadId?: string }) => {
+      emitToSubscribers(this.ring.push('scheduled.runEnded', event, event.threadId))
     })
     // A watched pull request changed (checks finished, a review arrived, the watch ended): clients refresh that thread's detail.
     onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {

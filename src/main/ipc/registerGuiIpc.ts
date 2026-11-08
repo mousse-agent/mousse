@@ -14,6 +14,7 @@ import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
 import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
+import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -97,6 +98,7 @@ import {
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
   SUBAGENT_QUESTION_BODY,
+  automationRunBody,
   bodyWithProject,
   getThreadNotificationPresentation,
   planThreadNotification,
@@ -211,6 +213,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
   ...BOTS_BROWSER_METHODS,
+  ...AUTOMATIONS_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -552,6 +555,42 @@ export function registerGuiIpc(
         // Open the thread the banner is about; the window selects it as if its row were clicked.
         win.webContents.send('app:openThread', about.threadId)
       }
+    })
+    notification.show()
+    if (useWindowsCompletionSound) playThreadCompletionSound()
+  }
+
+  /**
+   * An automation's run ended (`scheduled.runEnded`). It notifies only when its Tell me lets it (the daemon decides),
+   * through the person's choices for a finished thread, or for a question when the run failed. A click opens its thread.
+   */
+  const notifyAutomationRun = (data: unknown, win: BrowserWindow, activeThreadId: string | null, profileSettings: MousseSettings): void => {
+    const run = (data ?? {}) as Partial<ScheduledRunEnded>
+    if (run.notify !== true || typeof run.jobName !== 'string' || typeof run.outcome !== 'string') return
+    const kind: ThreadNotificationKind = run.outcome === 'failed' || run.outcome === 'incomplete' ? 'idle' : 'completed'
+    const plan = planThreadNotification({ ...threadNotificationChannels(profileSettings.notifications, kind), toast: false }, {
+      windowFocused: win.isFocused(),
+      viewingThread: Boolean(run.threadId && activeThreadId === run.threadId),
+      systemSupported: Notification.isSupported()
+    })
+    if (!plan.system) {
+      if (plan.playSound) playThreadCompletionSound()
+      return
+    }
+    const content = getThreadNotificationPresentation(kind, profileSettings)
+    const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
+    const notification = new Notification({
+      ...content,
+      title: run.jobName,
+      body: automationRunBody(run.outcome, run.error),
+      silent: useWindowsCompletionSound ? true : content.silent
+    })
+    notification.on('click', () => {
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+      if (run.threadId) win.webContents.send('app:openThread', run.threadId)
     })
     notification.show()
     if (useWindowsCompletionSound) playThreadCompletionSound()
@@ -995,8 +1034,10 @@ export function registerGuiIpc(
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
-      // Working → Waiting is still the same work cycle; only its end notifies.
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state)) {
+      // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
+      // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
+      const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input')) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1013,6 +1054,7 @@ export function registerGuiIpc(
       }
     }
     if (event.type === 'bots.message' && !replay) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
+    if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
       tracker.setState(event.threadId, 'awaiting_input')
       target('threads:activity', tracker.getSnapshot())
@@ -2033,8 +2075,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ ok: boolean }>('scheduled.delete', { id })
     return res.ok
   })
-  registerHandler('scheduled:pause', async (_e, id: string, reason?: string) => {
-    const res = await guiMms.request<{ job: unknown }>('scheduled.pause', { id, reason })
+  registerHandler('scheduled:pause', async (_e, id: string, reason?: string, until?: string) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.pause', { id, reason, ...(typeof until === 'string' && until ? { until } : {}) })
     return res.job
   })
   registerHandler('scheduled:resume', async (_e, id: string) => {

@@ -29,6 +29,7 @@ import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
+import { registerAutomationMethods } from './automations/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -242,6 +243,10 @@ export class MousseMainService extends MmsProfileServices {
     registerBotBrowserMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return services.personalBots ? services.botBrowsers : null
+    })
+    registerAutomationMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return () => services.automationIndex()
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))

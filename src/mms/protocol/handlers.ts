@@ -2877,6 +2877,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
         ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
+        ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),
         ...(patch.repeat === null
           ? { repeat: undefined }
           : patch.repeat !== undefined
@@ -2908,7 +2909,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       const reason = asOptionalString(p.reason, 512)
-      const job = ctx.mms.scheduled.pauseJob(id, reason)
+      // `until`: the pause ends by itself then (Pause… → Until tomorrow, Until Monday, Until a date).
+      const untilText = asOptionalString(p.until, 64)
+      let until: string | undefined
+      if (untilText) {
+        const at = Date.parse(untilText)
+        if (!Number.isFinite(at)) throw jobRefused('until must be a date and time')
+        if (at <= Date.now()) throw jobRefused('Pick a time in the future to resume')
+        until = new Date(at).toISOString()
+      }
+      const job = ctx.mms.scheduled.pauseJob(id, reason, until)
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.resume': {

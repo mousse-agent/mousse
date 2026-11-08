@@ -18,6 +18,7 @@ import { Reconciler } from '../src/mms/run/Reconciler'
 import { jobPermissionRequest } from '../src/mms/scheduled/jobPermission'
 import { AGENT_JOB_LIMIT_DEFAULTS, agentJobExpiry, isActiveAgentJob } from '../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
+import { SCHEDULED_SILENT_NOTICE } from '../src/mms/orchestrator/OrchestratorService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { ScheduledJob, ScheduledJobRunRecord } from '../src/shared/types'
@@ -182,8 +183,11 @@ describe('scheduled jobs run as turns', () => {
       expect(messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['write the report'])
       expect(messages.filter((message) => message.role === 'assistant')).toHaveLength(1)
       // The stored prompt is marked as the job's, so it does not pass for something the person typed.
-      const prompt = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user')
+      const prompt = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user' && !message.hidden)
       expect(prompt?.scheduled).toEqual({ jobId: job.id, jobName: 'Report' })
+      // The agent alone is told how to say "nothing new"; the person never sees it.
+      const notice = w.orch.getOrCreateSession(thread.id).messages.find((message) => message.role === 'user' && message.hidden)
+      expect(notice?.content).toBe(SCHEDULED_SILENT_NOTICE)
     })
 
     it('does the same through the direct path when no effect worker is attached', async () => {
@@ -520,7 +524,7 @@ describe('scheduled jobs run as turns', () => {
       expect(claude.turns).toHaveLength(1)
       expect(w.store.getThread(thread.id)?.modelOverride).toMatchObject(PI)
       // The person's own message is not marked; the job's prompt is, after waiting in the queue too.
-      const users = w.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user')
+      const users = w.orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user' && !message.hidden)
       expect(users.map((message) => message.scheduled?.jobName)).toEqual([undefined, 'Report'])
       // The repeat is spent and the next run is a full interval away.
       expect(new Date(w.jobs.getJob(job.id)!.nextRunAt!).getTime()).toBeGreaterThan(Date.now())
@@ -717,6 +721,40 @@ describe('scheduled jobs run as turns', () => {
       expect(first.threadId).toBe(chosen[0])
       expect(retry.threadId).toBe(chosen[0])
       expect(perRunThreads(w, job.id)).toHaveLength(1)
+    })
+
+    it('runs two jobs due on one thread in the same tick one after the other, and each keeps its repeat (#404)', async () => {
+      const release = gate()
+      let held = false
+      const pi = piAdapter(async (input) => {
+        // Whichever job reaches the thread first holds it until released.
+        if (!held) {
+          held = true
+          await release.promise
+        }
+        return `pi: ${input.prompt}`
+      })
+      const w = boot([pi])
+      const project = projectOf(w)
+      const thread = w.store.createThread('Shared', project.id, project.path)
+      w.orch.setThreadModelOverride(thread.id, PI)
+      const shared = { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval' as const, minutes: 10 }, repeat: { times: 3 } }
+      const first = addJob(w, { name: 'First', prompt: 'first job', ...shared })
+      const second = addJob(w, { name: 'Second', prompt: 'second job', ...shared })
+      makeDue(w, first)
+      makeDue(w, second)
+
+      await w.tick()
+      await waitFor(() => pi.turns.length === 1, 'the first turn')
+      // The other one waits behind it on the thread's queue, without a failure.
+      await waitFor(() => [first, second].some((job) => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued'), 'the second occurrence to queue')
+      expect([first, second].flatMap((job) => w.jobs.getJob(job.id)?.runHistory ?? []).some((record) => record.status === 'error')).toBe(false)
+
+      release.resolve()
+      const records = [await finished(w, first.id), await finished(w, second.id)]
+      expect(records.map((record) => record.status)).toEqual(['ok', 'ok'])
+      expect(pi.turns).toHaveLength(2)
+      for (const job of [first, second]) expect(w.jobs.getJob(job.id)?.repeat).toMatchObject({ times: 3, completed: 1 })
     })
 
     it('runs due jobs at the same time, so a slow one does not hold the others', async () => {
