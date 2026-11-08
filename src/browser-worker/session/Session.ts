@@ -103,6 +103,8 @@ export class ManagedSession {
   private downloadStates = new Map<string, 'inProgress' | 'completed' | 'canceled' | 'interrupted'>()
   /** Where the agent last acted (`agentCursor.ts`): held here, drawn by viewers over `frame()`, never in the page. */
   private cursor: BrowserAgentCursor | undefined
+  /** The tab last brought to the front (`toFront`). */
+  private frontTargetId = ''
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -236,6 +238,7 @@ export class ManagedSession {
     this.throwIfUnavailable(signal)
     this.tabs.set(tabId, tab)
     this.activeTabId = tabId
+    this.frontTargetId = created.targetId
     this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
       if (this.closed || this.closing) return
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string } })?.frame
@@ -365,6 +368,8 @@ export class ManagedSession {
       this.throwIfUnavailable(signal)
       this.tabs.set(tabId, tab)
       this.activeTabId = tabId
+      // A new tab opens in front.
+      this.frontTargetId = created.targetId
       this.touch()
       return { id: tabId, title: tab.title, url: tab.url }
     } catch (error) {
@@ -565,6 +570,7 @@ export class ManagedSession {
     if (request.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
     if (this.inFlight) fail('not_actionable', 'Another action is already in flight for this session')
     const tab = this.requireTab(request.tabId)
+    await this.toFront(tab)
     const abort = new AbortController()
     const onAbort = () => abort.abort(signal?.reason)
     if (signal) {
@@ -677,6 +683,19 @@ export class ManagedSession {
   }
 
   /**
+   * A headless browser paints only its front tab: a tab in the back never settles for an action's
+   * stability checks and gives no picture. The tab acted on or watched comes to the front.
+   */
+  private async toFront(tab: TabState): Promise<void> {
+    if (this.frontTargetId === tab.targetId || this.tabs.size < 2) {
+      this.frontTargetId = tab.targetId
+      return
+    }
+    await this.requireChrome().cdp.send('Target.activateTarget', { targetId: tab.targetId }, { timeoutMs: 5_000 })
+    this.frontTargetId = tab.targetId
+  }
+
+  /**
    * A live picture of a tab for a person watching (a bot's browser view): a JPEG of the visible
    * viewport, and the agent cursor while it is recent. Not an observation: no refs, no artifact, and
    * nothing a model reads.
@@ -684,6 +703,7 @@ export class ManagedSession {
   async frame(params: Record<string, unknown>): Promise<BrowserViewerFrame> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const cdp = this.requireChrome().cdp
+    await this.toFront(tab)
     const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
     const visual = metrics.cssVisualViewport ?? {}
     const width = visual.clientWidth && visual.clientWidth > 0 ? visual.clientWidth : 1280

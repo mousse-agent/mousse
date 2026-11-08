@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Sign-in</title>
+</head>
+<body>
+  <h1>Sign-in fixture</h1>
+  <p id="status">none</p>
+  <button id="go" type="button">Go</button>
+  <script>
+    // A sign-in that lasts: a cookie with an expiry, kept by a persistent browser profile.
+    const params = new URLSearchParams(location.search)
+    if (params.get('set')) document.cookie = 'mousse_signed_in=' + params.get('set') + '; max-age=3600; path=/'
+    document.getElementById('status').textContent = document.cookie || 'empty'
+    document.getElementById('go').addEventListener('click', () => { document.getElementById('status').textContent = 'clicked' })
+  </script>
+</body>
+</html>
