@@ -110,6 +110,8 @@ describe('placing requests in the transcript', () => {
       saved('r3', 40, { runId: 'run-3', status: 'answered', decision: 'allow' })
     ])
     expect(placed.map((message) => message.id)).toEqual(['u1', 'c1', 'permission:r1', 'a1'])
+    // Undo of the only turn, or a branch with no turn yet, leaves an empty conversation: none of its run's requests.
+    expect(withPermissionRequests([], [saved('r1', 2, { runId: 'run-1', status: 'answered', decision: 'allow' })])).toEqual([])
     // Messages that name no turn (an older thread) keep every request.
     expect(withPermissionRequests(messages, [saved('r2', 30, { runId: 'run-2' })]).map((message) => message.id)).toEqual(['u1', 'c1', 'a1', 'u2', 'a2', 'permission:r2'])
   })

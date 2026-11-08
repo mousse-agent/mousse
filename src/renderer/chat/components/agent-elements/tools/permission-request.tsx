@@ -118,11 +118,12 @@ export function withPermissionRequests(
   const placed: Array<{ at: number; message: UIMessage }> = [];
   const known = new Set<string>();
   // The run that asked is the turn of its messages (`turnId`). A thread whose messages name no turn (an older one)
-  // keeps every request.
+  // keeps every request; an empty conversation (its only turn undone, a branch with none yet) keeps none of a run.
   const turns = new Set(messages.map((message) => (message as { turnId?: unknown }).turnId).filter((turnId): turnId is string => typeof turnId === "string"));
+  const olderThread = messages.length > 0 && turns.size === 0;
   for (const request of saved) {
     known.add(request.requestId);
-    if (request.runId && turns.size && !turns.has(request.runId)) continue;
+    if (request.runId && !olderThread && !turns.has(request.runId)) continue;
     const at = readTime(request.createdAt);
     if (at == null) continue;
     placed.push({
