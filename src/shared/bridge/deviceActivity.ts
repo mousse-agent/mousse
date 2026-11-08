@@ -250,6 +250,8 @@ const PHRASES: Record<string, Phrase> = {
   'git.suggestCommitMessage': COMMIT_MESSAGE,
   'git.stage': STAGE,
   'git.unstage': STAGE,
+  'git.include': STAGE,
+  'git.undoLastCommit': COMMIT,
   'git.discard': DISCARD,
   'git.fetch': SYNC,
   'git.pull': SYNC,

@@ -436,6 +436,9 @@ export const PROTOCOL_METHODS = [
   'git.deleteBranch',
   'git.init',
   'git.cancelOperation',
+  'git.changes',
+  'git.include',
+  'git.undoLastCommit',
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
@@ -499,6 +502,7 @@ export type ProtocolEventType =
   | 'projects.updated'
   | 'threads.updated'
   | 'pullRequests.updated'
+  | 'git.selectionChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.message'
