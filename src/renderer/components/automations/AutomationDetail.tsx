@@ -295,27 +295,32 @@ export function AutomationDetail({
       </div>
 
       <p className="automation-sentence" data-testid="automation-sentence">
-        <button type="button" className="automation-chip" aria-expanded={builderOpen} onClick={() => setBuilderOpen((open) => !open)} data-testid="automation-when">
-          {whenSentence(draft)}
-        </button>
-        {', '}
+        <span className="automation-sentence-glue">
+          <button type="button" className="automation-chip" aria-expanded={builderOpen} onClick={() => setBuilderOpen((open) => !open)} data-testid="automation-when">
+            {whenSentence(draft)}
+          </button>
+          ,
+        </span>
+        {' '}
         <span className="automation-chip readonly" title="Who does it">{workflow ? draft.prompt.trim().split(/\s+/)[0] : whoName}</span>
         {workflow ? ' runs ' : ' does '}
         <button type="button" className="automation-chip" onClick={() => promptRef.current?.focus()}>this</button>
         {' in '}
-        <Select
-          id={id('project')}
-          ariaLabel="Where"
-          className="automation-chip-select"
-          size="small"
-          value={draft.projectId}
-          options={projectOptions}
-          onChange={(projectId) => {
-            const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
-            patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
-          }}
-        />
-        .
+        <span className="automation-sentence-glue">
+          <Select
+            id={id('project')}
+            ariaLabel="Where"
+            className="automation-chip-select"
+            size="small"
+            value={draft.projectId}
+            options={projectOptions}
+            onChange={(projectId) => {
+              const keep = catalog.threads.some((thread) => thread.id === draft.threadId && (!projectId || thread.projectId === projectId))
+              patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
+            }}
+          />
+          .
+        </span>
       </p>
 
       {builderOpen ? (

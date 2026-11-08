@@ -15,6 +15,8 @@
   overflow: hidden;
   -webkit-app-region: no-drag;
 }
+/* The page holds focus for its page-scoped keys; the page itself never shows a ring. */
+.automations-page:focus { outline: none; }
 
 /* No glass on Automations: the specular top light, glint and sheen are the main thread composer's (polish.css,
    ambient-glow.css). Menus that open from here sit in a portal, so they keep the shared menu material. */
@@ -810,7 +812,7 @@ html[data-theme='high-contrast'] .automations-page {
 .automation-row-seg.tone-bad { color: var(--danger); }
 .automation-row-seg.tone-warn { color: var(--warning); }
 
-.automation-bot-face { display: inline-flex; width: 16px; height: 16px; }
+.automation-bot-face { display: inline-flex; flex: none; width: 16px; height: 16px; }
 
 .automation-primary { flex: none; }
 .automation-row .settings-btn { height: 24px; padding: 0 10px; }
@@ -919,15 +921,16 @@ html[data-theme='high-contrast'] .automations-page {
 
 /* The words between the chips keep their own spaces, so a comma sits right after its chip. */
 .automation-sentence {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  row-gap: 4px;
-  white-space: pre;
+  display: block;
   margin: 0;
+  line-height: 30px;
   font-size: var(--settings-fs-row);
   color: var(--text-secondary);
 }
+.automation-sentence .automation-chip,
+.automation-sentence .ui-select { vertical-align: middle; }
+/* A chip and the punctuation after it stay together: "9:00," and "mousse." never break or gain a space. */
+.automation-sentence-glue { display: inline-flex; align-items: center; white-space: nowrap; vertical-align: middle; }
 
 .automation-detail-pair {
   display: flex;

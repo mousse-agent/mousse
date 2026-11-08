@@ -2,7 +2,7 @@ import { useState, type MouseEvent } from 'react'
 import type { AutomationItem } from '../../../shared/automations'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { Modal } from '../ui/Modal'
-import { BotFace } from '../bots/face/BotFace'
+import { BotFaceStill } from '../bots/face/BotFace'
 import { metaParts, primaryOf, pauseUntil, type MetaContext, type PauseChoice } from './automationList'
 
 /** The glyph column: what state the automation is in, always. */
@@ -58,7 +58,7 @@ export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onP
           {parts.map((part) => (
             <span key={part.key} className={`automation-row-seg${part.tone ? ` tone-${part.tone}` : ''}`} data-meta={part.key}>
               {part.key === 'bot' && item.who.kind === 'bot' ? (
-                <span className="automation-bot-face" aria-hidden="true"><BotFace look={item.who.look} state="idle" size={16} view="head" still /></span>
+                <span className="automation-bot-face" aria-hidden="true" data-testid="automation-bot-face"><BotFaceStill look={item.who.look} state="idle" size={16} view="head" /></span>
               ) : null}
               {part.text}
             </span>

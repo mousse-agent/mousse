@@ -19,7 +19,7 @@ import { clockText, describeSchedule, humanCron, nameFromPrompt } from '../../sr
 
 const openThread = vi.hoisted(() => vi.fn(async (_threadId: string) => undefined))
 vi.mock('../../src/renderer/lib/openThread', () => ({ openThread }))
-vi.mock('../../src/renderer/components/bots/face/BotFace', () => ({ BotFace: () => null }))
+vi.mock('../../src/renderer/components/bots/face/BotFace', () => ({ BotFace: () => null, BotFaceStill: () => null }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -351,7 +351,10 @@ describe('the Automations page', () => {
     expect($('[data-group="needs"] .automation-group-head')?.textContent).toBe('Needs you · 1')
     const primaries = $$('[data-testid="automation-row"]').map((row) => [row.dataset.key, row.querySelector('[data-primary]')?.textContent])
     expect(primaries).toEqual([['job:failed', 'Retry'], ['job:today', 'Run now'], ['bot:b:s', 'Open'], ['watch:t1', 'Open']])
+    // A bot row's meta line starts with the bot (its face, then its name): no time, no blank before it.
+    expect($$('[data-key="bot:b:s"] [data-meta]').map((part) => part.dataset.meta)[0]).toBe('bot')
     expect($('[data-key="bot:b:s"] [data-meta="bot"]')?.textContent).toBe('Pip')
+    expect($('[data-key="bot:b:s"] [data-testid="automation-bot-face"]')).not.toBeNull()
     expect($('[data-key="watch:t1"] .automation-row-meta')?.textContent).toContain('Notify')
     await click($('[data-key="watch:t1"] .automation-row-main'))
     expect(openThread).toHaveBeenCalledWith('t1')

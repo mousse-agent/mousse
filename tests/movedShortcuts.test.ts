@@ -287,6 +287,30 @@ describe('the registry is the only handler', () => {
     expect(fromPicker).toHaveBeenCalledTimes(1)
   })
 
+  it('lets a page take ⌘N while it has focus, and leaves New thread to the palette and every other place', () => {
+    const win = stubWindow()
+    attachCommandShortcuts(win as never)
+    const newThread = vi.fn()
+    const newAutomation = vi.fn()
+    let pageFocused = true
+    registerCommand('thread.new', { run: newThread })
+    registerCommand('thread.new', { run: newAutomation, enabled: () => pageFocused, keysOnly: true })
+
+    keydown(win, { key: 'n', code: 'KeyN', ctrlKey: true })
+    expect(newAutomation).toHaveBeenCalledTimes(1)
+    expect(newThread).not.toHaveBeenCalled()
+    // The palette and the menu keep New thread, even while the page has focus.
+    expect(runCommand('thread.new', 'palette')).toBe(true)
+    expect(runCommand('thread.new', 'menu')).toBe(true)
+    expect(newThread).toHaveBeenCalledTimes(2)
+    expect(newAutomation).toHaveBeenCalledTimes(1)
+    // Focus elsewhere: ⌘N is New thread again.
+    pageFocused = false
+    keydown(win, { key: 'n', code: 'KeyN', ctrlKey: true })
+    expect(newThread).toHaveBeenCalledTimes(3)
+    expect(newAutomation).toHaveBeenCalledTimes(1)
+  })
+
   it('leaves the workflow editor with only the keys that cannot be rebound', () => {
     const event = (init: Partial<WorkflowKeyEvent> & { key: string }): WorkflowKeyEvent => ({
       ctrlKey: false,

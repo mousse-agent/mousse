@@ -137,6 +137,8 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
     parts.push({ key: 'when', text: item.whenText })
   } else if (item.trigger === 'request') {
     parts.push({ key: 'when', text: 'on request' })
+  } else if (item.who.kind === 'bot') {
+    // A bot's row is named by its schedule ("every day · 08:00"); its meta line starts with the bot.
   } else if (item.next) {
     parts.push({ key: 'when', text: ownedWhenText(item.next.at, ctx.now, owner, ctx.viewerZone) })
   } else if (item.trigger === 'time' && item.schedule) {

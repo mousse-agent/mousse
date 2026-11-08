@@ -129,7 +129,8 @@ function botItem(schedule: BotAutomationSchedule, computer: AutomationItem['comp
     key: `bot:${schedule.botId}:${schedule.scheduleId}`,
     kind: 'bot',
     id: `${schedule.botId}:${schedule.scheduleId}`,
-    name: lineOf(schedule.prompt) || schedule.label,
+    // Named by its short label ("every day · 08:00"), as the bot's own Runs list names it; the prompt is the bot's.
+    name: schedule.label || lineOf(schedule.prompt),
     trigger: 'time',
     whenText: schedule.label,
     who: { kind: 'bot', name: schedule.botName, look: schedule.look },

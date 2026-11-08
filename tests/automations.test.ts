@@ -151,7 +151,8 @@ describe('the automation index', () => {
     const [jobItem, botItem, watchItem] = index.items
     expect(jobItem).toMatchObject({ trigger: 'time', where: { projectId: 'p1', name: 'mousse' }, tellMe: 'problems', may: 'accept_edits', next: { timeZone: 'Asia/Kolkata' }, link: { kind: 'job', jobId: 'j1' } })
     // The Incomplete run and the ask that stopped it are one Needs you item.
-    expect(botItem).toMatchObject({ name: 'Weather', who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, attention: { kind: 'ask', text: 'Wants to read files in Notes' }, link: { kind: 'bot', botId: 'bot-1' } })
+    // A bot row is named by its schedule's short label, as the bot's own Runs list names it.
+    expect(botItem).toMatchObject({ name: 'every day · 08:00', who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, attention: { kind: 'ask', text: 'Wants to read files in Notes' }, link: { kind: 'bot', botId: 'bot-1' } })
     expect(watchItem).toMatchObject({ trigger: 'thread_event', notifyOnly: true, whenText: 'PR #742', link: { kind: 'thread', threadId: 't-watch' } })
   })
 

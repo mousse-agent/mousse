@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { AutomationsList } from './automations/AutomationsList'
 import { LibraryView } from './automations/LibraryView'
@@ -12,8 +12,13 @@ export function AutomationsPage() {
   const open = useAppStore((s) => s.scheduledOpen)
   const profileId = useAppStore((s) => s.profileId)
   const [view, setView] = useState<'list' | 'library'>('list')
+  const pageRef = useRef<HTMLDivElement>(null)
+  // The page takes focus when it opens, so its page-scoped keys (⌘N) work at once; a click inside keeps it there.
+  useEffect(() => {
+    if (open && !pageRef.current?.contains(document.activeElement)) pageRef.current?.focus({ preventScroll: true })
+  }, [open])
   return (
-    <div className="automations-page" hidden={!open} data-automations-workspace="" data-view={view}>
+    <div ref={pageRef} className="automations-page" hidden={!open} tabIndex={-1} data-automations-workspace="" data-view={view}>
       <div className="automations-page-body">
         {view === 'library'
           ? <LibraryView active={open} onBack={() => setView('list')} />

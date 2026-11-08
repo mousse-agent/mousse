@@ -37,6 +37,13 @@ function browserWebhookApi(): WebhookApi {
   }
 }
 
+/** Whether focus is on the Automations page (the list, its create row or its detail), not elsewhere in the window. */
+export function pageHasFocus(doc: Pick<Document, 'activeElement' | 'querySelector'> | undefined = typeof document === 'undefined' ? undefined : document): boolean {
+  const page = doc?.querySelector('[data-automations-workspace]:not([hidden])')
+  const focused = doc?.activeElement
+  return Boolean(page && focused && page.contains(focused))
+}
+
 /** The name the page gives an agent: the provider instance's label (Claude, Codex), else the model. */
 function agentNameOf(providers: LlmProviderOption[], selection: { instanceId?: string; llmProvider?: string; model?: string } | undefined): string | undefined {
   if (!selection) return undefined
@@ -128,8 +135,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return () => clearInterval(timer)
   }, [active, refresh])
 
-  // The newest enabled handler of a command runs, so while the page shows, ⌘N opens the create row.
-  useCommand('thread.new', () => { setDetail(null); setCreateRequest((count) => count + 1) }, () => active)
+  // ⌘N is page-scoped: while focus is on this page, the key press opens the create row. The palette and the menu
+  // keep New thread, and anywhere else ⌘N is New thread too.
+  useCommand('thread.new', () => { setDetail(null); setCreateRequest((count) => count + 1) }, () => active && pageHasFocus(), { keysOnly: true })
 
   const items = useMemo(() => index?.items ?? [], [index])
   const detailItem = detail ? items.find((item) => item.key === detail) : undefined
