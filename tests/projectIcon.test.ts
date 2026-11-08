@@ -12,6 +12,7 @@ import {
   toStoredIconPath
 } from '../src/mms/data/projectIcon'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { PROJECT_ICON_MAX_BYTES } from '../src/shared/projectIcon'
 import type { Project } from '../src/shared/types'
 
@@ -162,6 +163,38 @@ describe('project icon choice', () => {
     const stale = recorder()
     await projectIconFor(project({ iconDetectedAt: new Date(now - 7 * 3600_000).toISOString() }), stale, now)
     expect(stale.calls).toEqual(['favicon.svg'])
+  })
+})
+
+describe('project icon methods', () => {
+  const setup = () => {
+    const home = join(root, 'home')
+    mkdirSync(home)
+    const folder = join(root, 'repo')
+    mkdirSync(folder)
+    writeFileSync(join(folder, 'favicon.svg'), SVG)
+    writeFileSync(join(folder, 'notes.txt'), 'secret')
+    const projects = new ProjectManager(home)
+    const { id } = projects.openProject(folder)
+    const call = (clientType: 'gui' | 'bridge', method: string, params: object) =>
+      dispatchMethod({ mms: { projects } as never, globalSequence: () => 0, connection: { clientType } as never }, method, params)
+    return { id, folder, projects, call }
+  }
+
+  it('answers a window on this computer and nobody else', async () => {
+    const { id, call } = setup()
+    expect(await call('gui', 'projects.icon', { projectId: id })).toMatchObject({ icon: { source: 'auto', path: 'favicon.svg' } })
+    expect(await call('bridge', 'projects.icon', { projectId: id })).toEqual({ icon: null })
+    await expect(call('bridge', 'projects.setIcon', { projectId: id, mode: 'off' })).rejects.toMatchObject({ code: 'forbidden' })
+  })
+
+  it('refuses a chosen file that is not an image', async () => {
+    const { id, folder, projects, call } = setup()
+    await expect(call('gui', 'projects.setIcon', { projectId: id, mode: 'custom', path: join(folder, 'notes.txt') }))
+      .rejects.toMatchObject({ code: 'invalid_params' })
+    expect(projects.getProject(id)?.iconPath).toBeUndefined()
+    await call('gui', 'projects.setIcon', { projectId: id, mode: 'off' })
+    expect(await call('gui', 'projects.icon', { projectId: id })).toEqual({ icon: null })
   })
 })
 
