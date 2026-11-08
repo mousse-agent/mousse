@@ -20,6 +20,9 @@ env:
   VERSION: ${{ inputs.version }}
   # The fourth number of the Windows file version, which only takes numbers.
   BUILD_NUMBER: ${{ github.run_number }}
+  # onnxruntime-node's install would download the CUDA provider (hundreds of MB) on Linux x64;
+  # read aloud uses only the CPU provider.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
 jobs:
   linux:
