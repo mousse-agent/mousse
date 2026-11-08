@@ -15,6 +15,7 @@ import './styles/global.css'
 import './styles/compact-shell.css'
 import './styles/sentence-case.css'
 import './styles/polish.css'
+import './styles/ambient-glow.css'
 import './styles/geist-fonts.css'
 
 // Apply the saved profile's appearance before React paints or MMS connects.

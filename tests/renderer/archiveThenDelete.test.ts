@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Thread → Archive → Delete in the sidebar: a thread in use offers Archive and no Delete; an archived thread offers
- * Unarchive and Delete; Archived has Clear all. Every delete asks first, names what goes, and is for good.
+ * Unarchive and Delete, and its menu Delete all archived. Every delete asks first, names what goes, and is for good.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -157,11 +157,15 @@ describe('the Archived section', () => {
     expect(remove.title).toBe('Delete on Laptop')
   })
 
-  it('clears all archived threads of this computer after a confirmation that names how many', async () => {
-    const clear = host.querySelector<HTMLButtonElement>('[data-testid="archived-clear-all"]')!
-    expect(clear.textContent).toBe('Clear all')
-    expect(clear.getAttribute('aria-label')).toBe('Delete all archived threads…')
-    await click(clear)
+  const deleteAllFromMenu = async () => {
+    await open()
+    await click(byLabel('More actions for Old one'))
+    await click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === 'Delete all archived…'))
+  }
+
+  it('deletes all archived threads of this computer from an archived row’s menu, after a confirmation that names how many', async () => {
+    expect(host.querySelector('[data-testid="archived-clear-all"]')).toBeNull()
+    await deleteAllFromMenu()
     expect(dialog()?.textContent).toContain('Delete 2 archived threads?')
     expect(dialog()?.textContent).toContain('Threads on other computers stay.')
     expect(deleted).toEqual([])
@@ -172,7 +176,7 @@ describe('the Archived section', () => {
 
   it('keeps the dialog open with the reason when a delete is refused, holding only what is left', async () => {
     refuse.old1 = 'A run is still stopping.'
-    await click(host.querySelector<HTMLButtonElement>('[data-testid="archived-clear-all"]'))
+    await deleteAllFromMenu()
     await click(document.querySelector<HTMLElement>('[data-testid="archived-delete-confirm"]'))
     expect(deleted).toEqual(['old2'])
     const alert = document.querySelector('[data-testid="archived-delete-error"]')

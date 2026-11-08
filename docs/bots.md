@@ -8,7 +8,7 @@ A bot is an agent a person makes from a **look** and one sentence ("What should 
 
 - The definition is format 2 (`src/shared/bots/personal/definition.ts`): name, description, look, role, the main thread spec with its model choice, and the grant (`permissions`). `owner` and `placement` are reserved for Teams and bot servers. Format 1 files are upgraded on read.
 - `bots.create` names the bot with one short model call (5 seconds at most). When that fails, a name made from the description is used, and the bot picks its own in its first turn. The bot's first message is produced at once, as a chat activation.
-- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and 15 minutes of work per activation.
+- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and an hour of work per activation. A bot whose grant still holds the earlier default of 15 minutes is moved to the hour when the profile opens (`BotEngine.upgradeWorkTime`, the same publish-and-approve as Allow); a grant the owner raised stays.
 
 ## Lanes
 
@@ -36,7 +36,7 @@ An ask is a request for one permission, shown as a card with Allow and Not now (
 
 - **In a chat turn** the bot's authority check returns a wall: the dispatch ends, the reply carries the card, and the answer continues the turn ("The owner allowed …" or "The owner said not now …"). Several `escalate` calls in one turn put all their cards on that one message. At most 5 walls per activation (`MAX_BOT_WALLS`).
 - **In a run** the check returns a third outcome, `refused`: the call fails with "The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped." and the dispatch goes on. One open ask is kept per permission (by fingerprint); later runs get the same refusal and write no new ask. A run writes at most 5 new asks, a bot at most 10 a day. An ask that waits never blocks a run or skips a schedule.
-- **Budgets** are different: a run that runs out of time or turns ends as failed, with an ask for more room.
+- **Budgets** are different: a run that runs out of time or turns ends as failed, with an ask for more room. Only work is charged: time spent waiting for the internet is not (see No internet), and a run that made no call at all in its whole time, with the internet there, ends failed with no ask (`no_progress`, "I couldn't get anything done on this run, so I stopped.").
 - **Allow** publishes and approves the widened grant; a run ask is used from the next run, with no follow-up activation. **Not now** closes the ask; a run may ask again for it after 24 hours. Asks never expire.
 - About lists what the bot can use, each with Remove (`bots.permissions.revoke`). Narrowing needs no approval.
 - Card wording comes from `askText` (`src/shared/bots/personal/askText.ts`).
@@ -56,7 +56,17 @@ So a command can read, and on Pi or an unsandboxed Claude Code change, files out
 
 Schedules live in `bots.db` (`bot_schedules`), not on the definition, so a schedule the bot writes changes no revision and needs no approval. The bot keeps them with `bot_schedule_add`, `bot_schedule_remove` and `bot_schedule_list` (the job scheduler already owns the `schedule_*` names): at most 8 per bot, at most every 5 minutes, on an interval or a cron expression. Each add shows its label as a chip ("every weekday · 09:00"). About lists them with Remove (`bots.schedules.remove`).
 
-`BotScheduler` (`src/mms/bots/triggers/scheduler.ts`) ticks every 30 seconds, separate from the job scheduler. An occurrence is skipped while the bot is paused, while every model is at its usage limit, or while the same schedule's previous run is still queued. A new or edited schedule starts from now and never runs a backlog.
+`BotScheduler` (`src/mms/bots/triggers/scheduler.ts`) ticks every 30 seconds, separate from the job scheduler. An occurrence is skipped while the bot is paused, while every model is at its usage limit, while the same schedule's previous run is still queued, or while the same schedule's run waits for the internet (`waiting_for_internet`): a waiting run never expires, so a schedule keeps at most one. A new or edited schedule starts from now and never runs a backlog.
+
+## No internet
+
+A bot activation (chat lane or run lane) waits when the internet is gone, instead of failing.
+
+- **The check** (`src/mms/bots/activation/connectivity.ts`, the host's `connectivity`): a DNS lookup and a TCP connection to port 443 of the provider's API host (Claude Code `api.anthropic.com`, Codex `chatgpt.com`, a known Pi provider's host) and of two well-known hosts; any one that answers is online. It never calls a model API. A Pi provider on this computer (Ollama, LM Studio) is never checked. Results are reused for 5 seconds.
+- **When.** Before each main dispatch is sent (`sendDispatch`). While a dispatch runs, every 20 seconds once it has made no call for a minute; two failed checks in a row end it. At its deadline, when it made no call for a minute. And when its run fails on a connection error (`[provider_unavailable]`, ENOTFOUND and the like; `isConnectionFailure`); with the internet there, that is the provider's own failure and ends the run as before.
+- **While it waits** the activation stays `running` with `end_reason` `waiting_for_internet` (no new column, so older builds still read `bots.db`), and holds its lane. Its chat gets one notice, "Waiting for internet. I'll carry on when it's back." (`bm_<activationId>_offline`, at most one per activation), and no error row. The summary's `stateText` is "Waiting for internet" (sidebar row, chat header and status line, `waiting: 'internet'`) while every running activation of the bot waits. A dispatch ended for the internet is charged only up to its last call. Waiting is never a failure, never counts toward the failure streak and never raises an ask.
+- **When it is back** (checked after 15 s, then 30 s, then every minute): a dispatch that was never sent is sent; one that ended is continued on the same thread with "The internet connection dropped while you were working; it is back now. Continue." (`continueWith`, `network`), as a restart continuation is, without using the automatic restart allowance. Unknown calls still pause it first.
+- **Restarts.** A waiting activation is found by the startup pass: a dispatch never sent is sent again through the same check; one that ended waits again and continues once the internet is back.
 
 ## Model and depth
 
@@ -70,10 +80,10 @@ The model is hidden. The definition holds `{mode: 'auto', depth}` or `{mode: 'na
 
 ## States and pausing
 
-States are idle, working, needs you (an open ask), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
+States are idle, working ("Waiting for internet" while it waits for it), needs you (an open ask), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
 
 - **Pause** stops schedules only; chat still works. The owner pauses from the menu (`bots.personal.pause`).
-- **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, stops and chat failures never count.
+- **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
 - **Resume** (`bots.personal.resume`) clears every pause, the failure count and the stuck error.
 
 ## Runtimes that can hold a bot
@@ -112,7 +122,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Area | Path |
 |---|---|
 | Shared types: definition, look, chat rows, chips, states, asks, memory, methods | `src/shared/bots/personal/` |
-| Engine: activations, lanes, dispatch, walls and asks, usage pauses, delete | `src/mms/bots/activation/BotEngine.ts` |
+| Engine: activations, lanes, dispatch, walls and asks, usage pauses, waiting for the internet, delete | `src/mms/bots/activation/BotEngine.ts`, `src/mms/bots/activation/connectivity.ts` |
 | Bot UI daemon side: create, chat, About, and what clients see | `src/mms/bots/chat/` |
 | Daemon methods (`bots.personal.v2`) | `src/mms/bots/registerMethods.ts`, `src/shared/bots/personal/methods.ts` |
 | Store, `bots.db` migrations | `src/mms/bots/store/BotStore.ts` |

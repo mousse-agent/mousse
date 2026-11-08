@@ -28,6 +28,15 @@ export function projectHues(projects: readonly HuedProject[]): Map<string, numbe
   return hues
 }
 
+/**
+ * The color of a project's hue, as every place that shows a project uses it: the Projects tree's folder icon, and
+ * the mark and tint of its threads' cards (Threads, Needs me, Archived). No hue (no project, or one removed from the
+ * sidebar) is no color, so the place stays neutral.
+ */
+export function projectHueColor(hue: number | undefined): string | undefined {
+  return hue ? `var(--hue-${hue})` : undefined
+}
+
 function preferredHue(id: string): number {
   let hash = 0
   for (let index = 0; index < id.length; index += 1) hash = (hash * 31 + id.charCodeAt(index)) | 0

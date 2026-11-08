@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Starting work from the sidebar: Add project and each project's "New thread" are always there, the tabs never
- * change width, both tabs end with the same "No project" and "Archived" footer, the open thread's row is always
+ * change width, both tabs end with the same "Archived" footer, the open thread's row is always
  * shown, and the Projects tab is a tree the keyboard can walk.
  */
 import { readFileSync } from 'node:fs'
@@ -158,6 +158,15 @@ describe('starting work', () => {
     expect(document.querySelector('[data-testid="pr-dialog"]')?.textContent).toBe('Mousse')
   })
 
+  it('gives Other threads a "New thread" button that starts a thread with no project, and no menu', () => {
+    show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined })])
+    const group = host.querySelector('.threads-sidebar-other-threads')!
+    expect(group.querySelector('[aria-haspopup="menu"]')).toBeNull()
+    click(group.querySelector('.threads-sidebar-project-row button[aria-label="New thread"]')!)
+    expect(actions.createAndSelectThread).toHaveBeenCalledTimes(1)
+    expect(actions.createAndSelectProjectThread).not.toHaveBeenCalled()
+  })
+
   it('starts a thread in the project from its menu', () => {
     show([thread('a', 'Fix tests')])
     click(byLabel('More actions for Mousse')!)
@@ -177,7 +186,9 @@ describe('tabs', () => {
     const label = rule(sidebarCss, '.threads-sidebar-tab-label')
     expect(label).not.toMatch(/text-overflow|overflow:\s*hidden/)
     expect(label).toMatch(/flex-shrink:\s*0/)
-    const queries = new Map([...sidebarCss.matchAll(/@container threads-sidebar \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/g)]
+    // The width rules read the `pill-tabs` container, which the sidebar is.
+    expect(rule(sidebarCss, '.threads-sidebar')).toMatch(/container-name:\s*threads-sidebar pill-tabs/)
+    const queries = new Map([...sidebarCss.matchAll(/@container pill-tabs \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/g)]
       .map(([, width, body]) => [Number(width), body]))
     expect([...queries.keys()]).toEqual([319, 239])
     // Under 320px (260px included) only the other two tabs drop their words; the open tab has a fixed minimum
@@ -212,30 +223,57 @@ describe('tabs', () => {
 })
 
 describe('the footer', () => {
-  it('ends Projects with No project and Archived, and Threads with Archived', () => {
+  it('ends Projects and Threads with Archived only', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined }), thread('c', 'Old', { settledAt: at })])
-    expect(headings()).toEqual(['No project · 1', 'Archived · 1'])
+    expect(headings()).toEqual(['Archived1'])
     act(() => useAppStore.setState({ threadsSidebarView: 'threads' }))
-    expect(headings()).toEqual(['Archived · 1'])
+    expect(headings()).toEqual(['Archived1'])
   })
 
-  it('holds archived threads inside Archived, with Clear all and no Recently deleted', () => {
+  it('holds archived threads inside Archived, with no Clear all and no Recently deleted', () => {
     show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     const archived = host.querySelector('.threads-sidebar-section-settled')!
     expect(archived.querySelector('[data-thread-id="c"]')).not.toBeNull()
-    expect(archived.querySelector('[data-testid="archived-clear-all"]')?.textContent).toBe('Clear all')
+    expect(archived.textContent).not.toContain('Clear all')
     expect(host.textContent).not.toContain('Recently deleted')
   })
 
-  it('follows the lists, and sticks to the bottom only when they are taller than the sidebar', () => {
-    // The list is as tall as its rows and shrinks (and scrolls) once it outgrows the sidebar; it no longer
-    // grows to push the footer down. The footer's auto bottom margin keeps the profile at the window's edge.
+  it('heads Archived with its count and a chevron that turns while it is open; the whole heading toggles', () => {
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at }), thread('d', 'Older', { settledAt: at })])
+    const archived = host.querySelector<HTMLElement>('.threads-sidebar-section-settled')!
+    const toggle = archived.querySelector<HTMLButtonElement>('.threads-sidebar-heading-toggle')!
+    expect(archived.querySelectorAll('.threads-sidebar-heading > *')).toHaveLength(1)
+    expect(toggle.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('2')
+    expect(toggle.querySelector('.threads-sidebar-settled-chevron')).not.toBeNull()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(archived.classList.contains('expanded')).toBe(true)
+    expect(rule(sidebarCss, '.threads-sidebar-section-settled.expanded .threads-sidebar-settled-chevron')).toMatch(/rotate\(90deg\)/)
+    expect(rule(sidebarCss, '.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle')).toMatch(/flex:\s*1/)
+  })
+
+  it('hides the count when nothing is archived', () => {
+    show([thread('a', 'Fix tests')])
+    expect(host.querySelector('.threads-sidebar-settled-count')).toBeNull()
+    expect(headings()).toEqual(['Archived'])
+  })
+
+  it('draws no divider above Archived', () => {
+    for (const css of [sidebarCss, compactCss, polishCss]) {
+      for (const [, body] of css.matchAll(/\.threads-sidebar-(?:section-settled|footer)\b[^{]*\{([^}]*)\}/g)) expect(body).not.toMatch(/border(-top)?\s*:/)
+    }
+  })
+
+  it('is pinned to the bottom of the pane, and the lists scroll above it when they are taller than the sidebar', () => {
+    // The list is as tall as its rows and shrinks (and scrolls) once it outgrows the sidebar. The footer's auto
+    // top margin takes the room the lists leave, so it stays at the bottom, above the profile, when they are short.
     const list = rule(sidebarCss, '.threads-sidebar-scroll')
     expect(list).toMatch(/flex:\s*0 1 auto/)
     expect(list).toMatch(/min-height:\s*0/)
     expect(list).toMatch(/overflow-y:\s*auto/)
-    expect(rule(sidebarCss, '.threads-sidebar-footer')).toMatch(/margin-bottom:\s*auto/)
+    expect(rule(sidebarCss, '.threads-sidebar-footer')).toMatch(/margin-top:\s*auto/)
     for (const css of [compactCss, polishCss]) expect(css).not.toMatch(/\.threads-sidebar-scroll(?![\w-])[^{]*\{[^}]*\bflex(-grow)?\s*:/)
     // The Agents tab has no footer, so its list fills the sidebar.
     expect(rule(sidebarCss, ".threads-sidebar-scroll[data-view='chats']")).toMatch(/flex-grow:\s*1/)
@@ -245,16 +283,37 @@ describe('the footer', () => {
     expect(scroller.nextElementSibling?.classList.contains('threads-sidebar-footer')).toBe(true)
   })
 
-  it('is the one scroll container: it keeps its room, and nothing inside it caps its own height', () => {
+  it('is the one scroll container: it keeps its room, and nothing inside it caps its own height at rest', () => {
     const footer = rule(sidebarCss, '.threads-sidebar-footer')
     expect(footer).toMatch(/flex:\s*0 0 auto/)
     expect(footer).toMatch(/min-height:\s*0/)
     expect(footer).toMatch(/overflow-y:\s*auto/)
     expect(footer).toMatch(/max-height:\s*45vh/)
-    const inside = /\.threads-sidebar-(bottom-recent|section-settled|settled-list|trash-list)\b[^{]*\{([^}]*)\}/g
+    const inside = /\.threads-sidebar-(section-settled|settled-list|trash-list)\b([^{]*)\{([^}]*)\}/g
     for (const css of [sidebarCss, compactCss, polishCss]) {
-      for (const [, , body] of css.matchAll(inside)) expect(body).not.toMatch(/max-height|overflow-y/)
+      for (const [, , selector, body] of css.matchAll(inside)) {
+        if (!selector.includes('[data-motion]')) expect(body).not.toMatch(/max-height|overflow-y/)
+      }
     }
+  })
+
+  it('opens and closes Archived over the room the footer shows, so a long list does not fill it in one frame', () => {
+    // Only while the Collapse moves: its rows are capped at 45vh less the heading, and the footer does not scroll.
+    expect(rule(sidebarCss, '.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] > .ui-collapse-clip > *'))
+      .toMatch(/max-height:\s*calc\(45vh - var\(--threads-sidebar-settled-head, 48px\)\)/)
+    expect(rule(sidebarCss, '.threads-sidebar-footer:has(> .threads-sidebar-section-settled > .ui-collapse[data-motion])')).toMatch(/overflow-y:\s*hidden/)
+    show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
+    click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+    expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.style.getPropertyValue('--threads-sidebar-settled-head')).toMatch(/px$/)
+  })
+
+  it('keeps the Archived rows still while the heading sweeps over them, so they fade in place', () => {
+    // The footer sits on the bottom of the pane: the rows hold the bottom of the group and its own box clips them.
+    const group = '.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse'
+    expect(rule(sidebarCss, group)).toMatch(/align-content:\s*end/)
+    expect(rule(sidebarCss, `${group} > .ui-collapse-clip`)).toMatch(/justify-content:\s*flex-end/)
+    expect(rule(sidebarCss, `${group}[data-motion]`)).toMatch(/overflow:\s*hidden/)
+    expect(rule(sidebarCss, `${group}[data-motion] > .ui-collapse-clip`)).toMatch(/overflow:\s*visible/)
   })
 })
 
@@ -338,9 +397,10 @@ describe('the open thread', () => {
     expect(row('t7').classList.contains('active')).toBe(true)
   })
 
-  it('opens No project when it has no project', () => {
+  it('opens Other threads when it has no project', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined })], { active: 'b' })
-    expect(row('b')).not.toBeNull()
+    expect(row('b').closest('.threads-sidebar-other-threads')).not.toBeNull()
+    expect(projectRow('Other threads').getAttribute('aria-expanded')).toBe('true')
   })
 
   it('is marked by its background only', () => {

@@ -1,0 +1,210 @@
+/*
+ * Ambient glow behind an empty thread, and the composer rim it lights.
+ *
+ * The glow is two soft wave layers (.chat--empty::before and ::after): the accent colour shown through
+ * a pre-blurred SVG mask whose shapes are wavy blobs with turbulence-displaced edges. Both layers are
+ * anchored to the composer (CSS anchor positioning), so the composer's top edge always sits on the same
+ * line of each layer, centred on it horizontally and spanning the middle 1/2.1 of its width.
+ *
+ * The rim on the composer's top edge mirrors that line. Each layer has a matching rim layer
+ * (.composer::before for wave A, ::after for wave B): a horizontal gradient whose bright stops sit where
+ * that layer's waves cross the composer's top edge. A layer and its rim share keyframe opacities, timing
+ * and start, so the rim brightens and dims with the glow behind it. The glow's own motion is skewX and
+ * scaleY about that edge line, which leaves the line itself unchanged, so the rim's stops never drift
+ * from the waves.
+ *
+ * Cost: the masks rasterise once per size; the drift animates only transform and opacity on composited
+ * layers, with no script. Animation speed scales the loop, and Off or reduced motion leaves it still.
+ */
+
+.app .chat--empty {
+  --ambient-glow-loop: calc(18s * var(--ui-motion-scale, 1));
+  /* The composer's top edge, as a fraction of a glow layer's height. */
+  --ambient-glow-edge: 0.56;
+  position: relative;
+  isolation: isolate;
+  anchor-scope: --ambient-glow-composer;
+}
+
+.app .chat--empty .chat-input-area .composer {
+  anchor-name: --ambient-glow-composer;
+}
+
+.app .chat--empty::before,
+.app .chat--empty::after {
+  --ambient-glow-h: clamp(380px, 84%, 720px);
+  content: "";
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  position-anchor: --ambient-glow-composer;
+  left: anchor(center, 50%);
+  top: calc(anchor(top, 44%) - var(--ambient-glow-h) * var(--ambient-glow-edge));
+  width: calc(anchor-size(width, 648px) * 2.1);
+  height: var(--ambient-glow-h);
+  translate: -50% 0;
+  transform-origin: 50% calc(var(--ambient-glow-edge) * 100%);
+  background-color: rgba(var(--accent-rgb), calc(var(--ui-aura-strength) * 1.25));
+  -webkit-mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
+  mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
+  will-change: transform, opacity;
+  animation: var(--ambient-glow-anim) var(--ambient-glow-loop) ease-in-out infinite;
+}
+
+/* Wave A: a broad body with two crests rising either side of centre. */
+.app .chat--empty::before {
+  --ambient-glow-anim: ambient-glow-a;
+  --ambient-glow-mask: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 100' preserveAspectRatio='none'><filter id='w' x='-30%25' y='-60%25' width='160%25' height='220%25'><feTurbulence type='fractalNoise' baseFrequency='0.03 0.07' numOctaves='2' seed='7'/><feDisplacementMap in='SourceGraphic' scale='12' xChannelSelector='R' yChannelSelector='G'/><feGaussianBlur stdDeviation='7 5'/></filter><g filter='url(%23w)' fill='white'><path fill-opacity='0.34' d='M36 66 C52 60 66 64 82 61 C98 58 112 63 128 60 C144 57 156 62 166 66 C152 77 132 82 102 83 C72 83 50 78 36 66 Z'/><path fill-opacity='0.8' d='M60 64 C62 46 68 30 76 26 C84 24 90 44 94 64 Z'/><path fill-opacity='0.8' d='M110 64 C114 44 122 28 130 24 C140 22 146 46 150 64 Z'/></g></svg>");
+  opacity: 0.9;
+}
+
+/* Wave B: one tall crest near centre and low swells at the far ends. */
+.app .chat--empty::after {
+  --ambient-glow-anim: ambient-glow-b;
+  --ambient-glow-mask: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 100' preserveAspectRatio='none'><filter id='w' x='-30%25' y='-60%25' width='160%25' height='220%25'><feTurbulence type='fractalNoise' baseFrequency='0.025 0.06' numOctaves='2' seed='19'/><feDisplacementMap in='SourceGraphic' scale='14' xChannelSelector='G' yChannelSelector='R'/><feGaussianBlur stdDeviation='7.5 5.5'/></filter><g filter='url(%23w)' fill='white'><path fill-opacity='0.34' d='M38 66 C54 62 68 66 86 62 C104 59 120 64 138 61 C150 59 158 63 164 67 C150 77 130 82 100 83 C70 83 52 78 38 66 Z'/><path fill-opacity='0.82' d='M84 64 C88 42 96 22 104 20 C114 20 120 44 124 64 Z'/><ellipse cx='56' cy='60' rx='13' ry='9' fill-opacity='0.4'/><ellipse cx='148' cy='60' rx='13' ry='9' fill-opacity='0.4'/></g></svg>");
+  opacity: 0.5;
+}
+
+/* The rim: the composer's border on the top edge, curving into the corners and fading down the sides,
+   plus a faint wash of the same light just inside it. Painted above the composer's fill. */
+.app .chat--empty .chat-input-area .composer::before,
+.app .chat--empty .chat-input-area .composer::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(90deg, var(--ambient-rim-stops));
+  -webkit-mask:
+    linear-gradient(to bottom, #000 0, #000 2px, transparent 13px) border-box,
+    linear-gradient(to bottom, rgba(0, 0, 0, var(--ambient-rim-wash)), transparent 10px) content-box,
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: source-in, source-over, xor, source-over;
+  mask:
+    linear-gradient(to bottom, #000 0, #000 2px, transparent 13px) border-box,
+    linear-gradient(to bottom, rgba(0, 0, 0, var(--ambient-rim-wash)), transparent 10px) content-box,
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0) border-box;
+  mask-composite: intersect, add, exclude, add;
+  animation: var(--ambient-glow-anim) var(--ambient-glow-loop) ease-in-out infinite;
+}
+
+.app .chat--empty .chat-input-area .composer {
+  /* The rim at full light: a soft sheen, the accent mostly lifted to white, at about half strength. */
+  --ambient-rim-hi: color-mix(in srgb, color-mix(in srgb, rgb(var(--accent-rgb)) 38%, white) 50%, transparent);
+  --ambient-rim-wash: 0.11;
+  /* The rim draws the lit top edge; the flat top light and the centred glint step aside for it. */
+  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.05), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-glint: transparent;
+  --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(var(--accent-rgb), 0.06) 0%, rgba(var(--accent-rgb), 0.015) 34%, transparent 64%);
+  --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
+}
+
+html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer {
+  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
+  --ui-glint: transparent;
+  --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(var(--accent-rgb), 0.07) 0%, rgba(var(--accent-rgb), 0.018) 36%, transparent 66%);
+}
+
+/* Rim stops, in the composer's width: each wave's brightness where it crosses the composer's top edge,
+   sampled from the masks above (peak = 100%). Change a mask, resample these. */
+.app .chat--empty .chat-input-area .composer::before {
+  --ambient-glow-anim: ambient-glow-rim-a;
+  --ambient-rim-stops:
+    color-mix(in srgb, var(--ambient-rim-hi) 11%, transparent) 0%,
+    color-mix(in srgb, var(--ambient-rim-hi) 51%, transparent) 10%,
+    color-mix(in srgb, var(--ambient-rim-hi) 97%, transparent) 25%,
+    color-mix(in srgb, var(--ambient-rim-hi) 59%, transparent) 40%,
+    color-mix(in srgb, var(--ambient-rim-hi) 23%, transparent) 50%,
+    color-mix(in srgb, var(--ambient-rim-hi) 26%, transparent) 56%,
+    color-mix(in srgb, var(--ambient-rim-hi) 66%, transparent) 66%,
+    var(--ambient-rim-hi) 80%,
+    color-mix(in srgb, var(--ambient-rim-hi) 77%, transparent) 90%,
+    color-mix(in srgb, var(--ambient-rim-hi) 56%, transparent) 100%;
+  opacity: 0.9;
+}
+
+.app .chat--empty .chat-input-area .composer::after {
+  --ambient-glow-anim: ambient-glow-rim-b;
+  --ambient-rim-stops:
+    color-mix(in srgb, var(--ambient-rim-hi) 26%, transparent) 0%,
+    color-mix(in srgb, var(--ambient-rim-hi) 16%, transparent) 10%,
+    color-mix(in srgb, var(--ambient-rim-hi) 4%, transparent) 22%,
+    color-mix(in srgb, var(--ambient-rim-hi) 41%, transparent) 35%,
+    color-mix(in srgb, var(--ambient-rim-hi) 88%, transparent) 45%,
+    var(--ambient-rim-hi) 55%,
+    color-mix(in srgb, var(--ambient-rim-hi) 84%, transparent) 65%,
+    color-mix(in srgb, var(--ambient-rim-hi) 40%, transparent) 75%,
+    color-mix(in srgb, var(--ambient-rim-hi) 20%, transparent) 85%,
+    color-mix(in srgb, var(--ambient-rim-hi) 30%, transparent) 100%;
+  opacity: 0.5;
+}
+
+/* Light themes: the glow stays a light accent wash; the rim is a tinted line, not a highlight. */
+html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
+  --ambient-rim-hi: color-mix(in srgb, color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white) 28%, transparent);
+  --ambient-rim-wash: 0.07;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .app .chat--empty .chat-input-area .composer {
+    --ambient-rim-hi: color-mix(in srgb, color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white) 28%, transparent);
+    --ambient-rim-wash: 0.07;
+  }
+}
+
+/* High contrast has no aura, so no glow and no rim. */
+html[data-theme='high-contrast'] .app .chat--empty::before,
+html[data-theme='high-contrast'] .app .chat--empty::after,
+html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer::before,
+html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer::after {
+  content: none;
+}
+
+/*
+ * The loop. A wave and its rim share each keyframe's opacity. The transform is skewX and scaleY about
+ * the composer's top edge (transform-origin), so the crests sway and rise while the edge line is still.
+ * The skew is large enough that the crest tips swing sideways by roughly a sixth of the composer's
+ * width, and the two waves lean in opposite directions so they cross. Peaks keep their opacity;
+ * the troughs drop further so the light visibly rises and falls.
+ * 0% and 100% equal the resting state above, which is what shows when motion is off.
+ */
+@keyframes ambient-glow-a {
+  0%, 100% { opacity: 0.9; transform: none; }
+  25% { opacity: 1; transform: skewX(-16deg) scaleY(1.14); }
+  50% { opacity: 0.3; transform: skewX(0deg) scaleY(0.9); }
+  75% { opacity: 0.65; transform: skewX(16deg) scaleY(1.08); }
+}
+
+@keyframes ambient-glow-b {
+  0%, 100% { opacity: 0.5; transform: none; }
+  25% { opacity: 0.2; transform: skewX(14deg) scaleY(0.92); }
+  50% { opacity: 0.78; transform: skewX(0deg) scaleY(1.15); }
+  75% { opacity: 0.6; transform: skewX(-14deg) scaleY(1.04); }
+}
+
+@keyframes ambient-glow-rim-a {
+  0%, 100% { opacity: 0.9; }
+  25% { opacity: 1; }
+  50% { opacity: 0.3; }
+  75% { opacity: 0.65; }
+}
+
+@keyframes ambient-glow-rim-b {
+  0%, 100% { opacity: 0.5; }
+  25% { opacity: 0.2; }
+  50% { opacity: 0.78; }
+  75% { opacity: 0.6; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app .chat--empty::before,
+  .app .chat--empty::after,
+  .app .chat--empty .chat-input-area .composer::before,
+  .app .chat--empty .chat-input-area .composer::after {
+    animation: none;
+  }
+}

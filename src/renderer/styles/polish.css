@@ -377,19 +377,22 @@ html[data-theme='high-contrast'] {
   color: var(--text-primary);
 }
 
-/* Each project keeps a hue so the tree is scannable by colour, not only text. */
-.app .threads-sidebar-project .threads-sidebar-project-icon { color: var(--hue-1); }
-.app .threads-sidebar-project:nth-child(6n + 2) .threads-sidebar-project-icon { color: var(--hue-2); }
-.app .threads-sidebar-project:nth-child(6n + 3) .threads-sidebar-project-icon { color: var(--hue-4); }
-.app .threads-sidebar-project:nth-child(6n + 4) .threads-sidebar-project-icon { color: var(--hue-5); }
-.app .threads-sidebar-project:nth-child(6n + 5) .threads-sidebar-project-icon { color: var(--hue-3); }
-.app .threads-sidebar-project:nth-child(6n + 6) .threads-sidebar-project-icon { color: var(--hue-6); }
+/* Each project keeps a hue so the tree is scannable by colour, not only text. The hue is the project's own
+   (`--project-hue`, set on the row from projectHues), the same as on its threads' cards, never its place in the list. */
+.app .threads-sidebar-project .threads-sidebar-project-icon { color: var(--project-hue, currentColor); }
+
+/* "Other threads" reads quieter than a project: regular weight, muted, no hue. Its header dims like a group out
+   of focus unless it holds the open thread (threads-sidebar.css). */
+.app .threads-sidebar-other-threads .threads-sidebar-project-toggle {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+.app .threads-sidebar-project.threads-sidebar-other-threads .threads-sidebar-project-icon { color: inherit; }
 
 /* The list sits inside a Collapse, so its bottom margin adds to the project's 2px: 4px + 2px keeps the 6px gap. */
 .app .threads-sidebar-children {
   margin: 1px 0 4px calc(var(--ui-row-x) + 7px);
-  padding-left: 6px;
-  border-left: 1px solid var(--ui-line-strong);
+  padding-left: 7px;
 }
 
 .app .threads-sidebar-thread {
@@ -483,7 +486,6 @@ html[data-theme='high-contrast'] {
 
 .app .threads-sidebar-section-settled {
   margin-top: 8px;
-  border-top: 1px solid var(--ui-line);
 }
 
 /* ---------- Chats: roster, groups, recent ---------- */
@@ -633,14 +635,7 @@ html .chat-avatar.group[class*='chat-color-'] {
 }
 
 /* ---------- Home and composer ---------- */
-/* An accent aura gives the start page a focal point without tinting surfaces. */
-.app .chat--empty {
-  background-image: radial-gradient(
-    52% 46% at 50% 44%,
-    rgba(var(--accent-rgb), var(--ui-aura-strength)) 0%,
-    transparent 72%
-  );
-}
+/* The start page's accent aura (a wavy glow that lights the composer's rim) is in ambient-glow.css. */
 
 .app .chat-empty-logo {
   bottom: calc(100% + 76px);
@@ -732,11 +727,6 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
     --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
     --ui-raised-shadow: inherit;
   }
-}
-
-.app .chat-input-area .composer:focus-within {
-  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
-  box-shadow: var(--ui-raised-shadow);
 }
 
 .app .chat-input-area .composer-input,
@@ -947,8 +937,7 @@ textarea:focus {
   background-clip: padding-box;
 }
 
-/* Focusing the field plays the rim glint once, then leaves it centred. */
-.app .chat-input-area .composer:focus-within,
+/* Focusing the agent chat field plays the rim glint once, then leaves it centred. The main composer looks the same focused or not. */
 .app .agent-chat-composer:focus-within {
   animation: ui-composer-glint calc(640ms * var(--ui-motion-scale)) ease-out 1;
 }

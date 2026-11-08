@@ -20,9 +20,10 @@ vi.mock('../../src/renderer/components/chats/ChatBrowserAccess', () => ({ ChatBr
 vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ ComposerQuestionModal: () => null }))
 // The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
+const markdown = vi.hoisted(() => ({ renders: 0 }))
 vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   const { createElement: h } = await import('react')
-  return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
+  return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => { markdown.renders++; return h('div', { className }, value) } }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
@@ -167,6 +168,35 @@ describe('while it works', () => {
     await type(box(), 'Also check the spam folder.')
     expect(button('Stop run')).toBeDefined()
     expect(button('Send message')?.disabled).toBe(false)
+  })
+
+  it('says Waiting for internet in the header and the status line, with no spinner, and still offers Stop', async () => {
+    await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
+    expect(host.querySelector('.chat-conversation-header span')?.textContent).toBe('Waiting for internet')
+    const status = transcript().querySelector('.chat-run-status')!
+    expect(status.textContent).toBe('Waiting for internet')
+    expect(status.querySelector('.chat-spin')).toBeNull()
+    expect(transcript().textContent).not.toContain('is working')
+    await click(button('Stop run'))
+    expect(fake.calls).toContainEqual(['stop', 'inbox'])
+  })
+})
+
+describe('what renders again', () => {
+  it('leaves the messages alone for a poll that changed nothing, a live chip, the bot starting work and the chats list', async () => {
+    fake.chats.inbox = [message(1, { author: 'owner', text: 'Find me a PSU.' }), message(2, { text: 'Here are three.' }), message(3, { text: 'And a fourth.' })]
+    await open()
+    markdown.renders = 0
+    await act(async () => { await useBotsStore.getState().refresh() })
+    await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'reading a page', highlight: 'example.com' }))
+    fake.bots = [{ ...inbox, state: 'working', stateText: 'Working…' }]
+    await act(async () => { await useBotsStore.getState().refresh() })
+    await act(async () => useChatsStore.setState({ snapshot: { ...useChatsStore.getState().snapshot } }))
+    expect(markdown.renders).toBe(0)
+    expect(transcript().querySelector('.chat-run-status')?.textContent).toContain('reading a page')
+    // A new message renders itself only.
+    await act(async () => fake.emit.message('inbox', message(4, { text: 'Done.' })))
+    expect(markdown.renders).toBe(1)
   })
 })
 

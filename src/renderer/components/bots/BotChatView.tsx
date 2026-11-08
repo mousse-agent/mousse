@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { CircleAlert, Loader2, Paperclip } from '../../lib/icons'
 import type { BotChatMessage, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -37,15 +37,22 @@ export function BotErrorLine({ error, onAction }: { error: BotError; onAction(ac
   </div>
 }
 
-function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: boolean }) {
+// Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
+const OwnerMessage = memo(function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: boolean }) {
   return <article className={`chat-participant-message from-person bot-you${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
     {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
     {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file, index) => <span key={`${index}:${file.name}`} className="bot-file-pill" title={file.path || undefined}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
     <time dateTime={message.at}>{pending ? 'Sending…' : botMessageTime(message.at)}</time>
   </article>
-}
+})
 
-function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }) {
+/** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
+const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.onAction === b.onAction &&
+  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.bot.look.colour === b.bot.look.colour && a.bot.look.accessory === b.bot.look.accessory
+
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }
+
+const BotMessage = memo(function BotMessage({ bot, message, onAction }: BotMessageProps) {
   const store = useBotsStore.getState
   return <article className="chat-participant-message from-agent" data-message-id={message.id}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
@@ -60,7 +67,7 @@ function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotC
       {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
     </div>
   </article>
-}
+}, sameBotMessage)
 
 /**
  * A bot's chat (bot-ui §4.4): the header with its face, name, description and one menu; the
@@ -82,6 +89,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const transcript = useRef<HTMLDivElement>(null)
   const messages = chat?.messages ?? EMPTY
   const working = bot.state === 'working'
+  // Working, but waiting for the internet: no spinner, and the header says so.
+  const offline = working && bot.waiting === 'internet'
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
@@ -105,12 +114,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [firstId, messages.length, pending.length, working, live?.chip?.text])
   useEffect(() => { anchor.current = { height: 0, atEnd: true } }, [bot.id])
 
-  const act = (action: NonNullable<BotError['action']>) => {
+  const act = useCallback((action: NonNullable<BotError['action']>) => {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
     else void store().resume(bot.id)
-  }
+  }, [bot.id, store])
   // Up in an empty composer brings back the owner's last message, as in a thread.
   const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
 
@@ -119,7 +128,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={40} view="head" />
-          <div><h1>{bot.name}</h1><span>{bot.description}</span></div>
+          <div><h1>{bot.name}</h1><span>{offline ? bot.stateText : bot.description}</span></div>
         </button>
         <BotMenu bot={bot} />
       </header>
@@ -134,7 +143,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           ? <OwnerMessage key={message.id} message={message} pending={false} />
           : <BotMessage key={message.id} bot={bot} message={message} onAction={act} />)}
         {pending.map((message) => <OwnerMessage key={message.id} message={message} pending />)}
-        {working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{live?.chip && <BotChipView chip={{ ...live.chip, live: true }} />}</div>}
+        {offline
+          ? <div className="chat-run-status bot-offline-status" role="status">{bot.stateText}</div>
+          : working && <div className="chat-run-status" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />{bot.name} is working…{live?.chip && <BotChipView chip={{ ...live.chip, live: true }} />}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       <div className="chat-input-area bot-input-area">

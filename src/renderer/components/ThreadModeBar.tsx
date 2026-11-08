@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Clock, Lock } from '../lib/icons'
+import { Clock } from '../lib/icons'
+import { isThreadStarted } from '../../shared/threadTitle'
 import { expiresAtAfter, expiresInLabel, isThreadExpired, threadExpiresAt } from '../../shared/threadExpiry'
 import type { Thread } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { ExpiryMenu } from './ExpiryMenu'
+import { SunglassesIcon } from './IncognitoGlasses'
 import '../styles/private-threads.css'
 
 interface ThreadModeBarViewProps {
+  /** A started private thread; an empty one says so on its logo (EmptyThreadHeading). */
   localOnly: boolean
   /** When the thread deletes itself (its own expiry, or its root thread's for a subagent). */
   expiresAt?: string
@@ -18,8 +21,8 @@ interface ThreadModeBarViewProps {
 }
 
 /**
- * Top of a private thread (`Thread.localOnly`) or one that deletes itself (`Thread.expiresAt`): says the
- * thread stays on this computer, and when it is deleted, with a menu to extend or keep it.
+ * Top of a private thread (`Thread.localOnly`) or one that deletes itself (`Thread.expiresAt`): a small pair
+ * of sunglasses for a private thread, and when it is deleted, with a menu to extend or keep it.
  */
 export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editable, now, onExpiryChange }: ThreadModeBarViewProps) {
   if (!localOnly && !expiresAt) return null
@@ -27,11 +30,8 @@ export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editab
   return (
     <div className="thread-mode-bar" role="status" data-mode={localOnly ? 'private' : 'expiring'}>
       {localOnly && (
-        <span className="thread-mode-bar-part">
-          <Lock size={12} strokeWidth={2} aria-hidden="true" />
-          <span className="thread-mode-bar-text">
-            Private <span className="thread-mode-bar-detail">· stays on this computer</span>
-          </span>
+        <span className="thread-mode-bar-part thread-mode-bar-private" role="img" aria-label="Incognito" title="Incognito · stays on this computer">
+          <SunglassesIcon />
         </span>
       )}
       {expiresAt && (
@@ -62,8 +62,6 @@ export function ThreadModeBar() {
   const thread = useAppStore((state) => state.threads.find((entry) => entry.id === state.activeThreadId))
   const threads = useAppStore((state) => state.threads)
   const upsertThread = useAppStore((state) => state.upsertThread)
-  // A new chat with Private switched on is private before its thread exists.
-  const draftLocalOnly = useAppStore((state) => state.composerWorkspaceDrafts[state.activeThreadId ?? '__blank__']?.localOnly === true)
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string | null>(null)
   const expiresAt = thread ? threadExpiresAt(thread, threads) : undefined
@@ -73,13 +71,13 @@ export function ThreadModeBar() {
     const timer = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(timer)
   }, [expiresAt])
-  if (!thread) return draftLocalOnly ? <ThreadModeBarView localOnly editable={false} now={now} onExpiryChange={() => undefined} /> : null
+  if (!thread) return null
   const root: Thread | undefined = thread.lineage ? threads.find((entry) => entry.id === thread.lineage!.rootThreadId) : thread
   const editable = !thread.node && !thread.lineage && !isThreadExpired(thread, threads, now)
   return (
     <>
       <ThreadModeBarView
-        localOnly={thread.localOnly === true || (!thread.startedAt && draftLocalOnly)}
+        localOnly={thread.localOnly === true && isThreadStarted(thread)}
         expiresAt={expiresAt}
         expiryStopsRun={(root ?? thread).expiryStopsRun === true}
         editable={editable}

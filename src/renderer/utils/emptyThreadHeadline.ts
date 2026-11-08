@@ -6,6 +6,14 @@ export const EMPTY_THREAD_HEADLINES = {
   lateNight: ['Up late brainstorming?', "Night owl mode. What's the idea?", 'Late one. What are we building?']
 } as const
 
+/** Headlines for an empty private chat (`Thread.localOnly`): it stays on this computer. */
+export const PRIVATE_THREAD_HEADLINES = [
+  "Off the record. What's up?",
+  "Just between us. What's first?",
+  "Private session. What's next?",
+  'Nothing leaves here. What is it?'
+] as const
+
 export type DaySlot = keyof typeof EMPTY_THREAD_HEADLINES
 
 /** Morning 5–11, afternoon 12–17, evening 18–22, late night 23–4, by the local hour. */
@@ -31,4 +39,9 @@ function hashSeed(seed: string): number {
 export function emptyThreadHeadline(date: Date, seed: string): string {
   const lines = EMPTY_THREAD_HEADLINES[daySlot(date)]
   return lines[hashSeed(seed) % lines.length]!
+}
+
+/** The private chat's headline, picked by `seed` (the chat's own headline, so one chat keeps its line). */
+export function privateThreadHeadline(seed: string): string {
+  return PRIVATE_THREAD_HEADLINES[hashSeed(seed) % PRIVATE_THREAD_HEADLINES.length]!
 }
