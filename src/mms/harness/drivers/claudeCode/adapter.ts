@@ -39,13 +39,14 @@ export interface ClaudeLockedProfile {
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread' | 'forkConversation'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
   interrupt: true,
+  // An undo or an edit cuts Claude's session at the next turn (issue #360), not as part of the undo.
   rollback: 'none',
-  fork: 'portable',
+  fork: 'native',
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',
@@ -56,7 +57,8 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
 /**
  * Claude Code through the official Agent SDK on the user's subscription (SPEC §13.4). Claude runs
  * its own loop and tools (weak containment) and keeps its own session, resumed while the history
- * fingerprint matches; prior turns otherwise go in as a prompt preamble. The service keeps one live
+ * fingerprint matches, and resumed cut after an earlier turn when an undo or an edit returned the
+ * history to what that turn left; prior turns otherwise go in as a prompt preamble. The service keeps one live
  * Claude process per thread, so the background agents and shells it started outlive a turn (see
  * `liveSession.ts`). Steers are drained by the service's poller and pushed into the live process as
  * an immediate message; a thread that has no live process (the cap on processes) interrupts and
@@ -149,8 +151,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     const service = this.service()
     if (!service) throw new Error(`${input.llmProvider} requires a project workspace`)
     const startedAt = Date.now()
-    // The SDK session id stays inside the service's saved sessions; the ref names the runtime.
-    const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
+    // Once the turn succeeded the ref names Claude's session and the turn's prompt: a fork cuts there.
+    let providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const locked = await this.lockedTurn(input, host, service)
     const cwd = locked ? locked.cwd : input.cwd ?? service.standaloneWorkspace(input.threadId)
@@ -191,6 +193,12 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       signal: input.signal,
       turnPreamble: host.bridge?.turnPreamble || undefined,
       history,
+      ...(input.historyHandedOver ? { historyHandedOver: true } : {}),
+      ...(input.handoffUnplanned ? { handoffUnplanned: true } : {}),
+      onSession: ({ sessionId, promptId }) => {
+        providerRef = { ...providerRef, sessionId, ...(promptId ? { nativeTurnId: promptId } : {}) }
+        sink.providerRef(providerRef)
+      },
       // SPEC §15.2: the Mousse MCP server over HTTP with this turn's bearer; Mousse's hook stamps each
       // Mousse call with the turn's token (`per_call` turn binding).
       mcp: host.bridge?.mcp ?? null,
@@ -309,11 +317,15 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   }
 
   /**
-   * No native fork yet: the subscription service keeps its SDK session private and offers no branch call.
-   * Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a native fork lands
-   * here once the runtime exposes session branching.
+   * Native fork (SPEC §16.2, issue #360): Claude's session cut after the turn `ref` names (its prompt,
+   * `nativeTurnId`; Mousse's run ordinals do not count Claude's turns), bound to the fork's thread,
+   * whose first turn makes the branch. Null (a portable `full_summary` handoff) without a target, on a
+   * locked instance, for a turn Claude started itself or one recorded before, or when the service
+   * cannot read the cut.
    */
-  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
-    return null
+  async forkSession(ref: ProviderRef, _atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
+    if (!target || this.locked || !ref.sessionId || !ref.nativeTurnId) return null
+    const sessionId = this.service()?.forkConversation?.({ prompt: ref.nativeTurnId, instanceId: ref.instanceId }, target.threadId)
+    return sessionId ? { provider: ref.provider, ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), ...(ref.model ? { model: ref.model } : {}), sessionId } : null
   }
 }
