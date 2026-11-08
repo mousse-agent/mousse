@@ -62,10 +62,10 @@ const proxy = (origin = 'http://127.0.0.1:8317') => ({
 afterEach(() => resetLocalProxyDetection())
 
 describe('which addresses may be a local proxy', () => {
-  it.each(['localhost', '127.0.0.1', '127.8.9.1', '10.0.0.5', '172.16.0.1', '172.31.255.255', '192.168.1.20', '169.254.10.1', '[::1]', '::1', 'fd12:3456::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:c0a8:114'])('%s is local', (host) => {
+  it.each(['localhost', '127.0.0.1', '127.8.9.1', '10.0.0.5', '172.16.0.1', '172.31.255.255', '192.168.1.20', '169.254.10.1', '100.64.0.1', '100.101.102.103', '100.127.255.254', '[::1]', '::1', 'fd12:3456::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:c0a8:114'])('%s is local', (host) => {
     expect(isLocalHost(host)).toBe(true)
   })
-  it.each(['api.anthropic.com', 'example.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '11.0.0.1', '2001:db8::1', 'localhost.example.com', '::ffff:8.8.8.8', '::ffff:808:808', 'api.localhost', '127.0.0.1.nip.io', 'proxy.internal', '0.0.0.0', '::'])('%s is not', (host) => {
+  it.each(['api.anthropic.com', 'example.com', '8.8.8.8', '172.32.0.1', '100.63.255.255', '100.128.0.1', '192.169.0.1', '11.0.0.1', '2001:db8::1', 'localhost.example.com', '::ffff:8.8.8.8', '::ffff:808:808', 'api.localhost', '127.0.0.1.nip.io', 'proxy.internal', '0.0.0.0', '::'])('%s is not', (host) => {
     expect(isLocalHost(host)).toBe(false)
   })
   it('keeps the origin of an http(s) base URL on a local address only', () => {

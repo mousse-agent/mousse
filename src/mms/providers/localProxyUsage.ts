@@ -32,7 +32,8 @@ type Json = Record<string, unknown>
 const isRecord = (value: unknown): value is Json => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
 /**
- * A literal loopback, private, link-local or unique-local address, or exactly `localhost` (which the
+ * A literal loopback, private, shared (100.64.0.0/10: carrier NAT and Tailscale's private network),
+ * link-local or unique-local address, or exactly `localhost` (which the
  * system resolves from its hosts file). No other name counts, not even `*.localhost`: a name a DNS
  * server answers could point anywhere, and could change between the check and the request.
  */
@@ -42,7 +43,7 @@ export function isLocalHost(hostname: string): boolean {
   const kind = isIP(host)
   if (kind === 4) {
     const [a, b] = host.split('.').map(Number) as [number, number]
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)
   }
   if (kind === 6) {
     if (host === '::1') return true
