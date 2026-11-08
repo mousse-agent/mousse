@@ -4,7 +4,7 @@ import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 

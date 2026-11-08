@@ -40,6 +40,7 @@ import { useCommand } from '../commands/commandRegistry'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
+import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
 import { useComposerNotice } from './ComposerNotice'
 
 export interface AttachedFile {
@@ -530,6 +531,17 @@ export function ChatComposer({
     if (options?.steer) onSend(skillMode, options)
     else onSend(skillMode)
   }
+
+  // The Changes tab's "Send N comments" sends what the shown composer holds, its review comments included.
+  const submitRef = useRef(submit)
+  submitRef.current = submit
+  useEffect(() => {
+    const onRequest = () => {
+      if (isShown(composerInputRef.current)) submitRef.current()
+    }
+    window.addEventListener(COMPOSER_SEND_EVENT, onRequest)
+    return () => window.removeEventListener(COMPOSER_SEND_EVENT, onRequest)
+  }, [])
 
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     // The token backdrop paints behind the textarea: keep it scroll-locked.

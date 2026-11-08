@@ -939,3 +939,24 @@
     transition-property: none !important;
   }
 }
+
+/* The glance: the branch, then how many files changed (opens Changes). */
+.side-card-git-glance {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.side-card-git-glance .side-card-git-branch {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.side-card-git-glance .side-card-git-changes {
+  flex: none;
+  width: auto;
+  margin-top: 0;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}

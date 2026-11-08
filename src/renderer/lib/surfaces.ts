@@ -15,8 +15,7 @@ export const SURFACE_CHOICES: SurfaceChoice[] = [
   { id: 'browser', label: 'Browser', commandId: 'surface.browser' },
   { id: 'terminal', label: 'Terminal', commandId: 'surface.terminal' },
   { id: 'files', label: 'Files', commandId: 'surface.files' },
-  { id: 'git', label: 'Diff', commandId: 'surface.git' },
-  { id: 'review', label: 'Review', commandId: 'surface.review' },
+  { id: 'git', label: 'Changes', commandId: 'surface.git' },
   { id: 'pullRequest', label: 'Pull request', commandId: 'surface.pullRequest' }
 ]
 
@@ -79,9 +78,7 @@ export function surfaceTabItems(input: {
     } else if (kind === 'files') {
       items.push({ key: 'files', view: 'files', label: 'Files', closable: true })
     } else if (kind === 'git') {
-      items.push({ key: 'git', view: 'git', label: 'Diff', closable: true })
-    } else if (kind === 'review') {
-      items.push({ key: 'review', view: 'review', label: 'Review', closable: true })
+      items.push({ key: 'git', view: 'git', label: 'Changes', closable: true })
     } else if (kind === 'pullRequest') {
       items.push({ key: 'pullRequest', view: 'pullRequest', label: 'Pull request', closable: true })
     }

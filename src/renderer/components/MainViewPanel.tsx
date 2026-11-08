@@ -1,8 +1,7 @@
 import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
-import { GitPanel } from './GitPanel'
-import { ReviewPanel } from './review/ReviewPanel'
+import { ChangesPanel } from './changes/ChangesPanel'
 import { PullRequestPanel } from './PullRequestPanel'
 import { DocumentPanel } from './DocumentPanel'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
@@ -36,8 +35,7 @@ export function MainViewPanel() {
   const transientPanel = (() => {
     if (empty) return <OpenSurfacePicker />
     switch (mainView) {
-      case 'git': return <GitPanel />
-      case 'review': return <ReviewPanel />
+      case 'git': return <ChangesPanel />
       case 'pullRequest': return <PullRequestPanel />
       case 'documents': return <DocumentPanel />
       default: return null
