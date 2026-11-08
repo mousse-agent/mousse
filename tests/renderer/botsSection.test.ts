@@ -25,6 +25,8 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
+// App mounts New bot apart from the chat pane (older code kept it inside the pane).
+const NewBotDialogHost = ((await import('../../src/renderer/components/bots/NewBotDialog')) as { NewBotDialogHost?: () => null }).NewBotDialogHost ?? (() => null)
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 
@@ -39,13 +41,13 @@ const direct = (id: string, name: string, at: string) => ({
   participants: [{ id: 'p1', kind: 'agent', name, definitionId: 'a1' }]
 }) as unknown as ChatSummary
 
-async function show(bots = fake.bots, chats: ChatSummary[] = []) {
+async function show(bots = fake.bots, chats: ChatSummary[] = [], pane = true) {
   fake.bots = bots
   await act(async () => {
     useChatsStore.getState().activate('p1')
     useChatsStore.setState({ snapshot: { agents: [], chats, devices: [] } })
   })
-  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace))))
+  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), pane && createElement(ChatWorkspace), createElement(NewBotDialogHost))))
 }
 const headings = () => [...host.querySelectorAll('.chats-sidebar-content .chat-section-heading h2')].map((element) => element.textContent)
 const button = (label: string) => [...host.querySelectorAll('button')].find((element) => element.getAttribute('aria-label') === label || element.textContent === label)
@@ -75,6 +77,12 @@ describe('the Bots section', () => {
     expect(host.textContent).not.toContain('Roster')
     expect(host.querySelector('[aria-label="Open Automations"]')).toBeNull()
     expect(host.querySelector('.chats-sidebar-content .chat-empty-hint')?.textContent).toBe('No bots yet. Press + to make one.')
+    await click(button('New bot'))
+    expect(host.querySelector('[role="dialog"] h2')?.textContent).toBe('New bot')
+  })
+
+  it('opens New bot from + while the pane shows Projects, as it does after a restart', async () => {
+    await show([summary('a', { name: 'Inbox helper' })], [], false)
     await click(button('New bot'))
     expect(host.querySelector('[role="dialog"] h2')?.textContent).toBe('New bot')
   })

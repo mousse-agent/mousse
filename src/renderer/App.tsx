@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { ChatWorkspace } from './components/chats/ChatWorkspace'
+import { NewBotDialogHost } from './components/bots/NewBotDialog'
 import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
@@ -634,6 +635,8 @@ export default function App() {
 
       <CommandPalette />
       <ThreadRenameDialog />
+      {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
+      {profileReady && <NewBotDialogHost />}
 
       <ToastHost />
 

@@ -27,6 +27,7 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
+const { NewBotDialogHost } = await import('../../src/renderer/components/bots/NewBotDialog')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 
@@ -79,7 +80,7 @@ beforeEach(async () => {
   document.body.append(host)
   root = createRoot(host)
   await act(async () => useChatsStore.getState().activate('p1'))
-  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace))))
+  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace), createElement(NewBotDialogHost))))
 })
 
 afterEach(() => {
