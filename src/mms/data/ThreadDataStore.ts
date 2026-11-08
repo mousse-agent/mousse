@@ -82,6 +82,9 @@ interface ThreadMeta {
   scheduledJobId?: string
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
+  /** See `Thread.worktreeStartSha`. */
+  worktreeStartSha?: string
+  worktreeBaseBranch?: string
   pullRequest?: ThreadPullRequestLink
   order: number
   pinnedAt?: string
@@ -330,6 +333,8 @@ export class ThreadDataStore extends EventEmitter {
       /** See `Thread.expiresAt`; checked by the caller. */
       expiresAt?: string
       expiryStopsRun?: boolean
+      /** See `Thread.worktreeStartSha`; resolved by the caller. */
+      worktreeStart?: { sha: string; branch: string }
     }
   ): Thread {
     const id = opts?.id ?? uuidv4()
@@ -358,6 +363,10 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.localOnly === true) meta.localOnly = true
     if (opts?.expiresAt) meta.expiresAt = opts.expiresAt
     if (opts?.expiresAt && opts.expiryStopsRun === true) meta.expiryStopsRun = true
+    if (opts?.worktreeStart) {
+      meta.worktreeStartSha = opts.worktreeStart.sha
+      meta.worktreeBaseBranch = opts.worktreeStart.branch
+    }
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's
