@@ -456,29 +456,43 @@ function conversationStatePath(threadDirectory: string, branchId: string): strin
 
 /**
  * The versions of each edited prompt the conversation now shows. Editing a prompt makes a branch that starts before
- * its turn (`at: 'start'`); the branch that turn ran on and every such branch of the same turn are its versions,
- * oldest first. A version is shown on the active branch's own prompt: the edited turn on the branch it ran on, or the
- * first turn of an edited version. A version with no turn yet (the edit was never sent) shows nowhere.
+ * its turn (`at: 'start'`), whose first turn is the edited prompt; editing that one again is a version of the same
+ * prompt. So each prompt's versions are the branch its first version ran on and every edit of it, at any depth, in
+ * the order they were made. A version is shown on the active branch's own prompt: the first version's turn on the
+ * branch it ran on, or an edit's first turn. An edit with no turn yet (never sent) shows nowhere.
  */
 export function promptVersionsOf(
   branches: readonly import('../../shared/threadActions').ConversationBranch[],
   actions: readonly ThreadAction[],
   activeBranchId: string
 ): Array<{ turnId: string; versions: string[]; current: number }> {
+  const edits = branches.filter((branch) => branch.at === 'start' && branch.parentTurnId && branch.lifecycle !== 'tombstoned')
+  const firstTurnOf = (branchId: string) => actions.find((action) => action.conversationBranchId === branchId)?.turnId
+  const branchOfTurn = (turnId: string) => actions.find((action) => action.turnId === turnId)?.conversationBranchId
+  // The first version's turn of the prompt `turnId` is a version of: up through the edits whose first turn it is.
+  const rootOf = (turnId: string): string => {
+    let root = turnId
+    for (let depth = 0; depth < edits.length; depth += 1) {
+      const branch = edits.find((edit) => edit.id === branchOfTurn(root))
+      if (!branch || firstTurnOf(branch.id) !== root) break
+      root = branch.parentTurnId!
+    }
+    return root
+  }
   const groups = new Map<string, string[]>()
-  for (const branch of branches) {
-    if (branch.at !== 'start' || !branch.parentTurnId || branch.lifecycle === 'tombstoned') continue
-    const original = actions.find((action) => action.turnId === branch.parentTurnId)?.conversationBranchId
+  for (const edit of [...edits].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const root = rootOf(edit.parentTurnId!)
+    const original = branchOfTurn(root)
     if (!original) continue
-    const versions = groups.get(branch.parentTurnId) ?? [original]
-    versions.push(branch.id)
-    groups.set(branch.parentTurnId, versions)
+    const versions = groups.get(root) ?? [original]
+    versions.push(edit.id)
+    groups.set(root, versions)
   }
   const shown: Array<{ turnId: string; versions: string[]; current: number }> = []
-  for (const [turnId, versions] of groups) {
+  for (const [root, versions] of groups) {
     const current = versions.indexOf(activeBranchId)
     if (current < 0) continue
-    const onBranch = current === 0 ? turnId : actions.find((action) => action.conversationBranchId === activeBranchId)?.turnId
+    const onBranch = current === 0 ? root : firstTurnOf(activeBranchId)
     if (onBranch) shown.push({ turnId: onBranch, versions, current })
   }
   return shown

@@ -28,6 +28,26 @@ describe('the versions of an edited prompt', () => {
     expect(promptVersionsOf(branches, actions, 'e2')).toEqual([{ turnId: 't2-edit-2', versions: ['main', 'e1', 'e2'], current: 2 }])
   })
 
+  it('an edit of an edited prompt is another version of the same prompt, reachable from each version', () => {
+    // t2 on main, edited into e1 (first turn t2-e1), which is edited again into e2 (first turn t2-e2).
+    const nested = [action('t1', 'main'), action('t2', 'main'), action('t2-e1', 'e1'), action('t2-e2', 'e2')]
+    const made = [{ ...branch('e1', 't2', 'start'), createdAt: '1' }, { ...branch('e2', 't2-e1', 'start'), parentBranchId: 'e1', createdAt: '2' }]
+    expect(promptVersionsOf(made, nested, 'main')).toEqual([{ turnId: 't2', versions: ['main', 'e1', 'e2'], current: 0 }])
+    expect(promptVersionsOf(made, nested, 'e1')).toEqual([{ turnId: 't2-e1', versions: ['main', 'e1', 'e2'], current: 1 }])
+    expect(promptVersionsOf(made, nested, 'e2')).toEqual([{ turnId: 't2-e2', versions: ['main', 'e1', 'e2'], current: 2 }])
+  })
+
+  it('an edit of a later prompt on an edited version is its own prompt\'s version, not the earlier one\'s', () => {
+    // e1 replaced t2 (first turn t2-e1) and went on with t3-e1; editing t3-e1 makes versions of that prompt only.
+    const later = [action('t2', 'main'), action('t2-e1', 'e1'), action('t3-e1', 'e1'), action('t3-e3', 'e3')]
+    const made = [{ ...branch('e1', 't2', 'start'), createdAt: '1' }, { ...branch('e3', 't3-e1', 'start'), parentBranchId: 'e1', createdAt: '2' }]
+    expect(promptVersionsOf(made, later, 'e1')).toEqual([
+      { turnId: 't2-e1', versions: ['main', 'e1'], current: 1 },
+      { turnId: 't3-e1', versions: ['e1', 'e3'], current: 0 }
+    ])
+    expect(promptVersionsOf(made, later, 'e3')).toEqual([{ turnId: 't3-e3', versions: ['e1', 'e3'], current: 1 }])
+  })
+
   it('shows none for a branch after a turn, an edit never sent, or a removed edit', () => {
     expect(promptVersionsOf([branch('after', 't1')], actions, 'after')).toEqual([])
     expect(promptVersionsOf([branch('e3', 't2', 'start')], actions, 'e3')).toEqual([])

@@ -982,13 +982,17 @@ export function OrchestratorChat() {
           const history = await readThreadActionHistory(activeThreadId, true)
           const action = editablePrompt(history, turnId)
           if (!action) throw new Error("This message can't be edited now.")
+          // The prompt's images go with the edit. They are read now, before the switch puts back the conversation
+          // from before the prompt; one known here by name only (another computer's thread) is fetched first.
+          const original = useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')?.images ?? []
+          const images = await Promise.all(original.map(async (image, index) => image.data ? image
+            : { ...image, ...await window.mousse.threads.messageImage(activeThreadId, promptId, index) }))
           const { branch } = await window.mousse.actions.fork({
             threadId: activeThreadId, actionId: action.id, at: 'start', name: 'Edited', expectedJournalGeneration: history.journalGeneration
           }) as { branch: { id: string } }
           await window.mousse.actions.activateBranch({ threadId: activeThreadId, conversationBranchId: branch.id })
           invalidateThreadActionHistory(activeThreadId)
-          const images = useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')?.images?.filter((image) => image.data)
-          await sendMessage(text, chatMode, images?.length ? images : undefined, activeThreadId)
+          await sendMessage(text, chatMode, images.length ? images : undefined, activeThreadId)
         } catch (error) {
           showToast({ tone: 'error', message: readableError(error, "The edited message wasn't sent. Try again.") })
           throw error
