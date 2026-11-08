@@ -87,7 +87,7 @@ describe('thread switching terminal lifecycle', () => {
     expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
     const mainPane = appSource.match(/<KeepMounted as="main"[\s\S]*?<\/KeepMounted>/)?.[0]
     expect(mainPane).toBeDefined()
-    expect(mainPane).toMatch(/active=\{mainAreaOpen && sidebarMode === 'projects'\} preserveLayout/)
+    expect(mainPane).toMatch(/active=\{mainAreaOpen && workspaceMode === 'projects'\}[^>]*\bpreserveLayout\b/)
     expect(mainPane).toMatch(/<MainViewPanel\s*\/>/)
   })
 
