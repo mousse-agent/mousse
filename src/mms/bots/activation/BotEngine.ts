@@ -20,7 +20,7 @@ import {
   type BotWallKind,
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -1586,6 +1586,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
         if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
           return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
+        // What the bot already holds is no ask: a card for it would grant nothing.
+        if (heldAlready(base, asked)) return `The owner already allowed this (${askText(asked).title}). Use it now.`
         const reason = request.reason.trim() || 'The bot did not say why.'
         if (row.lane === 'run') {
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
@@ -3711,6 +3713,18 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
   return limits
 }
 
+
+/** Whether `authority` already holds the tool, skill or MCP tool `asked` names (a folder or a limit never counts). */
+function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skills' | 'mcp'>, asked: BotAskRequest): boolean {
+  if ('tool' in asked) {
+    if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool)
+    // The browser is held as its tools.
+    return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
+  }
+  if ('skill' in asked) return authority.skills.has(asked.skill)
+  if ('mcp' in asked) return authority.mcp.has(`${asked.mcp.serverId}::${asked.mcp.tool}`)
+  return false
+}
 
 /** What a gate refusal asks the owner for. */
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {

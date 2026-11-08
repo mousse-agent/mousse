@@ -136,7 +136,12 @@ describe('a bot asking for and using the browser', () => {
     expect(scheduled.prepared.authority.check(act)).toEqual({ ok: true })
     await finish(f, scheduled.payload, 'completed', { text: 'Report.' })
     expect(f.store.openAsks(botId)).toEqual([])
-    expect(turns.map((turn) => turn.lane)).toEqual(['chat', 'chat', 'run'])
+    // Asking again for what it holds is no new card.
+    const again = await chat('Once more', 'm3')
+    expect(again.prepared.authority.escalate!({ permission: { tool: 'browser_open' }, reason: 'Again.' })).toBe('The owner already allowed this (use the browser). Use it now.')
+    await finish(f, again.payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+    expect(turns.map((turn) => turn.lane)).toEqual(['chat', 'chat', 'run', 'chat'])
     // Both lanes drive the one browser its home thread owns.
     expect(new Set(turns.map((turn) => turn.homeThreadId)).size).toBe(1)
     expect(ended).toEqual(expect.arrayContaining([later.activation.id, scheduled.activation.id]))
