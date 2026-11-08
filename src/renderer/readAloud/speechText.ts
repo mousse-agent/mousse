@@ -102,11 +102,13 @@ export function markdownToSpeechText(markdown: string): string {
 
 /**
  * Splits text into pieces of at most `maxChars`, preferring paragraph, then sentence, then word
- * boundaries. `maxChars` may be a function of the piece's index, so pieces can grow.
+ * boundaries. `maxChars` may be a function of the piece's index, so pieces can grow. Sentences
+ * longer than `splitAt` are cut at words first; by default that is the smaller of the first two
+ * limits.
  */
-export function splitSpeechChunks(text: string, maxChars: number | ((index: number) => number)): string[] {
+export function splitSpeechChunks(text: string, maxChars: number | ((index: number) => number), splitAt?: number): string[] {
   const limitAt = (index: number): number => Math.max(1, Math.floor(typeof maxChars === 'number' ? maxChars : maxChars(index)))
-  const smallest = typeof maxChars === 'number' ? limitAt(0) : Math.min(limitAt(0), limitAt(1))
+  const smallest = splitAt ?? (typeof maxChars === 'number' ? limitAt(0) : Math.min(limitAt(0), limitAt(1)))
   const pieces: string[] = []
   for (const paragraph of text.split(/\n{2,}/)) {
     const trimmed = paragraph.trim()
@@ -136,19 +138,92 @@ export function splitSpeechChunks(text: string, maxChars: number | ((index: numb
   return chunks
 }
 
-/** The first local segment is short so audio starts soon; later ones grow to this size. */
-export const FIRST_SEGMENT_CHARS = 100
+/** The first local segment is short so audio starts within about two seconds. */
+export const FIRST_SEGMENT_CHARS = 60
+/** A shorter first segment still sizes the next ones as if it were this long. */
+const MIN_FIRST_SEGMENT_CHARS = 30
+/** Later segments grow from this size to the largest one; it is also where sentences are cut at words. */
+const SEGMENT_CHARS = 100
 export const MAX_SEGMENT_CHARS = 220
 const SEGMENT_GROWTH = 1.25
+/** A cut at a comma or similar leaves at least this much of the sentence on each side. */
+const MIN_CLAUSE_CHARS = 20
+
+/** Offsets in `text` where a sentence or a paragraph ends. */
+function sentenceEnds(text: string): number[] {
+  const ends: number[] = []
+  for (const match of text.matchAll(/[.!?]+["')\]]*(?=\s|$)|\n{2,}/g)) {
+    ends.push(match[0].startsWith('\n') ? match.index : match.index + match[0].length)
+  }
+  if (ends.at(-1) !== text.length) ends.push(text.length)
+  return ends
+}
+
+/**
+ * Splits off the start of `text`, at most `max` characters, and returns it with the rest. Whole
+ * sentences are taken while they fit (a paragraph break ends a sentence). When the next one does
+ * not fit and what was taken is shorter than `max / 2`, such as a "Sure." opener, that sentence is
+ * taken too and cut: at the last comma, semicolon, colon or dash that leaves at least 20 characters
+ * on each side, else at the last space before `max`. The rest of that sentence starts the rest.
+ */
+export function takeLeading(text: string, max: number): [head: string, rest: string] {
+  const trimmed = text.trim()
+  if (trimmed.length <= max) return [trimmed, '']
+  const split = (at: number): [string, string] => [trimmed.slice(0, at).trim(), trimmed.slice(at).trim()]
+  let fit = 0
+  let next = trimmed.length
+  for (const end of sentenceEnds(trimmed)) {
+    if (trimmed.slice(0, end).trimEnd().length > max) {
+      next = end
+      break
+    }
+    fit = end
+  }
+  if (fit > 0 && trimmed.slice(0, fit).trim().length >= max / 2) return split(fit)
+
+  let clause = -1
+  // One character past `max`, so a comma that ends exactly at `max` still sees the space after it.
+  for (const match of trimmed.slice(fit, max + 1).matchAll(/[,;:](?=\s)|—/g)) {
+    const at = fit + match.index + match[0].length
+    if (at > max || trimmed.slice(0, at).trim().length < MIN_CLAUSE_CHARS) continue
+    if (trimmed.slice(at, next).trim().length < MIN_CLAUSE_CHARS) continue
+    clause = at
+  }
+  if (clause > 0) return split(clause)
+  // One character is kept free for the full stop a segment that ends mid-sentence gets.
+  for (let at = max - 1; at > fit; at--) {
+    if (/\s/.test(trimmed[at])) return split(at)
+  }
+  return split(fit > 0 ? fit : max - 1)
+}
 
 /**
  * Cuts text into the segments a local model voices one at a time. Each segment is spoken in one
  * pass, so paragraph breaks inside it become sentence ends instead of newlines.
+ *
+ * The first segment is at most `FIRST_SEGMENT_CHARS`, so the first audio is ready soon. Each later
+ * segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k, L0 × 2^k)` long, where L0 is the first
+ * segment's length (at least 30): doubling at most keeps synthesis ahead of playback from the
+ * first clip on. Segments whose limit is under 100 are cut with `takeLeading` too; from the first
+ * limit of 100 on, the rest is split as before, cutting sentences over 100 characters at words.
  */
 export function splitSpeechSegments(text: string): string[] {
-  const limit = (index: number): number => Math.min(MAX_SEGMENT_CHARS, FIRST_SEGMENT_CHARS * SEGMENT_GROWTH ** index)
-  return splitSpeechChunks(text, limit).map((chunk) =>
-    chunk
+  const segments: string[] = []
+  let [head, rest] = takeLeading(text, FIRST_SEGMENT_CHARS)
+  if (head) segments.push(head)
+  const first = Math.max(head.length, MIN_FIRST_SEGMENT_CHARS)
+  const limit = (index: number): number =>
+    Math.min(MAX_SEGMENT_CHARS, SEGMENT_CHARS * SEGMENT_GROWTH ** index, first * 2 ** index)
+  let index = 1
+  while (rest && limit(index) < SEGMENT_CHARS) {
+    ;[head, rest] = takeLeading(rest, Math.floor(limit(index)))
+    segments.push(head)
+    index++
+  }
+  const start = index
+  if (rest) segments.push(...splitSpeechChunks(rest, (offset) => limit(start + offset), SEGMENT_CHARS))
+  return segments.map((segment) =>
+    segment
       .split(/\n{2,}/)
       .map((paragraph) => endWithPunctuation(paragraph.trim()))
       .join(' ')
