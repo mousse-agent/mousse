@@ -100,8 +100,10 @@ function requestMessage(data: PermissionRequestData, createdAt: string | undefin
 /**
  * The transcript with the thread's permission requests in it. A saved request goes after the last
  * message that came before it was asked, so it sits in the turn that asked it, under the call it is
- * about. A waiting request the saved list does not have yet goes at the end: it is being asked now.
- * `answered` holds answers given here that the saved list does not show yet.
+ * about. A saved request of a turn the conversation no longer shows (an undone turn, one on another
+ * conversation branch) is left out: its run is no message's turn. A waiting request the saved list
+ * does not have yet goes at the end: it is being asked now. `answered` holds answers given here that
+ * the saved list does not show yet.
  */
 export function withPermissionRequests(
   messages: UIMessage[],
@@ -115,8 +117,12 @@ export function withPermissionRequests(
   };
   const placed: Array<{ at: number; message: UIMessage }> = [];
   const known = new Set<string>();
+  // The run that asked is the turn of its messages (`turnId`). A thread whose messages name no turn (an older one)
+  // keeps every request.
+  const turns = new Set(messages.map((message) => (message as { turnId?: unknown }).turnId).filter((turnId): turnId is string => typeof turnId === "string"));
   for (const request of saved) {
     known.add(request.requestId);
+    if (request.runId && turns.size && !turns.has(request.runId)) continue;
     const at = readTime(request.createdAt);
     if (at == null) continue;
     placed.push({

@@ -100,6 +100,20 @@ describe('placing requests in the transcript', () => {
     expect((placed.at(-1)!.parts[0] as unknown as { data: { status: string; decision: string } }).data).toMatchObject({ status: 'answered', decision: 'reject' })
   })
 
+  it('leaves out a request of a turn the conversation no longer shows, after Undo or on another conversation branch', () => {
+    const inTurn = (message: UIMessage, turnId: string) => ({ ...message, turnId }) as unknown as UIMessage
+    // Turn 1 ("Test it") stays; turns 2 and 3 asked approvals and were undone, or belong to the branch left behind.
+    const shown = [inTurn(user('u1', 0, 'Test it'), 'run-1'), inTurn(command('c1', 1), 'run-1'), inTurn(reply('a1', 9, 'Done.'), 'run-1')]
+    const placed = withPermissionRequests(shown, [
+      saved('r1', 2, { runId: 'run-1', status: 'answered', decision: 'allow' }),
+      saved('r2', 30, { runId: 'run-2', status: 'answered', decision: 'allow' }),
+      saved('r3', 40, { runId: 'run-3', status: 'answered', decision: 'allow' })
+    ])
+    expect(placed.map((message) => message.id)).toEqual(['u1', 'c1', 'permission:r1', 'a1'])
+    // Messages that name no turn (an older thread) keep every request.
+    expect(withPermissionRequests(messages, [saved('r2', 30, { runId: 'run-2' })]).map((message) => message.id)).toEqual(['u1', 'c1', 'a1', 'u2', 'a2', 'permission:r2'])
+  })
+
   it('leaves out a request asked before the first message shown', () => {
     expect(withPermissionRequests(messages.slice(3), [saved('r1', 2)]).map((message) => message.id)).toEqual(['u2', 'a2'])
   })
