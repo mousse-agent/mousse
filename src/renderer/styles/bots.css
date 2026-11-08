@@ -40,15 +40,15 @@
 @media (prefers-reduced-motion: reduce) { .bot-chip.is-live svg { animation: none; } }
 
 /* Asking for something, inside the bot's message; the approval look (#590). */
-.bot-ask { margin-top: 12px; max-width: 520px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(var(--accent-rgb), .28); background: rgba(var(--accent-rgb), .06); }
-.bot-ask-title { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); }
-.bot-ask-title svg { color: var(--accent); flex-shrink: 0; }
-.bot-ask-title strong { font-weight: 600; }
-.bot-ask-note { margin: 6px 0 0 24px; font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
-.bot-ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.bot-ask-answer { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
+.ask-card { margin-top: 12px; max-width: 520px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(var(--accent-rgb), .28); background: rgba(var(--accent-rgb), .06); }
+.ask-card-title { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); }
+.ask-card-title svg { color: var(--accent); flex-shrink: 0; }
+.ask-card-title strong { font-weight: 600; }
+.ask-card-note { margin: 6px 0 0 24px; font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+.ask-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.ask-card-answer { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
 .bot-ghost-button { border-radius: 8px; padding: 8px 13px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
-.bot-ghost-button:disabled, .bot-ask .chat-primary-button:disabled { opacity: .5; }
+.bot-ghost-button:disabled, .ask-card .chat-primary-button:disabled { opacity: .5; }
 
 /* Something went wrong: one red line and one way out. */
 .bot-error { display: flex; align-items: center; gap: 10px; margin-top: 10px; max-width: 520px; padding: 10px 14px; border-radius: 10px; background: color-mix(in srgb, var(--error, #e79090) 12%, transparent); color: var(--error, #e79090); font-size: 12px; }

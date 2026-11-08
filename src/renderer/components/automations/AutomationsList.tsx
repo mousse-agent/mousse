@@ -18,6 +18,7 @@ import { draftFromJob, EMPTY_CATALOG, isUnchanged, modelGroups, patchOf, type Sc
 import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
 import { AutomationRow, glyphOf, PausePicker } from './AutomationRows'
+import { AskCard } from '../asks/AskCard'
 import { CreateRow, type CreatePrefill } from './CreateRow'
 import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest } from '../../stores/automationCreateStore'
 import { modelKeyOf } from '../scheduled/jobDraft'
@@ -491,7 +492,17 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             <section key={group.key} className="automation-group" data-testid="automation-group" data-group={group.key} aria-label={group.label}>
               <h2 className="automation-group-head">{group.key === 'needs' ? `${group.label} · ${group.items.length}` : group.label}</h2>
               <div className="automation-rows" role="listbox" aria-multiselectable="true" aria-label={group.label}>
-                {group.items.map((item) => (
+                {group.items.map((item) => item.attention?.kind === 'ask' && item.attention.answer ? (
+                  // Every ask Needs you can answer in place renders through the one ask card.
+                  <AskCard
+                    key={item.key}
+                    layout="row"
+                    line={item.attention.text}
+                    lineText={item.attention.text}
+                    onAnswer={(choice) => answer(item, choice === 'allow')}
+                    row={{ name: item.name, key: item.key, kind: item.kind, menu: menuOf(item).filter((entry) => entry.testId !== 'automation-ask-not-now'), onOpen: () => openItem(item) }}
+                  />
+                ) : (
                   <AutomationRow
                     key={item.key}
                     item={item}

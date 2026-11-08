@@ -21,7 +21,8 @@ export function glyphOf(item: AutomationItem): { glyph: string; kind: string; ti
 
 /**
  * One automation: the glyph, its name, one meta line (a bot's face beside its name there), one primary action and
- * "…". A selected row is tinted; nothing marks its edge.
+ * "…". A selected row is tinted; nothing marks its edge. An ask Needs you answers in place is the ask card's row
+ * (`AskCard`), not this.
  */
 export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onPrimary }: {
   item: AutomationItem
@@ -67,10 +68,8 @@ export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onP
       </button>
       <button
         type="button"
-        className={`settings-btn automation-primary${primary.kind === 'allow' ? ' primary' : ''}`}
+        className="settings-btn automation-primary"
         data-primary={primary.kind}
-        data-testid={primary.kind === 'allow' ? 'automation-ask-allow' : undefined}
-        title={primary.kind === 'allow' ? item.attention?.text : undefined}
         onClick={onPrimary}
         aria-label={`${primary.label}: ${item.name}`}
       >
