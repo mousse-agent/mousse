@@ -5,12 +5,14 @@ import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotChatAttachment } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
 import { createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
+import { keepEqualById } from '../lib/keepEqual'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
  * was read, the live chip of a working bot, owner messages on their way, and About's detail.
  * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Chats tab is open,
- * `useBotsPolling` lists them again every 2 seconds, in case an event was missed.
+ * `useBotsPolling` lists them again every 2 seconds while the window shows, in case an event was
+ * missed. A list that changed nothing keeps the objects held, so nothing renders again for it.
  */
 
 /** Messages one chat page asks for. */
@@ -171,9 +173,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
           const list = (await bots().list()).filter((bot) => !removed.has(bot.id))
           if (owner !== epoch) return
           set((state) => {
+            // A list that brought nothing new keeps the bots held, so the open chat does not render again.
+            const bots = keepEqualById(state.bots, list)
             // A live chip lasts while its bot works.
-            const live = Object.fromEntries(Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working')))
-            return { bots: list, loaded: true, live, ...celebrate(state.bots, list) }
+            const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
+            const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
+            return { bots, loaded: true, live, ...celebrate(state.bots, bots) }
           })
         } catch {
           // A missed list is listed again by the next event or poll; the open chat keeps what it has.
@@ -383,22 +388,31 @@ export const useBotsStore = create<BotsState>((set, get) => {
 let pollers = 0
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
+/** A poll tick: a hidden window (minimised) lists nothing, and lists again as soon as it shows. */
+function pollVisible(): void {
+  if (document.visibilityState !== 'hidden') void useBotsStore.getState().refresh()
+}
+
 /**
  * Lists the bots now and every 2 seconds while a view that shows them is mounted: the Chats tab's
  * sidebar and the chat pane. The sidebar can be shown without the pane (after a restart the pane
- * opens on Projects), so each lists them; they share one timer.
+ * opens on Projects), so each lists them; they share one timer. A hidden window skips the ticks.
  */
 export function useBotsPolling(): void {
   const profileId = useBotsStore((s) => s.profileId)
   useEffect(() => {
     void useBotsStore.getState().refresh()
     pollers += 1
-    pollTimer ??= setInterval(() => { void useBotsStore.getState().refresh() }, POLL_MS)
+    if (pollTimer === undefined) {
+      pollTimer = setInterval(pollVisible, POLL_MS)
+      document.addEventListener('visibilitychange', pollVisible)
+    }
     return () => {
       pollers -= 1
       if (pollers === 0 && pollTimer !== undefined) {
         clearInterval(pollTimer)
         pollTimer = undefined
+        document.removeEventListener('visibilitychange', pollVisible)
       }
     }
   }, [profileId])

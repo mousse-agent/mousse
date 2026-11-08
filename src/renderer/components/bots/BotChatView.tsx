@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { ArrowUp, CircleAlert, Loader2, Paperclip, Square, X } from '../../lib/icons'
 import type { BotChatMessage, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -31,15 +31,22 @@ export function BotErrorLine({ error, onAction }: { error: BotError; onAction(ac
   </div>
 }
 
-function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: boolean }) {
+// Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
+const OwnerMessage = memo(function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: boolean }) {
   return <article className={`chat-participant-message from-person bot-you${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
     {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
     {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file) => <span key={file.path} className="bot-file-pill" title={file.path}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
     <time dateTime={message.at}>{pending ? 'Sending…' : botMessageTime(message.at)}</time>
   </article>
-}
+})
 
-function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }) {
+/** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
+const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.onAction === b.onAction &&
+  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.bot.look.colour === b.bot.look.colour && a.bot.look.accessory === b.bot.look.accessory
+
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void }
+
+const BotMessage = memo(function BotMessage({ bot, message, onAction }: BotMessageProps) {
   const store = useBotsStore.getState
   return <article className="chat-participant-message from-agent" data-message-id={message.id}>
     {/* Transcript faces are still: one baked pose per look, shared by every message. */}
@@ -54,7 +61,7 @@ function BotMessage({ bot, message, onAction }: { bot: BotSummary; message: BotC
       {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
     </div>
   </article>
-}
+}, sameBotMessage)
 
 /**
  * A bot's chat (bot-ui §4.4): the header with its face, name, description and one menu; the
@@ -99,12 +106,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [firstId, messages.length, pending.length, working, live?.chip?.text])
   useEffect(() => { anchor.current = { height: 0, atEnd: true } }, [bot.id])
 
-  const act = (action: NonNullable<BotError['action']>) => {
+  const act = useCallback((action: NonNullable<BotError['action']>) => {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
     else void store().resume(bot.id)
-  }
+  }, [bot.id, store])
   const attach = async () => {
     const paths = await window.mousse.dialog.pickFiles({ title: `Attach files for ${bot.name}` }).catch(() => [] as string[])
     if (!paths.length) return
