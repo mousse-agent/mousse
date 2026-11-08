@@ -27,6 +27,7 @@ function frameSrc(view: BotBrowserView): string | undefined {
 }
 
 function statusText(view: BotBrowserView): string {
+  if (view.setup) return 'Setting up'
   if (!view.open) return 'Closed'
   return view.control === 'owner' ? 'You have it' : 'Live'
 }
@@ -50,6 +51,7 @@ function BrowserFrame({ bot, view, children, ...handlers }: {
       ? <img src={src} alt={view.tab?.title || `${bot.name}'s browser`} draggable={false} />
       : <div className="bot-browser-frame-empty"><Globe size={22} aria-hidden /></div>}
     {view.open && <AgentCursor cursor={view.cursor} />}
+    {view.setup && <div className="bot-browser-closed" role="status"><p>Setting up the browser on this computer{view.setup.percent !== undefined ? ` · ${view.setup.percent}%` : '…'}</p></div>}
     {children}
   </div>
 }
@@ -160,7 +162,7 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
             typeLater(event.key)
           }
         }}>
-        {!view.open && <div className="bot-browser-closed">
+        {!view.open && !view.setup && <div className="bot-browser-closed">
           <p>{bot.name}'s browser is closed.</p>
           <button type="button" disabled={busy} onClick={() => void store().open(bot.id, /^https?:\/\//i.test(address.trim()) ? address.trim() : undefined)}>Open it</button>
         </div>}

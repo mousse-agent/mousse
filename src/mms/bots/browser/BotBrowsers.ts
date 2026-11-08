@@ -5,6 +5,7 @@ import { BOT_BROWSER_TOOLS, MAX_BOT_ACTIVE_MS } from '../../../shared/bots/perso
 import { agentCursorLive } from '../../../shared/browser/agentCursor'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
+import type { BrowserSetupStatus } from '../../../shared/browser/setup'
 import type { BrowserSessionRecord, BrowserTab, BrowserViewerFrame } from '../../../shared/browser/types'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
@@ -41,6 +42,17 @@ export interface BotBrowsersOptions {
   idleMs?: number
   now?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
+  /** How often a first-use install is checked on (default 1 second). */
+  setupPollMs?: number
+}
+
+/**
+ * The managed browser's setup, installation-wide (`BrowserSetupService`). A bot the owner allowed
+ * the browser installs it on first use: allowing it is what the download is for.
+ */
+export interface BotBrowserSetup {
+  status(): Promise<BrowserSetupStatus>
+  install(): Promise<unknown>
 }
 
 interface ActivationTabs {
@@ -95,6 +107,9 @@ const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
 export class BotBrowsers implements BotBrowserHost {
   private readonly bots = new Map<string, BotBrowserState>()
   private readonly policies = new ExecutionPolicyService()
+  private setup: BotBrowserSetup | undefined
+  /** A first-use install under way: how far it is, for the owner's view. */
+  private installing: { percent?: number } | undefined
   private readonly now: () => number
   private readonly idleMs: number
   private readonly setTimer: (fn: () => void, ms: number) => { clear(): void }
@@ -103,6 +118,11 @@ export class BotBrowsers implements BotBrowserHost {
     this.now = options.now ?? Date.now
     this.idleMs = options.idleMs ?? 2 * 60_000
     this.setTimer = options.setTimer ?? defaultTimer
+  }
+
+  /** The installation's browser setup (composed by the daemon once the profile's browser is configured). */
+  setSetup(setup: BotBrowserSetup | undefined): void {
+    this.setup = setup
   }
 
   turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined {
@@ -187,7 +207,8 @@ export class BotBrowsers implements BotBrowserHost {
       activations: [...state.used],
       ...(activationId ? { activationId } : {}),
       ...(frame && (options.frame || !open) ? { frame } : {}),
-      ...(open && last?.cursor && agentCursorLive(last.cursor, this.now()) ? { cursor: last.cursor } : {})
+      ...(open && last?.cursor && agentCursorLive(last.cursor, this.now()) ? { cursor: last.cursor } : {}),
+      ...(this.installing && !open ? { setup: { ...this.installing } } : {})
     }
   }
 
@@ -351,6 +372,7 @@ export class BotBrowsers implements BotBrowserHost {
     if (live) return { sessionId: live }
     if (state.opening) return { sessionId: (await state.opening).sessionId }
     const opening = (async (): Promise<OpenedSession> => {
+      await this.ensureInstalled(context.signal)
       // A session left disconnected (a worker restart) is closed first: it would hold the profile.
       if (state.sessionId) await this.closeSession(state).catch(() => undefined)
       const opened = await this.invoke(context, 'browser_open', { ...(url ? { url } : {}), persistent: true, workspaceId: botBrowserWorkspace(state.botId) })
@@ -364,6 +386,36 @@ export class BotBrowsers implements BotBrowserHost {
       return await opening
     } finally {
       if (state.opening === opening) state.opening = undefined
+    }
+  }
+
+  /**
+   * The managed browser, installed: on a computer without it, a bot's first browser use downloads it
+   * (once for every bot and profile) and waits for it, until the call's signal ends the wait.
+   */
+  private async ensureInstalled(signal: AbortSignal | undefined): Promise<void> {
+    const setup = this.setup
+    if (!setup) return
+    let status = await setup.status()
+    if (status.availability === 'ready') return
+    if (status.availability === 'unsupported' || status.availability === 'blocked' || (status.availability === 'setup-required' && !status.canInstall))
+      throw new BrowserAutomationError({ code: 'setup_required', message: `The browser can't run on this computer: ${status.message}` })
+    if (status.availability === 'setup-required') status = (await setup.install() as { status?: BrowserSetupStatus }).status ?? status
+    const pollMs = this.options.setupPollMs ?? 1_000
+    try {
+      for (;;) {
+        if (status.availability === 'ready') return
+        const operation = status.operation
+        if (operation && (operation.state === 'failed' || operation.state === 'cancelled'))
+          throw new BrowserAutomationError({ code: 'setup_required', message: `Setting up the browser did not finish: ${operation.error?.message ?? operation.state}. Try again later.` })
+        const fraction = operation?.progress.fraction
+        this.installing = typeof fraction === 'number' && Number.isFinite(fraction) ? { percent: Math.round(fraction * 100) } : {}
+        if (signal?.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'Setting up the browser goes on; this call ended before it finished.' })
+        await new Promise((resolve) => setTimeout(resolve, pollMs))
+        status = await setup.status()
+      }
+    } finally {
+      this.installing = undefined
     }
   }
 

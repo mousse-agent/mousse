@@ -34,6 +34,8 @@ export interface BotBrowserView {
   frame?: BotBrowserFrame
   /** Where the bot acted last, while it is recent: drawn over the picture, never in the page. */
   cursor?: BrowserAgentCursor
+  /** The browser is being set up on this computer (its first use): how far, when known. */
+  setup?: { percent?: number }
 }
 
 /** A person's input in the split view, at the page's CSS pixels. */

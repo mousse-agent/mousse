@@ -269,6 +269,8 @@ export class MousseMainService extends MmsProfileServices {
       if (services.platform.getManagedBrowserActiveCount() > 0) throw new Error('Managed browser work is still draining')
       this.browserProfiles.delete(services)
     })
+    // A bot's browser installs the managed browser on its first use.
+    services.botBrowsers.setSetup({ status: () => this.browserSetup.status(), install: () => this.browserSetup.install() })
     services.platform.configureBrowser({
       installationBrowserRoot: join(this.getHomeDir(), 'browser'),
       admitManagedLaunch: async () => {
