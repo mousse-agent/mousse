@@ -357,7 +357,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
       {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
-      {!blank && <AgentCursor cursor={agentCursor} />}
+      {!blank && <AgentCursor cursor={agentCursor} zoom={tab.zoomFactor || 1} />}
     </KeepMounted>
   )
 }

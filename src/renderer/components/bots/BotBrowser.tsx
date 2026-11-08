@@ -49,7 +49,7 @@ function BrowserFrame({ bot, view, children, ...handlers }: {
   return <div ref={frameRef} className="bot-browser-frame" style={{ aspectRatio: `${viewport.width} / ${viewport.height}` }} {...events}>
     {src
       ? <img src={src} alt={view.tab?.title || `${bot.name}'s browser`} draggable={false} />
-      : <div className="bot-browser-frame-empty"><Globe size={22} aria-hidden /></div>}
+      : <div className="bot-browser-frame-empty">{!view.setup && <Globe size={22} aria-hidden />}</div>}
     {view.open && <AgentCursor cursor={view.cursor} />}
     {view.setup && <div className="bot-browser-closed" role="status"><p>Setting up the browser on this computer{view.setup.percent !== undefined ? ` · ${view.setup.percent}%` : '…'}</p></div>}
     {children}

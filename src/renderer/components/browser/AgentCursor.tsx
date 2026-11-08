@@ -7,9 +7,11 @@ import './agentCursor.css'
  * an agent is about to click, type or scroll. It glides there, ripples where a click lands and
  * fades out after a few idle seconds. It sits in its own layer above the page and takes no events,
  * so the page never sees it and an agent's observation never contains it. Place it inside an
- * element exactly covering the page: the point is placed by its share of the page's viewport.
+ * element covering the page. A picture of the page (a frame) places the point by its share of the
+ * page's viewport; a live page (`zoom`, the in-app webview) by its CSS pixels at that zoom, from the
+ * page's top left, as the page itself is drawn.
  */
-export function AgentCursor({ cursor, label }: { cursor?: BrowserAgentCursor; label?: string }) {
+export function AgentCursor({ cursor, label, zoom }: { cursor?: BrowserAgentCursor; label?: string; zoom?: number }) {
   const [shown, setShown] = useState(false)
   // It appears where it is, and glides from there to each next point.
   const wasShown = useRef(false)
@@ -31,8 +33,8 @@ export function AgentCursor({ cursor, label }: { cursor?: BrowserAgentCursor; la
     return () => clearTimeout(timer)
   }, [at])
   if (!cursor || !(cursor.viewport.width > 0) || !(cursor.viewport.height > 0)) return null
-  const left = `${Math.max(0, Math.min(100, (cursor.x / cursor.viewport.width) * 100))}%`
-  const top = `${Math.max(0, Math.min(100, (cursor.y / cursor.viewport.height) * 100))}%`
+  const left = zoom ? `${cursor.x * zoom}px` : `${Math.max(0, Math.min(100, (cursor.x / cursor.viewport.width) * 100))}%`
+  const top = zoom ? `${cursor.y * zoom}px` : `${Math.max(0, Math.min(100, (cursor.y / cursor.viewport.height) * 100))}%`
   return <div className="agent-cursor-layer" aria-hidden data-agent-cursor>
     <div className={`agent-cursor${shown ? ' is-shown' : ''}${glides ? ' glides' : ''}`} style={{ left, top, ['--agent-cursor-glide' as string]: `${AGENT_CURSOR_GLIDE_MS}ms` }}>
       {shown && agentCursorClicks(cursor.action) && <span key={cursor.at} className="agent-cursor-ripple" />}
