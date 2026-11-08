@@ -26,7 +26,8 @@ import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 
 import { openSurface } from './lib/surfaces'
-import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
+import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
+import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './lib/panelSplit'
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
@@ -42,26 +43,21 @@ const MIN_THREADS_SIDEBAR_WIDTH = 180
 
 const MAX_THREADS_SIDEBAR_WIDTH = 480
 
-// Keep in sync with `.sidebar { min-width }` in app.css
-const SIDEBAR_MIN_WIDTH_PX = 280
-
 const threadsSidebarMaxWidth = (): number =>
   Math.max(MIN_THREADS_SIDEBAR_WIDTH, Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4))
 
 /**
- * The conversation pane's left edge, width and bounds in pixels. `.sidebar { width: N% }` resolves
- * against .app-content, so percentages are computed from that same width; deriving it from
- * window.innerWidth minus the threads sidebar makes the pane outrun the cursor. Dragging measures
- * from the pane's own left edge, so the handle tracks the cursor whatever sits to its left. The
- * bounds match the sidebar CSS (min-width: 280px, max-width: 60%).
+ * The row the conversation shares with the panel area: their two widths, without the divider between
+ * them, and the panel area's right edge. The panel area keeps a width in pixels within this row's
+ * bounds (lib/panelSplit).
  */
-function conversationPane(container: HTMLElement | null, sidebar: HTMLElement | null) {
-  if (!container || !sidebar) return null
-  const containerWidth = container.clientWidth
-  if (containerWidth <= 0) return null
-  const { left, width } = sidebar.getBoundingClientRect()
-  const max = containerWidth * 0.6
-  return { containerWidth, left, width, max, min: Math.min(SIDEBAR_MIN_WIDTH_PX, max) }
+function conversationRow(sidebar: HTMLElement | null) {
+  const main = sidebar?.parentElement?.querySelector<HTMLElement>(':scope > .main-area')
+  if (!sidebar || !main) return null
+  const { right, width: mainWidth } = main.getBoundingClientRect()
+  const width = sidebar.getBoundingClientRect().width + mainWidth
+  const workspaceWidth = sidebar.parentElement?.clientWidth ?? 0
+  return width > 0 && workspaceWidth > 0 ? { right, width, mainWidth, workspaceWidth } : null
 }
 
 // Event delivery is primary. This low-frequency reconciliation covers renderer
@@ -82,7 +78,7 @@ export default function App() {
     window.addEventListener('mousse:open-usage', openUsage)
     return () => window.removeEventListener('mousse:open-usage', openUsage)
   }, [setUsageOpen])
-  const sidebarWidth = useAppStore((s) => s.sidebarWidth)
+  const mainAreaWidth = useAppStore((s) => s.mainAreaWidth)
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
   const overlayOpen = useAppStore((s) => s.settingsOpen)
@@ -99,7 +95,7 @@ export default function App() {
     return () => clearInterval(timer)
   }, [profileId, profileReady, sidebarMode, threadsSidebarView])
 
-  const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
+  const setMainAreaWidth = useAppStore((s) => s.setMainAreaWidth)
 
   const applyThreadMessages = useAppStore((s) => s.applyThreadMessages)
 
@@ -153,7 +149,6 @@ export default function App() {
     clientX: number | null
     frame: number | null
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
-  const appContentRef = useRef<HTMLDivElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -437,11 +432,11 @@ export default function App() {
       return
     }
     if (kind === 'main') {
-      const pane = conversationPane(appContentRef.current, sidebarRef.current)
-      if (!pane) return
-      setSidebarWidth((Math.min(pane.max, Math.max(pane.min, clientX - pane.left)) / pane.containerWidth) * 100)
+      // The divider stops where the conversation reaches its 280px minimum or its 60% share.
+      const row = conversationRow(sidebarRef.current)
+      if (row) setMainAreaWidth(mainAreaWidthAtPointer(clientX, row))
     }
-  }, [setSidebarWidth, setThreadsSidebarWidth])
+  }, [setMainAreaWidth, setThreadsSidebarWidth])
 
   // Both dividers are keyboard separators: Left/Right move 16px, Home/End go to the bounds.
   const onThreadsResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -452,11 +447,14 @@ export default function App() {
   }
 
   const onMainResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const pane = conversationPane(appContentRef.current, sidebarRef.current)
-    const next = pane && resizerKeyTarget(event.key, pane.width, pane.min, pane.max)
-    if (!pane || next == null) return
+    // Keys move the divider: Right widens the conversation, so it narrows the panel area.
+    const row = conversationRow(sidebarRef.current)
+    if (!row) return
+    const { min, max } = mainAreaWidthBounds(row)
+    const conversation = resizerKeyTarget(event.key, row.width - row.mainWidth, row.width - max, row.width - min)
+    if (conversation == null) return
     event.preventDefault()
-    setSidebarWidth((next / pane.containerWidth) * 100)
+    setMainAreaWidth(row.width - conversation)
   }
 
   const flushResize = useCallback(() => {
@@ -526,7 +524,7 @@ export default function App() {
       <TitleBar />
       <LinuxWindowResizeHandles />
 
-      <div className="app-content" ref={appContentRef}>
+      <div className="app-content">
 
         {/* The closed sidebar peeks from its edge strip only; reaching for the rail moves nothing. */}
         <NavigationRail key={`${profileId}:${bootstrapAttempt}`} />
@@ -587,7 +585,7 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
+          style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : undefined}
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
@@ -612,20 +610,20 @@ export default function App() {
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
             onPointerDown={(event) => startResize('main', event)}
             onKeyDown={onMainResizerKey}
-            onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+            onDoubleClick={() => setMainAreaWidth(null)}
             role="separator"
             tabIndex={0}
             aria-orientation="vertical"
             aria-label="Resize panels"
-            // The conversation's share of the workspace, in percent; CSS caps it at 60.
-            aria-valuenow={Math.round(sidebarWidth)}
-            aria-valuemin={0}
-            aria-valuemax={60}
+            // The panel area's saved width in pixels (null: the default); the layout clamps it to the window.
+            aria-valuenow={mainAreaWidth ?? undefined}
           />
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area">
+        <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area"
+          // Beside it: the threads sidebar and its divider when open, and the 1px divider before it.
+          style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
           <MainViewPanel />
         </KeepMounted>

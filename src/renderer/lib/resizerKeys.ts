@@ -3,8 +3,6 @@ export const RESIZER_KEY_STEP = 16
 
 /** Default widths a double-click on a divider restores. */
 export const DEFAULT_THREADS_SIDEBAR_WIDTH = 260
-/** The conversation's share of the workspace, in percent. */
-export const DEFAULT_SIDEBAR_WIDTH = 30
 
 /**
  * The width a key moves a vertical divider to, or undefined for keys that do not resize.
