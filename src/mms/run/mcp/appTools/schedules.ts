@@ -73,7 +73,8 @@ const FORBIDDEN_INPUTS: Readonly<Record<string, string>> = {
   createdBy: 'createdBy is set by Mousse.',
   expiresAt: 'When a job ends is set by Mousse; only a person extends it.',
   projectId: 'A job takes the project of your own thread; you cannot name another.',
-  createThread: 'createThread is not available to agents: leave threadId out for a thread per run.'
+  createThread: 'createThread is not available to agents: leave threadId out for a thread per run.',
+  agent: 'A saved agent is chosen by a person; a job you create runs as you, no wider.'
 }
 
 function refuseForbidden(args: Record<string, unknown>): void {

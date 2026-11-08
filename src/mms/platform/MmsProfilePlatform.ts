@@ -24,6 +24,8 @@ import { MmsWorkflowAgents } from './MmsWorkflowAgents'
 import { MmsWorkflowBrowser } from './MmsWorkflowBrowser'
 import { mergeWorkflowAgentPreparation } from '../../shared/workflows/agentExecutionBindings'
 import { MmsAgentExecutionService } from './MmsAgentExecutionService'
+import { createScheduledAgentRunner } from '../automations/scheduledAgent'
+import type { ScheduledAgentRunner } from '../orchestrator/OrchestratorService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
 import { MmsBrowserService } from '../browser/MmsBrowserService'
@@ -51,6 +53,7 @@ export class MmsProfilePlatform {
   readonly chats: AgentChatService
   readonly chatResources: ChatResourceService
   readonly agentRuns: MmsAgentExecutionService
+  readonly scheduledAgentRunner: ScheduledAgentRunner
   readonly browserArtifacts: BrowserArtifactService
   readonly workerArtifactRoot: string
   private browserAssembly?: MmsBrowserService
@@ -72,6 +75,11 @@ export class MmsProfilePlatform {
     )
     this.models = new SharedAgentModelLookup(() => services.harness)
     this.chats = new AgentChatService({ services, registry: this.agentDefinitions,
+      resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
+        integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })
+    // A scheduled job whose Who is a saved agent runs it through the same resolver the chats use. The profile hands
+    // it to the orchestrator once that exists.
+    this.scheduledAgentRunner = createScheduledAgentRunner({ services, registry: this.agentDefinitions,
       resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
         integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })
     this.chatResources = createMmsChatResourceService(services, (groupId) => this.chats.resourceBinding(groupId))

@@ -128,7 +128,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -469,6 +469,7 @@ export class ScheduledJobStore {
       projectId: input.projectId,
       createThread: input.createThread,
       selection: input.selection,
+      ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,
@@ -525,6 +526,8 @@ export class ScheduledJobStore {
         const tooWide = permissionAboveCeiling(updated.permissionMode, updated.permissionCeiling)
         if (tooWide) throw new JobPermissionRefused(tooWide)
       }
+      // A workflow runs itself: a prompt that becomes a workflow drops the saved agent.
+      if (updated.agent && isWorkflowPrompt(updated.prompt)) delete updated.agent
       // A schedule edit that adds or removes the clock moves the next run with it.
       if (patch.schedule && !('nextRunAt' in patch) && (patch.schedule.kind === 'manual') !== (jobs[index].schedule.kind === 'manual')) {
         updated.nextRunAt = computeNextRun(patch.schedule)

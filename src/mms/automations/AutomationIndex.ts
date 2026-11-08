@@ -28,6 +28,8 @@ export interface AutomationIndexSources {
   /** The mode a job's run takes from its thread: the bound thread's, else the mode new threads start in. */
   threadMode(threadId: string | undefined): PermissionMode
   bots?(): BotAutomationSchedule[]
+  /** A saved agent's name, for a job whose Who is one; undefined when it is gone. */
+  savedAgentName?(definitionId: string): string | undefined
   watchStatus?(threadId: string): { state: 'watching' | 'paused' | 'ended' | 'off'; nextCheckAt: string | null }
   computerName?: string
   timeZone?: string
@@ -40,6 +42,14 @@ export function localTimeZone(): string {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
   } catch {
     return 'UTC'
+  }
+}
+
+function savedAgentName(definitionId: string, sources: AutomationIndexSources): string {
+  try {
+    return sources.savedAgentName?.(definitionId) ?? 'Removed agent'
+  } catch {
+    return 'Removed agent'
   }
 }
 
@@ -59,7 +69,9 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const workflow = isWorkflowPrompt(job.prompt)
   const who: AutomationWho = workflow
     ? { kind: 'workflow', name: job.prompt.trim().split(/\s+/)[0] ?? '/' }
-    : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
+    : job.agent
+      ? { kind: 'saved_agent', name: savedAgentName(job.agent.definitionId, sources), definitionId: job.agent.definitionId }
+      : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
   const trigger = job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
   const paused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
   const active = jobActiveRun(job, now)
@@ -69,7 +81,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const ask = job.liveStatus === 'needs_answer' ? { text: 'Waiting for your answer', ...(job.liveThreadId ? { threadId: job.liveThreadId } : {}) } : undefined
   const creator = job.createdBy ? sources.thread(job.createdBy.threadId) : undefined
   const projectName = job.projectId ? sources.projectName(job.projectId) : undefined
-  const may = jobEffectiveMay(job, sources.threadMode(job.threadId))
+  // A saved agent keeps to what it may use (its grants), not a permission mode.
+  const may = job.agent ? undefined : jobEffectiveMay(job, sources.threadMode(job.threadId))
   const attention = attentionOf({ ...(ask ? { ask } : {}), ...(last ? { last } : {}) })
   return {
     key: `job:${job.id}`,
@@ -89,6 +102,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     ...(last ? { last } : {}),
     runs,
     ...(may ? { may } : {}),
+    ...(job.agent && !workflow ? { mayIsGrant: true as const } : {}),
     tellMe: tellMeOf(job),
     ...(job.createdBy ? { addedBy: { threadId: job.createdBy.threadId, ...(creator?.name ? { threadName: creator.name } : {}) } } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),

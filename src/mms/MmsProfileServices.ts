@@ -760,6 +760,8 @@ export class MmsProfileServices {
       }
     })
 
+    // A job whose Who is a saved agent runs it through the profile's agent library.
+    this.orchestrator.setScheduledAgentRunner(this.platform.scheduledAgentRunner)
     this.scheduledStore = new ScheduledJobStore(config)
     this.scheduled = new ScheduledJobService(
       {
@@ -1242,6 +1244,13 @@ export class MmsProfileServices {
       threads: () => this.threads.listAllThreads(),
       projectName: (id) => this.projects.getProject(id)?.name,
       threadMode: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
+      savedAgentName: (definitionId) => {
+        try {
+          return this.platform.agentDefinitions.get(definitionId).settings.identity.name
+        } catch {
+          return undefined
+        }
+      },
       ...(bots ? { bots: () => bots.service.automationSchedules() } : {}),
       watchStatus: (threadId) => this.pullRequestWatch.status(threadId)
     })

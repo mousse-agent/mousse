@@ -5,7 +5,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  */
 
 import { isExpiryPreset } from '../../shared/threadExpiry'
-import { isTellMe, type ChatImageAttachment, type ChatMode, type ScheduledJobWorkspace, type TellMe } from '../../shared/types'
+import { isTellMe, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
@@ -748,6 +748,7 @@ export type CreateScheduledJobInputValidated = {
   projectId?: string
   createThread?: boolean
   selection?: ModelOverride
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
@@ -792,6 +793,13 @@ export function asTellMe(v: unknown, name = 'tellMe'): TellMe {
   return v
 }
 
+/** A job's saved agent: `{ definitionId }` and nothing else. */
+export function asJobAgent(v: unknown): ScheduledJobAgent {
+  const o = asPlainObject(v, 'agent')
+  for (const key of Object.keys(o)) if (key !== 'definitionId') throw new Error(`agent.${key} is not allowed`)
+  return { definitionId: asString(o.definitionId, 'agent.definitionId', 256) }
+}
+
 export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputValidated {
   const o = asPlainObject(v, 'input')
   const input: CreateScheduledJobInputValidated = {
@@ -805,6 +813,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (projectId) input.projectId = projectId
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
   if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
+  if (o.agent !== undefined) input.agent = asJobAgent(o.agent)
   if (o.mode !== undefined) input.mode = asJobMode(o.mode)
   if (o.permissionMode !== undefined) input.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
@@ -823,6 +832,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'projectId',
     'createThread',
     'selection',
+    'agent',
     'mode',
     'permissionMode',
     'workspace',
@@ -844,6 +854,7 @@ export function asScheduledJobPatch(v: unknown): {
   projectId?: string | null
   createThread?: boolean
   selection?: ModelOverride | null
+  agent?: ScheduledJobAgent | null
   mode?: 'agent' | 'plan' | null
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
@@ -860,6 +871,7 @@ export function asScheduledJobPatch(v: unknown): {
     'projectId',
     'createThread',
     'selection',
+    'agent',
     'mode',
     'permissionMode',
     'workspace',
@@ -889,6 +901,8 @@ export function asScheduledJobPatch(v: unknown): {
   if (o.workspace === null) patch.workspace = null
   else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
   if (o.tellMe !== undefined) patch.tellMe = asTellMe(o.tellMe)
+  if (o.agent === null) patch.agent = null
+  else if (o.agent !== undefined) patch.agent = asJobAgent(o.agent)
   if (o.repeat === null) patch.repeat = null
   else if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')

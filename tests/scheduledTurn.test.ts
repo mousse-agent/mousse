@@ -1753,4 +1753,45 @@ describe('scheduled jobs run as turns', () => {
       expect(w.jobs.getJob(job.id)).toMatchObject({ lastStatus: 'error', lastError: expect.stringContaining('Usage limit reached 4 times in a row') })
     })
   })
+
+  describe('a job whose Who is a saved agent', () => {
+    it('runs the agent on the occurrence thread, records who ran it, and marks a run after the agent was published again', async () => {
+      const claude = claudeAdapter((input) => `claude: ${input.prompt}`)
+      const w = boot([claude])
+      const project = projectOf(w)
+      const calls: Array<{ definitionId: string; threadId: string; prompt: string; workspaceRoot: string }> = []
+      let revision = 'rev-1'
+      w.orch.setScheduledAgentRunner(async (input) => {
+        calls.push({ definitionId: input.definitionId, threadId: input.threadId, prompt: input.prompt, workspaceRoot: input.workspaceRoot })
+        return { status: 'completed', text: `reviewer: ${input.prompt}`, agent: { definitionId: input.definitionId, name: 'PR reviewer', revision } }
+      })
+      const job = addJob(w, { projectId: project.id, createThread: true, agent: { definitionId: 'agent-1' } })
+
+      await runNow(w, job)
+      const first = await finished(w, job.id)
+      expect(first).toMatchObject({ status: 'ok', agent: { definitionId: 'agent-1', name: 'PR reviewer', revision: 'rev-1' } })
+      expect(first.agent?.changed).toBeUndefined()
+      expect(calls).toEqual([{ definitionId: 'agent-1', threadId: first.threadId, prompt: 'write the report', workspaceRoot: expect.any(String) }])
+      // No model ran it: the saved agent did.
+      expect(claude.turns).toHaveLength(0)
+      // The prompt and the agent's reply are the thread's messages.
+      const messages = w.orch.getMessages(first.threadId!)
+      expect(messages.map((message) => [message.role, message.content])).toEqual([['user', 'write the report'], ['assistant', 'reviewer: write the report']])
+
+      revision = 'rev-2'
+      await runNow(w, w.jobs.getJob(job.id)!)
+      await waitFor(() => (w.jobs.getJob(job.id)!.runHistory?.length ?? 0) === 2 && !w.jobs.getJob(job.id)!.runClaim, 'the second run')
+      expect(w.jobs.getJob(job.id)!.runHistory!.at(-1)!.agent).toMatchObject({ revision: 'rev-2', changed: true })
+    })
+
+    it('fails the run with what to do when the agent cannot run', async () => {
+      const w = boot([claudeAdapter(() => 'unused')])
+      const project = projectOf(w)
+      w.orch.setScheduledAgentRunner(async () => { throw new Error('Publish PR reviewer before an automation runs it.') })
+      const job = addJob(w, { projectId: project.id, createThread: true, agent: { definitionId: 'agent-1' } })
+      await runNow(w, job)
+      const record = await finished(w, job.id)
+      expect(record).toMatchObject({ status: 'error', error: 'Publish PR reviewer before an automation runs it.' })
+    })
+  })
 })

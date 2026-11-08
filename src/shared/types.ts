@@ -66,6 +66,22 @@ export interface ScheduledJobRunRecord {
   usageLimitUntil?: string
   /** The job was created by an agent (`ScheduledJob.createdBy`); set when the record is saved. */
   agentCreated?: true
+  /** The saved agent that ran this occurrence, at the published revision it ran. */
+  agent?: ScheduledRunAgent
+}
+
+/** A saved agent (an agent definition) as one run used it. */
+export interface ScheduledRunAgent {
+  definitionId: string
+  name: string
+  revision: string
+  /** The agent was published again since the run before it that used this agent. */
+  changed?: true
+}
+
+/** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */
+export interface ScheduledJobAgent {
+  definitionId: string
 }
 
 /**
@@ -193,6 +209,8 @@ export interface ScheduledJob {
   waitingBehind?: { threadId: string; since: string }
   /** Provider instance and model every run uses; absent = the thread's model (bound) or the profile default. */
   selection?: ModelOverride
+  /** A saved agent does the work instead of a model: each run takes its latest published revision. */
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
@@ -267,6 +285,7 @@ export interface CreateScheduledJobInput {
   projectId?: string
   createThread?: boolean
   selection?: ModelOverride
+  agent?: ScheduledJobAgent
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   permissionMode?: PermissionMode
@@ -289,6 +308,8 @@ export interface ScheduledJobPatch {
   projectId?: string | null
   createThread?: boolean
   selection?: ModelOverride | null
+  /** `null` clears it: a model (the selection, else the default agent) does the work again. */
+  agent?: ScheduledJobAgent | null
   mode?: 'agent' | 'plan' | null
   /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
   permissionMode?: PermissionMode | null

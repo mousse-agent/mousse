@@ -2875,6 +2875,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.threadId !== undefined || checked.threadId ? { threadId: checked.threadId ?? (patch.threadId === null ? undefined : patch.threadId) } : {}),
         ...(patch.projectId !== undefined ? { projectId: patch.projectId === null ? undefined : patch.projectId } : {}),
         ...(patch.selection !== undefined ? { selection: patch.selection === null ? undefined : checked.selection ?? patch.selection } : {}),
+        ...(patch.agent !== undefined ? { agent: patch.agent === null ? undefined : patch.agent } : {}),
         ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),

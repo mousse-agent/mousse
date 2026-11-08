@@ -19,6 +19,8 @@ import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
 import { AutomationRow, glyphOf, PausePicker } from './AutomationRows'
 import { CreateRow } from './CreateRow'
+import { useAutomationLibrary } from './WhoDoPickers'
+import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 import { AGENT_JOB_LIMIT_DEFAULTS } from '../../../shared/agentJobLimits'
@@ -82,6 +84,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const webhookApi = useMemo(browserWebhookApi, [])
   const viewerZone = useMemo(viewerTimeZone, [])
   const activeProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === state.activeThreadId)?.projectId ?? '')
+  const profileId = useAppStore((state) => state.profileId)
+  const { library, reload: reloadLibrary } = useAutomationLibrary(profileId)
   // ⌘N is New thread everywhere else; on this page it opens the create row.
   const createTitle = useShortcutTitle('New automation', 'thread.new')
 
@@ -127,13 +131,14 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return () => { offJobs(); offStatus(); offBots() }
   }, [refresh, loadCatalog])
 
-  // The page polls only while it is showing.
+  // The page polls only while it is showing; the Library may have changed while it was away.
   useEffect(() => {
     if (!active) return
+    reloadLibrary()
     void refresh()
     const timer = setInterval(() => { void refresh() }, POLL_MS)
     return () => clearInterval(timer)
-  }, [active, refresh])
+  }, [active, refresh, reloadLibrary])
 
   // ⌘N is page-scoped: while focus is on this page, the key press opens the create row. The palette and the menu
   // keep New thread, and anywhere else ⌘N is New thread too.
@@ -156,6 +161,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const defaultAgent = settings ? agentNameOf(providers, { instanceId: settings.provider.instanceId, llmProvider: settings.provider.llmProvider }) ?? 'Default agent' : 'Default agent'
   const modelName = (item: AutomationItem) => {
     const job = jobOf(item)
+    if (item.who.kind === 'saved_agent') return item.who.name
     if (item.who.kind !== 'agent') return undefined
     return agentNameOf(providers, job?.selection) ?? (job?.selection ? job.selection.model : defaultAgent)
   }
@@ -323,7 +329,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             item={detailItem}
             initial={initial}
             catalog={catalog}
-            whoName={modelName(detailItem) ?? defaultAgent}
+            library={library}
+            defaultName={defaultAgent}
+            profileId={profileId}
             viewerZone={viewerZone}
             save={async (draft) => {
               const change = patchOf(initial, draft, catalog)
@@ -377,14 +385,21 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       <div className="automations-scroll">
         <div className="automations-column" ref={listRef}>
           <CreateRow
+            profileId={profileId}
             catalog={catalog}
-            whoName={defaultAgent}
+            library={library}
+            defaultName={defaultAgent}
             owner={owner}
             initialProjectId={activeProjectId}
             defaultMay={defaultMay(profileMode, ceiling)}
             ceiling={ceiling}
             isGitRepo={async (projectId) => (await window.mousse.git.status({ projectId, workspaceThreadId: null })).isRepo}
             create={create}
+            addBotSchedule={async (botId, when, prompt) => {
+              await createPersonalBotsClient(window.mousse.platformRequest).addSchedule(botId, when, prompt)
+              await refresh()
+            }}
+            onOpenBot={openBot}
             openRequest={createRequest}
             title={createTitle}
           />

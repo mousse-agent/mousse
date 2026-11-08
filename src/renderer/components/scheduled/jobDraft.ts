@@ -83,6 +83,8 @@ export interface JobDraft {
   minutes: string
   expr: string
   modelKey: string
+  /** The saved agent that does the work (`ScheduledJob.agent`); `''` when a model does. */
+  agentId: string
   /** The model of a job whose provider no longer lists it; kept so saving without touching it changes nothing. */
   staleSelection?: ModelOverride
   mode: '' | 'agent' | 'plan'
@@ -113,6 +115,7 @@ export function newDraft(): JobDraft {
     minutes: '30',
     expr: '0 9 * * *',
     modelKey: '',
+    agentId: '',
     mode: '',
     permissionMode: '',
     projectId: '',
@@ -136,6 +139,7 @@ export function draftFromJob(job: ScheduledJob, catalog: ScheduledCatalog, provi
     minutes: job.schedule.kind === 'interval' ? String(job.schedule.minutes ?? 30) : base.minutes,
     expr: job.schedule.kind === 'cron' ? job.schedule.expr ?? base.expr : base.expr,
     modelKey,
+    agentId: job.agent?.definitionId ?? '',
     ...(job.selection && !known ? { staleSelection: job.selection } : {}),
     mode: job.mode ?? '',
     permissionMode: job.permissionMode ? normalizePermissionMode(job.permissionMode) : '',
@@ -306,6 +310,7 @@ export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCa
   if (draft.prompt.trim() !== initial.prompt.trim()) patch.prompt = draft.prompt.trim()
   if (!sameSchedule(initial, draft)) patch.schedule = scheduleOf(draft)
   if (draft.modelKey !== initial.modelKey) patch.selection = choiceOf(draft, catalog)?.selection ?? null
+  if (draft.agentId !== initial.agentId) patch.agent = draft.agentId ? { definitionId: draft.agentId } : null
   if (draft.mode !== initial.mode) patch.mode = draft.mode || null
   // A prompt that became a workflow loses its permission mode: workflows do not run under one.
   const wantedPermission = takesPermissionMode(draft) ? draft.permissionMode : ''

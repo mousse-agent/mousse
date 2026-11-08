@@ -156,6 +156,16 @@ describe('the automation index', () => {
     expect(watchItem).toMatchObject({ trigger: 'thread_event', notifyOnly: true, whenText: 'PR #742', link: { kind: 'thread', threadId: 't-watch' } })
   })
 
+  it('names a saved agent as Who, with its May its own grants, and a gone one as Removed agent', () => {
+    const index = buildAutomationIndex({
+      ...sources({ jobs: [job({ agent: { definitionId: 'agent-1' }, permissionMode: 'full', permissionCeiling: 'full' }), job({ id: 'j2', agent: { definitionId: 'gone' } })] }),
+      savedAgentName: (id) => (id === 'agent-1' ? 'PR reviewer' : undefined)
+    })
+    expect(index.items[0]).toMatchObject({ who: { kind: 'saved_agent', name: 'PR reviewer', definitionId: 'agent-1' }, mayIsGrant: true })
+    expect(index.items[0]!.may).toBeUndefined()
+    expect(index.items[1]!.who).toMatchObject({ kind: 'saved_agent', name: 'Removed agent' })
+  })
+
   it('names a source it cannot read instead of showing it empty', () => {
     const index = buildAutomationIndex({ ...sources({}), bots: () => { throw new Error('bots.db is locked') } })
     expect(index.unavailable).toEqual(['bots'])

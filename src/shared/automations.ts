@@ -45,6 +45,10 @@ export interface AutomationRun {
   detail?: string
   /** The thread the run's turn ran on; opening it lets the person continue the work. */
   threadId?: string
+  /** Who actually ran it: the saved agent or the model the run's binding used (not the job's field). */
+  ranBy?: string
+  /** The saved agent was published again since the run before this one. */
+  agentChanged?: true
 }
 
 /** How an occurrence that ended maps onto the contract; null while it waits (a usage limit, a waiting workflow). */
@@ -66,7 +70,13 @@ const WORKFLOW_ASK = /^State: waiting-(approval|input)$/m
 
 /** One of a job's run records in the contract. */
 export function jobRecordRun(record: ScheduledJobRunRecord): AutomationRun {
-  const base = { at: record.runAt, ...(record.threadId ? { threadId: record.threadId } : {}) }
+  const ranBy = record.agent?.name ?? record.selection?.model
+  const base = {
+    at: record.runAt,
+    ...(record.threadId ? { threadId: record.threadId } : {}),
+    ...(ranBy ? { ranBy } : {}),
+    ...(record.agent?.changed ? { agentChanged: true as const } : {})
+  }
   const ended = occurrenceOutcome(record.status, record.silent)
   if (ended) return { ...base, state: ended, ...(record.error ? { detail: record.error } : {}) }
   if (record.status === 'queued') return { ...base, state: 'waiting', reason: 'behind' }
@@ -135,6 +145,7 @@ export interface ScheduledRunEnded {
 /** Who does the work: an agent (the job's model, or the default agent), or a bot with its look. */
 export type AutomationWho =
   | { kind: 'agent'; name: string }
+  | { kind: 'saved_agent'; name: string; definitionId: string }
   | { kind: 'bot'; name: string; look: BotLook }
   | { kind: 'workflow'; name: string }
   | { kind: 'none'; name: string }
@@ -175,9 +186,9 @@ export interface AutomationItem {
   last?: AutomationRun
   /** Recent runs, newest first. */
   runs: AutomationRun[]
-  /** The effective permission: the strictest of the automation's mode, its ceiling and its thread's. Absent for a workflow, a bot or a watch. */
+  /** The effective permission: the strictest of the automation's mode, its ceiling and its thread's. Absent for a bot, a saved agent or a watch. */
   may?: PermissionMode
-  /** A bot's May is its grant, shown in its chat. */
+  /** A bot's May is its grant, shown in its chat; a saved agent's is what it may use, set in the Library. */
   mayIsGrant?: true
   tellMe?: TellMe
   addedBy?: { threadId: string; threadName?: string }

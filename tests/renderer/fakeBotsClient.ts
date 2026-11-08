@@ -104,6 +104,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.details[botId] = next
       return next
     })),
+    addSchedule: vi.fn((botId, when, prompt) => record('addSchedule', [botId, when, prompt], () => detail(botId))),
     removeSchedule: vi.fn((botId, scheduleId) => record('removeSchedule', [botId, scheduleId], () => {
       const next = { ...detail(botId), runs: detail(botId).runs.filter((item) => item.id !== scheduleId) }
       fake.details[botId] = next

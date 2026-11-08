@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus } from '../../lib/icons'
 import { describePermissionMode, isStricter, PERMISSION_MODES, type PermissionMode } from '../../../shared/permissionMode'
-import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
+import type { BotSchedule } from '../../../shared/bots/personal/definition'
 import type { CreateScheduledJobInput, JobSchedule } from '../../../shared/types'
+import { workflowCommandText, workflowInputsReady } from '../../../shared/workflows/workflowCommand'
 import { Select, type SelectOption } from '../ui/Select'
 import { errorText, firstRunOf, nameFromPrompt, SCHEDULE_PRESETS } from '../scheduled/scheduledLabels'
 import type { ScheduledCatalog } from '../scheduled/jobDraft'
 import { parseWhen } from './parseWhen'
 import { nextBeforeAdd } from './automationTime'
 import { describeSchedule } from '../../../shared/scheduleLabel'
+import { botWhen, matchWorkflows, parseWhoKey, whoKey, whoName, whoOptions, type AutomationLibrary, type Who, type WorkflowChoice } from './whoDo'
+import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
 
 /** A When the person picked from the chip; it wins over what the text says. */
 type Picked = { key: string; schedule: JobSchedule; label: string }
@@ -19,10 +22,22 @@ const PICKS: Picked[] = [
   { key: 'manual', schedule: { kind: 'manual' }, label: 'On demand' }
 ]
 
+/** What another surface opens the create row with (Automate…, Repeat this…). */
+export interface CreatePrefill {
+  /** Bumped for each request, so the same prefill can open the row twice. */
+  nonce: number
+  prompt?: string
+  projectId?: string
+  who?: Who
+  workflowId?: string
+}
+
 export interface CreateRowProps {
+  profileId: string
   catalog: ScheduledCatalog
-  /** The default agent's name, for the Who chip (pickers come later). */
-  whoName: string
+  library: AutomationLibrary
+  /** The default agent's name, for the Who chip. */
+  defaultName: string
   /** The computer that will own it. */
   owner: { name: string; timeZone: string }
   /** The project the page opens with. */
@@ -33,35 +48,61 @@ export interface CreateRowProps {
   ceiling: PermissionMode
   isGitRepo: (projectId: string) => Promise<boolean>
   create: (input: CreateScheduledJobInput) => Promise<void>
+  /** With a bot as Who, the bot gets the schedule (it stays the bot's, and it runs in the bot's chat). */
+  addBotSchedule: (botId: string, when: BotSchedule['when'], prompt: string) => Promise<void>
+  /** Opens the bot's chat, where its grant (its May) is shown. */
+  onOpenBot: (botId: string) => void
   /** Bumped by ⌘N on the page: the row opens and takes focus. */
   openRequest: number
+  prefill?: CreatePrefill | null
   /** The quiet row's tooltip, with its shortcut. */
   title: string
 }
 
 /**
  * The quiet "+ New automation…" row. It opens in place: one line of what to do and when ("every weekday at 9 review
- * open PRs"), the When · Who · Where chips, and a line that says what Add authorizes: the next run on the owning
- * computer's clock and the effective May. An unread When says Choose when and keeps Add off.
+ * open PRs"), the When · Who · Do · Where chips, and a line that says what Add authorizes: the next run on the owning
+ * computer's clock and the effective May. An unread When says Choose when and keeps Add off. Typing `/` offers the
+ * workflows; a workflow swaps the prompt for its inputs and the Who chip goes, since a workflow runs itself.
  */
-export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMay, ceiling, isGitRepo, create, openRequest, title }: CreateRowProps) {
+export function CreateRow({ profileId, catalog, library, defaultName, owner, initialProjectId, defaultMay, ceiling, isGitRepo, create, addBotSchedule, onOpenBot, openRequest, prefill, title }: CreateRowProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [picked, setPicked] = useState<Picked | null>(null)
   const [projectId, setProjectId] = useState(initialProjectId)
   const [may, setMay] = useState<PermissionMode>(defaultMay)
+  const [who, setWho] = useState<Who>({ kind: 'default' })
+  const [workflowId, setWorkflowId] = useState('')
+  const [inputs, setInputs] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [repo, setRepo] = useState<Record<string, boolean>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
+  const workflow: WorkflowChoice | undefined = library.workflows.find((entry) => entry.id === workflowId)
+  const { fields, loading: fieldsLoading } = useWorkflowFields(profileId, workflow)
+
+  const focusInput = () => requestAnimationFrame(() => inputRef.current?.focus())
   useEffect(() => { setMay(defaultMay) }, [defaultMay])
   useEffect(() => { if (!open) setProjectId(initialProjectId) }, [initialProjectId, open])
   useEffect(() => {
     if (openRequest === 0) return
     setOpen(true)
-    requestAnimationFrame(() => inputRef.current?.focus())
+    focusInput()
   }, [openRequest])
+  // Automate… and Repeat this… open the row with what they carry.
+  useEffect(() => {
+    if (!prefill) return
+    setOpen(true)
+    setPicked(null)
+    setError(null)
+    setText(prefill.prompt ?? '')
+    setWho(prefill.who ?? { kind: 'default' })
+    setWorkflowId(prefill.workflowId ?? '')
+    setInputs({})
+    if (prefill.projectId !== undefined) setProjectId(prefill.projectId)
+    focusInput()
+  }, [prefill])
   useEffect(() => {
     if (!projectId || projectId in repo) return
     let live = true
@@ -72,35 +113,62 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
   const now = new Date()
   const parsed = useMemo(() => parseWhen(text, new Date()), [text])
   const when: Pick<Picked, 'schedule' | 'label'> | null = picked ?? (parsed.kind === 'ok' ? { schedule: parsed.schedule, label: parsed.label } : null)
-  const prompt = (picked || parsed.kind !== 'ok' ? text : parsed.prompt).trim()
-  const workflow = isWorkflowPrompt(prompt)
+  const typed = (picked || parsed.kind !== 'ok' ? text : parsed.prompt).trim()
+  const suggestions = workflow ? [] : matchWorkflows(text, library.workflows)
+  const prompt = workflow ? workflowCommandText(workflow.slug, inputs, fields) : typed
+  const bot = who.kind === 'bot' && !workflow ? library.bots.find((entry) => entry.id === who.id) : undefined
+  const botSchedule = bot && when ? botWhen(when.schedule) : null
+  const savedAgent = who.kind === 'agent' && !workflow ? library.agents.find((entry) => entry.id === who.id) : undefined
   const first = when ? firstRunOf(when.schedule, now) : null
-  const canAdd = Boolean(when && prompt && !busy)
+  const ready = workflow ? !fieldsLoading && workflowInputsReady(fields, inputs) : Boolean(typed) && !typed.startsWith('/')
+  const blocked = botSchedule && !botSchedule.ok ? botSchedule.reason : null
+  const canAdd = Boolean(when && ready && !busy && !blocked)
   const whenTitle = !when && parsed.kind === 'ambiguous' ? parsed.reason : !when ? 'Say when in the text, like "every weekday at 9", or pick one' : when.label
 
+  const reset = () => {
+    setText('')
+    setPicked(null)
+    setWho({ kind: 'default' })
+    setWorkflowId('')
+    setInputs({})
+  }
   const close = () => {
     setOpen(false)
     setError(null)
   }
+  const chooseWorkflow = (id: string) => {
+    setWorkflowId(id)
+    setInputs({})
+    // The `/slug` typed to find it goes; the rest of the line is When.
+    if (id && /^\/\S*$/.test(text.trim())) setText('')
+    setError(null)
+    focusInput()
+  }
 
   const add = async () => {
-    if (!when || !prompt) return
+    if (!when || !ready || blocked) return
     setBusy(true)
     setError(null)
     try {
-      const gitProject = projectId ? (repo[projectId] ?? await isGitRepo(projectId).catch(() => false)) : false
-      await create({
-        name: nameFromPrompt(prompt) || 'Automation',
-        prompt,
-        schedule: when.schedule,
-        createThread: true,
-        ...(projectId ? { projectId } : {}),
-        ...(projectId && gitProject ? { workspace: { kind: 'newWorktree' as const } } : {}),
-        ...(!workflow ? { permissionMode: may } : {}),
-        tellMe: 'news'
-      })
-      setText('')
-      setPicked(null)
+      if (bot && botSchedule?.ok) {
+        await addBotSchedule(bot.id, botSchedule.when, prompt)
+      } else {
+        const gitProject = projectId ? (repo[projectId] ?? await isGitRepo(projectId).catch(() => false)) : false
+        const model = who.kind === 'model' && !workflow ? catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key) : undefined
+        await create({
+          name: workflow ? workflow.name : nameFromPrompt(prompt) || 'Automation',
+          prompt,
+          schedule: when.schedule,
+          createThread: true,
+          ...(projectId ? { projectId } : {}),
+          ...(projectId && gitProject ? { workspace: { kind: 'newWorktree' as const } } : {}),
+          ...(savedAgent ? { agent: { definitionId: savedAgent.id } } : {}),
+          ...(model ? { selection: model.selection } : {}),
+          ...(!workflow && !savedAgent ? { permissionMode: may } : {}),
+          tellMe: 'news'
+        })
+      }
+      reset()
       setOpen(false)
     } catch (cause) {
       setError(errorText(cause))
@@ -116,7 +184,7 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
         className="automation-create-quiet"
         data-testid="automation-create"
         title={title}
-        onClick={() => { setOpen(true); requestAnimationFrame(() => inputRef.current?.focus()) }}
+        onClick={() => { setOpen(true); focusInput() }}
       >
         <Plus size={14} aria-hidden="true" /> New automation…
       </button>
@@ -128,6 +196,8 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
     ...catalog.projects.map((project) => ({ value: project.id, label: project.name }))
   ]
   const mayOptions: SelectOption<PermissionMode>[] = PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode), disabled: isStricter(ceiling, mode) }))
+  const whoKeyNow = whoKey(who)
+  const naming = { defaultName, models: catalog.models, library }
 
   return (
     <div
@@ -147,16 +217,30 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
         className="automation-create-input"
         data-testid="automation-create-input"
         aria-label="New automation"
-        placeholder="every weekday at 9 review open PRs"
+        placeholder={workflow ? `When does /${workflow.slug} run? every weekday at 9` : 'every weekday at 9 review open PRs · / for a workflow'}
         value={text}
         onChange={(event) => { setText(event.target.value); setError(null) }}
         onKeyDown={(event) => {
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
-            if (canAdd) void add()
+            if (suggestions.length === 1) chooseWorkflow(suggestions[0]!.id)
+            else if (canAdd) void add()
           }
         }}
       />
+      {suggestions.length ? (
+        <ul className="automation-do-suggestions" role="listbox" aria-label="Workflows" data-testid="automation-do-suggestions">
+          {suggestions.map((entry) => (
+            <li key={entry.id} role="option" aria-selected="false">
+              <button type="button" className="automation-do-suggestion" title={entry.description ?? entry.name} onClick={() => chooseWorkflow(entry.id)}>
+                <span className="scheduled-mono">/{entry.slug}</span>
+                <span className="automation-do-suggestion-name">{entry.name}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {workflow ? <WorkflowInputs fields={fields} values={inputs} loading={fieldsLoading} onChange={(key, value) => setInputs((current) => ({ ...current, [key]: value }))} /> : null}
       <div className="automation-create-chips">
         <Select
           ariaLabel="When"
@@ -171,17 +255,29 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
           renderValue={() => <span data-testid="automation-create-when">{when ? when.label : 'Choose when'}</span>}
           onChange={(key) => setPicked(PICKS.find((pick) => pick.key === key) ?? null)}
         />
-        <span className="automation-chip readonly" title={workflow ? 'A workflow runs itself' : 'Your default agent'} data-testid="automation-create-who">
-          {workflow ? prompt.split(/\s+/)[0] : whoName}
-        </span>
-        <Select
-          ariaLabel="Where"
-          className="automation-chip-select"
-          size="small"
-          value={projectId}
-          options={projectOptions}
-          onChange={setProjectId}
-        />
+        {workflow ? null : (
+          <Select
+            ariaLabel="Who"
+            className="automation-chip-select"
+            size="small"
+            value={whoKeyNow}
+            options={whoOptions({ ...naming, withBots: true })}
+            title="Who does it: your default agent, a model, a saved agent or a bot"
+            renderValue={() => <span data-testid="automation-create-who">{whoName(who, naming)}</span>}
+            onChange={(key) => setWho(parseWhoKey(key))}
+          />
+        )}
+        <DoPicker value={workflowId} workflows={library.workflows} onChange={chooseWorkflow} />
+        {bot ? null : (
+          <Select
+            ariaLabel="Where"
+            className="automation-chip-select"
+            size="small"
+            value={projectId}
+            options={projectOptions}
+            onChange={setProjectId}
+          />
+        )}
         {picked ? <button type="button" className="scheduled-link-btn" onClick={() => setPicked(null)} title="Read When from the text again">Use text</button> : null}
       </div>
       <div className="automation-create-line">
@@ -192,29 +288,39 @@ export function CreateRow({ catalog, whoName, owner, initialProjectId, defaultMa
               : first ? `Next ${nextBeforeAdd(first.toISOString(), now, owner)}` : `${describeSchedule(when.schedule, now)}`
             : 'Choose when'}
         </span>
-        {!workflow ? (
-          <>
-            <span aria-hidden="true">·</span>
-            <span className="automation-create-may">
-              May:
-              <Select<PermissionMode>
-                ariaLabel="May"
-                className="automation-inline-select"
-                size="small"
-                value={may}
-                options={mayOptions}
-                title="What a run may do without asking. Your default mode for new threads, never more than you hold."
-                onChange={setMay}
-              />
-            </span>
-          </>
-        ) : null}
+        <span aria-hidden="true">·</span>
+        {bot ? (
+          <span className="automation-create-may" data-testid="automation-create-may">
+            {`May: ${bot.name}'s grant`}
+            <button type="button" className="scheduled-link-btn" onClick={() => onOpenBot(bot.id)} title={`What ${bot.name} may do is set by asking it, in its chat`}>View</button>
+          </span>
+        ) : savedAgent ? (
+          <span className="automation-create-may" data-testid="automation-create-may" title="A saved agent keeps to what it may use, set in the Library">
+            {`May: what ${savedAgent.name} may use`}
+          </span>
+        ) : workflow ? (
+          <span className="automation-create-may" data-testid="automation-create-may" title="A workflow runs itself; its steps follow its own nodes">Runs the workflow</span>
+        ) : (
+          <span className="automation-create-may">
+            May:
+            <Select<PermissionMode>
+              ariaLabel="May"
+              className="automation-inline-select"
+              size="small"
+              value={may}
+              options={mayOptions}
+              title="What a run may do without asking. Your default mode for new threads, never more than you hold."
+              onChange={setMay}
+            />
+          </span>
+        )}
         <span className="automation-create-spacer" />
         <button type="button" className="settings-btn" onClick={close}>Cancel</button>
-        <button type="button" className="settings-btn primary" data-testid="automation-create-add" disabled={!canAdd} onClick={() => void add()} title="Add (Enter)">
+        <button type="button" className="settings-btn primary" data-testid="automation-create-add" disabled={!canAdd} onClick={() => void add()} title={blocked ?? 'Add (Enter)'}>
           Add ⏎
         </button>
       </div>
+      {blocked ? <p className="scheduled-note warn" data-testid="automation-create-blocked">{blocked}</p> : null}
       {error ? <p className="scheduled-item-error" role="alert">{error}</p> : null}
     </div>
   )

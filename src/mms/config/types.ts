@@ -80,6 +80,7 @@ export interface ScheduledJobDefinition {
   projectId?: string
   createThread?: boolean
   selection?: ScheduledJob['selection']
+  agent?: ScheduledJob['agent']
   mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
   permissionMode?: ScheduledJob['permissionMode']

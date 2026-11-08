@@ -4,7 +4,7 @@ import { publishAppletPresentation, recoverAppletPresentation } from '../applets
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
 import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { sha256Hex } from '../../shared/agents/hashes'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { TaskWriterAuthority } from '../agents/TaskWriterAuthority'
@@ -170,6 +170,7 @@ import {
   type UserQuestion,
   type UserQuestionAnswers,
   type AnsweredQuestion,
+  type ScheduledRunAgent,
   DEFAULT_CHAT_MODE
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
@@ -614,6 +615,16 @@ export interface ScheduledTurnRef {
   jobName?: string
 }
 
+/** Runs a job's saved agent for one occurrence (`setScheduledAgentRunner`). */
+export type ScheduledAgentRunner = (input: {
+  definitionId: string
+  threadId: string
+  workspaceRoot: string
+  prompt: string
+  runId: string
+  signal: AbortSignal
+}) => Promise<{ status: 'completed' | 'failed' | 'cancelled' | string; text: string; error?: string; agent: ScheduledRunAgent }>
+
 /** What the scheduler hears from the orchestrator about its occurrences. */
 export interface ScheduledTurnHooks {
   /** The mode a run of the job asks for now (its mode and ceiling as stored), or nothing when the job has neither. */
@@ -982,6 +993,10 @@ export class OrchestratorService extends EventEmitter {
 
   /** The scheduler hears when a scheduled turn's run ends, wherever (and by whomever) the turn was drained. */
   setScheduledHooks(hooks: ScheduledTurnHooks | undefined): void { this.scheduledHooks = hooks }
+
+  private scheduledAgentRunner?: ScheduledAgentRunner
+  /** What runs a job's saved agent (`ScheduledJob.agent`); the profile platform owns the agent definitions. */
+  setScheduledAgentRunner(runner: ScheduledAgentRunner | undefined): void { this.scheduledAgentRunner = runner }
 
   private scheduledJobs?: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'>
 
@@ -12407,6 +12422,7 @@ export class OrchestratorService extends EventEmitter {
         : null
       if (workflow) return workflow
       if (!ingress) return { text: '', silent: false, error: 'A scheduled run needs its job' }
+      if (ingress.agent) return await this.runScheduledAgentTurn(prompt, ingress, ingress.agent.definitionId)
       return await this.runScheduledTurn(prompt, ingress)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -12561,6 +12577,60 @@ export class OrchestratorService extends EventEmitter {
     const text = response.message?.trim() || 'Done.'
     const silent = text === '[SILENT]' || text.startsWith('[SILENT]')
     return { ...base, text, silent }
+  }
+
+  /**
+   * Runs an occurrence with the job's saved agent: its latest published revision, on the occurrence's thread, as an
+   * unattended definition run (its own grants decide what it may use; a step that needs a person asks on the thread).
+   * The prompt and the reply are written to the thread, so opening the run shows the work.
+   */
+  private async runScheduledAgentTurn(prompt: string, ingress: ScheduledJobIngress, definitionId: string): Promise<BackgroundWorkflowTurnResult> {
+    const runner = this.scheduledAgentRunner
+    if (!runner) return { text: '', silent: false, error: 'Saved agents cannot run here: the agent library is not loaded.' }
+    const { threadId } = this.chooseScheduledThread(ingress)
+    ingress.onThreadChosen?.(threadId)
+    if (this.scheduledThreadBusy(threadId)) return { text: '', silent: false, status: 'busy', threadId }
+    let workspaceRoot: string
+    try {
+      workspaceRoot = await this.scheduledAgentWorkspace(threadId)
+    } catch (error) {
+      return { text: '', silent: false, error: error instanceof Error ? error.message : String(error), threadId, transcriptWritten: true }
+    }
+    const runId = `schedule-agent:${ingress.jobId}:${uuidv4()}`
+    const at = new Date().toISOString()
+    this.scheduledTurnThreads.add(threadId)
+    try {
+      this.recordAgentDefinitionMessages(threadId, [{ id: `${runId}:user`, role: 'user', content: prompt, timestamp: at, turnId: runId }])
+      const run = await runner({ definitionId, threadId, workspaceRoot, prompt, runId, signal: this.lifecycle.signal })
+      const text = run.text.trim()
+      const silent = run.status === 'completed' && (text === '[SILENT]' || text.startsWith('[SILENT]'))
+      if (text || run.error) {
+        this.recordAgentDefinitionMessages(threadId, [{ id: `${runId}:reply`, role: 'assistant', content: text || run.error || '', timestamp: new Date().toISOString(), turnId: runId }])
+      }
+      const base = { threadId, agent: run.agent, transcriptWritten: true }
+      if (run.status !== 'completed') return { ...base, text: '', silent: false, error: run.error ?? (run.status === 'cancelled' ? 'Stopped' : 'The agent run failed') }
+      return { ...base, text: text || 'Done.', silent }
+    } catch (error) {
+      return { text: '', silent: false, error: error instanceof Error ? error.message : String(error), threadId, transcriptWritten: true }
+    } finally {
+      this.scheduledTurnThreads.delete(threadId)
+    }
+  }
+
+  /** The folder a saved agent's occurrence works in: the thread's own checkout or worktree, or a scratch folder. */
+  private async scheduledAgentWorkspace(threadId: string): Promise<string> {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) throw new Error('The run thread is unavailable')
+    const projectPath = this.threadProjectPath(threadId)
+    if (!projectPath) {
+      const scratch = join(threadDir, 'agent-workspace')
+      mkdirSync(scratch, { recursive: true })
+      return scratch
+    }
+    if (this.threadStore?.getThread(threadId)?.workspaceBinding?.policy === 'primary') return resolveProjectWorkingDirectory(projectPath)
+    const workspace = await new WorkspaceResolver(threadDir, threadId, projectPath, this.placementOf(threadId), this.restoreNotifier(threadId))
+      .resolve('agent', 'main', this.lifecycle.signal, undefined, this.branchNameSource(threadId))
+    return workspace.projectPath ?? resolveProjectWorkingDirectory(projectPath)
   }
 
   /**

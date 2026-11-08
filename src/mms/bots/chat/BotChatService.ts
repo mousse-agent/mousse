@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
-import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition } from '../../../shared/bots/personal/definition'
+import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment } from '../../../shared/bots/personal/methods'
@@ -343,6 +343,12 @@ export class BotChatService {
       }
     }
     return out
+  }
+
+  /** `bots.schedules.add`: the owner gives the bot a schedule from the Automations page. */
+  addSchedule(botId: string, when: BotSchedule['when'], prompt: string): BotDetail {
+    this.engine.addSchedule(botId, { when, prompt }, 'owner')
+    return this.detailOf(botId)
   }
 
   removeSchedule(botId: string, scheduleId: string): BotDetail {

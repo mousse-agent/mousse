@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledWebhookDelivery } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery } from '../../shared/types'
 import { occurrenceOutcome, tellMeNotifies, type ScheduledRunEnded } from '../../shared/automations'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
@@ -55,6 +55,21 @@ export function generateWebhookSecret(): string {
 }
 
 /** What the orchestrator reports when a scheduled turn's Run Engine run ends. */
+/**
+ * The saved agent a run used, marked `changed` when it was published again since the last run that used it (the
+ * person sees "agent changed since last run" on that run).
+ */
+export function ranAgent(job: Pick<ScheduledJob, 'runHistory'>, agent: ScheduledRunAgent): ScheduledRunAgent {
+  const history = job.runHistory ?? []
+  let previous: ScheduledRunAgent | undefined
+  for (let index = history.length - 1; index >= 0 && !previous; index -= 1) {
+    const used = history[index]!.agent
+    if (used?.definitionId === agent.definitionId) previous = used
+  }
+  const { changed: _ignored, ...plain } = agent
+  return previous && previous.revision !== agent.revision ? { ...plain, changed: true } : plain
+}
+
 export interface ScheduledOccurrenceSettled {
   jobId: string
   occurrenceKey: string
@@ -702,6 +717,7 @@ export class ScheduledJobService extends EventEmitter {
         createThread: job.createThread,
         jobName: job.name,
         selection: job.selection,
+        ...(job.agent ? { agent: job.agent } : {}),
         mode: job.mode,
         workspace: job.workspace,
         permissionMode: job.permissionMode,
@@ -755,6 +771,7 @@ export class ScheduledJobService extends EventEmitter {
             mode: job.mode ?? 'agent',
             ...(result.permissionMode ? { permissionMode: result.permissionMode } : {}),
             ...(job.workspace ? { workspace: job.workspace } : {}),
+            ...(result.agent ? { agent: ranAgent(job, result.agent) } : {}),
             ...missingDetails
           }
         : missingPlaceholders.length ? missingDetails : undefined

@@ -132,6 +132,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     projectId: job.projectId,
     createThread: job.createThread,
     selection: job.selection,
+    ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,

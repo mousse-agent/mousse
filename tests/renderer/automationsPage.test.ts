@@ -241,9 +241,25 @@ describe('job draft', () => {
 let root: Root
 let host: HTMLElement
 
+/** What the Library holds for Who and Do: one published saved agent, one published workflow with two inputs, one bot. */
+const LIBRARY: Record<string, unknown> = {
+  'agentDefinitions.list': [
+    { id: 'agent-1', name: 'PR reviewer', purpose: 'Reviews PRs', publishedRevision: 'r1', enabled: true, archived: false },
+    { id: 'agent-draft', name: 'Draft only', enabled: true, archived: false }
+  ],
+  'workflows.list': [{ id: 'wf-1', slug: 'release-notes', name: 'Release notes', enabled: true, headRevisionId: 'h1', runnable: true, issues: [] }],
+  'workflows.getRevision': {
+    profileId: 'p', id: 'wf-1', slug: 'release-notes', name: 'Release notes', source: 'profile',
+    bundle: { format: 'mousse-workflow', version: 1, manifest: {}, files: [] },
+    compiled: { inputSchema: { type: 'object', properties: { tag: { type: 'string', title: 'Tag' }, draft: { type: 'boolean' } }, required: ['tag'] } }
+  },
+  'bots.personal.list': { bots: [{ id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'headphones' } }] },
+  'bots.schedules.add': { runs: [] }
+}
+
 function api(index: AutomationIndex, jobs: ScheduledJob[]) {
   return {
-    platformRequest: { request: vi.fn(async (method: string) => { if (method === 'automations.list') return index; throw new Error(method) }) },
+    platformRequest: { request: vi.fn(async (method: string, _params?: unknown) => { if (method === 'automations.list') return index; if (method in LIBRARY) return LIBRARY[method]; throw new Error(method) }) },
     scheduled: {
       list: vi.fn(async () => jobs),
       status: vi.fn(async () => ({ running: true })),
@@ -400,5 +416,75 @@ describe('the Automations page', () => {
     expect($('[aria-label="Search automations"]')).not.toBeNull()
     await click($('[data-testid="automations-library-link"]'))
     expect(openLibrary).toHaveBeenCalledOnce()
+  })
+
+  it('lets a saved agent do it: the Who picker lists published saved agents, and Add sends a real agent reference', async () => {
+    const mousse = await mount([])
+    await click($('[data-testid="automation-create"]'))
+    await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'every weekday at 9 review open PRs')
+    await click($('[data-testid="automation-create-who"]'))
+    expect(option('Draft only')).toBeUndefined()
+    await click(option('PR reviewer'))
+    expect($('[data-testid="automation-create-who"]')?.textContent).toBe('PR reviewer')
+    expect($('[data-testid="automation-create-may"]')?.textContent).toBe('May: what PR reviewer may use')
+    await click($('[data-testid="automation-create-add"]'))
+    const sent = mousse.scheduled.create.mock.calls[0]![0] as Record<string, unknown>
+    expect(sent).toMatchObject({ prompt: 'review open PRs', agent: { definitionId: 'agent-1' } })
+    expect(sent.permissionMode).toBeUndefined()
+  })
+
+  it('swaps the prompt for a workflow inputs when / picks one, hides Who, and runs it as /slug --input', async () => {
+    const mousse = await mount([])
+    await click($('[data-testid="automation-create"]'))
+    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
+    await type(input, '/rel')
+    const suggestions = $('[data-testid="automation-do-suggestions"]')
+    expect(suggestions?.textContent).toContain('/release-notes')
+    await click(suggestions!.querySelector('button'))
+    await act(async () => {})
+    expect($('[data-testid="automation-do"]')?.textContent).toBe('/release-notes')
+    expect($('[data-testid="automation-create-who"]')).toBeNull()
+    expect($('[data-testid="automation-workflow-inputs"]')?.textContent).toContain('Tag *')
+    await type(input, 'every friday at 16')
+    expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
+    await type($<HTMLInputElement>('[data-input="tag"]')!, 'v1.2 beta')
+    await click($('[data-testid="automation-create-add"]'))
+    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Release notes', prompt: '/release-notes --tag "v1.2 beta"', schedule: { kind: 'cron', expr: '0 16 * * 5' } }))
+  })
+
+  it('gives a bot the schedule when the bot is Who, and says a bot repeats', async () => {
+    const mousse = await mount([])
+    await click($('[data-testid="automation-create"]'))
+    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
+    await type(input, 'every day at 8 tell me the weather')
+    await click($('[data-testid="automation-create-who"]'))
+    await click(option('Pip'))
+    expect($('[data-testid="automation-create-may"]')?.textContent).toContain("Pip's grant")
+    expect($('[aria-label="Where"]')).toBeNull()
+    await click($('[data-testid="automation-create-add"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('bots.schedules.add', { botId: 'bot_1', when: { kind: 'cron', expr: '0 8 * * *' }, prompt: 'tell me the weather' })
+    expect(mousse.scheduled.create).not.toHaveBeenCalled()
+    await click($('[data-testid="automation-create"]'))
+    await click($('[data-testid="automation-create-who"]'))
+    await click(option('Pip'))
+    await click($('.automation-chip-select.when'))
+    await click(option('On demand'))
+    await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'check the news')
+    expect($('[data-testid="automation-create-blocked"]')?.textContent).toMatch(/A bot repeats/)
+    expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
+  })
+
+  it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {
+    const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1', agent: { definitionId: 'agent-1' } })
+    const runs = [
+      { at: new Date(Date.now() - 60_000).toISOString(), state: 'done' as const, ranBy: 'PR reviewer', agentChanged: true as const },
+      { at: new Date(Date.now() - 86_400_000).toISOString(), state: 'done' as const, ranBy: 'PR reviewer' }
+    ]
+    await mount([item({ key: 'job:j1', name: 'Nightly', who: { kind: 'saved_agent', name: 'PR reviewer', definitionId: 'agent-1' }, mayIsGrant: true, runs })], [stored])
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    expect($('[data-testid="automation-who"]')?.textContent).toBe('PR reviewer')
+    expect($('[data-testid="automation-may-agent"]')?.textContent).toBe('What PR reviewer may use')
+    expect($$('[data-testid="automation-run-who"]').map((entry) => entry.textContent)).toEqual(['PR reviewer', 'PR reviewer'])
+    expect($$('[data-testid="automation-run-changed"]')).toHaveLength(1)
   })
 })

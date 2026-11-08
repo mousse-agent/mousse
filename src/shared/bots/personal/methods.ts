@@ -1,3 +1,4 @@
+import type { BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
@@ -53,6 +54,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.chat.markRead',
   'bots.asks.answer',
   'bots.permissions.revoke',
+  'bots.schedules.add',
   'bots.schedules.remove',
   'bots.memory.list',
   'bots.memory.forget',
@@ -98,6 +100,8 @@ export interface BotsPersonalV2Api {
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
+  /** The owner adds a schedule (the Automations page's create row, with the bot as Who); the bot is told in its chat. */
+  'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string }; result: BotDetail }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

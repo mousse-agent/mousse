@@ -31,6 +31,9 @@ import {
 import { describeScheduleLong, errorText, nameFromPrompt, scheduleCode, WEEKDAY_OPTIONS } from '../scheduled/scheduledLabels'
 import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTime'
 import { runText } from './automationList'
+import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
+import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
+import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
 
 /** The custom schedule builder's choices. Daily and Weekly are plain forms that save as cron. */
 type BuilderKind = 'interval' | 'daily' | 'weekly' | 'cron' | 'once' | 'manual'
@@ -113,7 +116,9 @@ export function AutomationDetail({
   item,
   initial,
   catalog,
-  whoName,
+  library,
+  defaultName,
+  profileId,
   viewerZone,
   save,
   onBack,
@@ -130,8 +135,11 @@ export function AutomationDetail({
   item?: AutomationItem
   initial: JobDraft
   catalog: ScheduledCatalog
-  /** Who does it: the job's model's agent, else the default agent. */
-  whoName: string
+  /** Saved agents and workflows that fill Who and Do. */
+  library: AutomationLibrary
+  /** The default agent's name. */
+  defaultName: string
+  profileId: string
   viewerZone: string
   save: (draft: JobDraft) => Promise<void>
   onBack: () => void
@@ -229,13 +237,32 @@ export function AutomationDetail({
     ...(!threadLocked && draft.threadId && !projectThreads.some((thread) => thread.id === draft.threadId) ? [{ value: draft.threadId, label: 'Unknown thread' }] : []),
     ...projectThreads.map((thread) => ({ value: thread.id, label: thread.name }))
   ]
-  const modelOptions: SelectOption[] = [
-    { value: '', label: 'Default model' },
-    ...(draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
-      ? [{ value: draft.modelKey, label: `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)` }]
-      : []),
-    ...catalog.models.flatMap((group) => group.choices.map((choice) => ({ value: choice.key, label: choice.label, group: group.label })))
-  ]
+  // Who: the default agent, a model or a saved agent. A model the lists no longer offer stays chosen until changed.
+  const who: Who = draft.agentId ? { kind: 'agent', id: draft.agentId } : draft.modelKey ? { kind: 'model', key: draft.modelKey } : { kind: 'default' }
+  const naming = { defaultName, models: catalog.models, library }
+  const staleModel = draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
+    ? `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)`
+    : undefined
+  const savedAgentName = draft.agentId ? library.agents.find((agent) => agent.id === draft.agentId)?.name ?? (draft.agentId === initial.agentId && item?.who.kind === 'saved_agent' ? item.who.name : 'Saved agent') : undefined
+  const whoLabel = staleModel ?? savedAgentName ?? nameOfWho(who, naming)
+  const whoChoices = whoOptions({ ...naming, withBots: false, current: { key: whoKey(who), label: whoLabel } })
+  const chooseWho = (key: string) => {
+    const next = parseWhoKey(key)
+    if (next.kind === 'agent') patch({ agentId: next.id, modelKey: '' })
+    else if (next.kind === 'model') patch({ agentId: '', modelKey: next.key })
+    else patch({ agentId: '', modelKey: '' })
+  }
+
+  // Do: a prompt, or a workflow whose inputs replace the prompt.
+  const command = parseWorkflowCommand(draft.prompt)
+  const doWorkflow = command ? library.workflows.find((entry) => entry.slug === command.slug) : undefined
+  const { fields, loading: fieldsLoading } = useWorkflowFields(profileId, doWorkflow)
+  const chooseDo = (workflowId: string) => {
+    const chosen = library.workflows.find((entry) => entry.id === workflowId)
+    if (chosen) patch({ prompt: `/${chosen.slug}`, agentId: '' })
+    else patch({ prompt: '' })
+    if (!chosen) requestAnimationFrame(() => promptRef.current?.focus())
+  }
 
   // May: the effective mode a run gets, from what is chosen here, held to what the person holds.
   const workflow = !takesPermissionMode(draft)
@@ -302,9 +329,26 @@ export function AutomationDetail({
           ,
         </span>
         {' '}
-        <span className="automation-chip readonly" title="Who does it">{workflow ? draft.prompt.trim().split(/\s+/)[0] : whoName}</span>
-        {workflow ? ' runs ' : ' does '}
-        <button type="button" className="automation-chip" onClick={() => promptRef.current?.focus()}>this</button>
+        {workflow ? null : (
+          <Select
+            ariaLabel="Who"
+            className="automation-chip-select"
+            size="small"
+            value={whoKey(who)}
+            options={whoChoices}
+            title="Who does it"
+            renderValue={() => <span data-testid="automation-who">{whoLabel}</span>}
+            onChange={chooseWho}
+          />
+        )}
+        {workflow ? null : ' does '}
+        <DoPicker
+          value={doWorkflow?.id ?? (workflow ? draft.prompt.trim().split(/\s+/)[0] ?? '' : '')}
+          workflows={doWorkflow || !workflow ? library.workflows : [...library.workflows, { id: draft.prompt.trim().split(/\s+/)[0] ?? '/', slug: (draft.prompt.trim().split(/\s+/)[0] ?? '/').slice(1), name: 'Workflow not found', revisionId: '' }]}
+          promptLabel="this"
+          onChange={chooseDo}
+        />
+        {workflow ? ' runs' : null}
         {' in '}
         <span className="automation-sentence-glue">
           <Select
@@ -377,22 +421,35 @@ export function AutomationDetail({
         </div>
       ) : null}
 
-      <label className="scheduled-sr-only" htmlFor={id('prompt')}>What it does</label>
-      <textarea
-        ref={promptRef}
-        id={id('prompt')}
-        className="scheduled-prompt"
-        placeholder="What should the agent do?"
-        rows={3}
-        value={draft.prompt}
-        {...field('prompt')}
-        onChange={(event) => patch({ prompt: event.target.value })}
-      />
+      {doWorkflow && command ? (
+        <WorkflowInputs
+          fields={fields}
+          values={command.values}
+          loading={fieldsLoading}
+          onChange={(key, value) => patch({ prompt: workflowCommandText(doWorkflow.slug, { ...command.values, [key]: value }, fields) })}
+        />
+      ) : (
+        <>
+          <label className="scheduled-sr-only" htmlFor={id('prompt')}>What it does</label>
+          <textarea
+            ref={promptRef}
+            id={id('prompt')}
+            className="scheduled-prompt"
+            placeholder="What should the agent do?"
+            rows={3}
+            value={draft.prompt}
+            {...field('prompt')}
+            onChange={(event) => patch({ prompt: event.target.value })}
+          />
+        </>
+      )}
       {fieldError('prompt')}
 
       <div className="automation-detail-pair">
         <span className="automation-detail-label" id={id('may-label')}>May</span>
-        {workflow ? (
+        {draft.agentId && !workflow ? (
+          <span className="automation-detail-value" data-testid="automation-may-agent" title="A saved agent keeps to what it may use, set in the Library">{`What ${whoLabel} may use`}</span>
+        ) : workflow ? (
           <span className="automation-detail-value" title={WORKFLOW_PERMISSION_NOTE}>No permission mode (workflow)</span>
         ) : (
           <Select<PermissionMode>
@@ -455,6 +512,8 @@ export function AutomationDetail({
                 <span className={`automation-run-glyph ${run.state}`} aria-hidden="true">{RUN_GLYPH[run.state]}</span>
                 <span className="automation-run-when">{ownedWhenText(run.at, now, owner, viewerZone)}</span>
                 <span className="automation-run-text">{runText(run, now, owner, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
+                {run.ranBy ? <span className="automation-run-who" data-testid="automation-run-who" title="Who ran it">{run.ranBy}</span> : null}
+                {run.agentChanged ? <span className="automation-run-changed" data-testid="automation-run-changed" title="The saved agent was published again since the run before">agent changed since last run</span> : null}
                 {run.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenThread(run.threadId!)}>Open thread</button> : null}
               </li>
             ))}
@@ -468,7 +527,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">thread · worktree · model · limits · request URL · added by</span>
+        <span className="automation-more-hint">thread · worktree · mode · limits · request URL · added by</span>
       </button>
 
       {moreOpen ? (
@@ -503,7 +562,6 @@ export function AutomationDetail({
             </MoreRow>
           ) : draft.threadId ? <MoreRow title="Runs in" description="The thread's own workspace" /> : null}
 
-          <MoreRow title="Model" htmlFor={id('model')} control={<Select id={id('model')} className="scheduled-select" value={draft.modelKey} options={modelOptions} onChange={(modelKey) => patch({ modelKey })} />} />
 
           <MoreRow title="Mode" htmlFor={id('mode')} control={
             <Select<JobDraft['mode']> id={id('mode')} className="scheduled-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />

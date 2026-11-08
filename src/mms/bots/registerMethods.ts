@@ -1,5 +1,5 @@
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
-import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../shared/bots/personal/definition'
+import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotSchedule } from '../../shared/bots/personal/definition'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
@@ -30,6 +30,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
+  'bots.schedules.add': ['botId', 'when', 'prompt'],
   'bots.schedules.remove': ['botId', 'scheduleId'],
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
@@ -98,6 +99,15 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.permissions.revoke':
       if (!text(p.permissionId, 4096)) throw new DomainRpcError('invalid_params', 'A permission id is required')
       break
+    case 'bots.schedules.add': {
+      const when = p.when as { kind?: unknown; minutes?: unknown; expr?: unknown } | null
+      const ok = when && typeof when === 'object' && !Array.isArray(when) && (
+        (when.kind === 'interval' && Object.keys(when).every((key) => key === 'kind' || key === 'minutes') && whole(when.minutes, 1)) ||
+        (when.kind === 'cron' && Object.keys(when).every((key) => key === 'kind' || key === 'expr') && text(when.expr, 128)))
+      if (!ok) throw new DomainRpcError('invalid_params', 'When is every N minutes or a five-field cron')
+      if (!text(p.prompt, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Say what the bot should do')
+      break
+    }
     case 'bots.schedules.remove':
       if (typeof p.scheduleId !== 'string' || !SCHEDULE_ID.test(p.scheduleId)) throw new DomainRpcError('invalid_params', 'A schedule id is required')
       break
@@ -132,6 +142,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
+    case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':

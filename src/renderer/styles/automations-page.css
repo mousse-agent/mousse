@@ -968,3 +968,46 @@ html[data-theme='high-contrast'] .automations-page {
 .automations-library-head.agents-workspace__header { justify-content: flex-start; gap: var(--space-12); }
 .automations-library-head nav { margin-left: auto; }
 .automations-library-title { margin: 0; font-size: 16px; font-weight: 600; }
+
+/* ---- Who and Do -------------------------------------------------------- */
+
+/* Typing / lists the workflows under the line; a chosen one swaps the prompt for its inputs. */
+.automation-do-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+.automation-do-suggestion {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+  text-align: left;
+  cursor: pointer;
+}
+.automation-do-suggestion:hover,
+.automation-do-suggestion:focus-visible { background: var(--ui-pressed); outline: none; }
+.automation-do-suggestion-name { color: var(--text-secondary); }
+
+.automation-workflow-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-8) var(--space-12);
+}
+.automation-workflow-input { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: var(--settings-fs-small); color: var(--text-secondary); }
+.automation-workflow-input-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.automation-run-who { flex: none; color: var(--text-tertiary, var(--text-secondary)); }
+.automation-run-changed { flex: none; color: var(--warning); }
