@@ -11,7 +11,7 @@ import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { cutBefore, sessionEnd } from '../src/mms/harness/vendors/claude/sessionCuts'
 import { ClaudeSubscriptionAdapter, CLAUDE_SUBSCRIPTION_CAPABILITIES, type ClaudeSubscriptionClient } from '../src/mms/harness/drivers/claudeCode/adapter'
-import { FakeClaudeCli, resultFrame, SESSION, textDelta } from './run/fakeClaudeCli'
+import { FakeClaudeCli, type FakeClaudeProcess, resultFrame, SESSION, textDelta } from './run/fakeClaudeCli'
 
 const dirs: string[] = []
 const temp = (prefix: string) => {
@@ -47,6 +47,15 @@ function writeTurn(home: string, sessionId: string, prompt: string, parent: stri
   ]
   appendFileSync(join(dir, `${sessionId}.jsonl`), lines.map((line) => JSON.stringify(line)).join('\n') + '\n')
   return `${prompt}-snapshot`
+}
+
+/** An answer whose result carries usage, as Claude Code's do: the saved session gets a usage baseline. */
+function measuredAnswer(process: FakeClaudeProcess, uuid: string, text = 'ok'): void {
+  process.emit(textDelta(text, uuid), {
+    ...resultFrame({ uuids: [uuid], text }),
+    total_cost_usd: 0.1,
+    modelUsage: { 'claude-sonnet-4-6': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.1, contextWindow: 200000 } }
+  })
 }
 
 function fixture(extra: Partial<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]> = {}) {
@@ -104,6 +113,14 @@ describe('reading a cut from a Claude Code session file', () => {
     expect(cutBefore(claudeHome, 'missing', 'p2')).toBeUndefined()
     expect(sessionEnd(claudeHome, 'session')).toBe('p2-snapshot')
     expect(sessionEnd(claudeHome, 'missing')).toBeUndefined()
+  })
+
+  it('ends the main chain at its last entry, past metadata that has an id of its own', () => {
+    writeTurn(claudeHome, 'session', 'p1', null)
+    const file = join(claudeHome, 'projects', 'project', 'session.jsonl')
+    appendFileSync(file, [JSON.stringify({ type: 'custom-title', uuid: 'title', customTitle: 'Renamed' }), 'null', '42'].join('\n') + '\n')
+    expect(sessionEnd(claudeHome, 'session')).toBe('p1-snapshot')
+    expect(cutBefore(claudeHome, 'session', 'p1')).toBeUndefined()
   })
 })
 
@@ -187,6 +204,39 @@ describe('an undo or an edit on a Claude thread', () => {
     await service.chat({ threadId: 'thread', cwd: older.home, model: 'sonnet', prompt: 'hello', permissionMode: 'full', onText: vi.fn(), history: 'h1' })
     expect(reloaded.cli.last.options.resumeSessionAt).toBeUndefined()
     expect(reloaded.cli.last.text(0)).toContain('Previous conversation')
+  })
+
+  it('a session file Mousse cannot read gives the history as text, and the thread can send again', async () => {
+    const f = fixture()
+    await threeTurns(f)
+    const file = join(claudeHome, 'projects', 'project', `${SESSION}.jsonl`)
+    rmSync(file)
+    // Found, but reading it fails.
+    mkdirSync(file)
+    await f.turn('h2', 'after')
+    expect(f.cli.last.options.resumeSessionAt).toBeUndefined()
+    expect(f.cli.last.text(0)).toContain('Previous conversation')
+    expect(await f.chat({ history: 'after' })).toEqual(expect.stringContaining('reply to'))
+  })
+
+  it('a cut turn that ends before Claude Code made the new session keeps the session\'s turns, so the resend cuts again', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => measuredAnswer(process, String(message.uuid))
+    const turns = await threeTurns(f)
+    let ended = false
+    f.cli.reply = (message, process) => {
+      if (process.options.resumeSessionAt && !ended) {
+        ended = true
+        process.end()
+      } else measuredAnswer(process, String(message.uuid))
+    }
+    await expect(f.chat({ history: 'h2' })).rejects.toThrow()
+    expect(ended).toBe(true)
+    expect(f.saved().sessionId).toBe(SESSION)
+    expect(f.saved().turns?.map((turn) => turn.prompt)).toEqual([turns.p1, turns.p2, turns.p3])
+    await f.turn('h2', 'after')
+    expect(f.cli.last.options).toMatchObject({ resume: SESSION, resumeSessionAt: turns.end2, forkSession: true })
+    expect(f.cli.last.text(0)).not.toContain('Previous conversation')
   })
 
   it('when Claude Code cannot open the cut, the turn runs again once with the history as text', async () => {

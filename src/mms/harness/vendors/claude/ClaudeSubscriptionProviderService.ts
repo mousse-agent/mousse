@@ -2618,11 +2618,14 @@ export class ClaudeSubscriptionProviderService {
           // The prompt of a turn that did not finish but reached the session is a turn of it: a later cut
           // leaves it out with the turns after it. A finished turn saved its own above.
           const reached = promptId !== undefined && (stopped || (liveRun !== undefined && liveRun.ids.size > 0))
+          // A cut whose new session Claude Code never made (it ended or was stopped first) changed nothing:
+          // the session saved is the one it came from, which keeps its own turns.
+          const cutNotMade = branch !== undefined && savedSessionId !== branch.id
           this.settings.sessions = {
             ...this.settings.sessions,
             [input.threadId]: {
               ...kept,
-              ...(success ? {} : { turns: reached ? withTurn(savedSessionId) : turnsBefore(savedSessionId) }),
+              ...(success || cutNotMade ? {} : { turns: reached ? withTurn(savedSessionId) : turnsBefore(savedSessionId) }),
               sessionId: savedSessionId,
               cwd: resolve(input.cwd),
               // A stopped turn saves no model of its own, and the next turn resumes only on the same one.

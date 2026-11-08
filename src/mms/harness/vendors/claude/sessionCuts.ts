@@ -43,11 +43,19 @@ export function sessionFileOf(home: string, sessionId: string): string | undefin
 type Entry = { uuid?: unknown; parentUuid?: unknown; isSidechain?: unknown }
 
 function entries(file: string): Entry[] {
+  let text: string
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    // A file Mousse cannot read (removed meanwhile, no permission) holds no cut: the history goes in as text.
+    return []
+  }
   const parsed: Entry[] = []
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
+  for (const line of text.split('\n')) {
     if (!line.trim()) continue
     try {
-      parsed.push(JSON.parse(line) as Entry)
+      const entry: unknown = JSON.parse(line)
+      if (entry && typeof entry === 'object') parsed.push(entry as Entry)
     } catch {
       // A line cut short by a write in progress names no entry.
     }
@@ -73,7 +81,9 @@ export function sessionEnd(home: string, sessionId: string): string | undefined 
   const all = entries(file)
   for (let index = all.length - 1; index >= 0; index -= 1) {
     const entry = all[index]
-    if (typeof entry.uuid === 'string' && entry.uuid && entry.isSidechain !== true) return entry.uuid
+    // Entries of the conversation all carry `parentUuid` (null on the first). Metadata Claude Code
+    // writes beside them, such as a `custom-title`, can have an id of its own but none.
+    if (typeof entry.uuid === 'string' && entry.uuid && 'parentUuid' in entry && entry.isSidechain !== true) return entry.uuid
   }
   return undefined
 }
