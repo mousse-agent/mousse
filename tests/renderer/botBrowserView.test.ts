@@ -146,3 +146,14 @@ describe('the split view', () => {
     expect(host.querySelector('.bot-browser-pane')).toBeNull()
   })
 })
+
+describe('the agent cursor over a live in-app page', () => {
+  it('sits at the page\'s CSS pixels at the tab\'s zoom, in a layer that takes no events', async () => {
+    const { AgentCursor } = await import('../../src/renderer/components/browser/AgentCursor')
+    await act(async () => root.render(createElement(AgentCursor, { cursor: { x: 50, y: 20, action: 'click', at: Date.now(), viewport: { width: 400, height: 300 } }, zoom: 1.5 })))
+    const cursor = host.querySelector<HTMLElement>('[data-agent-cursor] .agent-cursor')!
+    expect(cursor.style.left).toBe('75px')
+    expect(cursor.style.top).toBe('30px')
+    expect(host.querySelector('.agent-cursor-ripple')).not.toBeNull()
+  })
+})
