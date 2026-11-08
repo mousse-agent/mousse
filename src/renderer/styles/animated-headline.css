@@ -1,0 +1,68 @@
+/* AnimatedHeadline: the old line blurs apart (scattered order), the new one resolves out of the blur, left to right.
+   Both lines share one grid cell, so the swap never moves the layout. */
+.animated-headline {
+  display: inline-grid;
+  justify-items: center;
+  max-width: 100%;
+}
+
+.animated-headline-layer {
+  grid-area: 1 / 1;
+}
+
+.animated-headline-word {
+  display: inline-block;
+  white-space: pre;
+}
+
+.animated-headline-char {
+  display: inline-block;
+}
+
+.animated-headline-layer.is-leaving {
+  pointer-events: none;
+}
+
+.animated-headline-layer.is-leaving .animated-headline-char {
+  animation: animated-headline-out calc(260ms * var(--ui-motion-scale, 1)) cubic-bezier(0.4, 0, 1, 1) both;
+  animation-delay: calc(var(--i) * 220ms * var(--ui-motion-scale, 1));
+}
+
+.animated-headline-layer.is-entering .animated-headline-char {
+  animation: animated-headline-in calc(380ms * var(--ui-motion-scale, 1)) cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc((180ms + var(--i) * 22ms) * var(--ui-motion-scale, 1));
+}
+
+@keyframes animated-headline-out {
+  to {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(-3px) scale(1.08);
+  }
+}
+
+@keyframes animated-headline-in {
+  from {
+    opacity: 0;
+    filter: blur(10px);
+    transform: translateY(3px) scale(0.96);
+  }
+}
+
+[data-motion='off'] .animated-headline-layer.is-leaving {
+  display: none;
+}
+
+[data-motion='off'] .animated-headline-char {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated-headline-layer.is-leaving {
+    display: none;
+  }
+
+  .animated-headline-char {
+    animation: none !important;
+  }
+}

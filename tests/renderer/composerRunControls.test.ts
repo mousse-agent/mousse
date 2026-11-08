@@ -255,25 +255,59 @@ describe('composer model picker', () => {
     expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 High')
   })
 
-  it('fits the picker to its rows, above the composer and no wider than it', () => {
-    // The picker anchors to the composer box, not to the model button.
+  it('pins the picker by its bottom edge just above the model button, left-aligned to it', () => {
+    // The composer (top 500) has room above it, but the picker still sits by the button that opened it.
     asComposer()
-    // Opened from the button, as in the app: the composer is there before the picker measures it.
+    // Opened from the button, as in the app: the button is there before the picker measures it.
     render({ open: false })
+    modelButton().getBoundingClientRect = () => ({ x: 40, y: 560, top: 560, left: 40, right: 150, bottom: 586, width: 110, height: 26, toJSON: () => ({}) })
     render()
-    const panel = () => document.querySelector('.model-picker-panel')!
-    expect(panel().classList.contains('is-fixed')).toBe(true)
-    expect(document.querySelector<HTMLElement>('.model-picker-shell')!.style.getPropertyValue('--floating-anchor-width')).toBe('640px')
+    const shell = document.querySelector<HTMLElement>('.model-picker-shell')!
+    expect(document.querySelector('.model-picker-panel')!.classList.contains('is-fixed')).toBe(true)
+    // 6px above the button; content changes grow it upward and never move it.
+    expect(shell.style.left).toBe('40px')
+    expect(shell.style.bottom).toBe(`${window.innerHeight - 560 + 6}px`)
+    expect(shell.style.top).toBe('')
+    expect(shell.style.getPropertyValue('--floating-max-height')).toBe('400px')
     // A search with no results keeps the column (its header alone) in place.
     type('nothing like this')
     expect(document.querySelectorAll('.model-picker-row')).toHaveLength(0)
     expect(document.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
-    // The stylesheet caps the width at the composer's and the height at eight rows; below that the box takes its content's height.
+    expect(shell.style.bottom).toBe(`${window.innerHeight - 560 + 6}px`)
+    // The stylesheet fits the box to its content up to the room it has: no fixed height.
     const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
-    const rule = css.slice(css.indexOf('.model-picker-panel.is-fixed {'), css.indexOf('}', css.indexOf('.model-picker-panel.is-fixed {')))
-    expect(rule).toMatch(/\n  width: min\(720px, var\(--floating-anchor-width, 720px\), calc\(100vw - 48px\)\);/)
-    expect(rule).toMatch(/\n  max-height: min\(440px, calc\(100vh - 16px\)\);/)
-    expect(rule).not.toMatch(/\n  height:/)
+    const ruleOf = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf('}', css.indexOf(`${selector} {`)))
+    expect(ruleOf('.model-picker-panel.is-fixed')).toMatch(/\n  max-height: min\(400px, var\(--floating-max-height, 400px\)\);/)
+    expect(ruleOf('.model-picker-panel.is-fixed')).not.toMatch(/\n  height:/)
+    expect(css).not.toContain('.model-picker-panel.is-fixed.has-rail {\n  height')
+  })
+
+  it('lists the selected model provider first, one provider at a time, and searches them all', () => {
+    const codex = provider([{ id: 'gpt', label: 'GPT-5.5' }, { id: 'gpt-mini', label: 'GPT-5.5 mini' }], false, 'Codex', 'codex')
+    const older: LlmModelOption = { id: 'opus-old', label: 'Opus 4', older: true }
+    render({ providers: [codex, provider([opus, sonnet, older])], modelId: 'opus:high' })
+    const titles = () => [...document.querySelectorAll('.model-picker-row-title')].map((title) => title.textContent)
+    const tab = (name: string) => document.querySelector<HTMLButtonElement>(`.model-picker-rail [aria-label="${name}"]`)!
+    // The selected model's provider is chosen on the rail, and only its models are listed, Show more last.
+    expect(tab('Claude Code').getAttribute('aria-selected')).toBe('true')
+    expect(titles()).toEqual(['Opus 5.5', 'Sonnet 5'])
+    expect(document.querySelector('.model-picker-list')!.lastElementChild!.textContent).toBe('Show more1')
+    act(() => tab('Codex').click())
+    expect(titles()).toEqual(['GPT-5.5', 'GPT-5.5 mini'])
+    expect(tab('Codex').getAttribute('aria-selected')).toBe('true')
+    // A search looks through every provider, each row naming its provider.
+    type('5')
+    expect(titles()).toEqual(['GPT-5.5', 'GPT-5.5 mini', 'Opus 5.5', 'Sonnet 5'])
+    expect(document.querySelector('.model-picker-row-provider')!.textContent).toBe('Codex')
+  })
+
+  it('fades out after closing without taking input, then goes', async () => {
+    render()
+    render({ open: false })
+    const shell = document.querySelector('.model-picker-shell')!
+    expect(shell.classList.contains('is-closing')).toBe(true)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)) })
+    expect(document.querySelector('.model-picker-shell')).toBeNull()
   })
 
   it('keeps a long model name to one line, with the full name in the tooltip', () => {

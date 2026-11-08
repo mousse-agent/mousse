@@ -248,3 +248,24 @@ describe('a new chat that deletes itself (issue #672)', () => {
     expect(setExpiry).toHaveBeenCalledWith('draft', '2026-11-06T13:00:00.000Z', false)
   })
 })
+
+describe('a new worktree from another branch', () => {
+  const deps = (create: ReturnType<typeof vi.fn>) => ({
+    create, setWorktreeEnabled: vi.fn(), update: vi.fn(), stillVisible: () => true, activate: vi.fn(), select: async () => {}
+  })
+
+  it('is created as a new thread carrying the branch, never set on a reused draft', async () => {
+    const create = vi.fn(async () => ({ id: 'fresh' }) as Thread)
+    const draft = { id: 'draft', projectId: 'p1', worktreeEnabled: true } as Thread
+    await prepareComposerThread({ ...deps(create), thread: draft, workspace: { projectId: 'p1', worktreeEnabled: true, baseBranch: 'feat/x' } })
+    expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: true, baseBranch: 'feat/x' })
+  })
+
+  it('sends no branch for the current checkout or another computer, so an older daemon behaves the same', async () => {
+    const create = vi.fn(async () => ({ id: 'fresh' }) as Thread)
+    await prepareComposerThread({ ...deps(create), workspace: { projectId: 'p1', worktreeEnabled: false, baseBranch: 'feat/x' } })
+    expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: false })
+    await prepareComposerThread({ ...deps(create), workspace: { projectId: 'p1', worktreeEnabled: true, node: 'nod_mac' as never, baseBranch: 'feat/x' } })
+    expect(create).toHaveBeenLastCalledWith('p1', { worktreeEnabled: true, node: 'nod_mac' })
+  })
+})

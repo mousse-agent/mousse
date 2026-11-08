@@ -20,7 +20,7 @@ import type { BotEscalationRow, BotMessageRow, BotStore } from '../store/BotStor
 
 /**
  * The starter grant (§5.3.1, `botStarterManifest`): files in the bot's own files folder, the web,
- * its own tools (`BOT_DEFAULT_APP_TOOLS`) and 15 minutes of work per activation, and nothing
+ * its own tools (`BOT_DEFAULT_APP_TOOLS`) and an hour of work per activation, and nothing
  * outside. Pressing Create bot approves it.
  */
 export function starterManifest(): BotManifest {
@@ -197,15 +197,19 @@ export class BotChatProjection {
     const error = registry?.error?.error
     // Only asks whose card is posted: a chat turn's asks show once its message is complete.
     const asks = this.store.openAsks(definition.id).filter((ask) => ask.messageId !== null)
-    const live = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant']).length
+    const liveRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant'])
+    const live = liveRows.length
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length, liveActivations: live })
+    // Working, but every running activation waits for the internet.
+    const running = liveRows.filter((row) => row.status === 'running')
+    const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
     const stateText = state === 'paused'
       ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? `Wants to ${this.card(asks[0]!).title}`
-          : state === 'working' ? 'Working…'
+          : state === 'working' ? (offline ? 'Waiting for internet' : 'Working…')
             : last ? oneLine(last.text || last.error?.text || '') : ''
     return {
       id: definition.id,
@@ -214,6 +218,7 @@ export class BotChatProjection {
       look: normalizeBotLook(definition.look),
       state,
       stateText,
+      ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),
       ...(last ? { last: { text: oneLine(last.text || last.error?.text || '', 200), at: last.at, author: last.author } } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),

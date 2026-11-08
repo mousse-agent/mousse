@@ -82,16 +82,17 @@
   }
 }
 
-/* Close: 1fr -> 0fr while the content fades out, all at once. */
+/* Close: 1fr -> 0fr while the content fades out, all at once. The fade is linear over most of the close, so the
+   rows are still visibly fading while the height moves (an ease-out fade was mostly gone in two frames). */
 .ui-collapse[data-motion='exit'] {
   grid-template-rows: 0fr;
-  transition: grid-template-rows 130ms var(--ui-collapse-ease-close);
+  transition: grid-template-rows 180ms var(--ui-collapse-ease-close);
 }
 
 .ui-collapse[data-motion='exit'] > .ui-collapse-clip > * {
   opacity: 0;
   transform: translateY(-3px);
-  transition: opacity 110ms var(--ui-collapse-ease-close), transform 130ms var(--ui-collapse-ease-close);
+  transition: opacity 160ms linear, transform 180ms var(--ui-collapse-ease-close);
 }
 
 /* The bottom edge of a closing group fades out over its last 20px (the last 4px fully), so a row the
@@ -109,7 +110,7 @@
 .ui-collapse-chevron {
   transform: rotate(0deg);
   transition-property: transform, rotate;
-  transition-duration: 130ms;
+  transition-duration: 180ms;
   transition-timing-function: var(--ui-collapse-ease-close);
 }
 
@@ -128,7 +129,7 @@ details.ui-collapse-details::details-content {
   block-size: 0;
   overflow: clip;
   opacity: 0;
-  transition: block-size 130ms var(--ui-collapse-ease-close), opacity 110ms var(--ui-collapse-ease-close), content-visibility 130ms allow-discrete;
+  transition: block-size 180ms var(--ui-collapse-ease-close), opacity 160ms linear, content-visibility 180ms allow-discrete;
 }
 
 details.ui-collapse-details[open]::details-content {

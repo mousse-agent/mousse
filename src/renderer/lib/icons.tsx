@@ -83,6 +83,7 @@ import Home01Icon from '@hugeicons/core-free-icons/Home01Icon'
 import Image01Icon from '@hugeicons/core-free-icons/Image01Icon'
 import InboxIcon from '@hugeicons/core-free-icons/InboxIcon'
 import Infinity01Icon from '@hugeicons/core-free-icons/Infinity01Icon'
+import IncognitoIcon from '@hugeicons/core-free-icons/IncognitoIcon'
 import InformationCircleIcon from '@hugeicons/core-free-icons/InformationCircleIcon'
 import JavaScriptIcon from '@hugeicons/core-free-icons/JavaScriptIcon'
 import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
@@ -243,6 +244,7 @@ export const HardDrive = /* @__PURE__ */ createIcon('HardDrive', HardDriveIcon)
 export const House = /* @__PURE__ */ createIcon('House', Home01Icon)
 export const Inbox = /* @__PURE__ */ createIcon('Inbox', InboxIcon)
 export const Infinity = /* @__PURE__ */ createIcon('Infinity', Infinity01Icon)
+export const Incognito = /* @__PURE__ */ createIcon('Incognito', IncognitoIcon)
 export const Info = /* @__PURE__ */ createIcon('Info', InformationCircleIcon)
 export const Keyboard = /* @__PURE__ */ createIcon('Keyboard', KeyboardIcon)
 export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)

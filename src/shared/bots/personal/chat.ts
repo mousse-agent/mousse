@@ -66,8 +66,10 @@ export interface BotSummary {
   description: string
   look: BotLook
   state: BotState
-  /** The Recent line: "Working…", "Wants to read files in …", "Paused". */
+  /** The Recent line: "Working…", "Waiting for internet", "Wants to read files in …", "Paused". */
   stateText: string
+  /** Set while the bot works but waits for the internet (its state is `working`). */
+  waiting?: 'internet'
   error?: BotError
   last?: { text: string; at: string; author: 'owner' | 'bot' }
   /** How the last activation ended. */

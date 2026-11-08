@@ -9,12 +9,15 @@ import {
   Copy,
   DeleteRegular,
   EditRegular,
+  Folder,
   FolderSearch,
   GitBranch,
   GitPullRequest,
+  Image,
   MessageSquarePlus,
   PinOffRegular,
   PinRegular,
+  RotateCcw,
   ShieldCheck,
   Clock
 } from '../lib/icons'
@@ -74,12 +77,20 @@ interface ThreadsContextMenuProps {
   onCopyPath?: () => void
   /** Threads only: delete the thread `ms` from now, or null to keep it. */
   onSetExpiry?: (ms: number | null) => void
+  /** Archived threads only: delete every archived thread of this computer, after a confirmation. */
+  onDeleteAllArchived?: () => void
+  /** Projects of this computer only: choose an image file as the project's icon. */
+  onChangeIcon?: () => void
+  /** Set when the project has a chosen icon or icons off: go back to the icon found in its folder. */
+  onResetIcon?: () => void
+  /** Set when the project shows an image icon: show the folder glyph instead. */
+  onUseFolderIcon?: () => void
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
 
 /**
- * "Git ›", "Delete after ›": rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
+ * "Git ›", "Delete after ›" (threads not archived): rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
  * arrow (focusing its first item); the left arrow or Escape closes it and returns to its item.
  */
 function Submenu({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
@@ -171,7 +182,11 @@ export function ThreadsContextMenu({
   openInEditor,
   reveal,
   onCopyPath,
-  onSetExpiry
+  onSetExpiry,
+  onDeleteAllArchived,
+  onChangeIcon,
+  onResetIcon,
+  onUseFolderIcon
 }: ThreadsContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
@@ -299,7 +314,25 @@ export function ThreadsContextMenu({
           <EditRegular />
           <span>Rename</span>
         </button>
-        {target.type === 'thread' && target.canExpire && onSetExpiry && (
+        {target.type === 'project' && onChangeIcon && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onChangeIcon}>
+            <Image />
+            <span>Change icon…</span>
+          </button>
+        )}
+        {target.type === 'project' && onResetIcon && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" title="Use the icon found in the project folder" onClick={onResetIcon}>
+            <RotateCcw />
+            <span>Reset icon</span>
+          </button>
+        )}
+        {target.type === 'project' && onUseFolderIcon && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onUseFolderIcon}>
+            <Folder />
+            <span>Use folder icon</span>
+          </button>
+        )}
+        {target.type === 'thread' && !target.settled && target.canExpire && onSetExpiry && (
           <Submenu icon={<Clock />} label="Delete after">
             {EXPIRY_PRESETS.map((preset) => (
               <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
@@ -356,6 +389,12 @@ export function ThreadsContextMenu({
           >
             <DeleteRegular />
             <span>Delete…</span>
+          </button>
+        )}
+        {target.type === 'thread' && target.settled && onDeleteAllArchived && (
+          <button type="button" className="threads-context-menu-item threads-context-menu-item-danger" role="menuitem" onClick={onDeleteAllArchived}>
+            <DeleteRegular />
+            <span>Delete all archived…</span>
           </button>
         )}
       </div>

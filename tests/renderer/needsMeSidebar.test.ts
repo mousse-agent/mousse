@@ -107,13 +107,38 @@ describe('the project row', () => {
     expect(html).toContain('class="threads-sidebar-project-count" aria-hidden="true">2<')
   })
 
-  it('shows working and done states, and nothing for a quiet project', () => {
-    setStore({ projects, threads, threadActivity: { c: 'processing', b: 'completed' }, threadsSidebarView: 'projects' })
-    const html = sidebar()
-    expect(html).toContain('threads-sidebar-project-status--working" role="img" aria-label="Working"')
-    expect(html).toContain('threads-sidebar-project-status--done" role="img" aria-label="Done"')
+  it('shows a working state, and nothing for a quiet project', () => {
+    setStore({ projects, threads, threadActivity: { c: 'processing' }, threadsSidebarView: 'projects' })
+    expect(sidebar()).toContain('threads-sidebar-project-status--working" role="img" aria-label="Working"')
     setStore({ projects, threads, threadActivity: {}, threadsSidebarView: 'projects' })
     expect(sidebar()).not.toContain('threads-sidebar-project-status')
+    expect(sidebar()).not.toContain('threads-sidebar-project-finished')
+  })
+
+  it('counts the threads that finished unseen after the name, with no dot', () => {
+    setStore({ projects, threads, threadActivity: { a: 'completed', c: 'completed', b: 'completed' }, threadsSidebarView: 'projects' })
+    const html = sidebar()
+    expect(html).toContain('Mousse</span><span class="threads-sidebar-project-finished" role="img" aria-label="2 finished" title="2 finished">2</span>')
+    expect(html).toContain('aria-label="1 finished" title="1 finished">1</span>')
+    expect(html).not.toContain('threads-sidebar-project-status')
+  })
+
+  it('keeps the needs-me dot beside the finished count', () => {
+    setStore({ projects, threads, threadActivity: { a: 'completed', c: 'awaiting_input' }, threadsSidebarView: 'projects' })
+    const html = sidebar()
+    expect(html).toContain('aria-label="1 finished" title="1 finished">1</span><span class="threads-sidebar-project-status threads-sidebar-project-status--needs-me"')
+  })
+
+  it('stays bright while it counts finished threads, as do those rows, until they are seen', () => {
+    const css = readFileSync(new URL('../../src/renderer/styles/threads-sidebar.css', import.meta.url), 'utf8')
+    const lit = css.match(/([^{}]*)\{\s*--sidebar-row-dim: 1;\s*\}/)?.[1] ?? ''
+    expect(lit).toContain('.threads-sidebar-project-row:has(.threads-sidebar-project-finished)')
+    expect(lit).toContain(':is(.threads-sidebar-status-icon--completed, .threads-sidebar-card-status-done)')
+    // Seeing the thread clears its finished state, and the header goes back to the focus dimming.
+    setStore({ projects, threads, threadActivity: { a: 'completed' }, activeThreadId: 'b', threadsSidebarView: 'projects' })
+    expect(sidebar()).toContain('threads-sidebar-project-finished')
+    setStore({ projects, threads, threadActivity: {}, activeThreadId: 'b', threadsSidebarView: 'projects' })
+    expect(sidebar()).not.toContain('threads-sidebar-project-finished')
   })
 })
 
