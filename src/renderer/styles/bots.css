@@ -72,7 +72,7 @@
 .chat-dialog .bot-new-text { min-height: 84px; resize: none; margin-bottom: 0; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
 .bot-new-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
-.bot-new-foot .chat-primary-button { margin-left: auto; padding: 9px 16px; }
+.bot-new-foot .chat-primary-button { margin-left: auto; padding: 9px 16px; display: inline-flex; align-items: center; gap: 6px; }
 .bot-new-foot .chat-primary-button[disabled] { opacity: .4; }
 .bot-new-foot .bot-ghost-button + .chat-primary-button { margin-left: 0; }
 .bot-new-foot .bot-ghost-button:first-child { margin-left: auto; }

@@ -135,6 +135,20 @@ describe('a terminal on another computer', () => {
     await invoke('pty:create', request)
     expect(sent('pty.create')[0].params).toEqual({ threadId: 'local-thread', ...request })
   })
+
+  it('opens it on the thread its tab names, not the one the window shows, and on none for a tab of no thread', async () => {
+    presentation.setActiveThreadId('shown-thread')
+    await invoke('pty:create', { agentId: '__project-shell__:a', threadId: 'tab-thread', cwd: 'C:\\here' })
+    await invoke('pty:create', { agentId: '__project-shell__:b', threadId: null, cwd: 'C:\\here' })
+    // A tab of a thread on another computer still names no folder of this computer.
+    await invoke('pty:create', { agentId: '__project-shell__:c', threadId: REMOTE, cwd: 'C:\\here' })
+    expect(sent('pty.create').map((call) => call.params)).toEqual([
+      { threadId: 'tab-thread', agentId: '__project-shell__:a', cwd: 'C:\\here' },
+      { threadId: '__unbound__', agentId: '__project-shell__:b', cwd: 'C:\\here' },
+      { threadId: REMOTE, agentId: '__project-shell__:c' }
+    ])
+    await expect(invoke('pty:create', { agentId: '__project-shell__:d', threadId: 42 })).rejects.toThrow('Invalid terminal thread')
+  })
 })
 
 describe('selecting a thread on another computer', () => {

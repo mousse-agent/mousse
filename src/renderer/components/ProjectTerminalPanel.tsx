@@ -6,6 +6,8 @@ import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { isQualifiedId } from '../../shared/threadRef'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { xtermFont, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
+import { threadForSend } from '../lib/executeQuickAction'
+import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
@@ -14,6 +16,18 @@ import {
   type TerminalNotice
 } from '../utils/terminalSession'
 import { DelayedLoader } from './ui/DelayedLoader'
+
+/**
+ * True when the tab's thread is the shown new chat on this computer: its composer pick (project, worktree) is applied
+ * before its terminal starts.
+ */
+function opensWithComposerPick(threadId: string): boolean {
+  const state = useAppStore.getState()
+  if (state.activeThreadId !== threadId) return false
+  const thread = state.threads.find((entry) => entry.id === threadId)
+  if (!isNewEmptyThread(threadId, thread, state.messages.length)) return false
+  return !composerWorkspaceFor(state.composerWorkspaceDrafts[threadId], thread, state.worktreeByDefault).node
+}
 
 interface TerminalInstance {
   tabId: string
@@ -39,7 +53,14 @@ export function ProjectTerminalPanel() {
   const spawningRef = useRef<Set<string>>(new Set())
   const activePtyRef = useRef<string | null>(null)
   const fitFrameRef = useRef<number | null>(null)
-  const [notice, setNotice] = useState<TerminalNotice | null>(null)
+  // Why a tab has no shell, by tab. A tab that failed to start waits for Retry instead of trying again on every change.
+  const [notices, setNotices] = useState<Record<string, TerminalNotice>>({})
+  const failedRef = useRef<Set<string>>(new Set())
+  const setTabNotice = useCallback((tabId: string, next: TerminalNotice | null) => {
+    if (next) failedRef.current.add(tabId)
+    else failedRef.current.delete(tabId)
+    setNotices(({ [tabId]: _old, ...rest }) => (next ? { ...rest, [tabId]: next } : rest))
+  }, [])
   // Terminals another of the user's computers has open on this thread (this computer's own thread only).
   const [holders, setHolders] = useState<Array<{ ptyId: string; name: string }>>([])
   // Stops in flight or failed, by terminal. A holder leaves the list only when its Stop succeeds.
@@ -70,7 +91,8 @@ export function ProjectTerminalPanel() {
 
   // What was said about one thread's terminal is not said about another's.
   useEffect(() => {
-    setNotice(null)
+    failedRef.current.clear()
+    setNotices({})
     setHolderStops({})
   }, [activeThreadId])
 
@@ -93,6 +115,7 @@ export function ProjectTerminalPanel() {
   const activeTab = visibleTabs.find((tab) => tab.id === requestedActiveId) ?? visibleTabs[0] ?? null
   const activeTabId = activeTab?.id ?? null
   const activePtyId = activeTab?.ptyId ?? null
+  const notice = activeTabId ? notices[activeTabId] ?? null : null
 
   const unmountTerminal = useCallback((ptyId: string) => {
     const inst = instancesRef.current.get(ptyId)
@@ -148,7 +171,10 @@ export function ProjectTerminalPanel() {
 
       const wrapper = document.createElement('div')
       wrapper.className = 'xterm-wrapper'
-      wrapper.style.display = 'none'
+      // A terminal reattached after the panel remounts (a reload, a profile switch) may already be the active one:
+      // the effect that shows the active terminal has run by then, so it is shown here or it stays blank.
+      const shown = activePtyRef.current === ptyId
+      wrapper.style.display = shown ? 'block' : 'none'
       wrapper.dataset.ptyId = ptyId
       wrapper.dataset.tabId = tabId
       containerRef.current.appendChild(wrapper)
@@ -174,6 +200,7 @@ export function ProjectTerminalPanel() {
         fitAddon,
         threadId
       })
+      if (shown) fitTerminal(ptyId, false)
     },
     [fitTerminal]
   )
@@ -181,24 +208,44 @@ export function ProjectTerminalPanel() {
   const spawnShellForTab = useCallback(
     async (tabId: string) => {
       if (spawningRef.current.has(tabId)) return
-      const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
-      const cwd = tab?.cwd || terminalCwd
+      let tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
+      let cwd = tab?.cwd || terminalCwd || undefined
       if (!tab || !cwd) return
       spawningRef.current.add(tabId)
 
-      if (tab.ptyId) {
-        await window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
-        unmountTerminal(tab.ptyId)
-        updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
-      }
-
       try {
+        if (tab.ptyId) {
+          await window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
+          unmountTerminal(tab.ptyId)
+          updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
+        }
+
+        // A new chat runs where the composer says (a project, a worktree) only once that pick is applied, as the first
+        // send does; until then it is a thread with no folder. Apply it first, so the terminal starts in that folder.
+        if (tab.ownerThreadId && !isQualifiedId(tab.ownerThreadId) && opensWithComposerPick(tab.ownerThreadId)) {
+          const state = useAppStore.getState()
+          const from = tab.ownerThreadId
+          const moveTab = (threadId: string): void => {
+            useAppStore.getState().updateProjectTerminalTab(tabId, { ownerThreadId: threadId })
+            useAppStore.getState().setActiveProjectTerminalTab(threadId, tabId)
+          }
+          const threadId = await threadForSend(state.profileId, moveTab)
+          if (!threadId) return
+          if (threadId !== from) moveTab(threadId)
+          tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
+          if (!tab) return
+          // The folder read for the draft is not the new thread's: the service picks the thread's own.
+          cwd = undefined
+        }
+
         const { ptyId } = await window.mousse.pty.create({
           agentId: `${PROJECT_SHELL_AGENT_ID}:${tabId}`,
-          cwd
+          ...(cwd ? { cwd } : {}),
+          // The tab's own thread, not whichever thread the window shows now; a tab kept in every thread has none.
+          threadId: tab.ownerThreadId
         })
-        setNotice(null)
-        updateProjectTerminalTab(tabId, { ptyId, cwd, exited: false })
+        setTabNotice(tabId, null)
+        updateProjectTerminalTab(tabId, { ptyId, ...(cwd ? { cwd } : {}), exited: false })
         mountTerminal(tabId, ptyId)
         const state = useAppStore.getState()
         const key = state.activeThreadId ?? '__standalone__'
@@ -206,15 +253,13 @@ export function ProjectTerminalPanel() {
           focusTerminal(ptyId)
         }
       } catch (error) {
-        // A terminal on another computer can be refused (its terminals from this device are off there, the
-        // computer is offline): the panel says so. A local terminal fails as it always did.
-        if (!isQualifiedId(tab.ownerThreadId)) throw error
-        setNotice(terminalNoticeFor(error))
+        // The tab says why it has no shell (the thread is busy, the computer is offline) and waits for Retry.
+        setTabNotice(tabId, terminalNoticeFor(error))
       } finally {
         spawningRef.current.delete(tabId)
       }
     },
-    [terminalCwd, unmountTerminal, updateProjectTerminalTab, mountTerminal, focusTerminal]
+    [terminalCwd, unmountTerminal, updateProjectTerminalTab, mountTerminal, focusTerminal, setTabNotice]
   )
 
   /**
@@ -225,7 +270,7 @@ export function ProjectTerminalPanel() {
   const reconcileTabSession = useCallback(
     async (tabId: string) => {
       if (mainView !== 'terminal') return
-      if (spawningRef.current.has(tabId)) return
+      if (spawningRef.current.has(tabId) || failedRef.current.has(tabId)) return
 
       const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
       if (!tab || (!tab.cwd && !terminalCwd)) return
@@ -403,10 +448,20 @@ export function ProjectTerminalPanel() {
             </button>
           </div>
         )}
-        {notice && (
+        {notice && activeTab && (
           <div className="terminal-empty" role="status">
             <p>{notice.message}</p>
             {notice.hint && <p>{notice.hint}</p>}
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setTabNotice(activeTab.id, null)
+                void spawnShellForTab(activeTab.id)
+              }}
+            >
+              Retry
+            </button>
           </div>
         )}
         {terminalCwd && visibleTabs.length === 0 && !notice && (

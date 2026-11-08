@@ -953,7 +953,12 @@ export interface ContextUsageSnapshot {
 
 export interface PtyCreateRequest {
   agentId: string
-  cwd: string
+  /** Absent: the service starts the shell in the thread's own folder. */
+  cwd?: string
+  /**
+   * The thread the terminal belongs to; null for a terminal of no thread. Absent: the thread the window shows.
+   */
+  threadId?: string | null
   command?: string
   env?: Record<string, string>
   shellArgs?: string[]
