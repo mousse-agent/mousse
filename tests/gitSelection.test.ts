@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -243,6 +243,78 @@ describe('project folder selection', () => {
     }
   })
 
+  it('reads a file committed with CRLF under core.autocrlf as git add stores it: only changed lines, and an unchanged file is not listed', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    const crlf = (value: string) => value.replace(/\n/g, '\r\n')
+    writeFileSync(join(cwd, 'c.txt'), crlf(text(LINES))); writeFileSync(join(cwd, 'same.txt'), crlf('same\nfile\n'))
+    git(cwd, 'add', 'c.txt', 'same.txt'); git(cwd, 'commit', '-q', '-m', 'crlf in HEAD')
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    writeFileSync(join(cwd, 'c.txt'), crlf(twoHunks()))
+    // The same bytes written again: stat-dirty only.
+    writeFileSync(join(cwd, 'same.txt'), crlf('same\nfile\n')); utimesSync(join(cwd, 'same.txt'), new Date(), new Date(Date.now() + 5_000))
+    const changes = await service.readChanges(cwd, place)
+    expect(changes.files.map((file) => file.path)).toEqual(['c.txt'])
+    const c = fileIn(changes, 'c.txt')
+    expect(c.hunks).toHaveLength(2)
+    expect(c.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.kind !== ' ')).toHaveLength(4)
+    await service.include(cwd, USER, place, { path: 'c.txt', version: c.version, include: false, hunks: [c.hunks[1]!.id] })
+    // HEAD's CRLF on every line of the stored version: no mixed line endings.
+    const index = execFileSync('git', ['cat-file', 'blob', ':c.txt'], { cwd }).toString('utf8')
+    expect(index).toBe(crlf(text(LINES.map((line, at) => (at === 2 ? 'line 3 changed' : line)))))
+    expect(staged(cwd)).toEqual(['c.txt'])
+    const after = await service.readChanges(cwd, place)
+    expect(fileIn(after, 'c.txt').hunks.map((hunk) => hunk.included)).toEqual(['yes', 'no'])
+    expect(after.files.map((file) => file.path)).toEqual(['c.txt'])
+  })
+
+  it('reads hundreds of long paths without one long command line', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    const dir = join(cwd, 'd'.repeat(100)); mkdirSync(dir)
+    const names = Array.from({ length: 200 }, (_, at) => `${'d'.repeat(100)}/${'f'.repeat(70)}-${String(at).padStart(3, '0')}.txt`)
+    for (const name of names) writeFileSync(join(cwd, name), `${name}\n`)
+    // More than Windows takes on one command line.
+    expect(names.join(' ').length).toBeGreaterThan(32_767)
+    const changes = await service.readChanges(cwd, place)
+    expect(changes.files.map((file) => file.path)).toEqual(names)
+    expect(changes.files.every((file) => file.included === 'yes' && !file.wholeFileOnly && file.hunks.length === 1)).toBe(true)
+  })
+
+  it('a switch away and back does not bring "everything left out" back', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    git(cwd, 'switch', '-q', '-c', 'other'); writeFileSync(join(cwd, 'other.txt'), 'other\n'); git(cwd, 'add', 'other.txt'); git(cwd, 'commit', '-q', '-m', 'other'); git(cwd, 'switch', '-q', 'main')
+    writeFileSync(join(cwd, 'a.txt'), twoHunks())
+    // Seen by a read between the switches.
+    expect((await service.includeAll(cwd, USER, place, false)).selection.state).toBe('chosen')
+    git(cwd, 'switch', '-q', 'other')
+    expect((await service.readChanges(cwd, place)).selection.state).toBe('untouched')
+    git(cwd, 'switch', '-q', 'main')
+    expect((await service.readChanges(cwd, place)).selection.state).toBe('untouched')
+    // Mousse's own switch, with no read between.
+    await service.includeAll(cwd, USER, place, false)
+    const { moved } = await service.clearingMarkerWhenHeadMoves(cwd, { markerFile: place.markerFile }, async () => git(cwd, 'switch', '-q', 'other'))
+    expect(moved).toBe(true)
+    git(cwd, 'switch', '-q', 'main')
+    expect((await service.readChanges(cwd, place)).selection.state).toBe('untouched')
+    // An action that leaves HEAD where it was keeps the marker.
+    await service.includeAll(cwd, USER, place, false)
+    expect((await service.clearingMarkerWhenHeadMoves(cwd, { markerFile: place.markerFile }, async () => undefined)).moved).toBe(false)
+    expect((await service.readChanges(cwd, place)).selection.state).toBe('chosen')
+  })
+
+  it('a file Git cannot read under the repository\'s own filter is never taken as diverged', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    git(cwd, 'config', 'filter.mine.clean', 'cat'); git(cwd, 'config', 'filter.mine.required', 'true')
+    writeFileSync(join(cwd, '.gitattributes'), '*.mine filter=mine\n'); writeFileSync(join(cwd, 'v.mine'), 'one\n')
+    git(cwd, 'add', '.gitattributes', 'v.mine'); git(cwd, 'commit', '-q', '-m', 'filtered')
+    writeFileSync(join(cwd, 'v.mine'), 'two\n'); writeFileSync(join(cwd, 'a.txt'), twoHunks())
+    await service.includeAll(cwd, USER, place, false)
+    // A terminal stages it, with its filter; then its timestamp changes, so it has to be read again.
+    git(cwd, 'add', 'v.mine')
+    utimesSync(join(cwd, 'v.mine'), new Date(), new Date(Date.now() + 5_000))
+    const file = fileIn(await service.readChanges(cwd, place), 'v.mine')
+    expect(file).toMatchObject({ wholeFileOnly: true, indexDiverged: false, included: 'yes' })
+  })
+
   it('falls back to whole files for a path under a filter (LFS and the like)', async () => {
     const cwd = repo(), place = projectPlace(), service = new GitService()
     writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n*.id ident\n')
@@ -378,6 +450,47 @@ describe('thread worktree selection', () => {
     await expect(service.commit(cwd, USER, 'chosen', { selection: { mode: 'chosen', token: changes.selection.token }, place })).rejects.toMatchObject({ code: 'stale' })
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(committed(cwd, 'a.txt')).toContain('line 10 agent')
+  })
+
+  it('keeps the same token from one read to the next before anything is chosen', async () => {
+    const cwd = repo(), place = threadPlace(), service = new GitService()
+    writeFileSync(join(cwd, 'a.txt'), twoHunks())
+    const first = (await service.readChanges(cwd, place)).selection
+    expect((await service.readChanges(cwd, place)).selection).toEqual(first)
+    await expect(service.describeSelection(cwd, place, first.token)).resolves.toMatchObject({ files: ['a.txt'] })
+    // Choosing, then including everything again, never brings an older token back.
+    await service.includeAll(cwd, USER, place, false)
+    const { selection } = await service.includeAll(cwd, USER, place, true)
+    expect(selection.token).not.toBe(first.token)
+  })
+
+  it('past the listing limit, "Leave out all" covers every file and an unlisted choice that no longer holds is stale', async () => {
+    const cwd = repo(), place = threadPlace(), service = new GitService({ selectionMaxFiles: 2 })
+    for (const name of ['0.txt', '1.txt', 'x.txt', 'y.txt']) writeFileSync(join(cwd, name), `${name}\n`)
+    writeFileSync(join(cwd, 'a.txt'), twoHunks())
+    const listed = await service.readChanges(cwd, place)
+    expect(listed.truncated).toBe(true)
+    expect(listed.files.map((file) => file.path)).toEqual(['0.txt', '1.txt'])
+    await service.includeAll(cwd, USER, place, false)
+    const zero = fileIn(await service.readChanges(cwd, place, { paths: ['0.txt'] }), '0.txt')
+    await service.include(cwd, USER, place, { path: '0.txt', version: zero.version, include: true })
+    // An unlisted file, chosen hunk by hunk.
+    const a = fileIn(await service.readChanges(cwd, place, { paths: ['a.txt'] }), 'a.txt')
+    expect(a.included).toBe('no')
+    await service.include(cwd, USER, place, { path: 'a.txt', version: a.version, include: true, hunks: [a.hunks[0]!.id] })
+    // The file changes where the chosen hunk was: the stored choice no longer holds.
+    writeFileSync(join(cwd, 'a.txt'), twoHunks().replace('line 3 changed', 'line 3 changed again'))
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const { selection } = await service.readChanges(cwd, place)
+    await expect(service.commit(cwd, USER, 'stale', { selection: { mode: 'chosen', token: selection.token }, place })).rejects.toMatchObject({ code: 'stale' })
+    await expect(service.describeSelection(cwd, place, selection.token)).rejects.toMatchObject({ code: 'stale' })
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    // Left out again, the commit takes only what was included: nothing unlisted comes along.
+    const again = fileIn(await service.readChanges(cwd, place, { paths: ['a.txt'] }), 'a.txt')
+    await service.include(cwd, USER, place, { path: 'a.txt', version: again.version, include: false })
+    const fresh = (await service.readChanges(cwd, place)).selection
+    await service.commit(cwd, USER, 'only zero', { selection: { mode: 'chosen', token: fresh.token }, place })
+    expect(git(cwd, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean)).toEqual(['0.txt'])
   })
 
   it('a hook that refuses leaves HEAD, the real index and the overlay as they were', async () => {

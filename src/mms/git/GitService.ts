@@ -15,7 +15,7 @@ import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCh
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv, privateIndexEnv } from './gitEnv'
-import { applyChoices, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
+import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
@@ -476,6 +476,8 @@ export class GitService {
     liveOutput?: { intervalMs?: number; maxLines?: number }
     /** Test seam: runs right before each entry a Discard removes gets its last check. */
     beforeDiscardUnlink?: (path: string) => void
+    /** Overrides how many changed files `git.changes` lists; for tests. */
+    selectionMaxFiles?: number
   } = {}) {}
 
   /** Every Git command here runs no program the repository configures (`repoPrograms`). */
@@ -1606,7 +1608,7 @@ export class GitService {
         if (!place) throw gitErrors.create('git_failed', "A chosen commit needs its folder's selection.")
         place.assertIdle?.()
         // Checked against the whole selection, so a change made since it was shown (a terminal `git add -A`, an agent's commit) refuses.
-        const view = await readSelection(this.selectionGit(top), top, place, place.kind === 'thread' ? {} : { paths: [] })
+        const view = await this.readView(top, place, place.kind === 'thread' ? {} : { paths: [] })
         if (view.selection.token !== selection.token) throw selectionErrors.create('stale')
         if (place.kind === 'thread') await this.commitThreadSelection(top, message, view, live)
         else {
@@ -1660,7 +1662,7 @@ export class GitService {
    * when HEAD moved: it then goes to the new HEAD (mixed), the working tree untouched.
    */
   private async commitThreadSelection(top: string, message: string, view: SelectionView, live: Live): Promise<void> {
-    const stale = view.files.filter((item) => item.staleChoice).map((item) => item.file.path)
+    const stale = view.all.filter((item) => item.staleChoice).map((item) => item.file.path)
     if (stale.length) throw selectionErrors.create('stale', undefined, { paths: stale })
     const index = await this.buildCommitIndex(top, view, true)
     try {
@@ -1674,7 +1676,8 @@ export class GitService {
       const moved = run.ok || await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore
       if (moved) {
         // Mixed: the real index matches the new HEAD, so `git status` does not show the commit reversed.
-        await this.runGit(top, ['reset', '-q'], { userAction: true }).catch(() => undefined)
+        const reset = await this.runGit(top, ['reset', '-q'], { userAction: true }).catch((error: unknown) => ({ ok: false, output: error instanceof Error ? error.message : String(error) }))
+        if (!reset.ok) console.warn('after a chosen commit the index could not be reset to the new HEAD; git status shows the commit reversed until it is', { top, error: reset.output.trim() })
         return
       }
       if (run.cancelled) throw cancelledError()
@@ -1694,7 +1697,8 @@ export class GitService {
   private async buildCommitIndex(top: string, view: SelectionView, asPerson: boolean): Promise<string> {
     const gitDir = await this.read(top, ['rev-parse', '--absolute-git-dir'])
     if (!gitDir) throw gitErrors.create('git_failed')
-    const file = join(gitDir, `mousse-selection-${randomUUID()}.index`)
+    await sweepSelectionIndexes(gitDir)
+    const file = join(gitDir, `${SELECTION_INDEX_PREFIX}${randomUUID()}.index`)
     try {
       const real = await this.read(top, ['rev-parse', '--git-path', 'index'])
       // A copy keeps the stat data, so only files that changed are read again.
@@ -1753,6 +1757,31 @@ ${run.output}`))
   // ---------------------------------------------------------------------------------------------------------
   // The selection: what the next commit takes (`gitSelection.ts`)
 
+  /** Reads the changes and the selection of `top` (`readSelection`). */
+  private readView(top: string, place: SelectionPlace, options: { paths?: readonly string[] }): Promise<SelectionView> {
+    return readSelection(this.selectionGit(top), top, place, { ...options, ...(this.options.selectionMaxFiles !== undefined ? { maxFiles: this.options.selectionMaxFiles } : {}) })
+  }
+
+  /**
+   * Runs a Git action that can move HEAD (switch branch, pull, abort a merge or rebase). When HEAD moved, the project's
+   * "everything left out" marker goes: any HEAD change ends it. Returns whether HEAD moved.
+   */
+  async clearingMarkerWhenHeadMoves<T>(cwd: string, marker: MarkerOptions | undefined, work: () => Promise<T>): Promise<{ result: T; moved: boolean }> {
+    if (!marker) return { result: await work(), moved: false }
+    const head = () => this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']).catch(() => null)
+    const before = await head()
+    let moved = false
+    let result: T
+    try {
+      result = await work()
+    } finally {
+      // Also when the action failed part way, after HEAD moved (a pull that stopped in a conflict).
+      moved = await head() !== before
+      if (moved) await clearMarker(marker.markerFile).catch(() => undefined)
+    }
+    return { result, moved }
+  }
+
   /** How the selection code runs Git in `top`: as Mousse's own commands. */
   private selectionGit(top: string): SelectionGit {
     return {
@@ -1786,7 +1815,7 @@ ${run.output}`))
   async readChanges(cwd: string, place: SelectionPlace, options: { paths?: readonly string[] } = {}): Promise<GitChangesResult> {
     if (!await this.isRepo(cwd)) return { files: [], selection: { state: 'untouched', token: '' }, truncated: false }
     const top = await this.toplevel(cwd)
-    const view = await readSelection(this.selectionGit(top), top, place, options)
+    const view = await this.readView(top, place, options)
     return { files: view.files.map((item) => item.file), selection: view.selection, truncated: view.truncated }
   }
 
@@ -1800,7 +1829,7 @@ ${run.output}`))
       place.assertIdle?.()
       const top = await this.toplevel(cwd)
       const git = this.selectionGit(top)
-      const read = () => readSelection(git, top, place, { paths: [request.path] })
+      const read = () => this.readView(top, place, { paths: [request.path] })
       let view = await read()
       let target = fileOf(view, request.path)
       if (!target || target.file.version !== request.version) throw selectionErrors.create('stale')
@@ -1830,11 +1859,10 @@ ${run.output}`))
     return this.asUser(userRequested, () => this.serialized(cwd, async () => {
       place.assertIdle?.()
       const top = await this.toplevel(cwd)
-      const git = this.selectionGit(top)
-      const view = await readSelection(git, top, place, {})
+      const view = await this.readView(top, place, {})
       if (view.collected.unmerged) throw gitErrors.create('git_merge_unresolved')
       if (place.kind === 'project') {
-        await this.keepDiverged(top, place, view.files.filter((item) => item.file.indexDiverged), include ? 'Include all' : 'Leave out all')
+        await this.keepDiverged(top, place, view.all.filter((item) => item.file.indexDiverged), include ? 'Include all' : 'Leave out all')
         if (include) {
           await this.stageEverything(top)
           await this.settleMarker(top, place.markerFile, false)
@@ -1847,7 +1875,8 @@ ${run.output}`))
       } else {
         const entries: Record<string, OverlayEntry> = {}
         if (!include) {
-          for (const item of view.files) {
+          // Every changed file, listed or past the limit: nothing unseen comes along after "Leave out all".
+          for (const item of view.all) {
             for (const path of item.paths) {
               const state = view.collected.paths.get(path)
               entries[path] = { head: state?.head ?? null, working: state?.work ?? null, chosen: null }
@@ -1856,7 +1885,7 @@ ${run.output}`))
         }
         await writeOverlay(place.overlayFile, view.overlay!, entries)
       }
-      return { selection: (await readSelection(git, top, place, { paths: [] })).selection }
+      return { selection: (await this.readView(top, place, { paths: [] })).selection }
     }))
   }
 
@@ -1994,10 +2023,10 @@ ${run.output}`))
   async describeSelection(cwd: string, place: SelectionPlace, token: string): Promise<CommitInput> {
     if (!await this.isRepo(cwd)) return EMPTY_COMMIT_INPUT
     const top = await this.toplevel(cwd)
-    const view = await readSelection(this.selectionGit(top), top, place, place.kind === 'thread' ? {} : { paths: [] })
+    const view = await this.readView(top, place, place.kind === 'thread' ? {} : { paths: [] })
     if (view.selection.token !== token) throw selectionErrors.create('stale')
     if (place.kind === 'project') return this.describeCommitInput(cwd, { indexOnly: true })
-    if (view.files.some((item) => item.staleChoice)) throw selectionErrors.create('stale')
+    if (view.all.some((item) => item.staleChoice)) throw selectionErrors.create('stale')
     const index = await this.buildCommitIndex(top, view, false)
     try {
       return await this.describeCommitInput(cwd, { indexOnly: true, indexFile: index })

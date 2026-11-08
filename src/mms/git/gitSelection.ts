@@ -14,10 +14,11 @@
  * (a filter or clean driver, `ident`, `working-tree-encoding`) is whole-file only, and a whole file is staged by Git.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readlink, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { AppError, createErrorProvider } from '../../shared/errors'
 import type { GitChangedFile, GitChangeHunk, GitChangeLine, GitIncluded, GitSelectionState } from '../../shared/types'
+import { privateIndexEnv } from './gitEnv'
 import type { GitRun } from './gitProcess'
 import { NO_DIFF_PROGRAMS } from './repoPrograms'
 
@@ -55,8 +56,10 @@ export const SELECTION_MAX_FILE_LINES = 20_000
 const LINE_LEVEL_MAX_HUNK = 2000
 /** The alignment gives up (and reports the file as diverged) when it would follow more possibilities than this at once. */
 const ALIGN_MAX_STATES = 20_000
-/** Files hashed per `hash-object` run. */
-const HASH_BATCH = 200
+/** Hunk lines' text one answer carries at most; files past it are listed without hunks (`tooLarge`). */
+export const SELECTION_MAX_ANSWER_BYTES = 32 * 1024 * 1024
+/** Files read per `update-index` run; a run that fails reads its files one by one. */
+const HASH_BATCH = 500
 /** Files read at once. */
 const CONCURRENCY = 8
 
@@ -101,12 +104,16 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
 export async function readOverlay(file: string): Promise<Overlay> {
   const found = await readJson<Overlay>(file)
   if (found && found.version === 1 && typeof found.revision === 'number' && found.entries && typeof found.entries === 'object' && typeof found.epoch === 'string') return found
-  return { version: 1, epoch: randomUUID(), revision: 0, entries: {} }
+  // No overlay yet: a fixed epoch, so the token stays the same from one read to the next.
+  return { version: 1, epoch: '', revision: 0, entries: {} }
 }
 
-/** Writes the overlay with the next revision. The revision only grows, so an older token never matches a newer overlay. */
+/**
+ * Writes the overlay with the next revision. The revision only grows, and the first write picks a new epoch, so an older
+ * token never matches a newer overlay, even after the file was removed.
+ */
 export async function writeOverlay(file: string, overlay: Overlay, entries: Record<string, OverlayEntry>): Promise<Overlay> {
-  const next: Overlay = { version: 1, epoch: overlay.epoch, revision: overlay.revision + 1, entries }
+  const next: Overlay = { version: 1, epoch: overlay.epoch || randomUUID(), revision: overlay.revision + 1, entries }
   await writeJsonAtomic(file, next)
   return next
 }
@@ -122,6 +129,18 @@ export async function recordMarker(file: string, top: string, head: string | nul
 
 export async function clearMarker(file: string): Promise<void> {
   await rm(file, { force: true })
+}
+
+/**
+ * Clears a marker recorded for another HEAD: any HEAD change ends "everything left out", so a switch away and back
+ * does not bring it back. HEAD is read again first, so a marker recorded meanwhile for a newer HEAD stays.
+ */
+export async function dropMarkerOfOtherHead(git: SelectionGit, file: string, head: string | null): Promise<void> {
+  const marker = await readMarker(file)
+  if (!marker || marker.head === (head ?? '')) return
+  const now = await git.read(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).catch(() => null)
+  if (!now) return
+  if (marker.head !== (now.ok ? now.stdout.trim() : '')) await clearMarker(file)
 }
 
 /** Whether the marker in `file` was recorded for this HEAD and this index. */
@@ -294,7 +313,7 @@ export async function collect(git: SelectionGit, top: string): Promise<Collected
     // Not changed since the index by stat: the index's version (none when the index has no entry).
     found.work = found.index
   }
-  await hashWorking(git, top, format, toHash)
+  await hashWorking(git, top, toHash)
   return { top, head, objectFormat: format, emptyBlob: objectName(format, 'blob', Buffer.alloc(0)), indexDigest: sha(indexList), indexEqualsHead: !unmerged && stagedRecords.length === 0, unmerged, paths, renames }
 }
 
@@ -319,53 +338,92 @@ export async function headEntryOf(git: SelectionGit, head: string | null, path: 
   return { mode: mode!, oid: oid! }
 }
 
-/** Finds each path's mode on disk and hashes it as Git would store it; files within the size limit are written as blobs. */
-async function hashWorking(git: SelectionGit, top: string, format: string, states: PathState[]): Promise<void> {
-  const files: PathState[] = []
+/**
+ * Reads each path's working-tree entry exactly as `git add` would store it: `update-index --add` into a private index
+ * seeded with the path's current index entries, so Git converts it the same way (a file committed with CRLF keeps CRLF
+ * under `core.autocrlf`). Files within the size limit are written as blobs; larger ones are only hashed. A nested
+ * repository is recorded as a link to its HEAD, as `git add` records it, without running Git inside it. Paths go on
+ * standard input, so no command line grows with them.
+ */
+async function hashWorking(git: SelectionGit, top: string, states: PathState[]): Promise<void> {
+  const present: Array<{ found: PathState; name: string; fallback: string }> = []
   for (const found of states) {
     const name = found.path.replace(/\/$/, '')
-    const full = join(top, name)
-    const info = await lstat(full).catch(() => null)
+    const info = await lstat(join(top, name)).catch(() => null)
     if (!info) { found.work = null; continue }
-    if (info.isSymbolicLink()) {
-      const target = await readlink(full).catch(() => null)
-      found.work = { mode: LINK, oid: target === null ? '' : objectName(format, 'blob', Buffer.from(target)) }
-      found.workKnown = target !== null
-      continue
-    }
-    if (info.isDirectory()) {
-      // A nested repository or submodule: Git records it as a link to its HEAD.
-      const nested = await git.read(['-C', name, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).catch(() => null)
-      found.work = { mode: GITLINK, oid: nested?.ok ? nested.stdout.trim() : '' }
-      found.workKnown = Boolean(nested?.ok)
-      continue
-    }
-    const known = found.work?.mode && REGULAR.has(found.work.mode) ? found.work.mode : undefined
-    const executable = process.platform !== 'win32' && (info.mode & 0o111) !== 0
-    found.work = { mode: known ?? (executable ? '100755' : found.index && REGULAR.has(found.index.mode) ? found.index.mode : '100644'), oid: '' }
-    found.workSize = info.size
-    files.push(found)
+    found.workSize = info.isFile() ? info.size : 0
+    // The mode shown when Git cannot read the path.
+    const regular = found.work?.mode && REGULAR.has(found.work.mode) ? found.work.mode : found.index && REGULAR.has(found.index.mode) ? found.index.mode : '100644'
+    present.push({ found, name, fallback: info.isSymbolicLink() ? LINK : info.isDirectory() ? GITLINK : regular })
   }
-  const small = files.filter((found) => (found.workSize ?? 0) <= SELECTION_MAX_FILE_BYTES)
-  const large = files.filter((found) => (found.workSize ?? 0) > SELECTION_MAX_FILE_BYTES)
-  const batches = [...chunks(small, HASH_BATCH).map((part) => ({ part, write: true })), ...chunks(large, HASH_BATCH).map((part) => ({ part, write: false }))]
-  for (const { part, write } of batches) {
-    const flags = write ? ['-w'] : []
-    const run = await git.read(['hash-object', ...flags, '--', ...part.map((found) => found.path)])
-    if (run.ok) {
-      const lines = run.stdout.split(/\r?\n/)
-      part.forEach((found, index) => { found.work = { mode: found.work!.mode, oid: lines[index]?.trim() ?? '' } })
-      continue
+  if (!present.length) return
+  const unknown = (item: (typeof present)[number]): void => {
+    item.found.work = { mode: item.fallback, oid: '' }
+    item.found.workKnown = false
+  }
+  const run = async (args: readonly string[], env: Record<string, string>, input: string): Promise<GitRun | null> => git.read(args, { env, input }).catch(() => null)
+  const gitDir = (await run(['rev-parse', '--absolute-git-dir'], {}, ''))?.stdout.trim()
+  if (!gitDir) {
+    present.forEach(unknown)
+    return
+  }
+  await sweepSelectionIndexes(gitDir)
+  // In the Git folder, where Mousse may write an index of its own.
+  const file = join(gitDir, `${SELECTION_INDEX_PREFIX}read-${randomUUID()}.index`)
+  try {
+    const env = privateIndexEnv(file)
+    const seed = present.flatMap((item) => item.found.stages)
+    if (seed.length && !(await run(['update-index', '-z', '--index-info'], env, nulList(seed)))?.ok) {
+      present.forEach(unknown)
+      return
     }
-    // A file that went away or cannot be read fails the batch: each is hashed alone.
-    for (const found of part) {
-      const one = await git.read(['hash-object', ...flags, '--', found.path])
-      if (one.ok) found.work = { mode: found.work!.mode, oid: one.stdout.trim() }
-      else if (!(await lstat(join(top, found.path)).catch(() => null))) found.work = null
-      else found.workKnown = false
+    const small = present.filter((item) => (item.found.workSize ?? 0) <= SELECTION_MAX_FILE_BYTES)
+    const large = present.filter((item) => (item.found.workSize ?? 0) > SELECTION_MAX_FILE_BYTES)
+    const failed = new Set<PathState>()
+    const add = async (part: typeof present, write: boolean): Promise<boolean> =>
+      Boolean((await run(['update-index', '--add', '--remove', '--replace', ...(write ? [] : ['--info-only']), '-z', '--stdin'], env, nulList(part.map((item) => item.name))))?.ok)
+    for (const [items, write] of [[small, true], [large, false]] as const) {
+      for (const part of chunks(items, HASH_BATCH)) {
+        if (await add(part, write)) continue
+        // A path that cannot be read fails the whole run: each is read alone.
+        for (const item of part) if (!await add([item], write)) failed.add(item.found)
+      }
     }
+    const listed = await run(['ls-files', '-s', '-z'], env, '')
+    const entries = new Map<string, Entry>()
+    for (const line of listed?.ok ? listed.stdout.split('\0') : []) {
+      const tab = line.indexOf('\t')
+      if (tab < 0) continue
+      const [mode, oid, stage] = line.slice(0, tab).split(' ')
+      if (stage === '0') entries.set(line.slice(tab + 1), { mode: mode!, oid: oid! })
+    }
+    for (const item of present) {
+      if (!listed?.ok || failed.has(item.found)) unknown(item)
+      else item.found.work = entries.get(item.name) ?? null
+    }
+  } finally {
+    await rm(file, { force: true }).catch(() => undefined)
+    await rm(`${file}.lock`, { force: true }).catch(() => undefined)
   }
 }
+
+/** The private index files the selection reads and commits through, in the Git folder. */
+export const SELECTION_INDEX_PREFIX = 'mousse-selection-'
+/** A private index older than this was left by a run that stopped (a crash): no read or commit takes this long. */
+const SELECTION_INDEX_STALE_MS = 60 * 60 * 1000
+
+/** Removes private indexes a stopped run left in `gitDir`. */
+export async function sweepSelectionIndexes(gitDir: string): Promise<void> {
+  const names = await readdir(gitDir).catch(() => [] as string[])
+  const now = Date.now()
+  await Promise.all(names.filter((name) => name.startsWith(SELECTION_INDEX_PREFIX) && /\.index(\.lock)?$/.test(name)).map(async (name) => {
+    const full = join(gitDir, name)
+    const info = await stat(full).catch(() => null)
+    if (info && now - info.mtimeMs > SELECTION_INDEX_STALE_MS) await rm(full, { force: true }).catch(() => undefined)
+  }))
+}
+
+const nulList = (items: readonly string[]): string => `${items.join('\0')}\0`
 
 function chunks<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = []
@@ -583,6 +641,8 @@ export interface FileView {
   oldHead: Entry | null
   work: Entry | null
   oldWork: Entry | null
+  /** False when the working tree's version of a path could not be read (`work` then has no object). */
+  workKnown: boolean
   /** The selection's entry for the path, and for a rename's old path. */
   selected: Entry | null
   oldSelected: Entry | null
@@ -594,7 +654,13 @@ export interface FileView {
 
 export interface SelectionView {
   collected: Collected
+  /** The files listed: at most the limit. */
   files: FileView[]
+  /**
+   * Every changed file, past the limit too. A file past it whose selection is neither HEAD's nor the working tree's is
+   * checked as a listed one is, so `indexDiverged` and `staleChoice` hold for all of them; the rest have no hunks.
+   */
+  all: FileView[]
   selection: GitSelectionState
   truncated: boolean
   /** Project folders: whether the marker matches HEAD and the index now. */
@@ -699,13 +765,15 @@ function changeOf(state: PathState, renamed: boolean): GitChangedFile['change'] 
  * Reads the changes and the selection. `paths` limits the files listed (a rename's other path comes along); the
  * selection's state and token always cover the whole folder.
  */
-export async function readSelection(git: SelectionGit, top: string, place: SelectionPlace, options: { paths?: readonly string[] } = {}): Promise<SelectionView> {
+export async function readSelection(git: SelectionGit, top: string, place: SelectionPlace, options: { paths?: readonly string[]; maxFiles?: number } = {}): Promise<SelectionView> {
   const collected = await collect(git, top)
+  const maxFiles = options.maxFiles ?? SELECTION_MAX_FILES
   let markerValid = false
   let overlay: Overlay | undefined
   let selection: GitSelectionState
   if (place.kind === 'project') {
     markerValid = await markerMatches(place.markerFile, top, collected.head, collected.indexDigest)
+    if (!markerValid) await dropMarkerOfOtherHead(git, place.markerFile, collected.head)
     // A conflict leaves no tree to compare: nothing counts as chosen.
     const untouched = collected.unmerged || (collected.indexEqualsHead && !markerValid)
     selection = { state: untouched ? 'untouched' : 'chosen', token: sha(['project', collected.head ?? '', collected.indexDigest, markerValid]) }
@@ -769,16 +837,21 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
       hunks: [],
       included: 'no'
     }
-    views.push({ file, paths: old ? [state.path, old.path] : [state.path], head: state.head, oldHead: old?.head ?? null, work: state.work, oldWork: old?.work ?? null, selected, oldSelected, staleChoice })
+    views.push({ file, paths: old ? [state.path, old.path] : [state.path], head: state.head, oldHead: old?.head ?? null, work: state.work, oldWork: old?.work ?? null, workKnown: state.workKnown && (old?.workKnown ?? true), selected, oldSelected, staleChoice })
   }
   views.sort((a, b) => (a.file.path < b.file.path ? -1 : a.file.path > b.file.path ? 1 : 0))
-  const truncated = views.length > SELECTION_MAX_FILES
-  const shown = views.slice(0, SELECTION_MAX_FILES)
+  const truncated = views.length > maxFiles
+  const shown = views.slice(0, maxFiles)
+  // Past the limit, a file whose selection is neither HEAD's nor the working tree's is still checked, so a commit or
+  // "Leave out all" never takes an unlisted choice as valid when it no longer holds.
+  const unlisted = (view: FileView): boolean =>
+    !(sameEntry(view.selected, view.work) && sameEntry(view.oldSelected, view.oldWork)) && !(sameEntry(view.selected, view.head) && sameEntry(view.oldSelected, view.oldHead))
+  const checked = [...shown, ...views.slice(maxFiles).filter(unlisted)]
 
-  const attrs = await attributes(git, shown.flatMap((view) => view.paths))
-  const sizes = await blobSizes(git, shown.flatMap((view) => [view.head?.oid ?? '', view.work?.oid ?? '', view.selected?.oid ?? '']))
+  const attrs = await attributes(git, checked.flatMap((view) => view.paths))
+  const sizes = await blobSizes(git, checked.flatMap((view) => [view.head?.oid ?? '', view.work?.oid ?? '', view.selected?.oid ?? '']))
   let emptyBlobStored: Promise<unknown> | null = null
-  await limited(shown, async (view) => {
+  await limited(checked, async (view) => {
     const { file } = view
     const attr = attrs.get(file.path)
     if (attr && !attr.roundTrip) file.wholeFileOnly = true
@@ -809,7 +882,9 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
     view.text = { head, work, hunks, choices }
   })
 
-  for (const view of shown) {
+  const listed = new Set(shown)
+  let answerBytes = 0
+  for (const view of checked) {
     const { file } = view
     if (file.change === 'conflict') file.included = 'no'
     else if (untouched) file.included = 'yes'
@@ -819,6 +894,8 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
       if (!each.length) file.included = sameEntry(view.selected, view.work) ? 'yes' : 'no'
     } else if (sameEntry(view.selected, view.work) && sameEntry(view.oldSelected, view.oldWork)) file.included = 'yes'
     else if (sameEntry(view.selected, view.head) && sameEntry(view.oldSelected, view.oldHead)) file.included = 'no'
+    // A project file whose working tree could not be read: what is staged counts as included, never as diverged.
+    else if (place.kind === 'project' && !view.workKnown) file.included = 'yes'
     else {
       // Neither HEAD, the working tree, nor HEAD plus some of the hunks: diverged, and only the whole file can be chosen.
       file.included = 'partial'
@@ -826,7 +903,13 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
       file.wholeFileOnly = true
       if (place.kind === 'thread') view.staleChoice = true
     }
-    if (view.text) {
+    const textBytes = view.text ? view.text.hunks.reduce((total, hunk) => total + hunk.bytes.reduce((sum, line) => sum + line.length, 0), 0) : 0
+    if (view.text && listed.has(view) && answerBytes + textBytes > SELECTION_MAX_ANSWER_BYTES) {
+      // The answer is full: this file is listed without hunks, whole file only.
+      file.tooLarge = true
+      file.wholeFileOnly = true
+    } else if (view.text && listed.has(view)) {
+      answerBytes += textBytes
       file.hunks = view.text.hunks.map((hunk, index): GitChangeHunk => ({
         id: hunk.id,
         oldStart: hunk.shape.oldStart,
@@ -848,5 +931,5 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
       state: selection.state
     })
   }
-  return { collected, files: shown, selection, truncated, markerValid, ...(overlay ? { overlay } : {}) }
+  return { collected, files: shown, all: views, selection, truncated, markerValid, ...(overlay ? { overlay } : {}) }
 }

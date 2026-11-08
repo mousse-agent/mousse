@@ -627,6 +627,7 @@ export const ROUTED_LARGE_READS: readonly string[] = [
   'files.read',
   'files.readAsset',
   'git.diff',
+  'git.changes',
   'review.file',
   'runs.events'
 ]

@@ -1163,6 +1163,21 @@ async function clearProjectSelectionAfter(ctx: HandlerContext, method: string, p
   }
 }
 
+/**
+ * Runs a switch, pull or abort in a project folder: when it moved HEAD, the project's "everything left out" marker goes
+ * (any HEAD change ends it, so switching away and back does not bring it back) and views read the selection again.
+ */
+async function clearingSelectionWhenHeadMoves<T>(ctx: HandlerContext, p: Record<string, unknown>, target: GitMutationTarget, work: () => Promise<T>): Promise<T> {
+  const marker = threadWorktree(target) ? undefined : selectionMarkerOf(() => selectionPlaceFor(ctx, p, target.root))
+  const { result, moved } = await ctx.mms.gitService.clearingMarkerWhenHeadMoves(target.root, marker, work)
+  const projectId = moved ? requestProjectId(ctx, p) : undefined
+  if (projectId) {
+    const threadId = asOptionalString(p.threadId, 256)
+    ctx.emitEvent?.('git.selectionChanged', { projectId, ...(threadId ? { threadId } : {}) }, threadId)
+  }
+  return result
+}
+
 /** The marker of a project folder's selection, for the index writes that keep it; none in a thread's worktree. */
 function selectionMarkerOf(place: () => SelectionPlace): { markerFile: string } | undefined {
   let found: SelectionPlace
@@ -3816,7 +3831,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
-      const result = await ctx.mms.gitService.checkout(target.root, gitUserAction(ctx, 'Switch branch'), asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
+      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => ctx.mms.gitService.checkout(target.root, gitUserAction(ctx, 'Switch branch'), asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) }))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
@@ -3926,7 +3941,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
-      const result = await followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, gitUserAction(ctx, 'Pull'), { strategy: strategy as GitPullStrategy, ...request }))
+      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, gitUserAction(ctx, 'Pull'), { strategy: strategy as GitPullStrategy, ...request })))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.abortInProgress': {
@@ -3940,9 +3955,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = recordedThreadTarget(ctx, p, target)
       const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
       const abortKeeping = () => ctx.mms.gitService.abortInProgress(target.root, gitUserAction(ctx, `Abort the ${kind}`), kind, { owner })
-      const kept = thread
-        ? await runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Aborted the ${kind}`, reversible: false }] }, abortKeeping)
-        : await abortKeeping()
+      const kept = await clearingSelectionWhenHeadMoves(ctx, p, target, () => thread
+        ? runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Aborted the ${kind}`, reversible: false }] }, abortKeeping)
+        : abortKeeping())
       return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: abortKeptNotice(kind, kept) } } : {})
     }
     case 'git.createBranch': {

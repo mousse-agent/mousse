@@ -1572,6 +1572,7 @@ export interface GitChangedFile {
   wholeFileOnly: boolean
   /** The selection holds content that is neither HEAD nor HEAD plus some of these hunks, or was chosen against an older HEAD. */
   indexDiverged: boolean
+  /** Listed without hunks: a side is over the size or line limit, or the answer already carries as many hunk lines as one answer holds. */
   tooLarge: boolean
   /** Changes whenever this path's HEAD entry, selection entries, working-tree content or the selection state change. */
   version: string

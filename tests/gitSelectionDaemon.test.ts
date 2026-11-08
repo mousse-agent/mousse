@@ -153,4 +153,21 @@ describe('Git selection through the daemon', () => {
     expect(fileOf(await changes(scope), 'a.txt').included).toBe('yes')
     await expect(client.request('git.include', { ...scope, path: '../outside.txt', version: 'x', include: true })).rejects.toMatchObject({ code: 'git_path_outside' })
   })
+
+  it('a branch switch away and back ends "everything left out"', async () => {
+    const project = mms.projects.openProject(f.repo)
+    const scope = { projectId: project.id }
+    const main = git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')
+    git(f.repo, 'switch', '-q', '-c', 'other'); writeFileSync(join(f.repo, 'other.txt'), 'other\n'); git(f.repo, 'add', 'other.txt'); git(f.repo, 'commit', '-qm', 'other'); git(f.repo, 'switch', '-q', main)
+    writeFileSync(join(f.repo, 'new.txt'), 'new\n')
+    await client.request('git.include', { ...scope, all: true, include: false })
+    expect((await changes(scope)).selection.state).toBe('chosen')
+    const seen: unknown[] = []
+    client.onEvent((event) => { if (event.type === 'git.selectionChanged') seen.push(event.data) })
+    await client.subscribe(0)
+    await client.request('git.checkout', { ...scope, branch: 'other' })
+    await client.request('git.checkout', { ...scope, branch: main })
+    expect((await changes(scope)).selection.state).toBe('untouched')
+    await vi.waitFor(() => expect(seen).toContainEqual({ projectId: project.id }))
+  })
 })
