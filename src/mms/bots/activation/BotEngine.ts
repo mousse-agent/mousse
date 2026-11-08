@@ -161,6 +161,10 @@ export interface BotEngineHost {
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
   providerLabel?(instanceId: string): string
+  /** The models the owner may pick by hand in About and on the create row (#673). */
+  modelChoices?(): Promise<Array<{ model: string; label: string }>>
+  /** This computer's name, the one computer a bot runs on for now. */
+  computerName?(): string
   /**
    * Whether the skill or MCP tool an ask names exists here: a run never asks the owner for one that
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
@@ -310,7 +314,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId)
     })
-    this.service = new BotChatService(this, { store: host.store, ...(host.memory ? { memory: host.memory } : {}), now: () => this.now() })
+    this.service = new BotChatService(this, {
+      store: host.store,
+      ...(host.memory ? { memory: host.memory } : {}),
+      now: () => this.now(),
+      ...(host.modelChoices ? { modelChoices: host.modelChoices } : {}),
+      ...(host.computerName ? { computerName: host.computerName } : {})
+    })
     try {
       for (const row of host.store.all('SELECT thread_id, bot_id, role FROM bot_threads'))
         this.known.set(row.thread_id as string, { botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole })
@@ -869,7 +879,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * wall, the same schedule's last run still waits in the queue or for the internet, the occurrence is skipped and says why. An open ask
    * is not a skip: asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now?: Date }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now?: Date; model?: string }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
@@ -908,6 +918,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         createdAt: this.store.now(),
         lane: 'run'
       }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
+      // A model the owner picked by hand for this automation (#673): this run's named choice, at the bot's depth. One
+      // that is not available leaves the run on the bot's own choice, as any named model does.
+      if (inserted && input.model) this.store.setModelOverride(id, { mode: 'named', model: input.model, depth: admitted.published.main.model.depth })
       if (inserted) this.dropOverQueue(botId, 'run')
       return inserted
     })
@@ -3840,7 +3853,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
     this.entry(botId)
     let added: BotScheduleEntry
     try {
@@ -3894,6 +3907,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(description ? { description } : {}),
       ...(profile.look ? { look: { colour: profile.look.colour, accessory: profile.look.accessory } } : {})
     }))
+  }
+
+  /**
+   * The owner picks the bot's model by hand in About (#673): a named model, or `null` for by usage (automatic). Saved
+   * as a revision with the same grant, so no approval is needed; the depth stays.
+   */
+  setOwnerModel(botId: string, model: string | null): void {
+    this.entry(botId)
+    const current = this.published(botId).main.model
+    const choice: BotModelChoice = model ? { mode: 'named', model, depth: current.depth } : { mode: 'auto', depth: current.depth }
+    this.publishProfile(botId, (next) => ({ ...next, main: { ...next.main, model: choice } }))
+  }
+
+  /** The bot's model as the owner set it: by usage, or a named model. */
+  ownerModel(botId: string): string | null {
+    const model = this.published(botId).main.model
+    return model.mode === 'named' ? model.model : null
   }
 
   /**

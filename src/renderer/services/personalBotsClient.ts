@@ -23,7 +23,10 @@ export interface PersonalBotsClient {
   markRead(botId: string, seq: number): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
-  addSchedule(botId: string, when: BotSchedule['when'], prompt: string): Promise<BotDetail>
+  addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
+  /** The bot's model by hand or by usage (null), and the computers it can run on (#673). */
+  model(botId: string): Promise<BotsPersonalV2Result<'bots.model.get'>>
+  setModel(botId: string, model: string | null): Promise<BotSummary>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
   exportMemory(botId: string, dir: string): Promise<{ files: string[] }>
 }
@@ -47,7 +50,9 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),
-    addSchedule: (botId, when, prompt) => call('bots.schedules.add', { botId, when, prompt }),
+    addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
+    model: (botId) => call('bots.model.get', { botId }),
+    setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir })
   }

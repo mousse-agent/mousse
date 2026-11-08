@@ -89,6 +89,8 @@ export interface ScheduledJobBot {
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
   createdBy: 'owner' | 'bot'
+  /** A model the owner picked by hand for this automation's runs (#673); absent: the bot's own choice (by usage). */
+  model?: string
 }
 
 /** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */

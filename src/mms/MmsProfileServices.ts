@@ -2,7 +2,7 @@ import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
@@ -677,6 +677,17 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
+      // By hand (#673): the ready models that can hold a bot here, named by their provider.
+      modelChoices: async () => {
+        const seen = new Set<string>()
+        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
+          if (seen.has(model)) return []
+          seen.add(model)
+          const family = this.botProviderLabel(instanceId)
+          return [{ model, label: family ? `${family} · ${model}` : model }]
+        })
+      },
+      computerName: () => hostname(),
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers

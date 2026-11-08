@@ -97,6 +97,8 @@ export interface BotScheduleEntry {
   label: string
   createdBy: 'owner' | 'bot'
   createdAt: string
+  /** A model picked by hand for its runs; absent: by usage. */
+  model?: string
   nextAt?: string
   /** Paused from the Automations page (the bot's own pause is the bot's). */
   paused: boolean
@@ -154,6 +156,7 @@ export class BotScheduleBook {
       label: this.labelOf(when),
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
+      ...(job.bot.model ? { model: job.bot.model } : {}),
       ...(job.nextRunAt && job.state !== 'paused' && job.enabled ? { nextAt: job.nextRunAt } : {}),
       paused: job.state === 'paused' || !job.enabled,
       tellMe: tellMeOf(job),
@@ -192,7 +195,7 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least 5 minutes apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
     const problem = botScheduleProblem(input.when, prompt)
@@ -204,7 +207,8 @@ export class BotScheduleBook {
       prompt,
       schedule: jobScheduleOf(when),
       threadId: botJobThreadGuard(botId),
-      bot: { botId, scheduleId, createdBy }
+      // Only the owner picks a model by hand; a bot's own schedule runs on its own choice.
+      bot: { botId, scheduleId, createdBy, ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim() } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!

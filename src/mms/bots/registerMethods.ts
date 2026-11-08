@@ -30,8 +30,10 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
-  'bots.schedules.add': ['botId', 'when', 'prompt'],
+  'bots.schedules.add': ['botId', 'when', 'prompt', 'model'],
   'bots.schedules.remove': ['botId', 'scheduleId'],
+  'bots.model.get': ['botId'],
+  'bots.model.set': ['botId', 'model'],
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
   'bots.memory.export': ['botId', 'dir']
@@ -106,8 +108,12 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
         (when.kind === 'cron' && Object.keys(when).every((key) => key === 'kind' || key === 'expr') && text(when.expr, 128)))
       if (!ok) throw new DomainRpcError('invalid_params', 'When is every N minutes or a five-field cron')
       if (!text(p.prompt, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Say what the bot should do')
+      if (p.model !== undefined && !text(p.model, 256)) throw new DomainRpcError('invalid_params', 'A model is a name of 1 to 256 characters')
       break
     }
+    case 'bots.model.set':
+      if (p.model !== null && !text(p.model, 256)) throw new DomainRpcError('invalid_params', 'A model is a name of 1 to 256 characters, or null for by usage')
+      break
     case 'bots.schedules.remove':
       if (typeof p.scheduleId !== 'string' || !SCHEDULE_ID.test(p.scheduleId)) throw new DomainRpcError('invalid_params', 'A schedule id is required')
       break
@@ -142,7 +148,9 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
-    case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string)
+    case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string, typeof p.model === 'string' ? p.model : undefined)
+    case 'bots.model.get': return bots.modelGet(botId)
+    case 'bots.model.set': return bots.modelSet(botId, typeof p.model === 'string' ? p.model.trim() : null)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':

@@ -69,7 +69,19 @@ describe('About this bot', () => {
     expect(face.getAttribute('data-colour')).toBe('green')
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
     expect(head.querySelector('p')?.textContent).toBe('Tells me which emails need a reply.')
-    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS'])
+    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'RUNS ON'])
+  })
+
+  it('runs by usage until the owner picks a model by hand, on this computer (#673)', async () => {
+    await show()
+    expect(rows('RUNS ON')).toEqual(['Model', 'Computer'])
+    expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('By usage')
+    expect(host.querySelector('[data-testid="bot-about-computer"]')?.textContent).toContain('Desk')
+    await click(host.querySelector('[aria-label="Inbox helper\'s model"]') ?? undefined)
+    const sonnet = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Claude · sonnet'))
+    await click(sonnet)
+    expect(fake.calls).toContainEqual(['setModel', 'b1', 'sonnet'])
+    expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('Claude · sonnet')
   })
 
   it('lists what it can use and removes one', async () => {

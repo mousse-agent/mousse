@@ -81,6 +81,10 @@ export class BotChatService {
     store: BotStore
     memory?: BotMemoryAdmin
     now(): number
+    /** The models the owner may pick by hand (#673): ready, and able to hold a bot here. */
+    modelChoices?(): Promise<Array<{ model: string; label: string }>>
+    /** This computer's name. */
+    computerName?(): string
   }) {}
 
   private get store(): BotStore {
@@ -318,10 +322,28 @@ export class BotChatService {
     }
   }
 
-  /** `bots.schedules.add`: the owner gives the bot a schedule from the Automations page. */
-  addSchedule(botId: string, when: BotSchedule['when'], prompt: string): BotDetail {
-    this.engine.addSchedule(botId, { when, prompt }, 'owner')
+  /** `bots.schedules.add`: the owner gives the bot a schedule from the Automations page, with a model by hand or by usage. */
+  addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): BotDetail {
+    this.engine.addSchedule(botId, { when, prompt, ...(model ? { model } : {}) }, 'owner')
     return this.detailOf(botId)
+  }
+
+  /**
+   * `bots.model.get` (#673, by hand): the bot's model (null: by usage) and the computer it runs on, with what the owner
+   * may pick. Models are the ready ones that can hold a bot here; computers are the ones this daemon can run it on,
+   * which is this computer until bots can run elsewhere.
+   */
+  async modelGet(botId: string): Promise<{ model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: Array<{ id: string; name: string }> }> {
+    this.engine.definitionOf(botId)
+    const models = await (this.options.modelChoices?.() ?? Promise.resolve([])).catch(() => [])
+    const computer = this.options.computerName?.() ?? 'This computer'
+    return { model: this.engine.ownerModel(botId), models, computer: 'this_computer', computers: [{ id: 'this_computer', name: computer }] }
+  }
+
+  /** `bots.model.set`: the owner picks a model by hand, or by usage again (`null`). */
+  modelSet(botId: string, model: string | null): { bot: BotSummary } {
+    this.engine.setOwnerModel(botId, model)
+    return { bot: this.summaryOf(botId) }
   }
 
   removeSchedule(botId: string, scheduleId: string): BotDetail {

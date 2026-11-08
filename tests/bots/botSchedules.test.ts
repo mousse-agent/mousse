@@ -271,6 +271,31 @@ describe('bot schedules in the shared scheduler', () => {
     expect(events.filter((event) => event.message.kind === 'run_report').at(-1)!.quiet).toBeUndefined()
   })
 
+  it('a model picked by hand for an owner\'s automation is its runs\' model; by usage is the default (#673)', async () => {
+    await f.bots.reconcileOnStartup()
+    const byHand = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy.', model: 'opus' }, 'owner')
+    const byUsage = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
+    // The bot's own schedules never name a model: only the owner picks one.
+    const own = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Mine.', model: 'opus' }, 'bot')
+    expect([byHand.model, byUsage.model, own.model]).toEqual(['opus', undefined, undefined])
+    await f.tickSchedules(new Date(T0 + 5 * MIN))
+    const of = (scheduleId: string) => f.store.listActivations(botId).find((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId)!
+    expect(of(byHand.scheduleId).modelOverride).toEqual({ mode: 'named', model: 'opus', depth: 'normal' })
+    expect(of(byUsage.scheduleId).modelOverride).toBeNull()
+  })
+
+  it('the owner picks the bot\'s model by hand in About, or by usage again, on this computer (#673)', async () => {
+    expect(await f.bots.service.modelGet(botId)).toMatchObject({ model: null, computer: 'this_computer', computers: [{ id: 'this_computer' }] })
+    const revision = f.store.registry(botId)!.revision
+    f.bots.service.modelSet(botId, 'sonnet')
+    expect(f.bots.ownerModel(botId)).toBe('sonnet')
+    expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'named', model: 'sonnet', depth: 'normal' })
+    // A new revision with the same grant: no approval.
+    expect(f.store.registry(botId)!.revision).not.toBe(revision)
+    f.bots.service.modelSet(botId, null)
+    expect(f.bots.definitionOf(botId).main.model).toEqual({ mode: 'auto', depth: 'normal' })
+  })
+
   it('nextOccurrenceAfter keeps the cadence when on time and collapses when late', () => {
     const every5 = { kind: 'interval' as const, minutes: 5 }
     expect(nextOccurrenceAfter(every5, iso(T0), new Date(T0 + 1000))).toBe(iso(T0 + 5 * MIN))

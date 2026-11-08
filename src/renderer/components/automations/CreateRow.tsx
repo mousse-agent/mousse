@@ -48,8 +48,10 @@ export interface CreateRowProps {
   ceiling: PermissionMode
   isGitRepo: (projectId: string) => Promise<boolean>
   create: (input: CreateScheduledJobInput) => Promise<void>
-  /** With a bot as Who, the bot gets the schedule (it stays the bot's, and it runs in the bot's chat). */
-  addBotSchedule: (botId: string, when: BotSchedule['when'], prompt: string) => Promise<void>
+  /** With a bot as Who, the bot gets the schedule (it stays the bot's, and it runs in the bot's chat); `model` is one picked by hand. */
+  addBotSchedule: (botId: string, when: BotSchedule['when'], prompt: string, model?: string) => Promise<void>
+  /** What a bot may run on, picked by hand (#673): the models that can hold it here, and the computers it can run on. */
+  botChoices?: (botId: string) => Promise<{ models: Array<{ model: string; label: string }>; computers: Array<{ id: string; name: string }> }>
   /** Opens the bot's chat, where its grant (its May) is shown. */
   onOpenBot: (botId: string) => void
   /** Bumped by ⌘N on the page: the row opens and takes focus. */
@@ -65,7 +67,7 @@ export interface CreateRowProps {
  * computer's clock and the effective May. An unread When says Choose when and keeps Add off. Typing `/` offers the
  * workflows; a workflow swaps the prompt for its inputs and the Who chip goes, since a workflow runs itself.
  */
-export function CreateRow({ profileId, catalog, library, defaultName, owner, initialProjectId, defaultMay, ceiling, isGitRepo, create, addBotSchedule, onOpenBot, openRequest, prefill, title }: CreateRowProps) {
+export function CreateRow({ profileId, catalog, library, defaultName, owner, initialProjectId, defaultMay, ceiling, isGitRepo, create, addBotSchedule, botChoices, onOpenBot, openRequest, prefill, title }: CreateRowProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [picked, setPicked] = useState<Picked | null>(null)
@@ -118,6 +120,18 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
   const prompt = workflow ? workflowCommandText(workflow.slug, inputs, fields) : typed
   const bot = who.kind === 'bot' && !workflow ? library.bots.find((entry) => entry.id === who.id) : undefined
   const botSchedule = bot && when ? botWhen(when.schedule) : null
+  // A bot runs by usage unless a model is picked by hand; it runs on this computer for now.
+  const [botModel, setBotModel] = useState('')
+  const [runsOn, setRunsOn] = useState<{ models: Array<{ model: string; label: string }>; computers: Array<{ id: string; name: string }> } | null>(null)
+  const botId = bot?.id
+  useEffect(() => {
+    setBotModel('')
+    setRunsOn(null)
+    if (!botId || !botChoices) return
+    let live = true
+    botChoices(botId).then((choices) => { if (live) setRunsOn(choices) }, () => undefined)
+    return () => { live = false }
+  }, [botId, botChoices])
   const savedAgent = who.kind === 'agent' && !workflow ? library.agents.find((entry) => entry.id === who.id) : undefined
   const first = when ? firstRunOf(when.schedule, now) : null
   const ready = workflow ? !fieldsLoading && workflowInputsReady(fields, inputs) : Boolean(typed) && !typed.startsWith('/')
@@ -151,7 +165,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
     setError(null)
     try {
       if (bot && botSchedule?.ok) {
-        await addBotSchedule(bot.id, botSchedule.when, prompt)
+        await addBotSchedule(bot.id, botSchedule.when, prompt, botModel || undefined)
       } else {
         const gitProject = projectId ? (repo[projectId] ?? await isGitRepo(projectId).catch(() => false)) : false
         const model = who.kind === 'model' && !workflow ? catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key) : undefined
@@ -267,6 +281,31 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
             onChange={(key) => setWho(parseWhoKey(key))}
           />
         )}
+        {bot && runsOn ? (
+          <>
+            <Select
+              ariaLabel="Model"
+              className="automation-chip-select"
+              size="small"
+              value={botModel}
+              options={[{ value: '', label: 'By usage' }, ...runsOn.models.map((choice) => ({ value: choice.model, label: choice.label }))]}
+              title={`What ${bot.name} runs on: by usage picks a ready model each run, or pick one`}
+              renderValue={() => <span data-testid="automation-create-model">{botModel ? runsOn.models.find((choice) => choice.model === botModel)?.label ?? botModel : 'By usage'}</span>}
+              onChange={setBotModel}
+            />
+            {runsOn.computers.length ? (
+              <Select
+                ariaLabel="Computer"
+                className="automation-chip-select"
+                size="small"
+                value={runsOn.computers[0]!.id}
+                options={runsOn.computers.map((computer) => ({ value: computer.id, label: computer.name }))}
+                title="The computer it runs on. Your other computers join this list later."
+                onChange={() => undefined}
+              />
+            ) : null}
+          </>
+        ) : null}
         <DoPicker value={workflowId} workflows={library.workflows} onChange={chooseWorkflow} />
         {bot ? null : (
           <Select

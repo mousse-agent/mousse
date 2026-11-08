@@ -101,6 +101,10 @@ export function setBotsClient(next: PersonalBotsClient | null): void { client = 
 function bots(): PersonalBotsClient {
   return client ?? (client = createPersonalBotsClient(window.mousse.platformRequest))
 }
+/** The client the bot screens talk through (About's model and computer). */
+export function botsClient(): PersonalBotsClient {
+  return bots()
+}
 
 let epoch = 0
 let refreshOperation: Promise<void> | undefined

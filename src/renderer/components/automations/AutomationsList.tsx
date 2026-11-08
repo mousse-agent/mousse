@@ -226,6 +226,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return item?.link.kind === 'job' ? [item.link.jobId] : []
   })
 
+  const botChoices = useCallback((botId: string) => createPersonalBotsClient(window.mousse.platformRequest).model(botId), [])
   const openBot = (botId: string) => {
     closeRailPages()
     void useChatsStore.getState().openBot(botId)
@@ -455,10 +456,11 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             ceiling={ceiling}
             isGitRepo={async (projectId) => (await window.mousse.git.status({ projectId, workspaceThreadId: null })).isRepo}
             create={create}
-            addBotSchedule={async (botId, when, prompt) => {
-              await createPersonalBotsClient(window.mousse.platformRequest).addSchedule(botId, when, prompt)
+            addBotSchedule={async (botId, when, prompt, model) => {
+              await createPersonalBotsClient(window.mousse.platformRequest).addSchedule(botId, when, prompt, model)
               await refresh()
             }}
+            botChoices={botChoices}
             onOpenBot={openBot}
             openRequest={createRequest}
             prefill={prefill}

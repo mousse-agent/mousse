@@ -56,6 +56,8 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.permissions.revoke',
   'bots.schedules.add',
   'bots.schedules.remove',
+  'bots.model.get',
+  'bots.model.set',
   'bots.memory.list',
   'bots.memory.forget',
   'bots.memory.export'
@@ -100,8 +102,17 @@ export interface BotsPersonalV2Api {
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
-  /** The owner adds a schedule (the Automations page's create row, with the bot as Who); the bot is told in its chat. */
-  'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string }; result: BotDetail }
+  /**
+   * The owner adds a schedule (the Automations page's create row, with the bot as Who). `model`: one picked by hand for
+   * its runs (#673); absent, the bot's own choice (by usage).
+   */
+  'bots.schedules.add': { params: { botId: string; when: BotSchedule['when']; prompt: string; model?: string }; result: BotDetail }
+  /**
+   * The bot's model and computer, by hand (#673): `model` null is by usage (the default). Model names appear here and on
+   * the pickers that use them only. `computers` are the ones this daemon can run the bot on (this one, for now).
+   */
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: Array<{ id: string; name: string }> } }
+  'bots.model.set': { params: { botId: string; model: string | null }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

@@ -133,7 +133,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createThread: job.createThread,
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy } } : {}),
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.model ? { model: job.bot.model } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,

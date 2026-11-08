@@ -1,7 +1,10 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import { botFaceState, useBotsStore } from '../../stores/botsStore'
+import type { BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
+import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
+import { errorText } from '../../services/personalBotsClient'
+import { Select } from '../ui/Select'
 import { BotFace } from './face/BotFace'
 
 /** "Mon 09:00" for a run's next time; today's runs show the time alone. */
@@ -13,8 +16,48 @@ export function nextRunText(at: string, now = new Date()): string {
 }
 
 /**
+ * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (this one, until
+ * bots can run on your other computers).
+ */
+function RunsOn({ botId, name }: { botId: string; name: string }) {
+  const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const client = botsClient()
+  useEffect(() => {
+    let live = true
+    client.model(botId).then((next) => { if (live) setChoices(next) }, (cause) => { if (live) setError(errorText(cause)) })
+    return () => { live = false }
+    // The client is a thin wrapper over the window's transport; the bot decides what to read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [botId])
+  if (!choices) return error ? <p className="bot-about-empty" role="alert">{error}</p> : null
+  const pick = async (model: string) => {
+    setError(null)
+    try {
+      await client.setModel(botId, model || null)
+      setChoices({ ...choices, model: model || null })
+    } catch (cause) {
+      setError(errorText(cause))
+    }
+  }
+  const models = [{ value: '', label: 'By usage' }, ...choices.models.map((choice) => ({ value: choice.model, label: choice.label }))]
+  if (choices.model && !choices.models.some((choice) => choice.model === choices.model)) models.push({ value: choices.model, label: `${choices.model} (not available now)` })
+  return <>
+    <div className="bot-about-row" data-testid="bot-about-model">
+      <span>Model</span>
+      <Select ariaLabel={`${name}'s model`} size="small" value={choices.model ?? ''} options={models} title="By usage picks a ready model each run" onChange={(model) => void pick(model)} />
+    </div>
+    <div className="bot-about-row" data-testid="bot-about-computer">
+      <span>Computer</span>
+      <Select ariaLabel={`${name}'s computer`} size="small" value={choices.computer} options={choices.computers.map((computer) => ({ value: computer.id, label: computer.name }))} title="Your other computers join this list later" onChange={() => undefined} />
+    </div>
+    {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
+  </>
+}
+
+/**
  * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; Pause and Delete. Nothing else: no model, folder picker or log.
+ * when it runs, each with Remove; what it runs on, by hand or by usage (#673); Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const detail = useBotsStore((s) => s.details[bot.id])
@@ -43,6 +86,8 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         <button type="button" aria-label={`Remove ${run.label}`} onClick={() => void store().removeSchedule(bot.id, run.id)}>Remove</button>
       </div>)
       : detail && <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>}
+    <h3>RUNS ON</h3>
+    <RunsOn botId={bot.id} name={bot.name} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>
