@@ -8,7 +8,7 @@ import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
-import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
+import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
@@ -1082,6 +1082,19 @@ const api = {
     /** Bytes of one file of a downloaded local model. */
     readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
+    /** Starts a native engine slot for a downloaded Kokoro model; resolves with its id once the model has loaded. */
+    nativeOpen: (modelId: LocalTtsModelId): Promise<number> => ipcRenderer.invoke('readAloud:nativeOpen', modelId),
+    /** Voices one segment on a slot; rejects when the slot stopped. */
+    nativeSpeak: (slotId: number, text: string, voice: string, speed: number): Promise<NativeSpeechResult> =>
+      ipcRenderer.invoke('readAloud:nativeSpeak', slotId, text, voice, speed),
+    /** Stops a slot at once, also mid-segment. */
+    nativeClose: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeClose', slotId),
+    /** A slot's process ended without being closed. */
+    onNativeSlotExit: (cb: (slotId: number) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { slotId: number }) => cb(event.slotId)
+      ipcRenderer.on('readAloud:nativeSlotExit', handler)
+      return () => ipcRenderer.removeListener('readAloud:nativeSlotExit', handler)
+    },
     /** Speech audio for at most PROVIDER_TTS_MAX_CHARS characters, made with a provider's TTS model. */
     synthesizeWithProvider: (request: ProviderSpeechRequest): Promise<ProviderSpeechResult> =>
       ipcRenderer.invoke('readAloud:synthesizeWithProvider', request),

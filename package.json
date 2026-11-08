@@ -76,6 +76,7 @@
     "micromark-extension-gfm-table": "^2.1.2",
     "node-datachannel": "0.33.4",
     "node-pty": "^1.0.0",
+    "onnxruntime-node": "1.21.0",
     "pele": "^1.10.0",
     "qrcode-generator": "^1.5.2",
     "shiki": "^3.23.0",

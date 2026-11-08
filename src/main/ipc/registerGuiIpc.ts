@@ -20,7 +20,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell, utilityProcess } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
@@ -62,6 +62,7 @@ import {
   type ProviderTranscriptionResult
 } from '../../shared/dictation'
 import { LocalModelManager, defaultLocalModelsRoot } from '../localModels/LocalModelManager'
+import { NativeTtsSlots, nativeTtsHostScript } from '../readAloud/NativeTtsSlots'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -2652,6 +2653,17 @@ export function registerGuiIpc(
   registerHandler('readAloud:readLocalModelFile', (_e, modelId: string, path: string) =>
     localTtsModels.readFile(modelId, path)
   )
+  // Kokoro on onnxruntime-node, one utility process per slot (see NativeTtsSlots).
+  const nativeTts = new NativeTtsSlots({
+    fork: () => utilityProcess.fork(nativeTtsHostScript(), [], { serviceName: 'Mousse voice engine' }),
+    readFile: (modelId, path) => localTtsModels.readFile(modelId, path),
+    isDownloaded: async (modelId) => (await localTtsModels.status(modelId)).state.status === 'downloaded'
+  })
+  registerHandler('readAloud:nativeOpen', (event, modelId: unknown) => nativeTts.open(event.sender, modelId))
+  registerHandler('readAloud:nativeSpeak', (event, slotId: unknown, text: unknown, voice: unknown, speed: unknown) =>
+    nativeTts.speak(event.sender, slotId, text, voice, speed)
+  )
+  registerHandler('readAloud:nativeClose', (event, slotId: unknown) => nativeTts.close(event.sender, slotId))
   registerHandler('readAloud:synthesizeWithProvider', async (_e, request: ProviderSpeechRequest): Promise<ProviderSpeechResult> => {
     const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
       providerId: request?.providerId,
