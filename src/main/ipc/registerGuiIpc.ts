@@ -1688,13 +1688,18 @@ export function registerGuiIpc(
     return res.thread
   })
 
-  // `/fork`: the same fork agents make with `thread_fork`, after the thread's latest finished turn.
-  registerHandler('threads:fork', async (_e, threadId: string) => {
+  // `/fork`: the same fork agents make with `thread_fork`, after the thread's latest finished turn. Fork on a turn
+  // passes that turn's run: the fork starts after it, from the code it left.
+  registerHandler('threads:fork', async (_e, threadId: string, options?: { atRunId?: string }) => {
+    const atRunId = typeof options?.atRunId === 'string' && options.atRunId ? options.atRunId : undefined
+    const at = atRunId
+      ? { atRunOrdinal: (await guiMms.request<{ run: { ordinal: number; threadId: string } }>('runs.get', { threadId, runId: atRunId })).run.ordinal }
+      // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now. An
+      // earlier turn without one is refused instead of starting from today's code.
+      : { atRunOrdinal: 'latest_stable', seedFrom: 'current_head' }
     const forked = await guiMms.request<{ threadId: string }>('thread.fork', {
       sourceThreadId: threadId,
-      atRunOrdinal: 'latest_stable',
-      // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now.
-      seedFrom: 'current_head',
+      ...at,
       clientRequestId: randomUUID()
     })
     const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')

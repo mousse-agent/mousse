@@ -74,7 +74,8 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
-import { errorText, sendErrorLine } from '../lib/errorText'
+import { errorText, readableError, sendErrorLine } from '../lib/errorText'
+import { showToast } from './ui/Toast'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
@@ -971,6 +972,12 @@ export function OrchestratorChat() {
       send: (content, images) => {
         if (resendBusy || !useAppStore.getState().workspaceReady) return
         void sendMessage(content, chatMode, images, activeThreadId)
+      },
+      // The fork opens once it is made; a turn that can't be forked says why.
+      forkFrom: (turnId) => {
+        void window.mousse.threads.fork(activeThreadId, { atRunId: turnId }).catch((error: unknown) => {
+          showToast({ tone: 'error', message: readableError(error, "This turn couldn't be forked. Try again.") })
+        })
       }
     })
   }, [activeThreadId, resendBusy, sendMessage, chatMode])

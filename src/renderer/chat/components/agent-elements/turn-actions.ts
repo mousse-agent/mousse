@@ -11,6 +11,8 @@ export type TurnActions = {
   retry: (promptId: string) => void;
   /** Sends "Continue" to the thread. */
   continueRun: () => void;
+  /** Forks the thread after the finished turn with this `turnId` and opens the fork. */
+  forkFrom?: (turnId: string) => void;
 };
 
 export const TurnActionsContext = createContext<TurnActions | null>(null);
@@ -29,11 +31,14 @@ type RetryImage = { data?: string };
 export function createTurnActions<Image extends RetryImage>({
   prompt,
   send,
+  forkFrom,
 }: {
   prompt: (promptId: string) => { content: string; images?: Image[] } | undefined;
   send: (content: string, images?: Image[]) => void;
+  forkFrom?: (turnId: string) => void;
 }): TurnActions {
   return {
+    ...(forkFrom ? { forkFrom } : {}),
     retryTitle: (promptId) => {
       const message = prompt(promptId);
       if (!message || !(message.content || message.images?.length)) return null;
