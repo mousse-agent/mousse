@@ -482,7 +482,7 @@ export function AutomationDetail({
         <span className="automation-detail-label" id={id('may-label')}>May</span>
         {bot ? (
           <span className="automation-detail-value" data-testid="automation-may-bot" title={`What ${bot.name} may do is set by asking it, in its chat`}>
-            {`${bot.name}'s grant`}
+            {`${bot.name}'s grant `}
             {onOpenBot ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenBot(bot.id)}>View</button> : null}
           </span>
         ) : draft.agentId && !workflow ? (
