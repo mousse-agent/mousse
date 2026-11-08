@@ -201,18 +201,75 @@ function applySync(full: string, next: Replacement, found: Found, temporary: str
   }
 }
 
+/** The {@link PathDigest} a {@link Replacement} leaves at its path. */
+const replacementDigest = (next: Replacement): PathDigest =>
+  next.kind === 'file' ? fileDigest(next.bytes) : next.kind === 'link' ? linkDigest(next.target) : null
+
+/** The {@link PathDigest} of what {@link foundSync} found. */
+const foundDigest = (found: Found): PathDigest =>
+  found.kind === 'file' ? fileDigest(found.bytes) : found.kind === 'link' ? linkDigest(found.target) : found.kind === 'absent' ? null : 'other'
+
+/**
+ * Puts back what stood at each path, trying every one even when one fails. A path already as it stood is left alone.
+ * With `wrote`, a path is put back only while it still holds what the batch wrote there: anything else is someone's
+ * newer work, which stays. Returns the paths that could not be put back.
+ */
+function putBackAllSync(top: string, items: ReadonlyArray<{ path: string; found: Found; wrote?: PathDigest }>): string[] {
+  const left: string[] = []
+  for (const item of items) {
+    try {
+      const now = foundSync(top, item.path)
+      if (now.found.kind !== 'other' && now.digest === foundDigest(item.found)) continue
+      if (item.wrote !== undefined && now.digest !== item.wrote) {
+        left.push(item.path)
+        continue
+      }
+      putBackSync(absolute(top, item.path), item.found)
+    } catch {
+      left.push(item.path)
+    }
+  }
+  return left
+}
+
+/** `error`, naming the paths that could not be put back as they were. */
+export function notPutBack(error: unknown, paths: readonly string[]): unknown {
+  if (!paths.length) return error
+  const cause = error instanceof Error ? error : new Error(String(error))
+  const wrapped = new Error(`${cause.message} Not put back as before: ${paths.join(', ')}; the earlier versions are in the kept copy.`, { cause })
+  return Object.assign(wrapped, { code: (cause as NodeJS.ErrnoException).code, notPutBack: [...paths] })
+}
+
+/** What {@link writeProvenUndoable} did. */
+export interface ProvenWriteResult {
+  /** The first path that changed since it was planned; nothing was written. */
+  stopped?: string
+  /**
+   * Puts back what the writes replaced, where each path still holds what was written (newer work stays). For a step
+   * after the writes that fails (the index that should change with them). Returns the paths it could not put back.
+   */
+  undo: () => string[]
+}
+
 /**
  * Makes every write of `writes`, or none. Each new file or link is made in `scratch` first (the repository's Git
  * folder, so a crash never leaves one in the working tree for `Commit all` to take). Then, with nothing awaited from
  * the first check to the last change, every path is read again and compared with its `expected`; one that changed
- * stops the batch before anything is written. A change that fails puts back what the batch had already changed.
+ * stops the batch before anything is written. A change that fails puts back what the batch had already changed, the
+ * failing path's too; the error names any path that could not be put back.
  * Returns the first path that changed, or undefined when every write was made.
  */
 export async function writeProven(top: string, scratch: string, writes: readonly ProvenWrite[]): Promise<string | undefined> {
+  return (await writeProvenUndoable(top, scratch, writes)).stopped
+}
+
+/** {@link writeProven}, with a way to put the writes back if what should change with them fails. */
+export async function writeProvenUndoable(top: string, scratch: string, writes: readonly ProvenWrite[]): Promise<ProvenWriteResult> {
+  const nothing = (): string[] => []
   const prepared: Array<{ write: ProvenWrite; full: string; temporary?: string }> = []
   try {
     for (const write of writes) {
-      if (write.next.kind !== 'absent' && !await foldersAbove(top, write.path)) return write.path
+      if (write.next.kind !== 'absent' && !await foldersAbove(top, write.path)) return { stopped: write.path, undo: nothing }
       const full = absolute(top, write.path)
       if (write.next.kind === 'absent') {
         prepared.push({ write, full })
@@ -234,20 +291,29 @@ export async function writeProven(top: string, scratch: string, writes: readonly
     const found: Found[] = []
     for (const item of prepared) {
       const now = foundSync(top, item.write.path)
-      if (now.digest !== item.write.expected || now.found.kind === 'other') return item.write.path
+      if (now.digest !== item.write.expected || now.found.kind === 'other') return { stopped: item.write.path, undo: nothing }
       found.push(now.found)
     }
-    const done: number[] = []
+    let reached = 0
     try {
-      prepared.forEach((item, at) => {
-        applySync(item.full, item.write.next, found[at]!, item.temporary)
-        done.push(at)
-      })
+      for (; reached < prepared.length; reached++) {
+        const item = prepared[reached]!
+        applySync(item.full, item.write.next, found[reached]!, item.temporary)
+      }
     } catch (error) {
-      for (const at of done.reverse()) putBackSync(prepared[at]!.full, found[at]!)
-      throw error
+      // The failing path may be half changed (a file written in place, a link removed), so it is put back too.
+      const back = prepared.slice(0, reached + 1).map((item, at) => ({ path: item.write.path, found: found[at]! })).reverse()
+      throw notPutBack(error, putBackAllSync(top, back))
     }
-    return undefined
+    const written = prepared.map((item, at) => ({ path: item.write.path, found: found[at]!, wrote: replacementDigest(item.write.next) })).reverse()
+    let undone = false
+    return {
+      undo: () => {
+        if (undone) return []
+        undone = true
+        return putBackAllSync(top, written)
+      }
+    }
   } finally {
     for (const item of prepared) if (item.temporary) rmSync(item.temporary, { force: true })
   }

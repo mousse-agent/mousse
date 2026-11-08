@@ -7,7 +7,7 @@ import { expirePreservedFiles, keptFilesFromListing, PRESERVED_REF_FORMAT, threa
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { GitService } from '../src/mms/git/GitService'
 import { userAction } from '../src/mms/git/gitPolicy'
-import { fileDigest, writeProven } from '../src/mms/git/gitRevert'
+import { fileDigest, writeProven, writeProvenUndoable } from '../src/mms/git/gitRevert'
 import type { SelectionPlace } from '../src/mms/git/gitSelection'
 import type { GitChangedFile, GitChangesResult, GitRevertResult } from '../src/shared/types'
 import { DEFAULT_UNDO_RETENTION_POLICY } from '../src/shared/undoRetention'
@@ -26,6 +26,36 @@ vi.mock('../src/mms/actions/keptCopies', async (importOriginal) => {
       return kept
     }
   }
+})
+
+// Faults: the index lock renamed over the index fails (Windows EPERM while another program holds the index open); a
+// working file another program holds open refuses the rename onto it, and its in-place write fails part-way.
+const fault = vi.hoisted(() => ({ indexRename: false, refuseRename: new Set<string>(), halfWrite: new Map<string, number>() }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>()
+  const rename = (async (from, to) => {
+    if (fault.indexRename && /index\.lock$/.test(String(from)) && /[\\/]index$/.test(String(to))) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    return real.rename(from, to)
+  }) as typeof real.rename
+  return { ...real, rename, default: { ...real, rename } }
+})
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>()
+  const busy = () => Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' })
+  const renameSync = ((from, to) => {
+    if (fault.refuseRename.has(String(to))) throw busy()
+    return real.renameSync(from, to)
+  }) as typeof real.renameSync
+  const writeFileSync = ((file, data, options) => {
+    const left = fault.halfWrite.get(String(file))
+    if (left !== undefined && left > 0) {
+      fault.halfWrite.set(String(file), left - 1)
+      real.writeFileSync(file, 'half')
+      throw busy()
+    }
+    return real.writeFileSync(file, data, options)
+  }) as typeof real.writeFileSync
+  return { ...real, renameSync, writeFileSync, default: { ...real, renameSync, writeFileSync } }
 })
 
 vi.mock('../src/mms/git/gitSelection', async (importOriginal) => {
@@ -67,6 +97,9 @@ const threadPlace = (): Extract<SelectionPlace, { kind: 'thread' }> => ({ kind: 
 afterEach(() => {
   seam.afterKeep = undefined
   seam.afterSelection = undefined
+  fault.indexRename = false
+  fault.refuseRename.clear()
+  fault.halfWrite.clear()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -443,6 +476,62 @@ describe('revert in a project folder', () => {
     expect(readdirSync(cwd).filter((name) => name.startsWith('mousse-revert-') || name.startsWith('.mousse-revert-'))).toEqual([])
   })
 
+  it('a hunk revert that finds the index locked writes nothing, so the reverted change never stays staged', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25])); writeFileSync(join(cwd, 'b.txt'), 'b changed\n')
+    await service.include(cwd, USER, place, { path: 'b.txt', version: (await listed(cwd, place, 'b.txt')).version, include: false })
+    const a = await listed(cwd, place, 'a.txt')
+    const lock = join(cwd, '.git', 'index.lock')
+    // Another Git command takes the index once the copy is kept.
+    seam.afterKeep = () => writeFileSync(lock, '')
+    await expect(service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })).rejects.toMatchObject({ code: 'git_index_locked' })
+    seam.afterKeep = undefined
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3, 25]).trimEnd())
+    expect(await service.revertedList(cwd, owner)).toEqual([])
+    unlinkSync(lock)
+    await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })
+    expect(read(cwd, 'a.txt')).toBe(changed([3]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3]).trimEnd())
+  })
+
+  it('an index that cannot be replaced after the files were written puts the files back, and a retry finishes', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25])); writeFileSync(join(cwd, 'b.txt'), 'b changed\n')
+    await service.include(cwd, USER, place, { path: 'b.txt', version: (await listed(cwd, place, 'b.txt')).version, include: false })
+    const a = await listed(cwd, place, 'a.txt')
+    // A revert: the hunk stays in the file and in the index.
+    fault.indexRename = true
+    await expect(service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })).rejects.toMatchObject({ code: 'EPERM' })
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3, 25]).trimEnd())
+    fault.indexRename = false
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })
+    // A restore: the file goes back to what the revert left, with the index.
+    fault.indexRename = true
+    await expect(service.restoreReverted(cwd, USER, place, done.revertId, { owner })).rejects.toMatchObject({ code: 'EPERM' })
+    expect(read(cwd, 'a.txt')).toBe(changed([3]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3]).trimEnd())
+    fault.indexRename = false
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3, 25]).trimEnd())
+  })
+
+  it('a restore stopped with the file back and the index not finishes the index on a retry', async () => {
+    const cwd = repo(), place = projectPlace(), owner = folder()
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25])); writeFileSync(join(cwd, 'b.txt'), 'b changed\n')
+    await service.include(cwd, USER, place, { path: 'b.txt', version: (await listed(cwd, place, 'b.txt')).version, include: false })
+    const a = await listed(cwd, place, 'a.txt')
+    const done = await service.revert(cwd, USER, place, { path: 'a.txt', version: a.version, hunks: [a.hunks[1]!.id] }, { owner })
+    // The file as kept, the index as the revert left it.
+    writeFileSync(join(cwd, 'a.txt'), changed([3, 25]))
+    expect(await service.restoreReverted(cwd, USER, place, done.revertId, { owner })).toEqual({ restored: true })
+    expect(read(cwd, 'a.txt')).toBe(changed([3, 25]))
+    expect(staged(cwd, 'a.txt')).toBe(changed([3, 25]).trimEnd())
+    expect(staged(cwd, 'b.txt')).toBe('b')
+  })
+
   it('after the Undo window the sweep expires the copy: the list empties and a restore says expired', async () => {
     const cwd = repo(), place = projectPlace(), owner = folder()
     const start = Date.now()
@@ -558,5 +647,46 @@ describe('proven writes', () => {
     // file it would replace is still there.
     await expect(writeProven(cwd, join(cwd, 'no-such-folder'), [{ path: 'a.txt', expected: before, next: { kind: 'link', target: Buffer.from('b.txt') } }])).rejects.toThrow()
     expect(read(cwd, 'a.txt')).toBe(text(LINES))
+  })
+
+  it('a write that fails part-way puts back the paths already written and the failing one', async () => {
+    const cwd = repo()
+    const writes = [
+      { path: 'a.txt', expected: fileDigest(readFileSync(join(cwd, 'a.txt'))), next: { kind: 'file', bytes: Buffer.from('new a\n'), mode: 0o644 } },
+      { path: 'b.txt', expected: fileDigest(Buffer.from('b\n')), next: { kind: 'file', bytes: Buffer.from('new b\n'), mode: 0o644 } }
+    ] as const
+    // b.txt is held open: the rename onto it is refused, and the write in place stops after truncating it.
+    fault.refuseRename.add(join(cwd, 'b.txt'))
+    fault.halfWrite.set(join(cwd, 'b.txt'), 1)
+    await expect(writeProven(cwd, join(cwd, '.git'), writes)).rejects.toMatchObject({ code: 'EBUSY' })
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
+    expect(read(cwd, 'b.txt')).toBe('b\n')
+  })
+
+  it('a path that cannot be put back does not stop the others, and the error names it', async () => {
+    const cwd = repo()
+    const writes = [
+      { path: 'a.txt', expected: fileDigest(readFileSync(join(cwd, 'a.txt'))), next: { kind: 'file', bytes: Buffer.from('new a\n'), mode: 0o644 } },
+      { path: 'b.txt', expected: fileDigest(Buffer.from('b\n')), next: { kind: 'file', bytes: Buffer.from('new b\n'), mode: 0o644 } }
+    ] as const
+    fault.refuseRename.add(join(cwd, 'b.txt'))
+    fault.halfWrite.set(join(cwd, 'b.txt'), 2)
+    const error = await writeProven(cwd, join(cwd, '.git'), writes).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'EBUSY', notPutBack: ['b.txt'] })
+    expect((error as Error).message).toContain('b.txt')
+    expect(read(cwd, 'a.txt')).toBe(text(LINES))
+  })
+
+  it('undo puts back only what still holds the write: a save made since stays', async () => {
+    const cwd = repo()
+    const done = await writeProvenUndoable(cwd, join(cwd, '.git'), [
+      { path: 'a.txt', expected: fileDigest(readFileSync(join(cwd, 'a.txt'))), next: { kind: 'file', bytes: Buffer.from('new a\n'), mode: 0o644 } },
+      { path: 'b.txt', expected: fileDigest(Buffer.from('b\n')), next: { kind: 'absent' } }
+    ])
+    expect(done.stopped).toBeUndefined()
+    writeFileSync(join(cwd, 'a.txt'), 'saved since\n')
+    expect(done.undo()).toEqual(['a.txt'])
+    expect(read(cwd, 'a.txt')).toBe('saved since\n')
+    expect(read(cwd, 'b.txt')).toBe('b\n')
   })
 })

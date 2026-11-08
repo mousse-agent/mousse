@@ -16,7 +16,7 @@ import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv, privateIndexEnv } from './gitEnv'
 import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
-import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, pathDigest, recordRestored, recordRevert, revertsOf, revertSummary, REVERTED_LIST_MAX, sameFolder, UNKNOWN_DIGEST, writeProven, type FoundRevert, type PathDigest, type ProvenWrite, type RevertedPath, type RevertRecord, type Replacement } from './gitRevert'
+import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, notPutBack, pathDigest, recordRestored, recordRevert, revertsOf, revertSummary, REVERTED_LIST_MAX, sameFolder, UNKNOWN_DIGEST, writeProven, writeProvenUndoable, type FoundRevert, type PathDigest, type ProvenWrite, type RevertedPath, type RevertRecord, type Replacement } from './gitRevert'
 import { PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
@@ -397,6 +397,12 @@ function keepRefusal(error: unknown): unknown {
   if (!(error instanceof KeepCopyRefusedError)) return error
   const fixed = gitErrors.create(error.code === 'keep_copy_too_large' ? 'keep_copy_too_large' : 'keep_copy_refused')
   return new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
+}
+
+/** `git_index_locked` for a revert or restore that found Git's index lock taken past the wait; `outcome` says what changed. */
+function indexLockedError(lock: string, outcome: string): AppError {
+  const fixed = gitErrors.create('git_index_locked')
+  return new AppError({ code: fixed.code, message: `Git's index is locked (${lock}): another Git command is running, or one stopped without removing its lock. ${outcome} Try again once it has finished.`, errorInfo: fixed.errorInfo, details: { path: lock } })
 }
 
 /** Whether `path` is there, as `existsSync` answers, without blocking. */
@@ -2184,6 +2190,29 @@ ${run.output}`))
     return { written }
   }
 
+  /**
+   * {@link commitIndexEntries} with `writes` made under the same lock ({@link writeProvenUndoable}), once the index is
+   * proven still as planned and right before it is replaced: the files and the index change together, or neither does.
+   * A path staged by someone else meanwhile stops the writes with `stopRestaged` (a restore); otherwise their staging
+   * stays and the files are written (a revert). `locked`: nothing was written. When the index cannot be replaced after
+   * the files were written, the files are put back where they still hold what was written, and the error names any path
+   * that could not be.
+   */
+  private async commitWithWrites(top: string, scratch: string, entries: ReadonlyMap<string, Entry | null>, before: ReadonlyMap<string, string | null>, writes: readonly ProvenWrite[], stopRestaged: boolean): Promise<{ written: Map<string, string | null>; locked?: string; stopped?: string }> {
+    let stopped: string | undefined
+    let undo: (() => string[]) | undefined
+    try {
+      const committed = await this.commitIndexEntries(top, entries, before, async (restaged) => {
+        stopped = stopRestaged ? [...restaged][0] : undefined
+        if (stopped === undefined) ({ stopped, undo } = await writeProvenUndoable(top, scratch, writes))
+        return stopped === undefined
+      })
+      return { written: committed.written, ...(committed.locked ? { locked: committed.locked } : {}), ...(stopped !== undefined ? { stopped } : {}) }
+    } catch (error) {
+      throw notPutBack(error, undo?.() ?? [])
+    }
+  }
+
   /** Reverts hunks or lines of one text file: the file is rewritten with the rest of its changes, proven unchanged first. */
   private async revertHunks(top: string, git: SelectionGit, place: SelectionPlace, view: SelectionView, target: FileView, keepChoices: Choices, keep: { owner: string }): Promise<RevertDone> {
     const text = target.text
@@ -2213,6 +2242,24 @@ ${run.output}`))
     if (!bytes || await addedBlob(git, path, bytes) !== oid) throw selectionErrors.create('whole_file_only')
     const scratch = await this.scratchOf(top)
 
+    // The selection loses the reverted changes too; the changes it held otherwise stay as they were.
+    const headBytes = Buffer.concat(text.head)
+    const entryFor = async (selected: Buffer, entryMode: string): Promise<Entry | null> => {
+      if (selected.equals(headBytes)) return target.head
+      if (selected.equals(content)) return { mode: entryMode, oid }
+      return { mode: entryMode, oid: await storeBlob(git, selected) }
+    }
+    const reduced = text.choices ? applyChoices(text.head, text.hunks, text.choices.map((row, hunk) => row.map((value, line) => value && keepChoices[hunk]![line]!))) : null
+    // Project folders: the index entries the revert left, as it wrote them (or as they were shown, when it wrote none).
+    const shown = place.kind === 'project' ? stagedEntryDigests(view.collected.paths.get(path)?.stages ?? []).get(path) ?? null : undefined
+    let index: string | null | undefined = shown
+    // Nothing chosen yet (`Commit all`): the index is HEAD's and stays so.
+    let staged: { entry: Entry | null } | undefined
+    if (place.kind === 'project' && reduced && view.selection.state === 'chosen') {
+      const entry = await entryFor(reduced, target.selected?.mode ?? gitMode)
+      if (!sameEntry(entry, target.selected)) staged = { entry }
+    }
+
     let kept: KeptCopy
     try {
       kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-revert', action: 'Revert', paths: [path] })
@@ -2222,32 +2269,21 @@ ${run.output}`))
     // The copy holds what the new bytes were made from; a file saved in between is someone's newer work.
     const keptDigest = kept.digests.get(path)
     if ((keptDigest === undefined ? null : `file:${keptDigest}`) !== expected) throw selectionErrors.create('stale')
-    if (await writeProven(top, scratch, [{ path, expected, next: { kind: 'file', bytes, mode } }]) !== undefined) throw selectionErrors.create('stale')
-
-    // The selection loses the reverted changes too; the changes it held otherwise stay as they were.
-    const headBytes = Buffer.concat(text.head)
-    const entryFor = async (selected: Buffer, entryMode: string): Promise<Entry | null> => {
-      if (selected.equals(headBytes)) return target.head
-      if (selected.equals(content)) return { mode: entryMode, oid }
-      return { mode: entryMode, oid: await storeBlob(git, selected) }
+    const writes: ProvenWrite[] = [{ path, expected, next: { kind: 'file', bytes, mode } }]
+    if (staged) {
+      // The file is written under Git's index lock, right before the staged version loses the reverted changes: a
+      // locked index refuses before anything is written, so the change never stays staged behind a reverted file.
+      // Staged by someone else meanwhile: the file is reverted, their staging stays, and a restore leaves it.
+      const committed = await this.commitWithWrites(top, scratch, new Map([[path, staged.entry]]), new Map([[path, shown ?? null]]), writes, false)
+      if (committed.locked) throw indexLockedError(committed.locked, 'Nothing was reverted.')
+      if (committed.stopped !== undefined) throw selectionErrors.create('stale')
+      index = committed.written.has(path) ? committed.written.get(path)! : undefined
+    } else if (await writeProven(top, scratch, writes) !== undefined) {
+      throw selectionErrors.create('stale')
     }
-    const reduced = text.choices ? applyChoices(text.head, text.hunks, text.choices.map((row, hunk) => row.map((value, line) => value && keepChoices[hunk]![line]!))) : null
+
     let overlay: RevertDone['overlay']
-    // Project folders: the index entries the revert left, as it wrote them (or as they were shown, when it wrote none).
-    let index: string | null | undefined
-    if (place.kind === 'project') {
-      const shown = stagedEntryDigests(view.collected.paths.get(path)?.stages ?? []).get(path) ?? null
-      index = shown
-      // Nothing chosen yet (`Commit all`): the index is HEAD's and stays so.
-      if (reduced && view.selection.state === 'chosen') {
-        const entry = await entryFor(reduced, target.selected?.mode ?? gitMode)
-        if (!sameEntry(entry, target.selected)) {
-          // Staged by someone else meanwhile, or the index stayed locked: their staging stays, and a restore leaves it.
-          const committed = await this.commitIndexEntries(top, new Map([[path, entry]]), new Map([[path, shown]]))
-          index = committed.written.has(path) ? committed.written.get(path)! : undefined
-        }
-      }
-    } else {
+    if (place.kind !== 'project') {
       const current = view.overlay!
       const before = current.entries[path]
       if (before && reduced) {
@@ -2274,7 +2310,10 @@ ${run.output}`))
     if (!head) return out
     const listing = await this.runGit(top, ['ls-tree', '-z', '--full-tree', head, '--', ...paths], { env: { GIT_LITERAL_PATHSPECS: '1' } })
     if (!listing.ok) return new Map(paths.map((path) => [path, UNKNOWN_DIGEST]))
-    const links = (await this.read(top, ['config', '--type=bool', 'core.symlinks'])) !== 'false'
+    // Set at any level (`git init` sets it in the repository where it probes); unset, Git for Windows writes links as
+    // files, and Git elsewhere makes links.
+    const symlinks = await this.read(top, ['config', '--type=bool', 'core.symlinks'])
+    const links = symlinks === null || symlinks === '' ? process.platform !== 'win32' : symlinks === 'true'
     for (const line of listing.stdout.split('\0')) {
       const tab = line.indexOf('\t')
       const path = line.slice(tab + 1)
@@ -2373,7 +2412,11 @@ ${run.output}`))
         return staged ? stagedEntryDigests([`${staged.mode} ${staged.oid} 0\t${path}`]).get(path)! : null
       }
       const atKept = (path: string): boolean => now.get(path) === (kept.get(path)?.digest ?? null) && (!indexed(path) || (index.get(path) ?? null) === keptIndex(path))
-      const atAfter = (path: string): boolean => now.get(path) === (afterOf.get(path)?.work ?? null) && (!indexed(path) || (index.get(path) ?? null) === (afterOf.get(path)!.index ?? null))
+      // The file and the staged version each either still as the revert left them or already as kept, whichever the other
+      // is: a restore stopped between the two (the files put back, the index not) finishes, and only Mousse's own writes
+      // are written over.
+      const workKnown = (path: string): boolean => now.get(path) === (kept.get(path)?.digest ?? null) || now.get(path) === (afterOf.get(path)?.work ?? null)
+      const indexKnown = (path: string): boolean => !indexed(path) || (index.get(path) ?? null) === keptIndex(path) || (index.get(path) ?? null) === (afterOf.get(path)!.index ?? null)
       const changed = async (path: string): Promise<GitRestoreRevertedResult> => {
         const currentBlob = await this.blobAt(git, top, path)
         const keptBlob = kept.get(path)?.entry?.oid
@@ -2386,7 +2429,7 @@ ${run.output}`))
       }
       // Put back another way (a retry, or chat Undo): the thread's earlier choices come back too, once.
       if (record.paths.every(atKept)) return restored(!revert.restored)
-      const moved = record.paths.find((path) => !atKept(path) && !atAfter(path))
+      const moved = record.paths.find((path) => !workKnown(path) || !indexKnown(path))
       if (moved !== undefined) return changed(moved)
       if (options.check) return { pending: true }
 
@@ -2416,14 +2459,9 @@ ${run.output}`))
         if (entries.size) {
           // The files are written under Git's index lock, once the index is proven still as the revert left it, and the
           // staged versions replace the index right after: both change, or neither does.
-          const committed = await this.commitIndexEntries(top, entries, before, async (restaged) => {
-            stopped = [...restaged][0] ?? await writeProven(top, scratch, writes)
-            return stopped === undefined
-          })
-          if (committed.locked) {
-            const fixed = gitErrors.create('git_index_locked')
-            throw new AppError({ code: fixed.code, message: `Git's index is locked (${committed.locked}): another Git command is running, or one stopped without removing its lock. Nothing was restored. Try again once it has finished.`, errorInfo: fixed.errorInfo, details: { path: committed.locked } })
-          }
+          const committed = await this.commitWithWrites(top, scratch, entries, before, writes, true)
+          if (committed.locked) throw indexLockedError(committed.locked, 'Nothing was restored.')
+          stopped = committed.stopped
         } else {
           stopped = await writeProven(top, scratch, writes)
         }
