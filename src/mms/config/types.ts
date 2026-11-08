@@ -81,6 +81,7 @@ export interface ScheduledJobDefinition {
   createThread?: boolean
   selection?: ScheduledJob['selection']
   agent?: ScheduledJob['agent']
+  bot?: ScheduledJob['bot']
   mode?: ScheduledJob['mode']
   workspace?: ScheduledJob['workspace']
   permissionMode?: ScheduledJob['permissionMode']
@@ -105,6 +106,7 @@ export interface ScheduledJobRuntime {
   pausedReason?: string
   resumeAt?: string
   waitingBehind?: ScheduledJob['waitingBehind']
+  botSkip?: ScheduledJob['botSkip']
   runHistory?: ScheduledJob['runHistory']
   repeat?: { times: number; completed: number }
   runClaim?: ScheduledJob['runClaim']

@@ -166,7 +166,7 @@ export type PrimaryKind = 'allow' | 'retry' | 'run' | 'resume' | 'open'
 export function primaryOf(item: AutomationItem): { kind: PrimaryKind; label: string } {
   if (item.attention?.kind === 'ask' && item.attention.answer) return { kind: 'allow', label: 'Allow' }
   if (item.kind === 'ask') return { kind: 'open', label: 'Open' }
-  if (item.kind === 'bot' || item.kind === 'watch') return { kind: 'open', label: 'Open' }
+  if (item.who.kind === 'bot' || item.kind === 'watch') return { kind: 'open', label: 'Open' }
   // A paused automation's old failure is not news; an open ask still waits for its answer.
   if (item.paused && item.attention?.kind !== 'ask') return { kind: 'resume', label: 'Resume' }
   if (item.attention?.kind === 'failed') return { kind: 'retry', label: 'Retry' }

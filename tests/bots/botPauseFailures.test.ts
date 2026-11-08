@@ -84,14 +84,14 @@ describe('pause and resume', () => {
   it('pause skips schedules while the chat still works; resume clears it', async () => {
     await f.bots.reconcileOnStartup()
     const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 10 }, prompt: 'Check the news' }, 'owner')
-    await f.bots.tickSchedules(new Date(f.clock.now))
-    const next = Date.parse(f.store.scheduleStates(botId)[0]!.nextRunAt!)
+    await f.tickSchedules(new Date(f.clock.now))
+    const next = Date.parse(f.book.list(botId)[0]!.nextAt!)
     f.bots.service.pause(botId)
     expect(f.store.registry(botId)!.pausedReason).toBe('owner')
     f.clock.now = next + 1_000
-    const { inserted } = await f.bots.tickSchedules(new Date(f.clock.now))
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now))
     expect(inserted).toEqual([])
-    expect(f.store.scheduleStates(botId)).toMatchObject([{ scheduleId, lastSkipReason: 'paused' }])
+    expect(f.book.list(botId)).toMatchObject([{ scheduleId, skip: { reason: 'paused' } }])
     expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'paused', stateText: 'Paused' })
     // Chat still works while paused.
     await f.bots.service.chatSend({ botId, text: 'Anything new?', clientRequestId: 'm1' })
@@ -101,8 +101,8 @@ describe('pause and resume', () => {
     // Resume: the next occurrence runs again.
     const { bot } = await f.bots.service.resume(botId)
     expect(bot.state).not.toBe('paused')
-    f.clock.now = Date.parse(f.store.scheduleStates(botId)[0]!.nextRunAt!) + 1_000
-    expect((await f.bots.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
+    f.clock.now = Date.parse(f.book.list(botId)[0]!.nextAt!) + 1_000
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
   })
 
   it('resume clears a failures pause, the streak and the stuck error', async () => {
@@ -137,7 +137,7 @@ describe('pauses that stay (review round 2)', () => {
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
     expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'owner', pausedUntil: null, error: null })
     f.clock.now += 2 * 60 * 60_000
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     expect(f.store.registry(botId)!.pausedReason).toBe('owner')
   })
 
@@ -151,7 +151,7 @@ describe('pauses that stay (review round 2)', () => {
     expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'usage_limit', failureStreak: 2 })
     f.problem = undefined
     f.clock.now += 2 * 60 * 60_000
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     expect(f.store.registry(botId)).toMatchObject({ pausedReason: null, failureStreak: 2 })
     await runOnce('f3', 'failed')
     expect(f.store.registry(botId)).toMatchObject({ pausedReason: 'failures', failureStreak: 3 })

@@ -7,7 +7,7 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { askText, botRun, buildAutomationIndex, jobEffectiveMay, type AutomationIndexSources } from '../src/mms/automations/AutomationIndex'
 import { AgentJobAskStore } from '../src/mms/automations/AgentJobAsks'
-import type { BotAutomationSchedule } from '../src/mms/bots/chat/BotChatService'
+import type { BotAutomationFacts } from '../src/mms/bots/chat/BotChatService'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../src/mms/protocol/validators'
 import {
   attentionOf,
@@ -61,7 +61,7 @@ describe('the Run contract', () => {
   })
 
   it('maps bot activations onto the contract', () => {
-    const run = (status: BotAutomationSchedule['runs'][number]['status'], endReason?: string) => botRun({ id: 'a', status, at: PAST, ...(endReason ? { endReason } : {}) })
+    const run = (status: BotAutomationFacts['runs'][number]['status'], endReason?: string) => botRun({ id: 'a', status, at: PAST, ...(endReason ? { endReason } : {}) })
     expect(run('queued').state).toBe('queued')
     expect(run('running').state).toBe('running')
     expect(run('waiting_grant').state).toBe('incomplete')
@@ -116,7 +116,7 @@ describe('Tell me', () => {
   })
 })
 
-function sources(input: { jobs?: ScheduledJob[]; threads?: Thread[]; bots?: BotAutomationSchedule[]; watch?: AutomationIndexSources['watchStatus'] }): AutomationIndexSources {
+function sources(input: { jobs?: ScheduledJob[]; threads?: Thread[]; bots?: Record<string, BotAutomationFacts>; watch?: AutomationIndexSources['watchStatus'] }): AutomationIndexSources {
   const threads = input.threads ?? []
   return {
     jobs: () => input.jobs ?? [],
@@ -124,7 +124,7 @@ function sources(input: { jobs?: ScheduledJob[]; threads?: Thread[]; bots?: BotA
     threads: () => threads,
     projectName: (id) => (id === 'p1' ? 'mousse' : undefined),
     threadMode: (threadId) => (threadId === 't-ask' ? 'ask' : 'accept_edits'),
-    ...(input.bots ? { bots: () => input.bots! } : {}),
+    ...(input.bots ? { bot: (botId: string) => input.bots![botId] } : {}),
     ...(input.watch ? { watchStatus: input.watch } : {}),
     computerName: 'Desk',
     timeZone: 'Asia/Kolkata',
@@ -136,24 +136,30 @@ describe('the automation index', () => {
   it('lists jobs, bot schedules and pull request watches in one list, each with what opens it', () => {
     const watching = { id: 't-watch', name: 'Fix CI on #742', projectId: 'p1', pullRequest: { number: 742, watch: 'notify' } } as unknown as Thread
     const unwatched = { id: 't-plain', name: 'Plain', pullRequest: { number: 1 } } as unknown as Thread
-    const bot: BotAutomationSchedule = {
-      botId: 'bot-1', botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false, scheduleId: 'weather', label: 'every day · 08:00',
-      prompt: 'Weather\nTell me if it rains', createdBy: 'bot', nextAt: '2026-11-09T02:30:00.000Z',
-      runs: [{ id: 'act_1', status: 'waiting_grant', at: PAST }], ask: { text: 'read files in Notes', activationId: 'act_1' }
+    const pip: BotAutomationFacts = {
+      botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: false,
+      runs: [{ id: 'act_1', status: 'waiting_grant', at: PAST }], ask: { text: 'read files in Notes', activationId: 'act_1', askId: 'esc_1' }
     }
+    // A bot's schedule is a job whose Who is the bot: the same record and row as any job.
+    const weather = job({ id: 'bot-1--weather', name: 'Weather', prompt: 'Weather\nTell me if it rains', schedule: { kind: 'cron', expr: '0 8 * * *' }, nextRunAt: '2026-11-09T02:30:00.000Z', bot: { botId: 'bot-1', scheduleId: 'weather', createdBy: 'bot' } })
     const index = buildAutomationIndex(sources({
-      jobs: [job({ projectId: 'p1', tellMe: 'problems' })],
+      jobs: [job({ projectId: 'p1', tellMe: 'problems' }), weather],
       threads: [watching, unwatched],
-      bots: [bot],
+      bots: { 'bot-1': pip },
       watch: () => ({ state: 'watching', nextCheckAt: '2026-11-08T10:05:00.000Z' })
     }))
     expect(index.computer).toEqual({ name: 'Desk', timeZone: 'Asia/Kolkata' })
-    expect(index.items.map((item) => item.key)).toEqual(['job:j1', 'bot:bot-1:weather', 'watch:t-watch'])
+    expect(index.items.map((item) => item.key)).toEqual(['job:j1', 'job:bot-1--weather', 'watch:t-watch'])
     const [jobItem, botItem, watchItem] = index.items
     expect(jobItem).toMatchObject({ trigger: 'time', where: { projectId: 'p1', name: 'mousse' }, tellMe: 'problems', may: 'accept_edits', next: { timeZone: 'Asia/Kolkata' }, link: { kind: 'job', jobId: 'j1' } })
-    // The Incomplete run and the ask that stopped it are one Needs you item.
-    // A bot row is named by its schedule's short label, as the bot's own Runs list names it.
-    expect(botItem).toMatchObject({ name: 'every day · 08:00', who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, attention: { kind: 'ask', text: 'Wants to read files in Notes' }, link: { kind: 'bot', botId: 'bot-1' } })
+    // The Incomplete run and the ask that stopped it are one Needs you item, answered in place with the bot's method.
+    expect(botItem).toMatchObject({
+      kind: 'job', name: 'Weather', schedule: { kind: 'cron', expr: '0 8 * * *' }, who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, tellMe: 'news',
+      next: { at: '2026-11-09T02:30:00.000Z' },
+      attention: { kind: 'ask', text: 'Wants to read files in Notes', answer: { kind: 'bot_ask', botId: 'bot-1', askId: 'esc_1' } },
+      link: { kind: 'job', jobId: 'bot-1--weather', botId: 'bot-1' }
+    })
+    expect(botItem!.may).toBeUndefined()
     expect(watchItem).toMatchObject({ trigger: 'thread_event', notifyOnly: true, whenText: 'PR #742', link: { kind: 'thread', threadId: 't-watch' } })
   })
 
@@ -168,8 +174,17 @@ describe('the automation index', () => {
   })
 
   it('names a source it cannot read instead of showing it empty', () => {
-    const index = buildAutomationIndex({ ...sources({}), bots: () => { throw new Error('bots.db is locked') } })
+    const botJob = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+    const index = buildAutomationIndex({ ...sources({ jobs: [job({}), botJob] }), bot: () => { throw new Error('bots.db is locked') } })
     expect(index.unavailable).toEqual(['bots'])
+    expect(index.items.map((item) => item.key)).toEqual(['job:j1'])
+  })
+
+  it('a bot paused by itself shows its rows paused, resumed from the bot; a deleted bot takes its rows away', () => {
+    const botJob = job({ id: 'b--s', bot: { botId: 'b', scheduleId: 's', createdBy: 'owner' } })
+    const paused: BotAutomationFacts = { botName: 'Pip', look: { colour: 'cream', accessory: 'none' }, paused: true, pausedText: 'Paused until 14:00', runs: [] }
+    expect(buildAutomationIndex(sources({ jobs: [botJob], bots: { b: paused } })).items[0]).toMatchObject({ paused: true, pausedBy: 'bot', pausedReason: 'Paused until 14:00' })
+    expect(buildAutomationIndex(sources({ jobs: [botJob], bots: {} })).items).toEqual([])
   })
 
   it('shows the effective May: the strictest of the job, its ceiling and its thread, for a workflow too (#338)', () => {

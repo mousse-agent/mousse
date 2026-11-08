@@ -78,6 +78,8 @@ export class BotChatProjection {
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
+    /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
+    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
   }) {}
 
   private get store(): BotStore {
@@ -223,11 +225,9 @@ export class BotChatProjection {
   /** About this bot: what it can use beyond the starter grant, and its runs. */
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
-    const states = new Map(this.store.scheduleStates(definition.id).map((state) => [state.scheduleId, state]))
-    const runs: BotRunItem[] = this.store.schedules(definition.id).map((schedule) => {
-      const next = states.get(schedule.id)?.nextRunAt
-      return { id: schedule.id, label: schedule.label, ...(next ? { nextAt: next } : {}), kind: 'schedule' as const }
-    })
+    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
+      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const }
+    ))
     return {
       summary: this.summary(definition, now),
       permissions: grant ? this.permissionItems(definition.id, grant.manifest, grant.approvedAt) : [],

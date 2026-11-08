@@ -11,8 +11,8 @@ export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
-/** What an automation is, underneath: where its record lives and what opens it. */
-export type AutomationKind = 'job' | 'bot' | 'watch' | 'ask'
+/** What an automation is, underneath: where its record lives and what opens it. A bot's schedule is a job whose Who is the bot. */
+export type AutomationKind = 'job' | 'watch' | 'ask'
 
 /** What starts it: a time, a signed request (webhook), something on its thread (a pull request), or a person. */
 export type AutomationTrigger = 'time' | 'request' | 'thread_event' | 'on_demand'
@@ -150,12 +150,11 @@ export type AutomationWho =
   | { kind: 'workflow'; name: string }
   | { kind: 'none'; name: string }
 
-/** What opens it: the job's detail, the bot's chat, or the thread that watches. */
+/** What opens it: the job's detail (a bot's schedule names its bot too), an agent's ask, or the thread that watches. */
 export type AutomationLink =
-  | { kind: 'job'; jobId: string }
+  | { kind: 'job'; jobId: string; botId?: string }
   /** An agent's first-creation ask: Allow makes the automation (`automations.asks.answer`). */
   | { kind: 'ask'; askId: string; threadId: string }
-  | { kind: 'bot'; botId: string; scheduleId: string }
   | { kind: 'thread'; threadId: string }
 
 /**
@@ -179,7 +178,7 @@ export interface AutomationAttention {
 }
 
 export interface AutomationItem {
-  /** Unique in the list: `job:<id>`, `bot:<botId>:<scheduleId>`, `watch:<threadId>`. */
+  /** Unique in the list: `job:<id>`, `ask:<id>`, `watch:<threadId>`. */
   key: string
   kind: AutomationKind
   id: string
@@ -195,6 +194,8 @@ export interface AutomationItem {
   /** A pause that ends by itself. */
   pausedUntil?: string
   pausedReason?: string
+  /** Paused because its bot is paused (by its owner, three failed runs or a usage limit); Resume resumes the bot. */
+  pausedBy?: 'bot'
   /** The next run, in the owning computer's time zone. */
   next?: { at: string; timeZone: string }
   active?: AutomationRun

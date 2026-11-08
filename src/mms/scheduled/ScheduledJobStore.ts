@@ -37,7 +37,7 @@ import {
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { agentJobExpiredReason, isExpired } from './agentJobLimits'
-import { computeNextRun } from './computeNextRun'
+import { computeNextRun, nextOccurrenceAfter } from './computeNextRun'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
@@ -259,6 +259,7 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     pausedReason: job.pausedReason,
     resumeAt: job.resumeAt,
     waitingBehind: job.waitingBehind,
+    botSkip: job.botSkip,
     runHistory: labelAgentRuns(job),
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
@@ -291,6 +292,7 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     pausedReason: runtime?.pausedReason,
     resumeAt: runtime?.resumeAt,
     waitingBehind: runtime?.waitingBehind,
+    botSkip: runtime?.botSkip,
     runHistory: runtime?.runHistory ?? [],
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
@@ -439,16 +441,21 @@ export class ScheduledJobStore {
     return this.listJobs().find((job) => job.id === id)
   }
 
-  createJob(input: CreateScheduledJobInput): ScheduledJob {
+  /**
+   * Adds a job. `options.id` keeps an id the job already had elsewhere (a bot's schedule moved from `bots.db`): a job
+   * with that id already here is returned as it is, so a repeated move adds nothing. `options.nextRunAt` keeps the next
+   * run it had there.
+   */
+  createJob(input: CreateScheduledJobInput, options: { id?: string; nextRunAt?: string | null; createdAt?: string } = {}): ScheduledJob {
     const now = new Date().toISOString()
-    const nextRunAt = computeNextRun(input.schedule)
+    const nextRunAt = options.nextRunAt !== undefined ? options.nextRunAt : computeNextRun(input.schedule)
     // A mode with no ceiling to bound it gets the strictest ceiling, and the mode is brought down to it.
     const permissionCeiling = input.permissionCeiling ?? (input.permissionMode ? 'ask' : undefined)
     const permissionMode = input.permissionMode && !input.permissionCeiling ? narrowPermissionMode(input.permissionMode, 'ask') : input.permissionMode
     const tooWide = permissionAboveCeiling(permissionMode, permissionCeiling)
     if (tooWide) throw new JobPermissionRefused(tooWide)
     const job: ScheduledJob = {
-      id: uuidv4(),
+      id: options.id ?? uuidv4(),
       name: input.name.trim() || 'Scheduled job',
       prompt: input.prompt.trim(),
       schedule: input.schedule,
@@ -460,6 +467,7 @@ export class ScheduledJobStore {
       createThread: input.createThread,
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,
@@ -470,12 +478,14 @@ export class ScheduledJobStore {
       expiresAt: input.expiresAt,
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
       runHistory: [],
-      createdAt: now,
+      createdAt: options.createdAt ?? now,
       updatedAt: now
     }
 
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
+      const existing = options.id ? jobs.find((entry) => entry.id === options.id) : undefined
+      if (existing) return existing
       jobs.push(job)
       this.saveJobs(jobs)
       return job
@@ -1131,6 +1141,48 @@ export class ScheduledJobStore {
       job.state = 'scheduled'
       job.waitingBehind = { threadId, since: job.waitingBehind?.threadId === threadId ? job.waitingBehind.since : now }
       job.updatedAt = now
+      this.saveJobs(jobs)
+      return job
+    })
+  }
+
+  /**
+   * A bot's occurrence was handed to the bot, whose run lane runs it, or was skipped (`skipped` says why). The claim
+   * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
+   * Mousse was closed collapse into this one, so a backlog never runs.
+   */
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string }, now: Date = new Date()): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      const claim = job?.runClaim
+      if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
+      const occurrenceAt = claim.occurrenceKey
+      job.runClaim = undefined
+      job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
+      if (!outcome.skipped) {
+        job.lastRunAt = occurrenceAt
+        job.lastStatus = 'ok'
+        job.lastError = undefined
+      }
+      job.nextRunAt = nextOccurrenceAfter(job.schedule, occurrenceAt, now)
+      job.state = job.nextRunAt ? 'scheduled' : 'error'
+      if (!job.nextRunAt) job.lastError = 'Failed to compute next run'
+      job.updatedAt = now.toISOString()
+      this.saveJobs(jobs)
+      return job
+    })
+  }
+
+  /** A claim that could not be handled yet (the bots are still starting) goes back as it was: the same occurrence stays due. */
+  releaseClaim(id: string, claimToken: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken || job.runClaim.runId) return null
+      job.runClaim = undefined
+      job.state = 'scheduled'
+      job.updatedAt = new Date().toISOString()
       this.saveJobs(jobs)
       return job
     })

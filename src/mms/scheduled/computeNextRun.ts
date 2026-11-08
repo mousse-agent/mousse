@@ -155,6 +155,16 @@ export function computeNextRun(
   return null
 }
 
+/**
+ * The occurrence after `occurrenceAt`. When that one has passed too (Mousse was closed), every missed occurrence
+ * collapses into the one that just ran: the next is the first after `now`.
+ */
+export function nextOccurrenceAfter(schedule: JobSchedule, occurrenceAt: string, now: Date): string | null {
+  const next = computeNextRun(schedule, occurrenceAt, now)
+  if (next && Date.parse(next) > now.getTime()) return next
+  return computeNextRun(schedule, null, now)
+}
+
 export function isSilentOutput(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true

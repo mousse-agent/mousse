@@ -58,7 +58,7 @@ import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
 import { createBotContextProvider } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
-import { BotScheduler } from './bots/triggers/scheduler'
+import { BotScheduleBook } from './scheduled/botJobs'
 import type { BotStore } from './bots/store/BotStore'
 import { botScheduleLabel } from '../shared/scheduleLabel'
 import { RunStore } from './run/RunStore'
@@ -280,7 +280,8 @@ export class MmsProfileServices {
   readonly botModels: BotModelChooser
   /** Each bot's own browser (`bots.browser.*`, the browser tools of a bot with "use the browser"). */
   readonly botBrowsers: BotBrowsers
-  private readonly botScheduler: BotScheduler | null
+  /** Bots' schedules: automations whose Who is the bot, in the shared scheduled-job store. */
+  readonly botSchedules: BotScheduleBook
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
   private botSweepTimer: ReturnType<typeof setInterval> | null = null
@@ -641,8 +642,17 @@ export class MmsProfileServices {
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
-      // A published schedule is read at once; before the scheduler started this does nothing.
-      schedulesChanged: () => { void this.botScheduler?.wake() },
+      // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
+      schedulesChanged: () => { this.scheduled?.wake() },
+      // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
+      schedules: {
+        list: (botId) => this.botSchedules?.list(botId) ?? [],
+        get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
+        add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
+        remove: (botId, scheduleId) => this.botSchedules?.remove(botId, scheduleId) ?? false,
+        removeAll: (botId) => this.botSchedules?.removeAll(botId) ?? 0,
+        labelOf: (when) => botScheduleLabel(when)
+      },
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
@@ -682,7 +692,7 @@ export class MmsProfileServices {
         store: memory,
         journal,
         situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => store.schedules(botId).find((schedule) => schedule.id === scheduleId)?.createdAt
+        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt
       })
       const admin = createBotMemoryAdmin({
         store: memory,
@@ -734,8 +744,6 @@ export class MmsProfileServices {
       })
     })
     this.orchestrator.setBotDispatcher(personalBots)
-    // Bot schedules tick only after the bot startup pass (`startOwned`).
-    this.botScheduler = personalBots ? new BotScheduler({ tick: (now) => personalBots.tickSchedules(now) }) : null
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -775,6 +783,13 @@ export class MmsProfileServices {
     )
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
+    // One scheduler for bots too: a bot's schedule is a job whose Who is the bot, run in the bot's run lane. Its
+    // occurrences start only after the bot startup pass (`startOwned`); each tick then does the bots' upkeep.
+    this.botSchedules = new BotScheduleBook({ jobs: this.scheduled, label: (when) => botScheduleLabel(when) })
+    if (personalBots) {
+      this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
+      this.scheduled.setTickHook((now) => personalBots.maintain(now))
+    }
     this.orchestrator.setScheduledHooks({
       onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
       currentPermissionRequest: (jobId) => {
@@ -810,8 +825,12 @@ export class MmsProfileServices {
         return ask
       },
       jobLimits: () => config.agentJobLimits(),
-      list: () => this.scheduled.listJobs(),
-      get: (id) => this.scheduled.getJob(id),
+      // A bot's schedules are the bot's: an agent's schedule tools never see or change them.
+      list: () => this.scheduled.listJobs().filter((job) => !job.bot),
+      get: (id) => {
+        const job = this.scheduled.getJob(id)
+        return job?.bot ? undefined : job
+      },
       validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
       create: (input) => this.scheduled.createJob(input),
       update: (id, patch) => this.scheduled.updateJob(id, patch),
@@ -1262,7 +1281,7 @@ export class MmsProfileServices {
     return answered
   }
 
-  /** The Automations page's one list (`automations.list`): jobs, bot schedules and pull request watches. */
+  /** The Automations page's one list (`automations.list`): jobs (bots' schedules among them) and pull request watches. */
   automationIndex(): AutomationIndex {
     const bots = this.personalBots
     return buildAutomationIndex({
@@ -1278,7 +1297,7 @@ export class MmsProfileServices {
           return undefined
         }
       },
-      ...(bots ? { bots: () => bots.service.automationSchedules() } : {}),
+      ...(bots ? { bot: (botId: string, scheduleId: string) => bots.service.automationFacts(botId, scheduleId) } : {}),
       asks: () => this.agentJobAsks?.open() ?? [],
       pendingApproval: (threadId) => {
         const pending = this.questions.listPendingForThread(threadId)[0]
@@ -1404,7 +1423,6 @@ export class MmsProfileServices {
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
-    this.botScheduler?.stop()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
     this.webhooksClosed = true
@@ -1518,8 +1536,19 @@ export class MmsProfileServices {
   }
 
   private wireServiceEvents(): void {
+    // A bot's schedules are its About's too: an edit from the Automations page (or a moved next run) tells its bot.
+    let botSchedulesSeen = new Map<string, string>()
     this.scheduled.on('updated', (jobs) => {
       this.events.emit({ channel: 'scheduled:updated', data: jobs })
+      const seen = new Map<string, string>()
+      for (const job of jobs as ScheduledJob[]) {
+        if (!job.bot) continue
+        seen.set(job.bot.botId, `${seen.get(job.bot.botId) ?? ''}|${job.id}:${job.name}:${job.prompt}:${JSON.stringify(job.schedule)}:${job.enabled}:${job.state === 'paused'}:${job.nextRunAt}:${job.tellMe ?? ''}`)
+      }
+      for (const botId of new Set([...seen.keys(), ...botSchedulesSeen.keys()])) {
+        if (seen.get(botId) !== botSchedulesSeen.get(botId)) this.personalBots?.schedulesEdited(botId)
+      }
+      botSchedulesSeen = seen
       // A change to the jobs (a rotated or removed secret, a deleted job) applies to the listener at once.
       this.webhookSecretCache.invalidate()
       this.reconcileScheduledWebhookListener(jobs as ScheduledJob[])
@@ -1666,9 +1695,8 @@ export class MmsProfileServices {
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {
+      // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.
       this.scheduled.start()
-      // Bot schedules follow the same switch: with the scheduler off, nothing starts on its own.
-      this.botScheduler?.start()
     }
     await this.net.start()
     // After the net service has loaded its ports, so the listener can refuse one of them.

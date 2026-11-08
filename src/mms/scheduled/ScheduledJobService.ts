@@ -28,6 +28,18 @@ export interface ScheduledJobRunner {
   runIsolated(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult>
 }
 
+/**
+ * Runs a bot's occurrence in the bot's run lane (`BotEngine.runScheduledOccurrence`): it starts the bot's run, or says
+ * why the occurrence is skipped (the bot is paused, its last run of this schedule still waits), or that the bots are not
+ * ready yet (the occurrence stays due).
+ */
+export interface ScheduledBotRunner {
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date }):
+    | { kind: 'started'; activationId: string }
+    | { kind: 'skipped'; reason: string }
+    | { kind: 'not_ready' }
+}
+
 /** How often stored webhook payloads nothing references are swept. */
 const PAYLOAD_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
 
@@ -115,6 +127,10 @@ export class ScheduledJobService extends EventEmitter {
   private lastPayloadSweepAt = 0
   /** The last occurrence whose end was announced, per job: the turn's return and the run's end both report it. */
   private readonly announced = new Map<string, string>()
+  private botRunner: ScheduledBotRunner | null = null
+  /** Work that follows every tick in this process, lock or not (the bots' queue, their usage-limit resets). */
+  private tickHook: ((now: Date) => Promise<unknown> | unknown) | null = null
+  private clock: () => Date = () => new Date()
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -129,6 +145,21 @@ export class ScheduledJobService extends EventEmitter {
     this.store.setJobRemovedHandler((job) => {
       if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
     })
+  }
+
+  /** Where bots' occurrences run; without it a bot's occurrence is skipped as "bots unavailable". */
+  setBotRunner(runner: ScheduledBotRunner | null): void {
+    this.botRunner = runner
+  }
+
+  /** Runs after every tick of this process (bot upkeep); its failure never stops the scheduler. */
+  setTickHook(hook: ((now: Date) => Promise<unknown> | unknown) | null): void {
+    this.tickHook = hook
+  }
+
+  /** The clock claims and bot occurrences read (tests set it). */
+  setClock(clock: () => Date): void {
+    this.clock = clock
   }
 
   /** True while the scheduler is started: only then does anything start a webhook delivery. */
@@ -166,6 +197,7 @@ export class ScheduledJobService extends EventEmitter {
     if (job.createdBy) throw new ScheduledWebhookError('Agent-created jobs cannot have a webhook trigger.')
     if (job.schedule.kind === 'once') throw new ScheduledWebhookError('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
     if (job.trigger?.webhook) throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one.')
+    if (job.bot) throw new ScheduledWebhookError('A bot runs on its schedule; ask it in its chat for anything else.')
     const secretRef = webhookSecretRef(id)
     const secret = generateWebhookSecret()
     secrets.write(secretRef, secret)
@@ -328,9 +360,9 @@ export class ScheduledJobService extends EventEmitter {
     return { ...job, liveStatus: waiting ? 'needs_answer' : 'running', liveThreadId: threadId }
   }
 
-  createJob(input: Parameters<ScheduledJobStore['createJob']>[0]): ScheduledJob {
+  createJob(input: Parameters<ScheduledJobStore['createJob']>[0], options?: Parameters<ScheduledJobStore['createJob']>[1]): ScheduledJob {
     this.lifecycle.assertAccepting()
-    const job = this.store.createJob(input)
+    const job = this.store.createJob(input, options)
     this.emitUpdated()
     return job
   }
@@ -538,10 +570,32 @@ export class ScheduledJobService extends EventEmitter {
     if (this.stopped || this.lifecycle.stopping || this.tickInProgress) return
     try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned()) }
     catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
+    await this.runTickHook()
   }
 
-  private async tickOwned(): Promise<void> {
-    if (this.stopped || this.tickInProgress) return
+  private async runTickHook(): Promise<void> {
+    if (!this.tickHook) return
+    try {
+      await this.tickHook(this.clock())
+    } catch (error) {
+      console.warn('scheduler upkeep failed; the next tick tries again', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * One tick now, started or not, and the runs it started, to their return (tests, and a check by hand). Nothing runs
+   * once the profile is shutting down.
+   */
+  async tickNow(): Promise<void> {
+    if (this.lifecycle.stopping || this.tickInProgress) return
+    try { await this.lifecycle.run('scheduled-tick', () => this.tickOwned(true)) }
+    catch (error) { this.lastTickError = error instanceof Error ? error.message : String(error) }
+    await Promise.all([...this.inFlight.values()])
+    await this.runTickHook()
+  }
+
+  private async tickOwned(force = false): Promise<void> {
+    if ((this.stopped && !force) || this.tickInProgress) return
 
     const releaseTickLock = tryAcquireTickLock(join(this.store.homeDir, 'scheduled', '.tick.lock'))
     if (!releaseTickLock) return
@@ -549,7 +603,7 @@ export class ScheduledJobService extends EventEmitter {
     this.releaseTickLock = releaseTickLock
     this.tickInProgress = true
     try {
-      if (this.stopped) return
+      if (this.stopped && !force) return
 
       this.lastHeartbeatAt = new Date().toISOString()
       recordTickerHeartbeat(false, this.store.homeDir)
@@ -557,7 +611,7 @@ export class ScheduledJobService extends EventEmitter {
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
       this.sweepWebhookPayloadsIfDue()
-      const dueJobs = this.store.claimDueJobs(new Date(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
+      const dueJobs = this.store.claimDueJobs(this.clock(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
       if (dueJobs.length >= MAX_STARTS_PER_TICK) this.scheduleCatchUp()
       for (const job of dueJobs) {
         if (job.runClaim) this.ownedRunClaims.set(job.id, job.runClaim.token)
@@ -568,7 +622,7 @@ export class ScheduledJobService extends EventEmitter {
           if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted by profile shutdown before execution')
           continue
         }
-        if (this.stopped) {
+        if (this.stopped && !force) {
           if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted when scheduling stopped before execution')
           continue
         }
@@ -673,7 +727,40 @@ export class ScheduledJobService extends EventEmitter {
     return undefined
   }
 
+  /**
+   * A bot's occurrence: the bot engine starts it in the bot's run lane (a new child thread, a run report in its chat)
+   * under the bot's grant, or skips it. The claim ends at once either way; the bot's activation is the run.
+   */
+  private executeBotJob(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }): void {
+    const claim = job.runClaim
+    if (!claim) return
+    const now = this.clock()
+    let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
+    try {
+      outcome = this.botRunner
+        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now })
+        : { kind: 'skipped', reason: 'bots_unavailable' }
+    } catch (error) {
+      outcome = { kind: 'skipped', reason: 'bot_unavailable' }
+      console.warn('a bot occurrence could not start', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (outcome.kind === 'not_ready') {
+      if (this.store.releaseClaim(job.id, claim.token)) this.ownedRunClaims.delete(job.id)
+      return
+    }
+    if (outcome.kind === 'skipped') console.warn('a bot schedule occurrence was skipped', { jobId: job.id, occurrenceAt: claim.occurrenceKey, reason: outcome.reason })
+    if (this.store.finishBotClaim(job.id, claim.token, outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}, now)) this.ownedRunClaims.delete(job.id)
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
+    if (job.bot) {
+      try {
+        this.executeBotJob(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> })
+      } finally {
+        this.emitUpdated()
+      }
+      return
+    }
     this.emitUpdated()
     const claim = job.runClaim
     const claimToken = claim?.token

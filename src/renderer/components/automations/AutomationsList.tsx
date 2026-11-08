@@ -234,7 +234,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   const openItem = (item: AutomationItem) => {
     setSelected([])
-    if (item.link.kind === 'bot') openBot(item.link.botId)
+    if (item.link.kind === 'job' && item.link.botId) openBot(item.link.botId)
     else if (item.link.kind === 'thread' || item.link.kind === 'ask') goThread(item.link.threadId)
     else { setDetail(item.key); void loadCatalog() }
   }
@@ -272,7 +272,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       : []
     const askThread = item.attention?.threadId
     if (item.link.kind === 'ask') return [...notNow, { label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
-    if (item.link.kind === 'bot') return [...notNow, { label: 'Open bot chat', onSelect: () => openBot((item.link as { botId: string }).botId) }]
+    if (item.link.kind === 'job' && item.link.botId) { const botId = item.link.botId; return [...notNow, { label: 'Open bot chat', onSelect: () => openBot(botId) }] }
     if (item.link.kind === 'thread') return [{ label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
     const jobId = item.link.jobId
     const kind = primaryOf(item).kind

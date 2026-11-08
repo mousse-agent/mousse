@@ -228,15 +228,16 @@ describe('startup', () => {
     const g = botFixture()
     try {
       const { botId: id } = await createBot(g, { name: 'Ticker', reply: 'hi' })
-      g.bots.addSchedule(id, { when: { kind: 'interval', minutes: 5 }, prompt: 'check' }, 'owner')
+      const { scheduleId } = g.bots.addSchedule(id, { when: { kind: 'interval', minutes: 5 }, prompt: 'check' }, 'owner')
       const fresh = new (g.bots.constructor as new (host: typeof g.host) => typeof g.bots)(g.host)
       g.journal.length = 0
-      expect(await fresh.tickSchedules(new Date(g.clock.now))).toEqual({ inserted: [] })
-      expect(g.store.scheduleStates(id)).toEqual([])
+      const occurrence = { botId: id, scheduleId, prompt: 'check', occurrenceAt: new Date(g.clock.now).toISOString() }
+      // Before the startup pass the occurrence stays due: nothing is inserted.
+      expect(fresh.runScheduledOccurrence(occurrence)).toEqual({ kind: 'not_ready' })
+      expect(g.store.listActivations(id).filter((row) => row.lane === 'run')).toEqual([])
       await fresh.reconcileOnStartup()
       expect(g.journal[0]).toMatchObject({ sourceKey: 'catchUp' })
-      await fresh.tickSchedules(new Date(g.clock.now))
-      expect(g.store.scheduleStates(id)).toHaveLength(1)
+      expect(fresh.runScheduledOccurrence(occurrence)).toMatchObject({ kind: 'started' })
       fresh.close()
     } finally {
       g.close()
@@ -398,12 +399,12 @@ describe('chat turns at their edges (review round 2)', () => {
     await flush()
     expect(synced).toEqual([])
     fail = false
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     await flush()
     const thread = f.store.activation(activation.id)!.threadId!
     expect(synced).toContain(`${thread}:run:${activation.id}`)
     const copies = synced.length
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     await flush()
     expect(synced).toHaveLength(copies)
   })

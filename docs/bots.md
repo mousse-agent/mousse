@@ -79,9 +79,15 @@ In the bot chat, the reply of the last activation that used the browser shows a 
 
 ## Schedules
 
-Schedules live in `bots.db` (`bot_schedules`), not on the definition, so a schedule the bot writes changes no revision and needs no approval. The bot keeps them with `bot_schedule_add`, `bot_schedule_remove` and `bot_schedule_list` (the job scheduler already owns the `schedule_*` names): at most 8 per bot, at most every 5 minutes, on an interval or a cron expression. Each add shows its label as a chip ("every weekday · 09:00"). About lists them with Remove (`bots.schedules.remove`).
+A bot's schedule is an **automation whose Who is the bot**: an ordinary job in the shared scheduled-job store (`ScheduledJob.bot`), claimed by the one `ScheduledJobService`. It is not on the definition, so a schedule changes no revision and needs no approval. The Automations page lists it as a normal row, and its detail edits When, Do, the name and Tell me; Who stays the bot, and its May is the bot's grant. The bot's About lists the same records.
 
-`BotScheduler` (`src/mms/bots/triggers/scheduler.ts`) ticks every 30 seconds, separate from the job scheduler. An occurrence is skipped while the bot is paused, while every model is at its usage limit, while the same schedule's previous run is still queued, or while the same schedule's run waits for the internet (`waiting_for_internet`): a waiting run never expires, so a schedule keeps at most one. A new or edited schedule starts from now and never runs a backlog.
+- The bot keeps them with `bot_schedule_add`, `bot_schedule_remove` and `bot_schedule_list` (the job scheduler's agent tools own the `schedule_*` names, and never see a bot's jobs). `bots.schedules.add` and `bots.schedules.remove` are the owner's. All of them go through `BotScheduleBook` (`src/mms/scheduled/botJobs.ts`): at most 8 per bot, at most every 5 minutes, on an interval or a cron expression. Each add shows its label as a chip ("every weekday · 09:00").
+- A job's id is `<botId>--<scheduleId>`; the schedule id is the one the bot and its chat know.
+- Each due occurrence is handed to `BotEngine.runScheduledOccurrence`, which inserts a run activation keyed `sched:<botId>:<scheduleId>:<occurrenceAt>` (so a repeated hand-over inserts nothing). It is skipped, with the reason on the job (`botSkip`), while the bot is paused, while every model is at its usage limit, while a run waits at a wall, while the same schedule's previous run is still queued, or while the same schedule's run waits for the internet (`waiting_for_internet`): a waiting run never expires, so a schedule keeps at most one. Missed occurrences collapse into one. A new or edited time starts from now and never runs a backlog. Nothing starts before the bot startup pass.
+- After each tick, `BotEngine.maintain` ends usage-limit pauses past their reset, starts what waits in a free lane, and runs the daily purge of deleted bots.
+- **Tell me** applies to run reports: with Only problems a done run's report is posted without a notification (`bots.message` carries `quiet`). Failures still notify.
+- Pausing a row from the Automations page pauses that schedule only; the bot's own Pause stops all its schedules.
+- Schedules saved by earlier builds in `bots.db` (`bot_schedules`) are moved once into the shared store at profile open (`migrateBotSchedules`); see "Moving schedules".
 
 ## No internet
 
@@ -153,7 +159,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Store, `bots.db` migrations | `src/mms/bots/store/BotStore.ts` |
 | Grant compile, authority | `src/mms/bots/grants/compile.ts`, `src/mms/bots/authority/botAuthority.ts` |
 | Model choice | `src/mms/bots/model/` |
-| Schedules | `src/mms/bots/triggers/scheduler.ts` |
+| Schedules (in the shared scheduler) | `src/mms/scheduled/botJobs.ts`, `BotEngine.runScheduledOccurrence` |
 | Supervisor | `src/mms/bots/supervisor/`, `src/cli/fastpath/botSupervisorMain.ts` |
 | Chips | `src/shared/bots/personal/chips.ts`, `src/mms/bots/activity/BotActivitySink.ts` |
 | Instructions | `src/mms/bots/instructions.ts` |

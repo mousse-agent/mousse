@@ -608,8 +608,10 @@ export function registerGuiIpc(
    * yet, so the system notification stands in for it. A click opens the bot's chat.
    */
   const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
-    const { botId, message, botName } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown }
+    const { botId, message, botName, quiet } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown; quiet?: unknown }
     if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
+    // A run report its schedule's Tell me keeps quiet (Only problems) stays in the chat without a notification.
+    if (quiet === true) return
     const kind = botNotificationKind(message)
     if (!kind || !botNotifications.first(profileId, message.id)) return
     const channels = { ...threadNotificationChannels(profileSettings.notifications, kind), toast: false }

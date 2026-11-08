@@ -111,6 +111,7 @@ import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type Schedule
 import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { runNowRefusal } from '../scheduled/runNowRefusal'
+import { BotScheduleError } from '../scheduled/botJobs'
 import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
@@ -2851,6 +2852,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
+      // A bot's schedule: When, Do, its name and Tell me change; Who, Where and May stay the bot's (its grant).
+      if (existing.bot) {
+        try {
+          return { job: ctx.mms.botSchedules.update(existing, patch), jobs: ctx.mms.scheduled.listJobs() }
+        } catch (error) {
+          if (error instanceof BotScheduleError) throw jobRefused(error.message)
+          throw error
+        }
+      }
       if (patch.schedule?.kind === 'once' && existing.trigger?.webhook) {
         throw jobRefused('A job with a webhook cannot become a one-time job; disable its webhook first, or use a manual schedule.')
       }

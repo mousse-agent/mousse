@@ -1116,23 +1116,6 @@ export class BotStore {
     }))
   }
 
-  /** The occurrence a schedule last skipped and why; null once an occurrence runs again. */
-  setScheduleSkip(botId: string, scheduleId: string, reason: string | null, at: string | null): void {
-    this.run('UPDATE bot_schedule_state SET last_skip_reason = ?, last_skip_at = ? WHERE bot_id = ? AND schedule_id = ?', reason, at, botId, scheduleId)
-  }
-
-  putScheduleState(botId: string, scheduleId: string, spec: string, nextRunAt: string | null): void {
-    this.run(
-      'INSERT INTO bot_schedule_state(bot_id, schedule_id, spec_json, next_run_at) VALUES(?, ?, ?, ?) ON CONFLICT(bot_id, schedule_id) DO UPDATE SET spec_json = excluded.spec_json, next_run_at = excluded.next_run_at',
-      botId, scheduleId, spec, nextRunAt
-    )
-  }
-
-  dropScheduleState(botId: string, scheduleId?: string): void {
-    if (scheduleId === undefined) this.run('DELETE FROM bot_schedule_state WHERE bot_id = ?', botId)
-    else this.run('DELETE FROM bot_schedule_state WHERE bot_id = ? AND schedule_id = ?', botId, scheduleId)
-  }
-
   /**
    * Inserts an activation unless its idempotency key exists already; true when it was inserted.
    * A repeated schedule occurrence only finds the activation it made before.
@@ -1240,21 +1223,12 @@ export class BotStore {
     return this.all('SELECT * FROM bot_schedules WHERE bot_id = ? AND removed_at IS NULL ORDER BY created_at, id', botId).map(scheduleOf)
   }
 
-  schedule(botId: string, id: string): BotScheduleRow | undefined {
-    const row = this.get('SELECT * FROM bot_schedules WHERE bot_id = ? AND id = ?', botId, id)
-    return row ? scheduleOf(row) : undefined
-  }
-
   /** Adds a schedule; false when its id exists already (a schedule moved by the v4 upgrade included). */
   putSchedule(row: Omit<BotScheduleRow, 'removedAt'>): boolean {
     return this.run(
       'INSERT INTO bot_schedules(id, bot_id, when_json, prompt, label, created_by, created_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, JSON.stringify(row.when), row.prompt, row.label, row.createdBy, row.createdAt
     ) > 0
-  }
-
-  removeSchedule(botId: string, id: string): boolean {
-    return this.run('UPDATE bot_schedules SET removed_at = ? WHERE bot_id = ? AND id = ? AND removed_at IS NULL', this.now(), botId, id) > 0
   }
 
   deleteSchedules(botId: string): void {

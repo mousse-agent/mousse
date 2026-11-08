@@ -257,18 +257,18 @@ describe('schedules', () => {
   it('keeps at most one waiting run per schedule: later occurrences are skipped', async () => {
     const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'check' }, 'owner')
     await f.bots.reconcileOnStartup()
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     net.online = false
     f.clock.now += 5 * 60_000
-    const first = await f.bots.tickSchedules(new Date(f.clock.now))
+    const first = await f.tickSchedules(new Date(f.clock.now))
     await flush()
     expect(first.inserted).toHaveLength(1)
     expect(f.store.activation(first.inserted[0]!)).toMatchObject({ status: 'running', offline: true })
     for (let i = 0; i < 3; i += 1) {
       f.clock.now += 5 * 60_000
-      expect((await f.bots.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+      expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
     }
-    expect(f.store.scheduleStates(botId).find((state) => state.scheduleId === scheduleId)).toMatchObject({ lastSkipReason: 'waiting_for_internet' })
+    expect(f.book.get(botId, scheduleId)).toMatchObject({ skip: { reason: 'waiting_for_internet' } })
     expect(f.store.listActivations(botId).filter((row) => row.lane === 'run' && row.status !== 'done')).toHaveLength(1)
   })
 })

@@ -79,6 +79,18 @@ export interface ScheduledRunAgent {
   changed?: true
 }
 
+/**
+ * A bot's schedule kept as an automation whose Who is the bot (`ScheduledJob.bot`). Its runs are the bot's run lane:
+ * a fresh child thread, a run report in the bot chat, and the bot's grant as its May. `scheduleId` is the id the bot
+ * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
+ */
+export interface ScheduledJobBot {
+  botId: string
+  scheduleId: string
+  /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
+  createdBy: 'owner' | 'bot'
+}
+
 /** The saved agent a job's runs use (`ScheduledJob.agent`): its latest published revision at each run. */
 export interface ScheduledJobAgent {
   definitionId: string
@@ -211,6 +223,10 @@ export interface ScheduledJob {
   selection?: ModelOverride
   /** A saved agent does the work instead of a model: each run takes its latest published revision. */
   agent?: ScheduledJobAgent
+  /** A bot does the work, in its own run lane and under its own grant; set by the daemon only. */
+  bot?: ScheduledJobBot
+  /** A bot's occurrence that did not start, and why (the bot was paused, or its last run still waited). Cleared when one starts. */
+  botSkip?: { at: string; reason: string }
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
   /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
@@ -296,6 +312,8 @@ export interface CreateScheduledJobInput {
   accessCap?: import('./settings').AgentAccessLevel
   /** Daemon-only, like `accessCap`: the protocol refuses it. */
   expiresAt?: string
+  /** Daemon-only: a bot's schedule (`bots.schedules.add`, `bot_schedule_add`). The protocol refuses it. */
+  bot?: ScheduledJobBot
   repeat?: { times?: number }
 }
 

@@ -58,9 +58,9 @@ describe('the run lane', () => {
   it('a scheduled run gets the run pack of its schedule, and its final text is a run report', async () => {
     const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'check' }, 'owner')
     await f.bots.reconcileOnStartup()
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     f.clock.now += 5 * 60_000
-    const { inserted } = await f.bots.tickSchedules(new Date(f.clock.now))
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now))
     expect(inserted).toHaveLength(1)
     const activation = f.store.activation(inserted[0]!)!
     expect(activation).toMatchObject({ lane: 'run', status: 'running', trigger: { kind: 'schedule', scheduleId, input: 'check' } })

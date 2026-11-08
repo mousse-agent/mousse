@@ -14,7 +14,7 @@ import {
 import { narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { isWorkflowPrompt } from '../../shared/jobPermissionEdit'
 import { tellMeOf, type ScheduledJob, type Thread } from '../../shared/types'
-import type { BotAutomationSchedule, BotAutomationRunStatus } from '../bots/chat/BotChatService'
+import type { BotAutomationFacts, BotAutomationRunStatus } from '../bots/chat/BotChatService'
 import type { AgentJobAsk } from './AgentJobAsks'
 import { describeSchedule } from '../../shared/scheduleLabel'
 
@@ -30,7 +30,8 @@ export interface AutomationIndexSources {
   projectName(id: string): string | undefined
   /** The mode a job's run takes from its thread: the bound thread's, else the mode new threads start in. */
   threadMode(threadId: string | undefined): PermissionMode
-  bots?(): BotAutomationSchedule[]
+  /** A bot beside one of its schedules (a job whose Who is the bot): its name, face, pause and runs; undefined when it is gone. */
+  bot?(botId: string, scheduleId: string): BotAutomationFacts | undefined
   /** The permission request waiting on a thread, when it is one Allow can answer (`permissionRequestOptions`). */
   pendingApproval?(threadId: string): Extract<AttentionAnswer, { kind: 'thread_approval' }> | undefined
   /** A workflow run's open step approval, when it waits for one. */
@@ -87,6 +88,46 @@ function lineOf(text: string, max = 70): string {
 /** The effective May of a job: the strictest of its mode, its ceiling and the mode its thread runs in (a workflow's too, #338). */
 export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): PermissionMode {
   return narrowPermissionMode(job.permissionMode, job.permissionCeiling, threadMode)
+}
+
+/**
+ * A job whose Who is a bot: the same record and row as any job, with the bot's face, its own pause, and the runs its
+ * run lane made (the bot's activations). Its May is the bot's grant. Undefined for a bot that is gone or deleted.
+ */
+function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer']): AutomationItem {
+  const runs = facts.runs.map(botRun)
+  const active = runs[0] && !isRunEnded(runs[0].state) ? runs[0] : undefined
+  const last = runs.find((run) => isRunEnded(run.state))
+  const jobPaused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
+  const paused = jobPaused || facts.paused
+  const attention = attentionOf({
+    ...(facts.ask ? { ask: { text: `Wants to ${facts.ask.text}`, ...(facts.ask.askId ? { answer: { kind: 'bot_ask' as const, botId: job.bot.botId, askId: facts.ask.askId } } : {}) } } : {}),
+    ...(last ? { last } : {})
+  })
+  return {
+    key: `job:${job.id}`,
+    kind: 'job',
+    id: job.id,
+    name: job.name,
+    trigger: 'time',
+    schedule: job.schedule,
+    whenText: '',
+    who: { kind: 'bot', name: facts.botName, look: facts.look },
+    paused,
+    ...(jobPaused && job.resumeAt ? { pausedUntil: job.resumeAt } : {}),
+    ...(jobPaused && job.pausedReason ? { pausedReason: job.pausedReason } : !jobPaused && facts.pausedText ? { pausedReason: facts.pausedText } : {}),
+    // The bot's own pause (not this row's) is resumed from the bot.
+    ...(!jobPaused && facts.paused ? { pausedBy: 'bot' as const } : {}),
+    ...(job.nextRunAt && !paused && job.state !== 'error' ? { next: { at: job.nextRunAt, timeZone: computer.timeZone } } : {}),
+    ...(active ? { active } : {}),
+    ...(last ? { last } : {}),
+    runs,
+    mayIsGrant: true,
+    tellMe: tellMeOf(job),
+    ...(attention ? { attention } : {}),
+    link: { kind: 'job', jobId: job.id, botId: job.bot.botId },
+    computer
+  }
 }
 
 function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: AutomationItem['computer'], now: Date): AutomationItem {
@@ -179,7 +220,7 @@ function askItem(ask: AgentJobAsk, sources: AutomationIndexSources, computer: Au
 }
 
 /** A bot activation in the Run contract. */
-export function botRun(run: BotAutomationSchedule['runs'][number]): AutomationRun {
+export function botRun(run: BotAutomationFacts['runs'][number]): AutomationRun {
   const base = { at: run.at, ...(run.threadId ? { threadId: run.threadId } : {}) }
   const state: Record<BotAutomationRunStatus, AutomationRun> = {
     queued: { ...base, state: 'queued' },
@@ -200,35 +241,6 @@ function reasonText(reason: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-function botItem(schedule: BotAutomationSchedule, computer: AutomationItem['computer']): AutomationItem {
-  const runs = schedule.runs.map(botRun)
-  const active = runs[0] && !isRunEnded(runs[0].state) ? runs[0] : undefined
-  const last = runs.find((run) => isRunEnded(run.state))
-  const attention = attentionOf({
-    ...(schedule.ask ? { ask: { text: `Wants to ${schedule.ask.text}`, ...(schedule.ask.askId ? { answer: { kind: 'bot_ask' as const, botId: schedule.botId, askId: schedule.ask.askId } } : {}) } } : {}),
-    ...(last ? { last } : {})
-  })
-  return {
-    key: `bot:${schedule.botId}:${schedule.scheduleId}`,
-    kind: 'bot',
-    id: `${schedule.botId}:${schedule.scheduleId}`,
-    // Named by its short label ("every day · 08:00"), as the bot's own Runs list names it; the prompt is the bot's.
-    name: schedule.label || lineOf(schedule.prompt),
-    trigger: 'time',
-    whenText: schedule.label,
-    who: { kind: 'bot', name: schedule.botName, look: schedule.look },
-    paused: schedule.paused,
-    ...(schedule.pausedText ? { pausedReason: schedule.pausedText } : {}),
-    ...(schedule.nextAt && !schedule.paused ? { next: { at: schedule.nextAt, timeZone: computer.timeZone } } : {}),
-    ...(active ? { active } : {}),
-    ...(last ? { last } : {}),
-    runs,
-    mayIsGrant: true,
-    ...(attention ? { attention } : {}),
-    link: { kind: 'bot', botId: schedule.botId, scheduleId: schedule.scheduleId },
-    computer
-  }
-}
 
 function watchItem(thread: Thread, status: { state: string; nextCheckAt: string | null } | undefined, sources: AutomationIndexSources, computer: AutomationItem['computer']): AutomationItem {
   const pr = thread.pullRequest!
@@ -255,28 +267,37 @@ function watchItem(thread: Thread, status: { state: string; nextCheckAt: string 
 }
 
 /**
- * The read-only automation index (Path step 1): scheduled jobs, personal bots' schedules and pull request watches,
- * each in the Run contract, with Needs you worked out the same way for all. Sources that cannot be read are named in
- * `unavailable` instead of showing as empty.
+ * The automation index: scheduled jobs (a bot's schedules among them, as jobs whose Who is the bot) and pull request
+ * watches, each in the Run contract, with Needs you worked out the same way for all. Sources that cannot be read are
+ * named in `unavailable` instead of showing as empty.
  */
 export function buildAutomationIndex(sources: AutomationIndexSources): AutomationIndex {
   const now = sources.now?.() ?? new Date()
   const timeZone = sources.timeZone ?? localTimeZone()
   const computerName = sources.computerName ?? hostname()
   const computer = { name: computerName, timeZone, local: true }
-  const items: AutomationItem[] = sources.jobs().map((job) => jobItem(job, sources, computer, now))
+  const items: AutomationItem[] = []
   const unavailable: AutomationIndex['unavailable'] = []
+  for (const job of sources.jobs()) {
+    if (!job.bot) {
+      items.push(jobItem(job, sources, computer, now))
+      continue
+    }
+    // A bot's schedule shows with its bot; a bot that is gone or deleted takes its rows out of the list.
+    let facts: BotAutomationFacts | undefined
+    try {
+      facts = sources.bot?.(job.bot.botId, job.bot.scheduleId)
+      if (!sources.bot) throw new Error('bots unavailable')
+    } catch {
+      if (!unavailable.includes('bots')) unavailable.push('bots')
+      continue
+    }
+    if (facts) items.push(botJobItem(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts, computer))
+  }
   try {
     for (const ask of sources.asks?.() ?? []) items.push(askItem(ask, sources, computer))
   } catch {
     // The asks file could not be read: the jobs and the rest still show.
-  }
-  if (sources.bots) {
-    try {
-      for (const schedule of sources.bots()) items.push(botItem(schedule, computer))
-    } catch {
-      unavailable.push('bots')
-    }
   }
   if (sources.watchStatus) {
     try {

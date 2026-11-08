@@ -69,7 +69,7 @@ describe('usage limits', () => {
   it('schedules skip until the reset, and the first tick after it ends the pause', async () => {
     await f.bots.reconcileOnStartup()
     f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines' }, 'owner')
-    await f.bots.tickSchedules(new Date(f.clock.now))
+    await f.tickSchedules(new Date(f.clock.now))
     const until = new Date(f.clock.now + 2 * HOUR).toISOString()
     const activation = await f.bots.activate({ botId, input: 'go', clientRequestId: 'r1' })
     await runDispatch(f, activation.id, 1, limited(until))
@@ -77,14 +77,14 @@ describe('usage limits', () => {
     await flush()
     expect(f.store.registry(botId)!.pausedReason).toBe('usage_limit')
     f.clock.now += 35 * 60_000
-    expect((await f.bots.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
-    expect(f.store.scheduleStates(botId)[0]).toMatchObject({ lastSkipReason: 'usage_limited' })
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+    expect(f.book.list(botId)[0]).toMatchObject({ skip: { reason: 'usage_limited' } })
     // After the reset, the next tick ends the pause and the next occurrence runs.
     f.clock.now = Date.parse(until) + 60_000
     f.limited.clear()
-    expect((await f.bots.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
+    expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
     expect(f.store.registry(botId)).toMatchObject({ pausedReason: null, pausedUntil: null, error: null })
-    expect(f.store.scheduleStates(botId)[0]).toMatchObject({ lastSkipReason: null })
+    expect(f.book.list(botId)[0]!.skip).toBeUndefined()
   })
 
   it('chat still answers on another candidate; the chat lane\'s pause never counts as a failure', async () => {

@@ -64,8 +64,9 @@ import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMemoryAdmin, BotModelProblem, BotModelResolver, BotProcessSupervision, BotToolHost } from '../seams'
 import type { BotActivationRow, BotDispatchRow, BotEscalationRow, BotMessageRow, BotStore, BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
-import { firstOccurrence, nextOccurrence, scheduleProblem, scheduleSpec } from '../triggers/scheduler'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
+import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
+import { tellMeNotifies } from '../../../shared/automations'
 import { BotReloadAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
 
 /**
@@ -115,8 +116,13 @@ export interface BotEngineHost {
   stopThread?(threadId: string): Promise<unknown> | void
   /** `bots.changed`. */
   changed?(event: { botId?: string; activationId?: string }): void
-  /** A bot's schedules may have changed (it was published): the scheduler ticks now. */
+  /** A bot's schedules may have changed (it was resumed): the scheduler ticks now. */
   schedulesChanged?(): void
+  /**
+   * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
+   * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
+   */
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'>
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -193,8 +199,6 @@ export const BOT_ASK_DEFERRED_TEXT = 'Asked; the owner will answer after this me
 export const BOT_JOURNAL_ERROR: BotError = { text: 'I can\'t save my work. Free some disk space.', action: { kind: 'retry', label: 'Try again' } }
 /** Failed runs in a row that pause a bot's schedules. */
 export const BOT_FAILURE_PAUSE_STREAK = 3
-/** The shortest interval a bot may schedule itself at. */
-export const MIN_BOT_SCHEDULE_MINUTES = 5
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
 const REPLY_WAIT_MS = 5_000
 /** Retries on another model after usage limits, per activation. */
@@ -268,7 +272,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * known bot thread stays read-only and every other thread is left alone.
    */
   private readonly known = new Map<string, { botId: string; role: 'home' | BotThreadRole }>()
-  /** The startup pass has run: only then may the schedule tick insert activations (PR 6 §6). */
+  /** The startup pass has run: only then may a schedule's occurrence insert an activation (PR 6 §6). */
   private startupPassed = false
   /** The chat rows and the Bot UI's summaries (Bot Phase 1 §5.1.1). */
   readonly chat: BotChatProjection
@@ -301,8 +305,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.chat = new BotChatProjection({
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
-      // The bot's name rides along: a notification for a new bot's first row comes before any list names it.
-      emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId) })
+      // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
+      // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
+      emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
+      schedules: (botId) => this.listSchedules(botId)
     })
     this.service = new BotChatService(this, { store: host.store, ...(host.memory ? { memory: host.memory } : {}), now: () => this.now() })
     try {
@@ -310,6 +316,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.known.set(row.thread_id as string, { botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole })
     } catch (error) {
       console.warn('bot threads could not be read', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Whether a run report stays out of notifications: its schedule's Tell me is Only problems, and a report is a run
+   * that ended done. Every run, Only news and a failure's error row notify as before.
+   */
+  private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
+    if (message?.kind !== 'run_report' || !message.activationId) return false
+    try {
+      const row = this.store.activation(message.activationId)
+      if (row?.trigger.kind !== 'schedule') return false
+      const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
+      return entry ? !tellMeNotifies(entry.tellMe, 'done') : false
+    } catch {
+      return false
     }
   }
 
@@ -427,7 +449,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     await this.archiveThreads(botId)
     this.changed({ botId })
-    try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
     const deletedAt = this.store.registry(botId)?.deletedAt ?? this.store.now()
     return { purgeAt: new Date(Date.parse(deletedAt) + BOT_DELETE_PURGE_MS).toISOString() }
   }
@@ -495,8 +516,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its definition and files first: a failure leaves the purge unfinished, and the next sweep tries again.
     this.host.definitions.remove(botId)
     rmSync(this.filesFolder(botId), { recursive: true, force: true })
+    // Its schedules in the shared store go first: a purge stopped after this leaves nothing that runs.
+    this.host.schedules?.removeAll(botId)
     this.store.db.transaction(() => {
       this.store.deleteMessages(botId)
+      // The rows its schedules were moved from (`bot_schedules`), kept until now.
       this.store.deleteSchedules(botId)
       // Its asks, activations (their inputs and results), dispatches, grants and context generations go too.
       this.store.deleteBotRows(botId)
@@ -573,10 +597,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       grant: grant ? { digest: grant.digest, approvedAt: grant.approvedAt } : null,
       needsApproval: published ? addedPermissions(published.permissions, grant?.manifest ?? null) : [],
       openEscalations: this.store.activationsIn(entry.id, ['waiting_grant']).reduce((count, row) => count + this.store.escalations({ activationId: row.id, status: 'open' }).length, 0),
-      schedules: this.store.scheduleStates(entry.id).map((state) => ({
-        id: state.scheduleId,
-        nextRunAt: state.nextRunAt,
-        skipped: state.lastSkipReason && state.lastSkipAt ? { at: state.lastSkipAt, reason: state.lastSkipReason } : null
+      schedules: this.schedulesOf(entry.id).map((schedule) => ({
+        id: schedule.scheduleId,
+        nextRunAt: schedule.nextAt ?? null,
+        skipped: schedule.skip ?? null
       }))
     }
   }
@@ -835,29 +859,92 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return over.length
   }
 
-  // -- Schedules (PR 6 §6, Bot Phase 1 §5.5) ----------------------------------------------------
+  // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
   /**
-   * One scheduler tick. Schedules live in `bots.db` (`bot_schedules`). For each due occurrence,
-   * one transaction inserts its activation (`INSERT OR IGNORE` on
-   * `sched:<botId>:<scheduleId>:<occurrenceAt>`) and moves the schedule to its next occurrence;
-   * occurrences missed while Mousse was closed collapse into one. A repeated tick, or one after a
-   * crash, finds the key and inserts nothing. The tick only inserts, and never piles up copies: while
-   * the bot is paused (by its owner, after failed runs, or by a usage limit), its run waits at a
-   * wall, or the same schedule already has a run waiting in the queue, the occurrence is skipped (the
-   * schedule still moves on) and the reason is recorded. An open ask is not a skip: asks don't block.
-   * One bot that cannot be read never stops the others. Every tick also starts what waits in a free
-   * lane, and once a day deleted bots past their 30 days are purged. Nothing happens before the
-   * startup pass has run.
+   * One occurrence of a bot's schedule, handed over by the shared scheduler (`ScheduledJobService`), which owns the
+   * schedule's time and moves it on. In one transaction this inserts the occurrence's run activation, keyed
+   * `sched:<botId>:<scheduleId>:<occurrenceAt>`, so a repeated hand-over (after a crash) inserts nothing. It never piles
+   * up copies: while the bot is paused (by its owner, after three failed runs, or by a usage limit), its run waits at a
+   * wall, the same schedule's last run still waits in the queue or for the internet, the occurrence is skipped and says why. An open ask
+   * is not a skip: asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  async tickSchedules(now: Date = new Date(this.now())): Promise<{ inserted: string[] }> {
-    const inserted: string[] = []
-    if (!this.startupPassed) return { inserted }
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now?: Date }):
+    | { kind: 'started'; activationId: string }
+    | { kind: 'skipped'; reason: string }
+    | { kind: 'not_ready' } {
+    if (!this.startupPassed) return { kind: 'not_ready' }
+    const { botId, scheduleId, prompt, occurrenceAt } = input
+    const registry = this.store.registry(botId)
+    if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
+    this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
+    const paused = this.store.registry(botId)?.pausedReason
+    let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
+    let admitted: ReturnType<BotEngine['admissible']> | undefined
+    if (!skip) {
+      try {
+        admitted = this.admissible(botId)
+      } catch (error) {
+        // A bot that cannot run now (permissions to approve, its thread in the trash) skips this occurrence; the
+        // schedule still moves on, so approving later never runs a backlog.
+        skip = error instanceof BotEngineError ? error.code : 'bot_unavailable'
+      }
+    }
+    const id = `act_${randomUUID()}`
+    const made = this.store.db.transaction(() => {
+      if (!admitted || skip) return false
+      if (this.store.laneActivations(botId, 'run', ['waiting_grant']).length) { skip = 'bot_waiting_for_owner'; return false }
+      if (this.store.laneActivations(botId, 'run', ['queued']).some((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId)) { skip = 'previous_run_still_queued'; return false }
+      // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
+      if (this.store.laneActivations(botId, 'run', ['running']).some((row) => row.offline && row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId)) { skip = 'waiting_for_internet'; return false }
+      const inserted = this.store.insertActivationOnce({
+        id,
+        botId,
+        revision: admitted.published.revision!,
+        grantDigest: admitted.grant.digest,
+        trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt },
+        idempotencyKey: `sched:${botId}:${scheduleId}:${occurrenceAt}`,
+        status: 'queued',
+        createdAt: this.store.now(),
+        lane: 'run'
+      }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
+      if (inserted) this.dropOverQueue(botId, 'run')
+      return inserted
+    })
+    if (skip) {
+      this.changed({ botId })
+      return { kind: 'skipped', reason: skip }
+    }
+    if (made) {
+      this.changed({ botId, activationId: id })
+      this.pumpLater(botId)
+    }
+    return { kind: 'started', activationId: id }
+  }
+
+  /** A usage-limit pause ends at its reset time: the bot's schedules run again. Only that pause ends; the failure streak stays. */
+  private endUsagePauseIfDue(botId: string, now: Date): void {
+    const registry = this.store.registry(botId)
+    if (registry?.pausedReason !== 'usage_limit' || !registry.pausedUntil || Date.parse(registry.pausedUntil) > now.getTime()) return
+    this.store.db.transaction(() => {
+      this.store.setPaused(botId, null, undefined, { keepStreak: true })
+      if (registry.error?.code === 'usage_limit') this.store.setError(botId, null)
+    })
+    this.changed({ botId })
+  }
+
+  /**
+   * Bot upkeep after each tick of the shared scheduler: a usage-limit pause past its reset ends, what waits in a free
+   * lane starts, captures that missed a thread's last write run again, and once a day deleted bots past their 30 days
+   * are purged. One bot that cannot be read never stops the others. Nothing happens before the startup pass.
+   */
+  async maintain(now: Date = new Date(this.now())): Promise<void> {
+    if (!this.startupPassed) return
     for (const botId of this.host.definitions.ids()) {
       try {
-        inserted.push(...this.tickBot(botId, now))
+        this.endUsagePauseIfDue(botId, now)
       } catch (error) {
-        console.warn('a bot\'s schedules could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
+        console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
     for (const botId of new Set(this.store.activationsWith(['queued']).map((row) => row.botId))) {
@@ -869,88 +956,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     for (const ref of [...this.needsSync.values()]) this.resync(ref)
     if (now.getTime() - this.lastSweep >= SWEEP_EVERY_MS) await this.sweepDeleted(now.getTime()).catch(() => [])
-    return { inserted }
-  }
-
-  private tickBot(botId: string, now: Date): string[] {
-    const inserted: string[] = []
-    const registry = this.store.registry(botId)
-    if (!registry || registry.deletedAt) return inserted
-    // A usage-limit pause ends at its reset time: the bot's schedules run again.
-    if (registry.pausedReason === 'usage_limit' && registry.pausedUntil && Date.parse(registry.pausedUntil) <= now.getTime()) {
-      this.store.db.transaction(() => {
-        // Only the usage pause ends: the failure streak is not the reset's to clear.
-        this.store.setPaused(botId, null, undefined, { keepStreak: true })
-        if (registry.error?.code === 'usage_limit') this.store.setError(botId, null)
-      })
-      this.changed({ botId })
-    }
-    const paused = this.store.registry(botId)!.pausedReason
-    const schedules = this.store.schedules(botId)
-    const states = new Map(this.store.scheduleStates(botId).map((state) => [state.scheduleId, state]))
-    for (const id of states.keys()) if (!schedules.some((schedule) => schedule.id === id)) this.store.dropScheduleState(botId, id)
-    for (const row of schedules) {
-      const schedule: BotSchedule = { id: row.id, when: row.when, prompt: row.prompt }
-      const spec = scheduleSpec(schedule)
-      const state = states.get(schedule.id)
-      // A new or edited schedule starts from now: it never runs for times before it existed.
-      if (!state || state.spec !== spec) {
-        this.store.putScheduleState(botId, schedule.id, spec, firstOccurrence(schedule, now))
-        continue
-      }
-      if (!state.nextRunAt || Date.parse(state.nextRunAt) > now.getTime()) continue
-      const occurrenceAt = state.nextRunAt
-      const next = nextOccurrence(schedule, occurrenceAt, now)
-      let admitted: ReturnType<BotEngine['admissible']> | undefined
-      let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
-      if (!skip) {
-        try {
-          admitted = this.admissible(botId)
-        } catch (error) {
-          // A bot that cannot run now (permissions to approve, its thread in the trash) skips this
-          // occurrence; the schedule still moves on, so approving later never runs a backlog.
-          skip = error instanceof BotEngineError ? error.code : 'bot_unavailable'
-        }
-      }
-      const id = `act_${randomUUID()}`
-      const made = this.store.db.transaction(() => {
-        let made = false
-        if (admitted && !skip) {
-          if (this.store.laneActivations(botId, 'run', ['waiting_grant']).length) skip = 'bot_waiting_for_owner'
-          else if (this.store.laneActivations(botId, 'run', ['queued']).some((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === schedule.id)) skip = 'previous_run_still_queued'
-          // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-          else if (this.store.laneActivations(botId, 'run', ['running']).some((row) => row.offline && row.trigger.kind === 'schedule' && row.trigger.scheduleId === schedule.id)) skip = 'waiting_for_internet'
-        }
-        if (admitted && !skip) {
-          made = this.store.insertActivationOnce({
-            id,
-            botId,
-            revision: admitted.published.revision!,
-            grantDigest: admitted.grant.digest,
-            trigger: { kind: 'schedule', input: schedule.prompt, scheduleId: schedule.id, occurrenceAt },
-            idempotencyKey: `sched:${botId}:${schedule.id}:${occurrenceAt}`,
-            status: 'queued',
-            createdAt: this.store.now(),
-            lane: 'run'
-          }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
-          if (made) this.dropOverQueue(botId, 'run')
-        }
-        this.store.putScheduleState(botId, schedule.id, spec, next)
-        return made
-      })
-      // The skip is recorded once per reason: a skip repeated for the same reason changes nothing.
-      const reason = skip ?? null
-      if (reason !== state.lastSkipReason) {
-        this.store.setScheduleSkip(botId, schedule.id, reason, reason ? occurrenceAt : null)
-        if (reason) console.warn('a bot schedule occurrence was skipped', { botId, scheduleId: schedule.id, occurrenceAt, reason })
-        this.changed({ botId })
-      }
-      if (made) {
-        inserted.push(id)
-        this.changed({ botId, activationId: id })
-      }
-    }
-    return inserted
   }
 
   listActivations(botId?: string): BotActivationSummary[] {
@@ -3779,7 +3784,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
     activationOf: (threadId) => this.activationOf(threadId),
     schedules: {
-      add: (botId, schedule) => this.addSchedule(botId, schedule, 'bot'),
+      add: (botId, schedule) => {
+        const added = this.addSchedule(botId, schedule, 'bot')
+        return { scheduleId: added.scheduleId, label: added.label }
+      },
       remove: (botId, scheduleId) => this.removeSchedule(botId, scheduleId),
       list: (botId) => this.listSchedules(botId)
     },
@@ -3812,40 +3820,47 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /**
-   * A schedule (§5.5): at most 8 per bot, at least 5 minutes apart. The bot adds its own with
-   * `bot_schedule_add`; it needs no approval (schedules are not permissions) and changes no revision.
-   */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string }, createdBy: 'owner' | 'bot'): { scheduleId: string; label: string } {
-    this.entry(botId)
-    if (this.store.schedules(botId).length >= MAX_BOT_SCHEDULES)
-      throw new BotEngineError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
-    const schedule: BotSchedule = { id: `s-${randomUUID().slice(0, 8)}`, when: input.when, prompt: typeof input.prompt === 'string' ? input.prompt.trim() : '' }
-    const problem = scheduleProblem(schedule) ?? this.tooOften(schedule)
-    if (problem) throw new BotEngineError('schedule_invalid', problem)
-    const label = this.scheduleLabel(schedule.when)
-    this.store.putSchedule({ id: schedule.id, botId, when: schedule.when, prompt: schedule.prompt, label, createdBy, createdAt: this.store.now() })
+  /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
+  schedulesEdited(botId: string): void {
     this.changed({ botId })
-    try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
-    return { scheduleId: schedule.id, label }
   }
 
-  /** Why a schedule runs more often than every 5 minutes, or undefined. */
-  private tooOften(schedule: BotSchedule): string | undefined {
-    const message = `The shortest schedule is every ${MIN_BOT_SCHEDULE_MINUTES} minutes.`
-    if (schedule.when.kind === 'interval') return schedule.when.minutes < MIN_BOT_SCHEDULE_MINUTES ? message : undefined
-    // A cron expression: no two of its next runs may be closer than 5 minutes.
-    let at = firstOccurrence(schedule, new Date(this.now()))
-    for (let i = 0; at && i < 48; i += 1) {
-      const next = nextOccurrence(schedule, at, new Date(Date.parse(at)))
-      if (!next) return undefined
-      if (Date.parse(next) - Date.parse(at) < MIN_BOT_SCHEDULE_MINUTES * 60_000) return message
-      at = next
+  /** The bot's schedules in the shared store; none when this profile has no scheduler for them. */
+  schedulesOf(botId: string): BotScheduleEntry[] {
+    return this.host.schedules?.list(botId) ?? []
+  }
+
+  private scheduleBook(): NonNullable<BotEngineHost['schedules']> {
+    if (!this.host.schedules) throw new BotEngineError('schedules_unavailable', 'Schedules are not available here.')
+    return this.host.schedules
+  }
+
+  /**
+   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At most 8 per bot, at least 5 minutes
+   * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
+   * (schedules are not permissions) and changes no revision.
+   */
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
+    this.entry(botId)
+    let added: BotScheduleEntry
+    try {
+      added = this.scheduleBook().add(botId, input, createdBy)
+    } catch (error) {
+      if (error instanceof BotScheduleError) throw new BotEngineError(error.code, error.message)
+      throw error
     }
-    return undefined
+    this.changed({ botId })
+    return added
   }
 
+  /** A schedule in plain words, for a schedule a format-1 definition carried. */
   private scheduleLabel(when: BotSchedule['when']): string {
+    try {
+      const label = this.host.schedules?.labelOf(when)
+      if (label) return label
+    } catch {
+      // Below.
+    }
     try {
       const label = this.host.scheduleLabel?.(when)
       if (label) return label
@@ -3858,24 +3873,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
-    const removed = this.store.db.transaction(() => {
-      const done = this.store.removeSchedule(botId, scheduleId)
-      if (done) this.store.dropScheduleState(botId, scheduleId)
-      return done
-    })
-    if (removed) {
-      this.changed({ botId })
-      try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
-    }
+    const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
+    if (removed) this.changed({ botId })
     return removed
   }
 
   listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }> {
-    const states = new Map(this.store.scheduleStates(botId).map((state) => [state.scheduleId, state.nextRunAt]))
-    return this.store.schedules(botId).map((schedule) => {
-      const next = states.get(schedule.id)
-      return { scheduleId: schedule.id, label: schedule.label, ...(next ? { nextAt: next } : {}) }
-    })
+    return this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
   }
 
   /** The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. */
@@ -3916,7 +3920,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * Format-1 definitions become format 2 (§5.2), once, when the profile opens: each draft is
    * written back with its look; a published revision is published again in format 2 (the same
-   * manifest, so the grant's digest still holds) and its schedules move to `bot_schedules`; a draft
+   * manifest, so the grant's digest still holds) and its schedules move to `bot_schedules` (from
+   * where `migrateBotSchedules` moves them on to the shared store); a draft
    * that was never published is published with the starter grant only, approved on first chat.
    * The draft is written last, so an upgrade that stopped before it resumes at the next open.
    */
