@@ -183,7 +183,7 @@ button.lineage-row:focus-visible {
 
 /* Turns with the finished group's Collapse: same easing and open/close durations (components/ui/Collapse). */
 .lineage-group-chevron {
-  transition: transform 130ms var(--ui-collapse-ease-close);
+  transition: transform 180ms var(--ui-collapse-ease-close);
 }
 
 .lineage-group[data-open='true'] .lineage-group-chevron {

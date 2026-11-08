@@ -3,7 +3,7 @@ import '../../styles/collapse.css'
 
 /** Open and close durations; keep in step with `styles/collapse.css`. */
 export const COLLAPSE_OPEN_MS = 160
-export const COLLAPSE_CLOSE_MS = 130
+export const COLLAPSE_CLOSE_MS = 180
 /** Per-item delay, the number of items that get one, and the list length above which items do not stagger. */
 export const COLLAPSE_STAGGER_MS = 12
 export const COLLAPSE_STAGGER_ITEMS = 8

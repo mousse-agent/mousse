@@ -13,7 +13,8 @@
   min-height: 0;
   --threads-sidebar-row-height: 32px;
   container-type: inline-size;
-  container-name: threads-sidebar;
+  /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
+  container-name: threads-sidebar pill-tabs;
   background: var(--vscode-sideBar-background, rgba(var(--surface-strong-rgb), 0.72));
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -349,8 +350,7 @@
    merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {
   margin: 2px 0 0 17px;
-  padding-left: 6px;
-  border-left: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+  padding-left: 7px;
 }
 
 /* In a closing group a row's highlight (selected, hovered) fades with its text, quicker than the clip
@@ -574,7 +574,24 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   white-space: nowrap;
 }
 
-/* A project row's state: the worst of its threads as a dot, and while it is closed how many need the person. */
+/* How many of a group's threads finished unseen: a muted number right after the name. The name gives up its spare
+   width so the number sits beside it, not at the row's end. */
+.threads-sidebar-project-name:has(+ .threads-sidebar-project-finished) {
+  flex: 0 1 auto;
+}
+
+.threads-sidebar-project-finished {
+  flex-shrink: 0;
+  margin: 0 auto 0 -4px;
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+/* A project row's state: the worst of its threads above finished as a dot, and while it is closed how many need
+   the person. */
 .threads-sidebar-project-status {
   display: inline-flex;
   align-items: center;
@@ -589,7 +606,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-project-status--needs-me { color: var(--status-input); }
 .threads-sidebar-project-status--working { color: var(--status-running); }
 .threads-sidebar-project-status--paused { color: var(--warning); }
-.threads-sidebar-project-status--done { color: var(--status-done); }
 
 .threads-sidebar-status-dot {
   width: 7px;
@@ -666,6 +682,61 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-settled-list {
   min-height: 0;
+}
+
+/* Archived rows sit back: their content is faded and grey, the project wash is off, and the row's background
+   (hover, selected) is untouched. A row lights up in full colour while it is hovered, has keyboard focus or has
+   its menu open. A status that needs the person (input, approval) keeps its colour. */
+.threads-sidebar-settled-list .threads-sidebar-thread.settled :is(
+  .threads-sidebar-card-mark,
+  .threads-sidebar-card-project,
+  .threads-sidebar-card-pin,
+  .threads-sidebar-card-status:not(.threads-sidebar-card-status-input),
+  .threads-sidebar-card-age,
+  .threads-sidebar-card-title,
+  .threads-sidebar-card-sub,
+  .threads-sidebar-skeleton
+) {
+  opacity: 0.55;
+  filter: grayscale(1);
+  transition: opacity var(--ui-dur-fast, 120ms) ease-out, filter var(--ui-dur-fast, 120ms) ease-out;
+}
+
+.threads-sidebar-settled-list .threads-sidebar-thread.settled.project-tinted::after {
+  opacity: 0;
+  transition: opacity var(--ui-dur-fast, 120ms) ease-out;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled :is(
+  .threads-sidebar-card-mark,
+  .threads-sidebar-card-project,
+  .threads-sidebar-card-status,
+  .threads-sidebar-card-age,
+  .threads-sidebar-card-title,
+  .threads-sidebar-card-sub,
+  .threads-sidebar-skeleton
+),
+.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled :is(
+  .threads-sidebar-card-mark,
+  .threads-sidebar-card-project,
+  .threads-sidebar-card-status,
+  .threads-sidebar-card-age,
+  .threads-sidebar-card-title,
+  .threads-sidebar-card-sub,
+  .threads-sidebar-skeleton
+),
+.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled.project-tinted::after,
+.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled.project-tinted::after {
+  opacity: 1;
+  filter: none;
+}
+
+/* The pin glyph rests a little fainter than the text around it, lit or not. */
+.threads-sidebar-settled-list .threads-sidebar-thread.settled .threads-sidebar-card-meta > .threads-sidebar-card-pin { opacity: 0.47; }
+.threads-sidebar:not(.menu-open) .threads-sidebar-settled-list .threads-sidebar-thread-container:hover > .threads-sidebar-thread.settled .threads-sidebar-card-pin,
+.threads-sidebar-settled-list .threads-sidebar-thread-container:is(:has(:focus-visible), [data-menu-open]) > .threads-sidebar-thread.settled .threads-sidebar-card-pin {
+  opacity: 0.85;
+  filter: none;
 }
 
 .threads-sidebar-status-spinner {
@@ -759,6 +830,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-project-row:hover :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
 .threads-sidebar-project-row:focus-within :is(.threads-sidebar-project-new-chat, .threads-sidebar-project-more),
+.threads-sidebar-project-row.expanded.empty .threads-sidebar-project-new-chat,
 .threads-sidebar-project-more[aria-expanded="true"] {
   opacity: 1;
 }
@@ -799,34 +871,9 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   text-decoration: underline;
 }
 
-/* A project with no threads: muted "No threads", then a small New thread button. */
+/* A project with no threads: one muted "No threads" line; the header's New thread starts one. */
 .threads-sidebar-empty-nested {
-  display: flex;
-  align-items: center;
-  gap: 4px;
   padding-left: 11px;
-}
-
-.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) {
-  opacity: 1;
-}
-
-.threads-sidebar-empty-nested:has(.threads-sidebar-empty-new-thread) > span {
-  opacity: 0.7;
-}
-
-/* Neutral, like the row's own New thread: no accent at rest or on hover. */
-.threads-sidebar-empty-new-thread {
-  flex-shrink: 0;
-}
-
-.threads-sidebar-empty-new-thread:hover {
-  background: var(--ui-hover);
-}
-
-.threads-sidebar-empty-new-thread:focus-visible {
-  outline: 2px solid var(--text-secondary);
-  outline-offset: -2px;
 }
 
 .threads-sidebar-show-more {
@@ -1024,27 +1071,118 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 /* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
    width, so switching tabs does not resize it; the other two show their icons, with their names in the tooltips.
    A label is shown whole or not at all. */
-@container threads-sidebar (max-width: 319px) {
+@container pill-tabs (max-width: 319px) {
   .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 0 0 auto; min-width: 88px; padding: 0 8px; }
 }
 
 /* Too narrow even for one word beside two icons: every tab is an icon. */
-@container threads-sidebar (max-width: 239px) {
+@container pill-tabs (max-width: 239px) {
   .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 1 1 0; min-width: 0; padding: 0 4px; }
 }
 
-/* Under the lists: "No project" and "Archived". The footer follows the lists, and its auto bottom margin keeps
-   the profile at the window's edge. When the lists are taller than the sidebar they scroll and the footer sits
-   at the bottom. The footer is the one scroll container for its own sections: it takes what they need up to
-   45vh, and the lists above give up the room. */
+/* Under the lists: "Archived". The footer is pinned to the bottom of the pane, just above the profile: its auto
+   top margin takes whatever room the lists leave, so it stays at the bottom when the lists are short. When the
+   lists are taller than the sidebar they shrink and scroll and the footer stays in view. The footer is the one
+   scroll container for its own sections: it takes what they need up to 45vh, and the lists above give up the room. */
 .threads-sidebar-footer {
   flex: 0 0 auto;
   min-height: 0;
   max-height: 45vh;
   overflow-y: auto;
-  margin-bottom: auto;
+  margin-top: auto;
+}
+
+/* Archived opens and closes with the shared Collapse, like a project. While it moves, its rows are capped at the
+   room the footer shows under the heading (45vh less `--threads-sidebar-settled-head`, measured on each toggle), so
+   a long list's height and fade play over what is on screen instead of filling the footer in one frame. At rest
+   nothing is capped and the footer scrolls as above. */
+.threads-sidebar-footer:has(> .threads-sidebar-section-settled > .ui-collapse[data-motion]) {
+  overflow-y: hidden;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] > .ui-collapse-clip > * {
+  max-height: calc(45vh - var(--threads-sidebar-settled-head, 48px));
+  overflow: hidden;
+}
+
+/* The footer sits on the bottom of the pane, so as the list's height changes the heading moves, not the bottom
+   edge. The rows hold still at the bottom and the heading sweeps over them, top edge first: they fade where they
+   are instead of riding the heading down and out of view (that slide hid the fade). The group's own box clips
+   them, not the clip inside it: mid-motion the grid row is only part of the box (an auto-height grid sizes
+   itself by the fr fraction and the row by its square), so the row sits at the bottom of the box and the rows
+   overflow it upward, right up to the heading. */
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse {
+  align-content: end;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse > .ui-collapse-clip {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse > .ui-collapse-clip > * {
+  flex: none;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] {
+  overflow: hidden;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] > .ui-collapse-clip {
+  overflow: visible;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion='exit'] {
+  mask-image: linear-gradient(to top, #000 calc(100% - 20px), transparent calc(100% - 4px));
+}
+
+.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion='exit'] > .ui-collapse-clip {
+  mask-image: none;
+}
+
+/* The Archived heading is low emphasis: regular weight, secondary colour, icon and word centred on each other. */
+.app .threads-sidebar-section-settled .threads-sidebar-heading {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle {
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  line-height: 14px;
+}
+
+/* The count and the chevron sit at the row's end; the chevron turns down while Archived is open, like a project's. */
+.threads-sidebar-settled-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.threads-sidebar-settled-chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-secondary);
+  transition: transform 0.15s;
+}
+
+.threads-sidebar-settled-count + .threads-sidebar-settled-chevron {
+  margin-left: 0;
+}
+
+.threads-sidebar-section-settled.expanded .threads-sidebar-settled-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-settled-chevron { transition: none; }
+}
+
+.app .threads-sidebar-section-settled .threads-sidebar-heading-toggle > svg {
+  display: block;
 }
 
 /* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
@@ -1059,27 +1197,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-scroll[data-more-below]::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background-color: rgba(var(--accent-rgb), 0.32);
-}
-
-/* Archived: Clear all sits at the end of the heading; hover and focus use a background fill only. */
-.threads-sidebar-heading-action {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font: inherit;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s;
-}
-
-.threads-sidebar-heading-action:hover,
-.threads-sidebar-heading-action:focus-visible {
-  background: rgba(var(--accent-rgb), 0.12);
-  color: var(--danger);
-}
-
-.threads-sidebar-heading-action:focus-visible {
-  outline: none;
-  box-shadow: var(--ui-focus-ring);
 }
 
 .threads-sidebar-thread-action.danger:hover,
@@ -1136,4 +1253,65 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-thread-container.drop-after::before {
   bottom: -2px;
+}
+
+/* Focus: what is outside the open thread's context sits back a little, so it stands out. In Projects every
+   group's header but the open thread's group's dims, and every thread row but the open one (its group's other
+   rows too); in Threads every card but the open one. With nothing open nothing dims, except "Other threads",
+   which always reads quieter unless it holds the open thread. Hover, keyboard focus and an open menu bring a row
+   up. A status that needs the person keeps its full colour; Archived keeps its own fade (above). */
+@property --sidebar-row-dim {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 1;
+}
+
+.threads-sidebar {
+  --sidebar-inactive-opacity: 0.7;
+}
+
+/* Out of focus. :where keeps these at no specificity, so the lit rules below win. */
+:where(.threads-sidebar-tree[role='tree'][data-has-active] .threads-sidebar-thread-container:not(:has(> .threads-sidebar-thread:is(.active, .has-open-subagent)))),
+:where(.threads-sidebar-feed-list[data-has-active] > .threads-sidebar-thread-container:not(:has(> .threads-sidebar-thread:is(.active, .has-open-subagent)))),
+:where(.threads-sidebar-tree[role='tree'][data-has-active] .threads-sidebar-project:not([data-active-project]) > .threads-sidebar-project-row),
+:where(.threads-sidebar-other-threads:not([data-active-project]) > .threads-sidebar-project-row) {
+  --sidebar-row-dim: var(--sidebar-inactive-opacity);
+}
+
+/* Lit: hover, keyboard focus, an open menu, and what finished unseen (a row with the done check, a header with the
+   finished count) until it is looked at. */
+.threads-sidebar:not(.menu-open) :is(.threads-sidebar-thread-container, .threads-sidebar-project-row):hover,
+.threads-sidebar :is(.threads-sidebar-thread-container, .threads-sidebar-project-row):is(:has(:focus-visible), [data-menu-open]),
+.threads-sidebar .threads-sidebar-thread-container:has(> .threads-sidebar-thread :is(.threads-sidebar-status-icon--completed, .threads-sidebar-card-status-done)),
+.threads-sidebar .threads-sidebar-project-row:has(.threads-sidebar-project-finished) {
+  --sidebar-row-dim: 1;
+}
+
+/* The level eases rather than the opacity, so a row's parts all move together. */
+.threads-sidebar .threads-sidebar-thread-container {
+  transition: --sidebar-row-dim var(--ui-dur-fast, 120ms) ease-out;
+}
+
+.threads-sidebar .threads-sidebar-project-row {
+  transition: background 0.15s, --sidebar-row-dim var(--ui-dur-fast, 120ms) ease-out;
+}
+
+/* One opacity on the row's content; the selected and hover backgrounds of the row itself are untouched. A collapsed
+   project's icon divides its own fade by the row's (project-icons.css), so the two do not stack. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:not(:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input))) > .threads-sidebar-thread,
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:not(:has(.threads-sidebar-project-status--needs-me)) > .threads-sidebar-project-toggle {
+  opacity: var(--sidebar-row-dim);
+  --sidebar-icon-fade: var(--sidebar-row-dim);
+}
+
+/* A row that needs the person fades everything but its status. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)) :is(
+  .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
+  .threads-sidebar-thread-trailing > :not(.threads-sidebar-status-icon--question),
+  .threads-sidebar-card > :not(.threads-sidebar-card-body),
+  .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
+  .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input)
+),
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
+  filter: opacity(var(--sidebar-row-dim));
 }
