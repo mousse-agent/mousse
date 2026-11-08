@@ -36,7 +36,7 @@ import {
 } from '../queue/processLiveness'
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import { AGENT_JOBS_OFF_REASON, agentJobExpiredReason, isExpired } from './agentJobLimits'
+import { agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
@@ -214,15 +214,6 @@ export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt
  * The run records of a job an agent created say so. Every record is saved through here, so a record written by any
  * path (a finished run, a queued occurrence, an interrupted claim) carries the label without each writer knowing.
  */
-/** Pauses a job nothing is running for, with a reason the page shows. */
-function pauseIdleJob(job: ScheduledJob, reason: string): void {
-  job.enabled = false
-  job.state = 'paused'
-  job.pausedAt = new Date().toISOString()
-  job.pausedReason = reason
-  job.updatedAt = job.pausedAt
-}
-
 /**
  * The fields that pause a job. A running job keeps its running state and claim: the run in flight must be able to
  * finish. It settles as paused when it ends (`saveJobs`), and no further occurrence is claimed meanwhile.
@@ -794,28 +785,6 @@ export class ScheduledJobStore {
   }
 
   /**
-   * Pauses every job an agent created that is not paused (the setting "Agents may create jobs" was turned off). A job
-   * with a run in flight keeps its claim and settles as paused when the run ends. Returns how many it paused.
-   */
-  pauseAgentJobs(reason: string = AGENT_JOBS_OFF_REASON): number {
-    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
-      const jobs = this.listJobs()
-      let paused = 0
-      for (const job of jobs) {
-        if (!job.createdBy || !job.enabled || job.state === 'paused') continue
-        if (job.state === 'running' || job.runClaim) {
-          job.enabled = false
-          job.pausedAt = new Date().toISOString()
-          job.pausedReason = reason
-        } else pauseIdleJob(job, reason)
-        paused += 1
-      }
-      if (paused > 0) this.saveJobs(jobs)
-      return paused
-    })
-  }
-
-  /**
    * Gives a job `days` more from now (a person's choice: an agent has no way to call this). A job that ended because its
    * time ran out starts running again on its schedule; a finished one-time job stays finished.
    */
@@ -828,6 +797,25 @@ export class ScheduledJobStore {
       const nextRunAt = ended ? computeNextRun(job.schedule, job.lastRunAt) : undefined
       return this.updateJob(id, {
         expiresAt,
+        ...(ended ? { state: 'scheduled' as const, nextRunAt: nextRunAt ?? null, lastError: undefined } : {})
+      })
+    })
+  }
+
+  /**
+   * Keep (a person's choice): an automation an agent added loses only its end, the lifetime limit. Its access, its
+   * frequency and the agent's right to add more are untouched. One that ended because its time ran out starts again on
+   * its schedule; a finished one-time job stays finished. A job a person made has no end and is refused.
+   */
+  keepJob(id: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const job = this.getJob(id)
+      if (!job) return null
+      if (!job.createdBy) throw new Error('Only an automation an agent added has an end to remove.')
+      const ended = job.state === 'completed' && job.schedule.kind !== 'once' && isExpired(job)
+      const nextRunAt = ended ? computeNextRun(job.schedule, job.lastRunAt) : undefined
+      return this.updateJob(id, {
+        expiresAt: undefined,
         ...(ended ? { state: 'scheduled' as const, nextRunAt: nextRunAt ?? null, lastError: undefined } : {})
       })
     })
@@ -861,7 +849,6 @@ export class ScheduledJobStore {
 
       const jobs = this.listJobs()
       const due: ScheduledJob[] = []
-      const agentJobsOn = this.config.agentJobsEnabled()
       const lifetimeDays = this.config.agentJobLimits().lifetimeDays
       // An occurrence whose run ended (or can never start) is released before its job is considered.
       const released: Array<{ jobId: string; threadId: string; runId: string }> = []
@@ -880,14 +867,8 @@ export class ScheduledJobStore {
           job.pendingTrigger = undefined
           dirty = true
         }
-        // An idle job an agent created is held back while agents may not create jobs, and once it has ended; neither
-        // starts it again by itself, so a person resumes or extends it.
+        // An idle job an agent created ends once its time is up; it does not start again by itself, so a person keeps it.
         if (job.state !== 'running' && !job.runClaim && !job.pendingOccurrence) {
-          if (job.createdBy && job.enabled && job.state !== 'paused' && !agentJobsOn) {
-            pauseIdleJob(job, AGENT_JOBS_OFF_REASON)
-            dirty = true
-            continue
-          }
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
             job.state = 'completed'
             job.nextRunAt = null

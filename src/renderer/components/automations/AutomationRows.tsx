@@ -65,7 +65,15 @@ export function AutomationRow({ item, selected, ctx, menu, onOpen, onSelect, onP
           ))}
         </span>
       </button>
-      <button type="button" className="settings-btn automation-primary" data-primary={primary.kind} onClick={onPrimary} aria-label={`${primary.label}: ${item.name}`}>
+      <button
+        type="button"
+        className={`settings-btn automation-primary${primary.kind === 'allow' ? ' primary' : ''}`}
+        data-primary={primary.kind}
+        data-testid={primary.kind === 'allow' ? 'automation-ask-allow' : undefined}
+        title={primary.kind === 'allow' ? item.attention?.text : undefined}
+        onClick={onPrimary}
+        aria-label={`${primary.label}: ${item.name}`}
+      >
         {primary.label}
       </button>
       <RowMenu label={`More actions for ${item.name}`} items={menu} />

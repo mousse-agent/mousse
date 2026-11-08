@@ -38,7 +38,7 @@ interface Props {
 }
 
 /**
- * The limits on automations agents add: rows under "Agents may add automations" in Settings → Agent access, shown whether it is
+ * The limits on automations agents add: rows under "Automations agents add" in Settings → Agent access, shown whether it is
  * on or off. A value is saved when the field is left or Enter is pressed; one that is not a whole number in range is
  * refused with the range.
  */

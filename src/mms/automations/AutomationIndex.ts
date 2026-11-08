@@ -8,12 +8,15 @@ import {
   type AutomationIndex,
   type AutomationItem,
   type AutomationRun,
-  type AutomationWho
+  type AutomationWho,
+  type AttentionAnswer
 } from '../../shared/automations'
 import { narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { isWorkflowPrompt } from '../../shared/jobPermissionEdit'
 import { tellMeOf, type ScheduledJob, type Thread } from '../../shared/types'
 import type { BotAutomationSchedule, BotAutomationRunStatus } from '../bots/chat/BotChatService'
+import type { AgentJobAsk } from './AgentJobAsks'
+import { describeSchedule } from '../../shared/scheduleLabel'
 
 /** How many runs of each automation the list carries (the job keeps at most 20). */
 const RUNS_PER_ITEM = 10
@@ -28,6 +31,12 @@ export interface AutomationIndexSources {
   /** The mode a job's run takes from its thread: the bound thread's, else the mode new threads start in. */
   threadMode(threadId: string | undefined): PermissionMode
   bots?(): BotAutomationSchedule[]
+  /** The permission request waiting on a thread, when it is one Allow can answer (`permissionRequestOptions`). */
+  pendingApproval?(threadId: string): Extract<AttentionAnswer, { kind: 'thread_approval' }> | undefined
+  /** A workflow run's open step approval, when it waits for one. */
+  workflowApproval?(runId: string): Extract<AttentionAnswer, { kind: 'workflow_approval' }> | undefined
+  /** Agents' open first-creation asks: each is a Needs you item until it is answered. */
+  asks?(): AgentJobAsk[]
   /** A saved agent's name, for a job whose Who is one; undefined when it is gone. */
   savedAgentName?(definitionId: string): string | undefined
   watchStatus?(threadId: string): { state: 'watching' | 'paused' | 'ended' | 'off'; nextCheckAt: string | null }
@@ -43,6 +52,22 @@ export function localTimeZone(): string {
   } catch {
     return 'UTC'
   }
+}
+
+function safely<T>(read: () => T | undefined): T | undefined {
+  try {
+    return read()
+  } catch {
+    return undefined
+  }
+}
+
+/** The step approval a workflow job's last run waits for, from the run its delivery names ("Run: <id>"). */
+function workflowAsk(job: ScheduledJob, sources: AutomationIndexSources): { text: string; threadId?: string; answer: AttentionAnswer } | undefined {
+  const record = [...(job.runHistory ?? [])].reverse().find((entry) => entry.output)
+  const runId = record?.output ? /^Run: ([0-9a-f-]{36})$/m.exec(record.output)?.[1] : undefined
+  const answer = runId ? safely(() => sources.workflowApproval?.(runId)) : undefined
+  return answer ? { text: 'A workflow step wants your approval', ...(record?.threadId ? { threadId: record.threadId } : {}), answer } : undefined
 }
 
 function savedAgentName(definitionId: string, sources: AutomationIndexSources): string {
@@ -76,8 +101,11 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const active = jobActiveRun(job, now)
   const last = jobLastEndedRun(job)
   const runs = [...(job.runHistory ?? [])].reverse().slice(0, RUNS_PER_ITEM).map(jobRecordRun)
-  // A run waiting for the person's answer on its thread is an open ask.
-  const ask = job.liveStatus === 'needs_answer' ? { text: 'Waiting for your answer', ...(job.liveThreadId ? { threadId: job.liveThreadId } : {}) } : undefined
+  // A run waiting for the person's answer on its thread is an open ask; a permission request on it is answered in place.
+  const approval = job.liveStatus === 'needs_answer' && job.liveThreadId ? safely(() => sources.pendingApproval?.(job.liveThreadId!)) : undefined
+  const ask = job.liveStatus === 'needs_answer'
+    ? { text: approval ? 'Wants your approval' : 'Waiting for your answer', ...(job.liveThreadId ? { threadId: job.liveThreadId } : {}), ...(approval ? { answer: approval } : {}) }
+    : last?.state === 'incomplete' ? workflowAsk(job, sources) : undefined
   const creator = job.createdBy ? sources.thread(job.createdBy.threadId) : undefined
   const projectName = job.projectId ? sources.projectName(job.projectId) : undefined
   // A saved agent keeps to what it may use (its grants), not a permission mode.
@@ -105,8 +133,47 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     tellMe: tellMeOf(job),
     ...(job.createdBy ? { addedBy: { threadId: job.createdBy.threadId, ...(creator?.name ? { threadName: creator.name } : {}) } } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
+    ...(job.createdBy && job.expiresAt ? { keepable: true as const } : {}),
     ...(attention ? { attention } : {}),
     link: { kind: 'job', jobId: job.id },
+    computer
+  }
+}
+
+/**
+ * The words of an agent's first-creation ask: "<thread> wants to <what> <when>", with what cut to one short line.
+ */
+export function askText(ask: Pick<AgentJobAsk, 'input'>, threadName: string | undefined, now: Date = new Date()): string {
+  const what = lineOf(ask.input.prompt, 60)
+  const lowered = what ? what.charAt(0).toLowerCase() + what.slice(1) : 'add an automation'
+  return `${threadName ?? 'An agent'} wants to ${lowered} ${scheduleWords(ask.input.schedule, now)}`.trim()
+}
+
+function scheduleWords(schedule: AgentJobAsk['input']['schedule'], now: Date): string {
+  if (schedule.kind === 'manual') return 'when you run it'
+  const text = describeSchedule(schedule, now)
+  return text.charAt(0).toLowerCase() + text.slice(1)
+}
+
+function askItem(ask: AgentJobAsk, sources: AutomationIndexSources, computer: AutomationItem['computer']): AutomationItem {
+  const thread = sources.thread(ask.threadId)
+  const projectName = ask.input.projectId ? sources.projectName(ask.input.projectId) : undefined
+  const trigger = ask.input.schedule.kind === 'manual' ? 'on_demand' : 'time'
+  return {
+    key: `ask:${ask.id}`,
+    kind: 'ask',
+    id: ask.id,
+    name: ask.input.name,
+    trigger,
+    schedule: ask.input.schedule,
+    whenText: '',
+    who: { kind: 'agent', name: thread?.name ?? 'An agent' },
+    ...(ask.input.projectId ? { where: { projectId: ask.input.projectId, name: projectName ?? 'Removed project' } } : {}),
+    paused: false,
+    runs: [],
+    addedBy: { threadId: ask.threadId, ...(thread?.name ? { threadName: thread.name } : {}) },
+    attention: { kind: 'ask', text: askText(ask, thread?.name, sources.now?.()), threadId: ask.threadId, answer: { kind: 'agent_ask', askId: ask.id } },
+    link: { kind: 'ask', askId: ask.id, threadId: ask.threadId },
     computer
   }
 }
@@ -137,7 +204,10 @@ function botItem(schedule: BotAutomationSchedule, computer: AutomationItem['comp
   const runs = schedule.runs.map(botRun)
   const active = runs[0] && !isRunEnded(runs[0].state) ? runs[0] : undefined
   const last = runs.find((run) => isRunEnded(run.state))
-  const attention = attentionOf({ ...(schedule.ask ? { ask: { text: `Wants to ${schedule.ask.text}` } } : {}), ...(last ? { last } : {}) })
+  const attention = attentionOf({
+    ...(schedule.ask ? { ask: { text: `Wants to ${schedule.ask.text}`, ...(schedule.ask.askId ? { answer: { kind: 'bot_ask' as const, botId: schedule.botId, askId: schedule.ask.askId } } : {}) } } : {}),
+    ...(last ? { last } : {})
+  })
   return {
     key: `bot:${schedule.botId}:${schedule.scheduleId}`,
     kind: 'bot',
@@ -196,6 +266,11 @@ export function buildAutomationIndex(sources: AutomationIndexSources): Automatio
   const computer = { name: computerName, timeZone, local: true }
   const items: AutomationItem[] = sources.jobs().map((job) => jobItem(job, sources, computer, now))
   const unavailable: AutomationIndex['unavailable'] = []
+  try {
+    for (const ask of sources.asks?.() ?? []) items.push(askItem(ask, sources, computer))
+  } catch {
+    // The asks file could not be read: the jobs and the rest still show.
+  }
   if (sources.bots) {
     try {
       for (const schedule of sources.bots()) items.push(botItem(schedule, computer))

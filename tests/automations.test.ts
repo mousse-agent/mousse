@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
-import { botRun, buildAutomationIndex, jobEffectiveMay, type AutomationIndexSources } from '../src/mms/automations/AutomationIndex'
+import { askText, botRun, buildAutomationIndex, jobEffectiveMay, type AutomationIndexSources } from '../src/mms/automations/AutomationIndex'
+import { AgentJobAskStore } from '../src/mms/automations/AgentJobAsks'
 import type { BotAutomationSchedule } from '../src/mms/bots/chat/BotChatService'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../src/mms/protocol/validators'
 import {
@@ -279,5 +280,49 @@ describe('the scheduler', () => {
     expect(ended.map((event) => [event.outcome, event.notify])).toEqual([['nothing_new', false], ['done', true]])
     expect(store.getJob(created.id)?.runHistory?.map((record) => jobRecordRun(record).state)).toEqual(['nothing_new', 'done'])
     service.stop()
+  })
+})
+
+describe('the first-creation ask', () => {
+  let home: string
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'mousse-agent-asks-')) })
+  afterEach(() => { rmSync(home, { recursive: true, force: true }) })
+  const job = { name: 'Check PR #42', prompt: 'Check PR #42 for new review comments', schedule: { kind: 'interval' as const, minutes: 30 }, createdBy: { threadId: 't1', requestId: 'k1' } }
+
+  it('is durable, asked once per call, and Allow makes the automation and lets the thread add more', () => {
+    const store = new AgentJobAskStore(home)
+    const ask = store.ask({ threadId: 't1', requestKey: 'k1', job })
+    expect(store.ask({ threadId: 't1', requestKey: 'k1', job }).id).toBe(ask.id)
+    // Another store over the same folder (a daemon restart) still has it.
+    const again = new AgentJobAskStore(home)
+    expect(again.open().map((entry) => entry.id)).toEqual([ask.id])
+    expect(again.threadAllowed('t1')).toBe(false)
+    const created: string[] = []
+    const answered = again.answer(ask.id, 'allow', (entry) => { created.push(entry.input.name); return { id: 'job-1' } })
+    expect(answered).toMatchObject({ state: 'allowed', jobId: 'job-1' })
+    expect(created).toEqual(['Check PR #42'])
+    expect(again.threadAllowed('t1')).toBe(true)
+    expect(again.open()).toEqual([])
+    expect(() => again.answer(ask.id, 'allow', () => ({ id: 'x' }))).toThrow(/already answered/)
+  })
+
+  it('Not now closes it and allows nothing; a refused Allow (a limit) leaves it open', () => {
+    const store = new AgentJobAskStore(home)
+    const ask = store.ask({ threadId: 't1', requestKey: 'k1', job })
+    expect(() => store.answer(ask.id, 'allow', () => { throw new Error('Agents already have 10 active automations') })).toThrow(/10 active/)
+    expect(store.open()).toHaveLength(1)
+    expect(store.answer(ask.id, 'not_now', () => { throw new Error('not called') })).toMatchObject({ state: 'declined' })
+    expect(store.threadAllowed('t1')).toBe(false)
+  })
+
+  it('is one Needs you item that says who wants what, and when', () => {
+    const store = new AgentJobAskStore(home)
+    store.ask({ threadId: 't1', requestKey: 'k1', job })
+    const reviewer = { id: 't1', name: 'Reviewer' } as unknown as Thread
+    const index = buildAutomationIndex({ ...sources({ threads: [reviewer] }), asks: () => store.open() })
+    expect(index.items).toHaveLength(1)
+    expect(index.items[0]).toMatchObject({ kind: 'ask', name: 'Check PR #42', attention: { kind: 'ask', threadId: 't1' }, link: { kind: 'ask', threadId: 't1' } })
+    expect(index.items[0]!.attention!.text).toBe(askText(store.open()[0]!, 'Reviewer', new Date('2026-11-08T10:00:00.000Z')))
+    expect(index.items[0]!.attention!.text).toMatch(/^Reviewer wants to check PR #42 for new review comments every 30 min$/i)
   })
 })

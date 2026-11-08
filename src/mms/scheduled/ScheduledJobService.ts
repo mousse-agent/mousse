@@ -365,11 +365,12 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
-  /** "Agents may create jobs" was turned off: the jobs agents created stop until a person resumes them. */
-  pauseAgentJobs(): number {
-    const paused = this.store.pauseAgentJobs()
-    if (paused > 0) this.emitUpdated()
-    return paused
+  /** Keep: an agent-added automation loses only its end (`ScheduledJobStore.keepJob`). */
+  keepJob(id: string): ScheduledJob | null {
+    this.store.keepJob(id)
+    const job = this.store.getJob(id) ?? null
+    this.emitUpdated()
+    return job
   }
 
   extendJob(id: string, days?: number): ScheduledJob | null {

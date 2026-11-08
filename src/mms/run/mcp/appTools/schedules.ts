@@ -126,8 +126,9 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
 
 /**
  * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run`: an agent's hand on the jobs
- * its own thread made (docs/run-engine/SPEC.md §15.1). Every tool needs the `manage` agent access level and
- * `scheduled.agentJobs` to be on. Only a turn a person started may create or start a job or change what one does, so
+ * its own thread made (docs/run-engine/SPEC.md §15.1). Every tool needs the `manage` agent access level. The
+ * first automation a thread's agent adds is an ask the person answers (Allow or Not now); after Allow it adds more
+ * within the limits. Only a turn a person started may create or start a job or change what one does, so
  * no scheduled run, agent message, subagent or remote send can make jobs of its own and no chain of jobs can form. A job an
  * agent creates runs no wider than the agent that made it (its access level and permission mode are recorded on the
  * job, and a later change can only narrow them), ends after the profile's lifetime for such jobs unless a person
@@ -142,14 +143,13 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
   const schedules = host.schedules
   if (!schedules) return []
   const limitsNow = (): AgentJobLimits => schedules.jobLimits()
-  const enabled = (): boolean => {
+  const allowed = (threadId: string): boolean => {
     try {
-      return schedules.enabled()
+      return schedules.threadAllowed(threadId)
     } catch {
       return false
     }
   }
-  const switchedOff = 'Agents may not use scheduled jobs here: a person turns on "Agents may create jobs" on the Scheduled page.'
   const projectOf = (job: Pick<ScheduledJob, 'projectId' | 'threadId'>): string | undefined =>
     job.projectId ?? (job.threadId ? host.threadMeta?.(job.threadId)?.projectId : undefined)
   /** The jobs an agent may see and change: the ones made through these tools by its own thread. A person's job is never one. */
@@ -250,9 +250,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     // touch is the handler's decision (`visible`): the ones its own thread made.
     target: () => ({}),
     threadArgChecked: 'the handlers accept the caller\'s own thread or its lineage only (checkTarget)',
-    offered: () => false,
-    listed: () => enabled(),
-    available: () => (enabled() ? true : switchedOff)
+    offered: () => false
   }
 
   return [
@@ -260,7 +258,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_list',
       description:
-        'List the scheduled jobs your thread created (needs the manage agent access level and "Agents may create jobs" turned on). Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
+        'List the scheduled jobs your thread created (needs the manage agent access level). Jobs a person made, and jobs other threads made, are not shown and cannot be changed. Each job shows its cadence, state, when it ends, last runs and the limits its runs have.',
       inputSchema: { type: 'object', properties: {} },
       class: 'read',
       handler: (_args, ctx) => {
@@ -274,7 +272,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       // Read at every listing: the tool is built once, and a person may change the limits at any time.
       get description() {
         const limits = limitsNow()
-        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level and a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs; the first time, the person is asked and the job is made only if they allow it). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
       },
       get inputSchema() {
         return {
@@ -295,7 +293,6 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       },
       class: 'mutation',
       handler: (args, ctx) => {
-        if (!enabled()) return { text: switchedOff, isError: true }
         requirePerson(ctx, 'schedule_create')
         refuseForbidden(args)
         const requestKey = `schedule_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
@@ -322,9 +319,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
         const candidate = { ...(input.threadId ? { threadId: input.threadId } : {}), ...(projectId ? { projectId } : {}), ...(input.selection ? { selection: input.selection } : {}), ...(mode ? { mode } : {}), ...(input.workspace ? { workspace: input.workspace } : {}) }
         const checked = schedules.validate(candidate)
         const limits = schedules.limits(ctx.caller)
-        // Counted from the saved jobs, right before the job is saved, with nothing awaited in between.
-        assertRoomForAnotherJob()
-        const job = schedules.create({
+        const job = {
           name: input.name,
           prompt: input.prompt,
           schedule: input.schedule,
@@ -333,18 +328,29 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
           ...(input.repeat ? { repeat: input.repeat } : {}),
           createdBy: { threadId: ctx.caller.threadId, runId: ctx.caller.runId, requestId: requestKey },
           accessCap: limits.accessCap,
-          permissionCeiling: limits.permissionCeiling,
-          expiresAt: agentJobExpiry(limitsNow().lifetimeDays)
-        })
-        record(ctx, 'scheduled_job_created', job, `created scheduled job "${job.name}" (${job.id})`)
-        return json({ job: summary(job, ctx) })
+          permissionCeiling: limits.permissionCeiling
+        }
+        // The first time, the person is asked; the job is made only when they allow it, which also lets this thread add more.
+        if (!allowed(ctx.caller.threadId)) {
+          const ask = schedules.askFirst({ threadId: ctx.caller.threadId, requestKey, job })
+          return json({
+            waiting: true,
+            askId: ask.id,
+            message: `Not created yet: the person is asked whether to add "${job.name}" (Allow or Not now). It is made only if they allow it; do not ask again or retry. Tell them it is waiting for their answer in Automations.`
+          })
+        }
+        // Counted from the saved jobs, right before the job is saved, with nothing awaited in between.
+        assertRoomForAnotherJob()
+        const created = schedules.create({ ...job, expiresAt: agentJobExpiry(limitsNow().lifetimeDays) })
+        record(ctx, 'scheduled_job_created', created, `created scheduled job "${created.name}" (${created.id})`)
+        return json({ job: summary(created, ctx) })
       }
     },
     {
       ...common,
       name: 'schedule_update',
       description:
-        'Change a scheduled job your thread created (needs the manage agent access level and "Agents may create jobs" turned on). Pass jobId and only the fields to change; null clears model, workspace, thread or mode back to the default. Changing anything but the name needs a turn a person started. The rules of schedule_create hold. A change can only narrow the access and permission mode its runs get, to yours at most, and can only shorten how many runs it has; it never lengthens the job\'s life. To pause a job use schedule_pause; resuming or extending one is for a person.',
+        'Change a scheduled job your thread created (needs the manage agent access level). Pass jobId and only the fields to change; null clears model, workspace, thread or mode back to the default. Changing anything but the name needs a turn a person started. The rules of schedule_create hold. A change can only narrow the access and permission mode its runs get, to yours at most, and can only shorten how many runs it has; it never lengthens the job\'s life. To pause a job use schedule_pause; resuming or extending one is for a person.',
       get inputSchema() {
         return {
           type: 'object',
@@ -364,7 +370,6 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       },
       class: 'mutation',
       handler: (args, ctx) => {
-        if (!enabled()) return { text: switchedOff, isError: true }
         refuseForbidden(args)
         if (args.enabled !== undefined) throw new Error('schedule_update does not change whether a job is enabled: pause it with schedule_pause; a person resumes it.')
         const job = findVisible(requiredId(args, 'jobId'), ctx)
@@ -439,7 +444,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_pause',
       description:
-        'Pause a scheduled job your thread created, so it starts no further runs (needs the manage agent access level and "Agents may create jobs" turned on). A run in progress finishes. Only a person resumes a paused job.',
+        'Pause a scheduled job your thread created, so it starts no further runs (needs the manage agent access level). A run in progress finishes. Only a person resumes a paused job.',
       inputSchema: {
         type: 'object',
         properties: { jobId: { type: 'string' }, reason: { type: 'string', description: 'Shown next to the paused job.' } },
@@ -447,7 +452,6 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       },
       class: 'mutation',
       handler: (args, ctx) => {
-        if (!enabled()) return { text: switchedOff, isError: true }
         const job = findVisible(requiredId(args, 'jobId'), ctx)
         if (args.reason !== undefined && typeof args.reason !== 'string') throw new Error('reason must be a string')
         const reason = `Paused by an agent${typeof args.reason === 'string' && args.reason.trim() ? `: ${args.reason.trim()}` : ''}`.slice(0, 512)
@@ -461,11 +465,10 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       ...common,
       name: 'schedule_run',
       description:
-        'Start a scheduled job your thread created now, as Run now does (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job cannot start another). It starts within seconds, runs under the limits recorded on the job, and is refused while the job is running, waits in a queue, is paused, or has ended (a person resumes or extends it). The result is in the job\'s run history: read it with schedule_list.',
+        'Start a scheduled job your thread created now, as Run now does (needs the manage agent access level and a turn a person started: a job cannot start another). It starts within seconds, runs under the limits recorded on the job, and is refused while the job is running, waits in a queue, is paused, or has ended (a person resumes or extends it). The result is in the job\'s run history: read it with schedule_list.',
       inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] },
       class: 'mutation',
       handler: (args, ctx) => {
-        if (!enabled()) return { text: switchedOff, isError: true }
         requirePerson(ctx, 'schedule_run')
         const job = findVisible(requiredId(args, 'jobId'), ctx)
         if (isWorkflowPrompt(job.prompt)) return { text: 'This job runs a workflow; an agent does not start those.', isError: true }

@@ -5,7 +5,7 @@ import { normalizePermissionMode, type PermissionMode } from '../../../shared/pe
 import type { LlmProviderOption, MousseSettings } from '../../../shared/settings'
 import type { AutomationIndex, AutomationItem } from '../../../shared/automations'
 import type { CreateScheduledJobInput, ScheduledJob, SchedulerStatus } from '../../../shared/types'
-import { createAutomationsClient } from '../../services/automationsClient'
+import { answerAttention, createAutomationsClient } from '../../services/automationsClient'
 import { useCommand, useShortcutTitle } from '../../commands/commandRegistry'
 import { openThread } from '../../lib/openThread'
 import { closeRailPages } from '../../lib/railPages'
@@ -25,7 +25,6 @@ import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
-import { AGENT_JOB_LIMIT_DEFAULTS } from '../../../shared/agentJobLimits'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
 const POLL_MS = 15_000
@@ -81,7 +80,6 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [catalog, setCatalog] = useState<ScheduledCatalog>(EMPTY_CATALOG)
   const [providers, setProviders] = useState<LlmProviderOption[]>([])
   const [settings, setSettings] = useState<MousseSettings | null>(null)
-  const [extendDays, setExtendDays] = useState<number>(AGENT_JOB_LIMIT_DEFAULTS.lifetimeDays)
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
@@ -141,7 +139,6 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     void loadCatalog()
     void window.mousse.scheduled.list().then(setJobs, () => undefined)
     void window.mousse.scheduled.status().then(setStatus, () => undefined)
-    void window.mousse.scheduled.settings.get().then((value) => setExtendDays(value.agentJobLifetimeDays), () => undefined)
     const offJobs = window.mousse.scheduled.onUpdated((next) => { setJobs(next); void refresh() })
     const offStatus = window.mousse.scheduled.onStatus(setStatus)
     const offBots = window.mousse.personalBots?.onChanged?.(() => { void refresh() }) ?? (() => undefined)
@@ -238,15 +235,26 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const openItem = (item: AutomationItem) => {
     setSelected([])
     if (item.link.kind === 'bot') openBot(item.link.botId)
-    else if (item.link.kind === 'thread') goThread(item.link.threadId)
+    else if (item.link.kind === 'thread' || item.link.kind === 'ask') goThread(item.link.threadId)
     else { setDetail(item.key); void loadCatalog() }
   }
 
   const runNow = (jobId: string) => act(() => window.mousse.scheduled.run(jobId))
+  // Needs you answers an ask in place, with the daemon method its own surface uses.
+  const answer = (item: AutomationItem, allow: boolean) => {
+    const target = item.attention?.answer
+    if (!target) return
+    void act(() => answerAttention(target, allow, {
+      transport: window.mousse.platformRequest,
+      answerQuestions: (requestId, answers, threadId) => window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers, threadId)
+    }))
+  }
+  const keep = (jobId: string) => act(() => client.keep(jobId))
   const resume = (jobIds: string[]) => act(async () => { for (const id of jobIds) await window.mousse.scheduled.resume(id) })
 
   const primary = (item: AutomationItem) => {
     const kind = primaryOf(item).kind
+    if (kind === 'allow') { answer(item, true); return }
     if (kind === 'open') {
       const thread = item.attention?.threadId ?? item.active?.threadId
       if (item.kind === 'job' && thread) goThread(thread)
@@ -259,15 +267,23 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   }
 
   const menuOf = (item: AutomationItem): RowMenuItem[] => {
-    if (item.link.kind === 'bot') return [{ label: 'Open bot chat', onSelect: () => openBot((item.link as { botId: string }).botId) }]
+    const notNow: RowMenuItem[] = item.attention?.kind === 'ask' && item.attention.answer
+      ? [{ label: 'Not now', testId: 'automation-ask-not-now', onSelect: () => answer(item, false) }]
+      : []
+    const askThread = item.attention?.threadId
+    if (item.link.kind === 'ask') return [...notNow, { label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
+    if (item.link.kind === 'bot') return [...notNow, { label: 'Open bot chat', onSelect: () => openBot((item.link as { botId: string }).botId) }]
     if (item.link.kind === 'thread') return [{ label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
     const jobId = item.link.jobId
     const kind = primaryOf(item).kind
     const thread = item.active?.threadId ?? item.last?.threadId
     return [
+      ...notNow,
+      ...(notNow.length && askThread ? [{ label: 'Open thread', onSelect: () => goThread(askThread) }] : []),
       ...(kind !== 'run' && kind !== 'retry' ? [{ label: 'Run now', disabled: Boolean(item.active && item.active.state !== 'waiting'), onSelect: () => void runNow(jobId) }] : []),
       item.paused ? { label: 'Resume', onSelect: () => void resume([jobId]) } : { label: 'Pause…', onSelect: () => setPausing([item.key]) },
       { label: 'Edit', onSelect: () => openItem(item) },
+      ...(item.keepable ? [{ label: 'Keep', testId: 'automation-keep-menu', title: 'Remove its end; nothing else about it changes', onSelect: () => void keep(jobId) }] : []),
       ...(thread ? [{ label: 'Open last thread', onSelect: () => goThread(thread) }] : []),
       { label: 'Delete', danger: true, onSelect: () => setDeleting([item.key]) }
     ]
@@ -369,8 +385,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             onResume={() => void resume([detailJob.id])}
             onDelete={() => setDeleting([detailItem.key])}
             onWebhook={() => setWebhookJobId(detailJob.id)}
-            onExtend={() => void act(() => window.mousse.scheduled.extend(detailJob.id))}
-            extendDays={extendDays}
+            onKeep={() => void keep(detailJob.id)}
             onOpenThread={goThread}
           />
           {actionError ? <p className="scheduled-action-error" role="alert">{actionError}</p> : null}

@@ -7,12 +7,12 @@ import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurre
  * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
  */
 
-export const AUTOMATIONS_METHODS = ['automations.list'] as const
+export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep'] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
 /** What an automation is, underneath: where its record lives and what opens it. */
-export type AutomationKind = 'job' | 'bot' | 'watch'
+export type AutomationKind = 'job' | 'bot' | 'watch' | 'ask'
 
 /** What starts it: a time, a signed request (webhook), something on its thread (a pull request), or a person. */
 export type AutomationTrigger = 'time' | 'request' | 'thread_event' | 'on_demand'
@@ -153,14 +153,29 @@ export type AutomationWho =
 /** What opens it: the job's detail, the bot's chat, or the thread that watches. */
 export type AutomationLink =
   | { kind: 'job'; jobId: string }
+  /** An agent's first-creation ask: Allow makes the automation (`automations.asks.answer`). */
+  | { kind: 'ask'; askId: string; threadId: string }
   | { kind: 'bot'; botId: string; scheduleId: string }
   | { kind: 'thread'; threadId: string }
+
+/**
+ * How Needs you answers an open ask in place, with the same daemon method its own surface uses: a thread's permission
+ * request (`orchestrator.answerQuestions`), a workflow step's approval (`workflowRuns.approve`), an agent's
+ * first-creation ask (`automations.asks.answer`) or a bot's ask (`bots.asks.answer`).
+ */
+export type AttentionAnswer =
+  | { kind: 'thread_approval'; threadId: string; requestId: string; questionId: string; allow: string; deny: string }
+  | { kind: 'workflow_approval'; runId: string; approvalId: string; nodeId: string; instanceKey: string; attempt: number }
+  | { kind: 'agent_ask'; askId: string }
+  | { kind: 'bot_ask'; botId: string; askId: string }
 
 /** Why it needs the person: an open ask (answered where it was asked), or a run that ended Failed or Incomplete. */
 export interface AutomationAttention {
   kind: 'ask' | 'failed' | 'incomplete'
   text: string
   threadId?: string
+  /** An ask Needs you can answer in place (Allow, with Not now in "…"); absent: it is answered where it was asked. */
+  answer?: AttentionAnswer
 }
 
 export interface AutomationItem {
@@ -193,6 +208,8 @@ export interface AutomationItem {
   tellMe?: TellMe
   addedBy?: { threadId: string; threadName?: string }
   expiresAt?: string
+  /** An agent-added automation with an end: Keep removes only that end (`automations.keep`). */
+  keepable?: true
   /** A watch that only notifies its thread and never starts a turn. */
   notifyOnly?: true
   /** Present exactly when the item is in Needs you. */
@@ -215,8 +232,8 @@ export interface AutomationIndex {
  * Whether an item is in Needs you, from its runs and asks: an open ask, or a last ended run that is Failed or
  * Incomplete. Waiting never counts, and a later run that succeeded clears an earlier failure.
  */
-export function attentionOf(input: { ask?: { text: string; threadId?: string }; last?: AutomationRun }): AutomationAttention | undefined {
-  if (input.ask) return { kind: 'ask', text: input.ask.text, ...(input.ask.threadId ? { threadId: input.ask.threadId } : {}) }
+export function attentionOf(input: { ask?: { text: string; threadId?: string; answer?: AttentionAnswer }; last?: AutomationRun }): AutomationAttention | undefined {
+  if (input.ask) return { kind: 'ask', text: input.ask.text, ...(input.ask.threadId ? { threadId: input.ask.threadId } : {}), ...(input.ask.answer ? { answer: input.ask.answer } : {}) }
   const last = input.last
   if (last?.state === 'failed') return { kind: 'failed', text: last.detail ?? 'Failed', ...(last.threadId ? { threadId: last.threadId } : {}) }
   if (last?.state === 'incomplete') return { kind: 'incomplete', text: last.detail ?? 'Stopped at a missing permission', ...(last.threadId ? { threadId: last.threadId } : {}) }

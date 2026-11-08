@@ -254,7 +254,10 @@ const LIBRARY: Record<string, unknown> = {
     compiled: { inputSchema: { type: 'object', properties: { tag: { type: 'string', title: 'Tag' }, draft: { type: 'boolean' } }, required: ['tag'] } }
   },
   'bots.personal.list': { bots: [{ id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'headphones' } }] },
-  'bots.schedules.add': { runs: [] }
+  'bots.schedules.add': { runs: [] },
+  'automations.asks.answer': { ask: {} },
+  'automations.keep': { job: {} },
+  'bots.asks.answer': { message: {} }
 }
 
 function api(index: AutomationIndex, jobs: ScheduledJob[]) {
@@ -279,6 +282,7 @@ function api(index: AutomationIndex, jobs: ScheduledJob[]) {
     settings: { getOptions: async () => ({ llmProviders: providers }), get: async () => ({ permissions: { defaultMode: 'accept_edits' }, provider: { llmProvider: 'anthropic', instanceId: 'claude:main', model: 'sonnet' } }) },
     projects: { list: async () => projects },
     threads: { listAll: async () => [] },
+    orchestrator: { answerQuestionsDetailed: vi.fn(async () => ({ ok: true })) },
     git: { status: vi.fn(async () => ({ isRepo: true })) }
   }
 }
@@ -517,5 +521,46 @@ describe('the Automations page', () => {
     await type(input, 'every day at 7 summarize yesterday\'s commits')
     await click($('[data-testid="automation-create-add"]'))
     expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'summarize yesterday\'s commits', projectId: 'p1', selection: expect.objectContaining({ model: selection.model }) }))
+  })
+
+  it('answers asks in place from Needs you: Allow is the primary action, Not now is in "…"', async () => {
+    const mousse = await mount([
+      item({
+        key: 'ask:a1', kind: 'ask', name: 'Check PR #42', trigger: 'time', who: { kind: 'agent', name: 'Reviewer' },
+        attention: { kind: 'ask', text: 'Reviewer wants to check PR #42 every 30 min', threadId: 't9', answer: { kind: 'agent_ask', askId: 'a1' } },
+        link: { kind: 'ask', askId: 'a1', threadId: 't9' }
+      }),
+      item({
+        key: 'job:j2', name: 'Lint sweep', liveStatus: undefined,
+        attention: { kind: 'ask', text: 'Wants your approval', threadId: 't2', answer: { kind: 'thread_approval', threadId: 't2', requestId: 'r2', questionId: 'q', allow: 'yes', deny: 'no' } }
+      } as Parameters<typeof item>[0]),
+      item({
+        key: 'bot:b:s', kind: 'bot', name: 'every day · 08:00', who: { kind: 'bot', name: 'Pip', look: { colour: 'teal', accessory: 'none' } },
+        attention: { kind: 'ask', text: 'Wants to read files in Notes', answer: { kind: 'bot_ask', botId: 'b', askId: 'esc_1' } },
+        link: { kind: 'bot', botId: 'b', scheduleId: 's' }
+      })
+    ])
+    expect($$('[data-group="needs"] [data-testid="automation-ask-allow"]')).toHaveLength(3)
+    expect($('[data-key="ask:a1"] .automation-row-meta')?.textContent).toContain('Reviewer wants to check PR #42 every 30 min')
+    await click($('[data-key="ask:a1"] [data-testid="automation-ask-allow"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.asks.answer', { askId: 'a1', answer: 'allow' })
+    await click($('[data-key="job:j2"] [data-testid="automation-ask-allow"]'))
+    expect(mousse.orchestrator.answerQuestionsDetailed).toHaveBeenCalledWith('r2', { q: 'yes' }, 't2')
+    await click($('[aria-label="More actions for every day · 08:00"]'))
+    await click($('[data-testid="automation-ask-not-now"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('bots.asks.answer', { botId: 'b', askId: 'esc_1', answer: 'not_now' })
+  })
+
+  it('offers Keep on an automation an agent added, and Keep removes only its end', async () => {
+    const stored = job({ id: 'j1', name: 'Rerun checkout test', createdBy: { threadId: 't1' }, expiresAt: new Date(Date.now() + 86_400_000 * 5).toISOString() })
+    const mousse = await mount([item({ key: 'job:j1', name: 'Rerun checkout test', keepable: true, expiresAt: stored.expiresAt, addedBy: { threadId: 't1', threadName: 'Fix flaky test' } })], [stored])
+    await click($('[aria-label="More actions for Rerun checkout test"]'))
+    expect($('[data-testid="automation-keep-menu"]')).not.toBeNull()
+    await click($('[data-testid="automation-keep-menu"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.keep', { jobId: 'j1' })
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    await click($('[data-testid="automation-more"]'))
+    await click($('[data-testid="automation-keep"]'))
+    expect(mousse.platformRequest.request.mock.calls.filter(([method]) => method === 'automations.keep')).toHaveLength(2)
   })
 })

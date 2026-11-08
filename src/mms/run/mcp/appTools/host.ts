@@ -158,8 +158,16 @@ export type AgentApprovalResult =
  * decide what the caller may do first; none of this is reachable from model input except through them.
  */
 export interface AgentScheduleHost {
-  /** `scheduled.agentJobs` as it is now: off until a person turns it on, read at every call. */
-  enabled(): boolean
+  /**
+   * Whether the person allowed this thread's agent to add automations: they answered Allow to its first ask. Read at
+   * every call. A thread not allowed yet asks first (`askFirst`).
+   */
+  threadAllowed(threadId: string): boolean
+  /**
+   * Records the first-creation ask instead of making the automation: the person sees "<thread> wants to …" in Needs you
+   * and answers Allow or Not now. A retried call (the same request key) returns the ask it already made.
+   */
+  askFirst(input: { threadId: string; requestKey: string; job: Omit<CreateScheduledJobInput, 'expiresAt'> }): { id: string }
   /**
    * The limits on jobs agents create as they are now (`scheduled.agentJobMaxActive`, `agentJobMinIntervalMinutes`,
    * `agentJobLifetimeDays`), read at every call. Read only: a person sets them on the Scheduled page, and no tool does.

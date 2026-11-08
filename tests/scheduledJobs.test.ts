@@ -1297,47 +1297,16 @@ describe('ScheduledJobService concurrency and occurrences', () => {
     await vi.waitFor(() => expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'queued', agentCreated: true }))
   })
 
-  describe('jobs agents created while "Agents may create jobs" is off', () => {
-    it('are paused with a visible reason by the next tick and do not run, while a person\'s job runs', async () => {
-      config.updateScheduledSection({ agentJobs: false })
-      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
-      const agent = due('Agent made', { createdBy: { threadId: 'agent-thread', runId: 'r1' } })
+  describe('Keep on a job an agent created', () => {
+    it('removes only its end, starts an ended one again on its schedule, and is refused on a person\'s job', () => {
+      const ended = due('Ended', { createdBy: { threadId: 'agent-thread' }, expiresAt: new Date(Date.now() - 1000).toISOString(), accessCap: 'lineage', permissionCeiling: 'ask' })
+      store.claimDueJobs()
+      expect(store.getJob(ended.id)).toMatchObject({ state: 'completed' })
+      const kept = store.keepJob(ended.id)!
+      expect(kept.expiresAt).toBeUndefined()
+      expect(kept).toMatchObject({ state: 'scheduled', accessCap: 'lineage', permissionCeiling: 'ask', schedule: ended.schedule, createdBy: { threadId: 'agent-thread' } })
       const person = due('Person made')
-      serviceOf({ runIsolated: runner }).start()
-      await vi.waitFor(() => expect(store.getJob(person.id)?.lastStatus).toBe('ok'))
-      expect(runner).toHaveBeenCalledTimes(1)
-      expect(runner).toHaveBeenCalledWith('Person made', expect.anything())
-      expect(store.getJob(agent.id)).toMatchObject({ state: 'paused', enabled: false, pausedReason: expect.stringContaining('Agents may create jobs is off') })
-      expect(store.getJob(agent.id)?.runHistory).toEqual([])
-    })
-
-    it('stay paused when the setting is turned on again, until a person resumes them', async () => {
-      config.updateScheduledSection({ agentJobs: false })
-      const runner = vi.fn(async () => ({ text: 'ran', silent: false, transcriptWritten: true }))
-      const agent = due('Agent made', { createdBy: { threadId: 'agent-thread', runId: 'r1' } })
-      expect(store.claimDueJobs()).toEqual([])
-      expect(store.getJob(agent.id)?.state).toBe('paused')
-      config.updateScheduledSection({ agentJobs: true })
-      expect(store.claimDueJobs()).toEqual([])
-      expect(store.getJob(agent.id)).toMatchObject({ state: 'paused', enabled: false })
-      store.resumeJob(agent.id)
-      store.updateJob(agent.id, { nextRunAt: PAST, state: 'scheduled' })
-      expect(store.claimDueJobs().map((job) => job.id)).toEqual([agent.id])
-      void runner
-    })
-
-    it('are paused at once by pauseAgentJobs, a running one when its run ends, and a person\'s job never', () => {
-      const running = due('Running', { createdBy: { threadId: 'agent-thread' } })
-      expect(store.claimDueJobs().map((job) => job.id)).toEqual([running.id])
-      const idle = due('Idle', { createdBy: { threadId: 'agent-thread' } })
-      const person = due('Person made')
-      expect(store.pauseAgentJobs()).toBe(2)
-      expect(store.getJob(person.id)).toMatchObject({ enabled: true, state: 'scheduled' })
-      expect(store.getJob(idle.id)).toMatchObject({ enabled: false, state: 'paused', pausedReason: expect.stringContaining('Agents may create jobs is off') })
-      // The run in flight is not cut off: it keeps its claim and settles as paused.
-      expect(store.getJob(running.id)).toMatchObject({ enabled: false, state: 'running' })
-      expect(store.getJob(running.id)?.runClaim).toBeDefined()
-      expect(store.pauseAgentJobs()).toBe(0)
+      expect(() => store.keepJob(person.id)).toThrow(/Only an automation an agent added/)
     })
   })
 

@@ -124,6 +124,8 @@ import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
 import { buildAutomationIndex } from './automations/AutomationIndex'
+import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
+import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex } from '../shared/automations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
@@ -798,8 +800,15 @@ export class MmsProfileServices {
       projects: this.projects,
       threads: this.threads
     })
+    this.agentJobAsks = new AgentJobAskStore(homeDir)
     this.orchestrator.setScheduledJobs({
-      enabled: () => config.agentJobsEnabled(),
+      // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
+      threadAllowed: (threadId) => config.agentJobsEnabled() || this.agentJobAsks.threadAllowed(threadId),
+      askFirst: (input) => {
+        const ask = this.agentJobAsks.ask(input)
+        this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+        return ask
+      },
       jobLimits: () => config.agentJobLimits(),
       list: () => this.scheduled.listJobs(),
       get: (id) => this.scheduled.getJob(id),
@@ -1235,6 +1244,24 @@ export class MmsProfileServices {
     return record
   }
 
+  /** First-creation asks of agents that add automations (`AgentJobAskStore`). */
+  agentJobAsks!: AgentJobAskStore
+
+  /**
+   * Answers an agent's first-creation ask. Allow makes the automation as the agent asked, ending after the lifetime
+   * limit from now and counted against the active limit, and lets that thread add more; Not now closes the ask.
+   */
+  answerAgentJobAsk(askId: string, answer: 'allow' | 'not_now'): AgentJobAsk {
+    const limits = this.config.agentJobLimits()
+    const answered = this.agentJobAsks.answer(askId, answer, (ask) => {
+      const active = this.scheduled.listJobs().filter(isActiveAgentJob).length
+      if (active >= limits.maxActive) throw new Error(`Agents already have ${active} active automations (the limit is ${limits.maxActive}). Pause or delete one, or raise the limit in Settings, Agent access.`)
+      return this.scheduled.createJob({ ...ask.input, expiresAt: agentJobExpiry(limits.lifetimeDays) })
+    })
+    this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+    return answered
+  }
+
   /** The Automations page's one list (`automations.list`): jobs, bot schedules and pull request watches. */
   automationIndex(): AutomationIndex {
     const bots = this.personalBots
@@ -1252,6 +1279,22 @@ export class MmsProfileServices {
         }
       },
       ...(bots ? { bots: () => bots.service.automationSchedules() } : {}),
+      asks: () => this.agentJobAsks?.open() ?? [],
+      pendingApproval: (threadId) => {
+        const pending = this.questions.listPendingForThread(threadId)[0]
+        const question = pending?.questions.length === 1 ? pending.questions[0] : undefined
+        const allow = question?.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
+        const deny = question?.options.find((option) => option.decision === 'reject')
+        return pending && question && allow && deny && pending.approval
+          ? { kind: 'thread_approval', threadId, requestId: pending.requestId, questionId: question.id, allow: allow.id, deny: deny.id }
+          : undefined
+      },
+      workflowApproval: (runId) => {
+        const open = this.platform.workflowRuns.approvals.listOpen(this.profileId, runId)
+          .filter((record) => Date.parse(record.expiresAt) > Date.now())
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
+        return open ? { kind: 'workflow_approval', runId, approvalId: open.approvalId, nodeId: open.nodeId, instanceKey: open.instanceKey, attempt: open.attempt } : undefined
+      },
       watchStatus: (threadId) => this.pullRequestWatch.status(threadId)
     })
   }

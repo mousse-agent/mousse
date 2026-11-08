@@ -2961,7 +2961,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.config.updateScheduledSection(update)
       // Off means the jobs agents made stop now, visibly paused; turning it on again does not restart them.
       // A lower limit never pauses or removes a job: it only refuses the next create or change.
-      if (update.agentJobs === false) ctx.mms.scheduled.pauseAgentJobs()
       return { settings: scheduledSettings(ctx.mms.config) }
     }
     case 'scheduled.extend': {

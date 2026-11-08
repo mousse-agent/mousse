@@ -126,8 +126,7 @@ export function AutomationDetail({
   onResume,
   onDelete,
   onWebhook,
-  onExtend,
-  extendDays,
+  onKeep,
   onOpenThread
 }: {
   job: ScheduledJob
@@ -147,8 +146,8 @@ export function AutomationDetail({
   onResume: () => void
   onDelete: () => void
   onWebhook: () => void
-  onExtend: () => void
-  extendDays: number
+  /** Keep: an agent-added automation loses only its end. */
+  onKeep: () => void
   onOpenThread: (threadId: string) => void
 }) {
   const [draft, setDraft] = useState<JobDraft>(initial)
@@ -576,7 +575,7 @@ export function AutomationDetail({
               </>
             } control={
               <>
-                {job.expiresAt ? <button type="button" className="settings-btn" onClick={onExtend}>{`Extend ${extendDays} ${extendDays === 1 ? 'day' : 'days'}`}</button> : null}
+                {job.expiresAt ? <button type="button" className="settings-btn" data-testid="automation-keep" onClick={onKeep} title="Remove its end. Its access, how often it runs and what the agent may add stay as they are.">Keep</button> : null}
                 <button type="button" className="settings-icon-btn" title="Open the thread that added it" aria-label="Open the thread that added it" onClick={() => onOpenThread(job.createdBy!.threadId)}>
                   <MessageSquare size={14} />
                 </button>

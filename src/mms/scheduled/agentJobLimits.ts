@@ -25,8 +25,6 @@ export function isExpired(job: Pick<ScheduledJob, 'expiresAt'>, now: Date = new 
   return Number.isFinite(at) && at <= now.getTime()
 }
 
-export const AGENT_JOBS_OFF_REASON = 'Agents may create jobs is off, so jobs agents created do not run. Resume the job to run it again once it is on.'
-
 export function agentJobExpiredReason(lifetimeDays: number): string {
-  return `Ended: a job an agent creates ends after ${lifetimeDays} ${lifetimeDays === 1 ? 'day' : 'days'} unless a person extends it.`
+  return `Ended: a job an agent creates ends after ${lifetimeDays} ${lifetimeDays === 1 ? 'day' : 'days'} unless a person keeps it.`
 }

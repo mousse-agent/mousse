@@ -246,7 +246,11 @@ export class MousseMainService extends MmsProfileServices {
     })
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
-      return () => services.automationIndex()
+      return {
+        index: () => services.automationIndex(),
+        answerAsk: (askId, answer) => services.answerAgentJobAsk(askId, answer),
+        keep: (jobId) => services.scheduled.keepJob(jobId)
+      }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))

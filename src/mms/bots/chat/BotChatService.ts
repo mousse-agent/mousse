@@ -34,8 +34,8 @@ export interface BotAutomationSchedule {
   lastSkip?: { at: string; reason: string }
   /** Newest first. */
   runs: Array<{ id: string; status: BotAutomationRunStatus; at: string; endedAt?: string; endReason?: string; threadId?: string }>
-  /** An open ask one of these runs raised; it is answered in the bot chat. */
-  ask?: { text: string; activationId: string }
+  /** An open ask one of these runs raised; it is answered in the bot chat, or in place from Needs you (`askId`). */
+  ask?: { text: string; activationId: string; askId?: string }
 }
 
 /** How long naming a new bot may take before the description names it (§5.3.1). */
@@ -338,7 +338,7 @@ export class BotChatService {
           ...(state?.nextRunAt ? { nextAt: state.nextRunAt } : {}),
           ...(state?.lastSkipReason ? { lastSkip: { at: state.lastSkipAt ?? '', reason: state.lastSkipReason } } : {}),
           runs,
-          ...(ask ? { ask: { text: this.engine.chat.card(ask).title, activationId: ask.activationId } } : {})
+          ...(ask ? { ask: { text: this.engine.chat.card(ask).title, activationId: ask.activationId, askId: ask.id } } : {})
         })
       }
     }

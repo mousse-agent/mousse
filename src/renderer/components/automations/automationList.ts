@@ -157,10 +157,15 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
   return parts
 }
 
-export type PrimaryKind = 'retry' | 'run' | 'resume' | 'open'
+export type PrimaryKind = 'allow' | 'retry' | 'run' | 'resume' | 'open'
 
-/** A row's one primary action. Retry only on a Failed run; bots and watches open where they live. */
+/**
+ * A row's one primary action. An open ask Needs you can answer in place is Allow (Not now is in "…"); Retry only on a
+ * Failed run; bots and watches open where they live.
+ */
 export function primaryOf(item: AutomationItem): { kind: PrimaryKind; label: string } {
+  if (item.attention?.kind === 'ask' && item.attention.answer) return { kind: 'allow', label: 'Allow' }
+  if (item.kind === 'ask') return { kind: 'open', label: 'Open' }
   if (item.kind === 'bot' || item.kind === 'watch') return { kind: 'open', label: 'Open' }
   // A paused automation's old failure is not news; an open ask still waits for its answer.
   if (item.paused && item.attention?.kind !== 'ask') return { kind: 'resume', label: 'Resume' }
