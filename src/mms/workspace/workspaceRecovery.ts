@@ -5,10 +5,12 @@ import { waitForFolderAccess } from '../files/folderAccess'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { settlesItself } from '../../shared/resourceLifecycle'
+import { isExecutionLeaseHeld } from '../queue/ThreadExecutionLease'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
 const PUBLISH_TYPES = ['publish', 'change-publish']
+const CHECKPOINT_TYPES = ['action-checkpoint', 'change-checkpoint']
 
 /**
  * An operation's error as the person reads it. A failed Git command's message starts with the whole command line
@@ -78,10 +80,19 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
   // Turns, Undo and Publish are refused until this is recovered.
   // An unsettled expiry of kept files, or keep of a copy, touches no file; the next retention sweep settles it, so it
   // pauses nothing.
-  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType))
+  const pending = latest.filter((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType))
+  // A turn writes its checkpoint (`prepared` until the snapshot is recorded) while it still holds the thread's
+  // execution lease, so a checkpoint with no error under a live lease is that turn finishing, not a pause. A dead
+  // owner frees the lease, and the checkpoint it left shows as waiting.
+  const finishing = (entry: ThreadJournalRecord) => CHECKPOINT_TYPES.includes(entry.operationType) && entry.state === 'prepared' && !errorOf(entry)
+  const held = pending.some(finishing) && isExecutionLeaseHeld(threadDirectory)
+  const waiting = held ? pending.find((entry) => !finishing(entry)) : pending[0]
+  const live = held && !waiting
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
-  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  // `verify` also reports `recovery_required` for the checkpoint a live turn is writing; the next read after the turn
+  // tells whether Git can read the worktree.
+  if (!live && !verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
   for (const entry of latest) {

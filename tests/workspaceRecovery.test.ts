@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 import { vi } from 'vitest'
 import { cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { actionOptions, git } from './fixtures/gitFoundation'
 
 /** A repository with one commit, a thread directory, and an own Mousse home for the worktree. */
@@ -129,6 +130,22 @@ describe('what a thread is waiting on', () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     new ThreadJournal(f.thread).append({ operationId: 'revert-1', operationType: 'code-revert', state: 'prepared' })
     expect(await status()).toEqual({ kind: 'paused', reason: 'The code-revert operation did not finish.', operationId: 'revert-1', operationType: 'code-revert' })
+  })
+
+  it('says nothing while a live turn writes its checkpoint, and pauses once the turn that wrote it is gone', async () => {
+    await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+    // A turn holds the thread's execution lease while it takes its end-of-turn snapshot (`prepared` until recorded).
+    const lease = tryAcquireExecutionLease(f.thread)!
+    new ThreadJournal(f.thread).append({ operationId: 'turn-1', operationType: 'action-checkpoint', state: 'prepared', details: { actionState: 'stopped' } })
+    expect(await status()).toBeUndefined()
+    // A checkpoint that failed is a pause even while the lease is held.
+    new ThreadJournal(f.thread).append({ operationId: 'turn-0', operationType: 'change-checkpoint', state: 'prepared', details: { error: 'snapshot failed' } })
+    expect(await status()).toEqual({ kind: 'paused', reason: 'snapshot failed', operationId: 'turn-0', operationType: 'change-checkpoint' })
+    new ThreadJournal(f.thread).append({ operationId: 'turn-0', operationType: 'change-checkpoint', state: 'completed' })
+    expect(await status()).toBeUndefined()
+    // With no live owner (the daemon stopped mid-checkpoint), the checkpoint it left is waiting.
+    releaseExecutionLeaseHandle(lease)
+    expect(await status()).toEqual({ kind: 'paused', reason: 'The action-checkpoint operation did not finish.', operationId: 'turn-1', operationType: 'action-checkpoint' })
   })
 
   it('pauses the thread when Git cannot read the worktree', async () => {
