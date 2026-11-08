@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
-import { ArrowUp, CircleAlert, Loader2, Paperclip, Square, X } from '../../lib/icons'
+import { CircleAlert, Loader2, Paperclip } from '../../lib/icons'
 import type { BotChatMessage, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
@@ -11,8 +11,14 @@ import { BotMenu } from './BotMenu'
 import { BotAboutPanel } from './BotAboutPanel'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
+import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 
 const EMPTY: BotChatMessage[] = []
+const NO_FILES: AttachedFile[] = []
+const NO_VOICE: VoiceMessage[] = []
+const NO_SKILLS: never[] = []
+const ignore = () => {}
 
 /** A message's time: the time today, "Yesterday", or the date. */
 export function botMessageTime(at: string, now = new Date()): string {
@@ -37,7 +43,7 @@ export function BotErrorLine({ error, onAction }: { error: BotError; onAction(ac
 const OwnerMessage = memo(function OwnerMessage({ message, pending }: { message: BotChatMessage; pending: boolean }) {
   return <article className={`chat-participant-message from-person bot-you${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
     {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" />}
-    {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file) => <span key={file.path} className="bot-file-pill" title={file.path}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
+    {!!message.attachments?.length && <div className="bot-you-files">{message.attachments.map((file, index) => <span key={`${index}:${file.name}`} className="bot-file-pill" title={file.path || undefined}><Paperclip size={12} aria-hidden />{file.name}</span>)}</div>}
     <time dateTime={message.at}>{pending ? 'Sending…' : botMessageTime(message.at)}</time>
   </article>
 })
@@ -70,7 +76,8 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser }:
 /**
  * A bot's chat (bot-ui §4.4): the header with its face, name, description and one menu; the
  * owner's bubbles and the bot's messages with chips, ask cards and error lines; one status line
- * while it works; and a composer with only text, attach and send or Stop.
+ * while it works; and the thread composer without a thread's run settings: text, attach (also by
+ * dropping or pasting), dictation, and send or Stop.
  */
 export function BotChatView({ bot }: { bot: BotSummary }) {
   const chat = useBotsStore((s) => s.chats[bot.id])
@@ -90,8 +97,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const offline = working && bot.waiting === 'internet'
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
-  const files = attachments ?? []
-  const canSend = !!draft.trim() || files.length > 0
+  const files = attachments ?? NO_FILES
   // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
   const browser = useBotBrowser(bot.id, true)
   const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
@@ -124,13 +130,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
     else void store().resume(bot.id)
   }, [bot.id, store])
-  const attach = async () => {
-    const paths = await window.mousse.dialog.pickFiles({ title: `Attach files for ${bot.name}` }).catch(() => [] as string[])
-    if (!paths.length) return
-    const known = new Set(files.map((file) => file.path))
-    const added = paths.filter((path) => !known.has(path)).map((path) => ({ path, name: path.split(/[\\/]/).pop() || path }))
-    store().setAttachments(bot.id, [...files, ...added])
-  }
+  // Up in an empty composer brings back the owner's last message, as in a thread.
+  const lastPrompt = () => [...pending, ...messages].reverse().find((message) => message.author === 'owner' && message.text)?.text
 
   return <>
     <section className="chat-conversation bot-conversation">
@@ -159,21 +160,30 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
-      {error && <p role="alert" className="chat-error chat-composer-error">{error}</p>}
-      <form className="agent-chat-composer bot-composer" onSubmit={(event) => { event.preventDefault(); if (canSend) void store().send(bot.id) }}>
-        {!!files.length && <div className="bot-composer-files">{files.map((file) => <span key={file.path} className="bot-file-pill" title={file.path}>
-          <Paperclip size={12} aria-hidden />{file.name}
-          <button type="button" aria-label={`Remove ${file.name}`} onClick={() => store().setAttachments(bot.id, files.filter((entry) => entry.path !== file.path))}><X size={11} /></button>
-        </span>)}</div>}
-        <textarea aria-label={`Message ${bot.name}`} placeholder={`Message ${bot.name}`} value={draft} onChange={(event) => store().setDraft(bot.id, event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
-        <div className="agent-chat-composer-controls">
-          <button type="button" className="bot-attach" aria-label="Attach" title="Attach" onClick={() => void attach()}><Paperclip size={15} /></button>
-          {working && !canSend
-            ? <button type="button" className="chat-send-button bot-send-ready" aria-label="Stop" title="Stop" onClick={() => void store().stop(bot.id)}><Square size={13} /></button>
-            : <button type="submit" className={`chat-send-button${canSend ? ' bot-send-ready' : ''}`} disabled={!canSend} aria-label="Send" title="Send"><ArrowUp size={16} /></button>}
-        </div>
-      </form>
+      <div className="chat-input-area bot-input-area">
+        <ComposerNoticeProvider>
+          <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
+          <ComposerNoticeSlot />
+          {/* A bot picks its own model: no model picker, context ring, permission mode, commands or skills. */}
+          <ChatComposer
+            key={bot.id}
+            input={draft}
+            onInputChange={(value) => store().setDraft(bot.id, value)}
+            attachedFiles={files}
+            onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
+            voiceMessages={NO_VOICE}
+            onVoiceMessagesChange={ignore}
+            enabledSkills={NO_SKILLS}
+            disableSkillsPicker
+            slashCommands={false}
+            placeholder={`Message ${bot.name}`}
+            stoppable={working}
+            onSend={() => void store().send(bot.id)}
+            onStop={() => void store().stop(bot.id)}
+            lastPrompt={lastPrompt}
+          />
+        </ComposerNoticeProvider>
+      </div>
     </section>
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}

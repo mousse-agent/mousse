@@ -222,3 +222,20 @@
 .profile-edit-swatch[aria-checked='true'] { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 0 2px var(--ui-raised), 0 0 0 3.5px var(--text-primary); }
 .profile-edit-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .profile-edit-archive { margin-right: auto; }
+
+/* The rail's avatar (variant="rail"): the current profile while the sidebar, and its footer, is
+   closed. Its menu opens to the right, bottom edges aligned (usePinnedPopover side="right"), with a
+   quick fade and grow from the avatar that follows Animation speed and reduced motion. */
+.profile-rail-trigger .profile-avatar { width: 26px; height: 26px; font-size: 12px; }
+.navigation-rail-button.profile-rail-trigger[aria-expanded='true'] { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); }
+.profile-menu.profile-menu-rail {
+  max-height: var(--floating-max-height, calc(100vh - 16px));
+  animation: profile-rail-menu-in calc(140ms * var(--ui-motion-scale, 1)) cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+@keyframes profile-rail-menu-in {
+  from { opacity: 0; transform: scale(0.96); }
+}
+
+/* A hover peek of the closed sidebar has no footer: the rail avatar is the profile control then, and the
+   Archived footer sits at the bottom. */
+.sliding-threads-pane--overlay .profile-switcher.profile-switcher-sidebar { display: none; }

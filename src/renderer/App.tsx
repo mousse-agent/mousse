@@ -14,6 +14,7 @@ import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { ScheduledPage } from './components/ScheduledPage'
 import { NavigationRail } from './components/NavigationRail'
+import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
@@ -84,7 +85,7 @@ export default function App() {
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
   const overlayOpen = useAppStore((s) => s.settingsOpen)
-  const railPageOpen = useAppStore((s) => s.scheduledOpen)
+  const railPageOpen = useAppStore((s) => s.scheduledOpen || s.usageOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
@@ -144,10 +145,8 @@ export default function App() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
-  const [threadsPeek, setThreadsPeek] = useState(false)
-  const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
-  const threadsPeekCloseTimer = useRef<number | null>(null)
-  const threadsPeekUnmountTimer = useRef<number | null>(null)
+  // A rail page that replaces the workspace hides the sidebar, so the peek stands down for it.
+  const threadsPeek = useThreadsPeek(!threadsSidebarOpen && !railPageOpen)
   const resizeRef = useRef<{
     kind: 'main' | 'threads' | null
     pointerId: number | null
@@ -175,52 +174,6 @@ export default function App() {
       })
     return () => { disposed = true }
   }, [profileReady, bootstrapAttempt])
-
-  const cancelThreadsPeekClose = () => {
-    if (threadsPeekCloseTimer.current !== null) {
-      window.clearTimeout(threadsPeekCloseTimer.current)
-      threadsPeekCloseTimer.current = null
-    }
-    if (threadsPeekUnmountTimer.current !== null) {
-      window.clearTimeout(threadsPeekUnmountTimer.current)
-      threadsPeekUnmountTimer.current = null
-    }
-  }
-
-  const openThreadsPeek = () => {
-    cancelThreadsPeekClose()
-    setThreadsPeekClosing(false)
-    setThreadsPeek(true)
-  }
-
-  const scheduleThreadsPeekClose = () => {
-    cancelThreadsPeekClose()
-    // Grace period so moving from the edge strip to the panel doesn't flicker,
-    // then slide out before unmounting so close animates like open does.
-    threadsPeekCloseTimer.current = window.setTimeout(() => {
-      threadsPeekCloseTimer.current = null
-      setThreadsPeekClosing(true)
-      threadsPeekUnmountTimer.current = window.setTimeout(() => {
-        threadsPeekUnmountTimer.current = null
-        setThreadsPeek(false)
-        setThreadsPeekClosing(false)
-      }, 200)
-    }, 150)
-  }
-
-  useEffect(() => {
-    if (threadsSidebarOpen) {
-      cancelThreadsPeekClose()
-      setThreadsPeek(false)
-      setThreadsPeekClosing(false)
-      return
-    }
-  }, [threadsSidebarOpen])
-
-  useEffect(() => () => {
-    if (threadsPeekCloseTimer.current !== null) window.clearTimeout(threadsPeekCloseTimer.current)
-    if (threadsPeekUnmountTimer.current !== null) window.clearTimeout(threadsPeekUnmountTimer.current)
-  }, [])
 
   useEffect(() => {
     const platform = window.mousse.platform
@@ -531,10 +484,14 @@ export default function App() {
 
       <div className="app-content">
 
-        {/* The closed sidebar peeks from its edge strip only; reaching for the rail moves nothing. */}
-        <NavigationRail key={`${profileId}:${bootstrapAttempt}`} />
+        {/* The closed sidebar peeks from its edge strip at once, or after a short rest anywhere on the rail. */}
+        <NavigationRail key={`${profileId}:${bootstrapAttempt}`}
+          onMouseEnter={threadsPeek.enterRail} onMouseLeave={threadsPeek.leaveRail} onPointerDown={threadsPeek.cancelIntent} />
 
         {profileReady && <ScheduledPage />}
+        {profileReady && usageOpen && <div className="usage-rail-page">
+          <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />
+        </div>}
         <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
@@ -571,14 +528,14 @@ export default function App() {
             <div
               className="threads-sidebar-edge-trigger"
               aria-hidden="true"
-              onMouseEnter={openThreadsPeek}
+              onMouseEnter={threadsPeek.show}
             />
               <SlidingThreadsPane
-                open={threadsPeek && !threadsPeekClosing}
+                open={threadsPeek.open}
                 width={threadsSidebarWidth}
                 overlay
-                onMouseEnter={openThreadsPeek}
-                onMouseLeave={scheduleThreadsPeekClose}
+                onMouseEnter={threadsPeek.show}
+                onMouseLeave={threadsPeek.scheduleClose}
               >
                 <ThreadsSidebar />
               </SlidingThreadsPane>
@@ -590,10 +547,9 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={workspaceMode === 'chats' && !usageOpen ? { display: 'none' } : undefined}
+          style={workspaceMode === 'chats' ? { display: 'none' } : undefined}
           inert={workspaceSwap === 'out' || undefined}
         >
-          {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 

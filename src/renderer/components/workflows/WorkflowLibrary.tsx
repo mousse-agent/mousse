@@ -155,7 +155,7 @@ export function WorkflowLibrary({
   return (
     <div className="wf-root" data-workflow-library="" data-profile-id={profileId}>
       <header className="wf-header">
-        <h2>Workflows</h2>
+        <h2>Playbooks</h2>
         <div className="wf-actions">
           {activeRunsSlot}
           {onRefreshTools ? <RefreshToolsButton refreshing={refreshingTools} onRefresh={onRefreshTools} /> : null}
@@ -179,6 +179,7 @@ export function WorkflowLibrary({
           {tags.length > 0 || query.tag ? (
             <Select
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Filter by tag"
               value={query.tag}
@@ -193,6 +194,7 @@ export function WorkflowLibrary({
           {statuses.length > 1 || query.status !== 'all' ? (
             <Select<WorkflowLibraryStatus>
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Filter by status"
               value={query.status}
@@ -207,6 +209,7 @@ export function WorkflowLibrary({
           {library.length > 1 ? (
             <Select<WorkflowLibraryQuery['sort']>
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Sort workflows"
               value={query.sort}
@@ -250,7 +253,7 @@ export function WorkflowLibrary({
         </div>
       ) : empty ? (
         // New workflow and Import sit in the header; the empty library adds no second create button.
-        <p className="automation-empty-line" data-library-empty="">No workflows yet.</p>
+        <p className="automation-empty-line" data-library-empty="">No playbooks yet.</p>
       ) : visible.length === 0 ? (
         <p className="automation-empty-line" data-library-no-match="">
           No workflows match.

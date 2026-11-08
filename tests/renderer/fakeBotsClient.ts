@@ -46,7 +46,9 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     events: {
       onChanged: (cb) => { listeners.changed.add(cb); return () => listeners.changed.delete(cb) },
       onMessage: (cb) => { listeners.message.add(cb); return () => listeners.message.delete(cb) },
-      onActivity: (cb) => { listeners.activity.add(cb); return () => listeners.activity.delete(cb) }
+      onActivity: (cb) => { listeners.activity.add(cb); return () => listeners.activity.delete(cb) },
+      // The preload's path for a composer file: a picked or dropped file's own, a temporary copy of a pasted one.
+      attachmentPath: vi.fn(async (file: File) => (file.name.startsWith('paste-') ? `/tmp/mousse-bot-attachments/1/${file.name}` : `/home/me/Desktop/${file.name}`))
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
@@ -81,7 +83,9 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       return { messages: before.slice(-(page.limit ?? 100)), ...(fake.live[botId] ? { live: fake.live[botId] } : {}) }
     })),
     send: vi.fn((botId, text, clientRequestId, attachments) => record('send', [botId, text, clientRequestId, attachments], () => {
-      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(attachments?.length ? { attachments } : {}) })
+      // The service saves the files in the bot's files folder; the row names the copies.
+      const saved = attachments?.map((file) => ({ name: file.name, path: `/home/me/.mousse/bots/files/${botId}/attachments/2026-11-08/${file.name}` }))
+      const row = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text, ...(saved?.length ? { attachments: saved } : {}) })
       fake.chats[botId] = [...(fake.chats[botId] ?? []), row]
       return row
     })),
@@ -121,8 +125,11 @@ export function installPreload(fake: FakeBots, overrides: Record<string, Record<
   const groups: Record<string, unknown> = {
     personalBots: fake.events,
     app: group({ setViewedBot: vi.fn(async () => undefined), ...overrides.app }),
-    dialog: group({ pickFolder: vi.fn(async () => null), pickFiles: vi.fn(async () => []), ...overrides.dialog })
+    dialog: group({ pickFolder: vi.fn(async () => null), ...overrides.dialog })
   }
   for (const [name, value] of Object.entries(overrides)) if (!(name in groups)) groups[name] = group(value)
+  // The chat's composer sizes its box with a ResizeObserver, which jsdom does not have.
+  ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} }
+  Element.prototype.scrollIntoView ??= () => {}
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(groups, { get: (target, key: string) => target[key] ?? group() })
 }

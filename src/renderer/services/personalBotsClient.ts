@@ -50,16 +50,27 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
   }
 }
 
-/** The bot events the preload bridge forwards (`bots:changed`, `bots:message`, `bots:activity`). */
+/** The preload's bot group: the events it forwards (`bots:changed`, `bots:message`, `bots:activity`) and a file's path. */
 export interface PersonalBotsEvents {
   onChanged?(cb: (event: { botId?: string }) => void): () => void
   onMessage?(cb: (event: BotsPersonalV2EventData['bots.message']) => void): () => void
   onActivity?(cb: (event: { botId: string; activationId: string; chip: BotChip | null }) => void): () => void
+  /** A composer file's path on this computer (see `attachmentPath`). */
+  attachmentPath?(file: File): Promise<string>
 }
 
 /** The preload's bot events; a bridge that lacks one (an older preload) just never calls it. */
 export function personalBotsEvents(): PersonalBotsEvents {
   return ((window.mousse as unknown as { personalBots?: PersonalBotsEvents } | undefined)?.personalBots) ?? {}
+}
+
+/**
+ * A composer file's path on this computer, from the preload: where it is, or a temporary copy of a
+ * pasted one. `bots.chat.send` names files by path; the service copies them for the bot.
+ */
+export function attachmentPath(file: File): Promise<string> {
+  const bridge = personalBotsEvents()
+  return bridge.attachmentPath ? bridge.attachmentPath(file) : Promise.reject(new Error('Restart Mousse to attach files to a bot message.'))
 }
 
 /** The plain message of a failed request (RPC errors carry a code and a message). */
