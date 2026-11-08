@@ -56,7 +56,6 @@ export interface BotBrowserSetup {
 }
 
 interface ActivationTabs {
-  lane: BotLane
   /** Tabs this activation opened in the bot's session: the only ones it may use. */
   tabs: Set<string>
   /** The tab it used last: where an observation without a tab looks. */
@@ -128,7 +127,7 @@ export class BotBrowsers implements BotBrowserHost {
   turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined {
     if (!this.options.browser()) return undefined
     const state = this.state(input.botId, input.homeThreadId)
-    const activation = state.activations.get(input.activationId) ?? { lane: input.lane, tabs: new Set<string>(), ended: false }
+    const activation = state.activations.get(input.activationId) ?? { tabs: new Set<string>(), ended: false }
     state.activations.set(input.activationId, activation)
     const policy = this.policy(500)
     const execution: ExecutionContext = {
