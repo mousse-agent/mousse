@@ -8,7 +8,7 @@ import { ResizablePanelSidebar } from '../ResizablePanelSidebar'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { Select, type SelectOption } from '../ui/Select'
 import { Collapse } from '../ui/Collapse'
-import { ReviewDiffPane, WhitespaceToggle } from './ReviewDiffPane'
+import { DiffOptionsMenu, ReviewDiffPane } from './ReviewDiffPane'
 import { commentCounts, commentScopeLabel, scopeKey } from './reviewComments'
 import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type WorkspaceAvailability } from './reviewData'
 import {
@@ -297,12 +297,8 @@ export function ReviewPanel() {
           <button type="button" className="btn btn-ghost btn-sm" onClick={refresh} disabled={loading} title="Refresh">
             <RefreshCw size={14} strokeWidth={2} />
           </button>
+          {!noChanges && <DiffOptionsMenu />}
         </div>
-        {!noChanges && (
-          <div className="review-toggle-row">
-            <WhitespaceToggle />
-          </div>
-        )}
         {reason && <div className="review-banner" role="status">{reason}</div>}
         {error && (
           <div className="review-banner review-banner-error" role="alert">

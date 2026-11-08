@@ -14,7 +14,7 @@ vi.mock('../../src/renderer/components/review/reviewData', () => ({
 }))
 // The diff pane loads Monaco; the stub shows only the line it would show without a file.
 vi.mock('../../src/renderer/components/review/ReviewDiffPane', () => ({
-  WhitespaceToggle: () => createElement('label', { className: 'review-toggle' }, 'Ignore leading/trailing whitespace'),
+  DiffOptionsMenu: () => createElement('button', { className: 'diff-options-trigger' }, 'Diff options'),
   ReviewDiffPane: ({ path, emptyLabel }: { path: string | null; emptyLabel?: string }) =>
     createElement('div', { className: 'diff-stub' }, path ?? emptyLabel)
 }))
@@ -51,12 +51,12 @@ async function render() {
 }
 
 describe('Review panel with no changes', () => {
-  it('shows one scoped line and no diff pane, whitespace toggle or resize handle', async () => {
+  it('shows one scoped line and no diff pane, diff options or resize handle', async () => {
     files = async () => result([])
     await render()
     expect(host.textContent).toContain('No changes in Working tree')
     expect(host.querySelector('.git-diff')).toBeNull()
-    expect(host.querySelector('.review-toggle')).toBeNull()
+    expect(host.querySelector('.diff-options-trigger')).toBeNull()
     expect(host.querySelector('.panel-sidebar-resize-handle')).toBeNull()
     expect(host.querySelector('.review-sidebar')?.classList.contains('resizable-panel-sidebar-fill')).toBe(true)
     expect(host.textContent).not.toContain('Select a changed file')

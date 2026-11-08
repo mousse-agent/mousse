@@ -31,7 +31,7 @@ import { GitOperationStatus } from './git/GitOperationStatus'
 import { GitSyncBar } from './git/GitSyncBar'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
-import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
+import { DiffOptionsMenu, ReviewDiffPane } from './review/ReviewDiffPane'
 import { usePullRequestPushTarget } from './sideCard/usePullRequestPushTarget'
 import { gitActionRowModel } from './sideCard/gitSectionLogic'
 import { folderName } from '../lib/folderLabel'
@@ -488,7 +488,7 @@ export function GitPanel() {
           <span className="panel-toolbar-path">
             {selected ? `${selected.staged ? 'Staged' : 'Unstaged'}: ${selected.path}` : 'Diff'}
           </span>
-          <WhitespaceToggle />
+          <DiffOptionsMenu />
           {actionModel && folderId && (
             <GitActionButtons
               host="git-panel"
