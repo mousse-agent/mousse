@@ -113,17 +113,19 @@ export function ChangesHeader(props: ChangesHeaderProps) {
           renderValue={() => (
             <span className="changes-scope-label">
               {props.live && <span className="changes-live-dot" aria-label="Turn running" />}
-              {fit.scope}
+              <span className="changes-scope-text">{fit.scope}</span>
             </span>
           )}
           onChange={props.onScope}
         />
       </div>
-      <button type="button" className="changes-counts" title="Jump to a file (F)" onClick={props.onCounts}>
-        <span>{content.count}</span>
-        {fit.showLeft && content.left && <span className="changes-faint"> · {content.left}</span>}
-        {fit.showTotals && content.totals && <span className="changes-stat changes-totals">{content.totals}</span>}
-      </button>
+      {content.count && (
+        <button type="button" className="changes-counts" title="Jump to a file (F)" onClick={props.onCounts}>
+          <span>{content.count}</span>
+          {fit.showLeft && content.left && <span className="changes-faint"> · {content.left}</span>}
+          {fit.showTotals && content.totals && <span className="changes-stat changes-totals">{content.totals}</span>}
+        </button>
+      )}
       <span className="changes-header-gap" />
       {chip && (
         <BranchPicker

@@ -49,18 +49,22 @@ export interface DefaultScopeInput {
   lastTurn: { turnId: string; endedAt: number | null } | null
   hasUncommitted: boolean
   ownWorktree: boolean
+  /** The thread has had a turn that changed files (This thread has something to show). */
+  hasTurns: boolean
 }
 
 /**
  * A fresh open shows Last turn if it ended since the tab was last opened, otherwise the scope the
  * user last chose, otherwise Uncommitted when there is something uncommitted, otherwise This thread.
+ * Last turn and This thread are skipped when the menu would not offer them (no turn yet).
  */
 export function defaultScope(input: DefaultScopeInput): ChangesScopeId {
   if (!input.ownWorktree) return 'uncommitted'
   const turn = input.lastTurn
   if (turn && (input.lastOpenedAt === null || (turn.endedAt !== null && turn.endedAt > input.lastOpenedAt))) return 'last'
-  if (input.saved) return input.saved
-  return input.hasUncommitted ? 'uncommitted' : 'thread'
+  const offered = (id: ChangesScopeId) => (id === 'last' ? turn !== null : id === 'thread' ? input.hasTurns : true)
+  if (input.saved && offered(input.saved)) return input.saved
+  return input.hasUncommitted || !input.hasTurns ? 'uncommitted' : 'thread'
 }
 
 /**
@@ -90,6 +94,11 @@ export function scopeTitle(id: ChangesScopeId, input: { pinnedTurnId: string | n
   return choice?.prompt ?? 'Turn'
 }
 
+/** The scope's name inside a sentence: "No changes in this thread". A turn's prompt words stay as written. */
+export function scopeInSentence(title: string): string {
+  return /^(Last turn|This thread|Uncommitted)\b/.test(title) ? title.charAt(0).toLowerCase() + title.slice(1) : title
+}
+
 /** The label truncated to about 16 characters, for a narrow header; the full label goes in the tooltip. */
 export function shortScopeTitle(title: string, max = 16): string {
   return firstChars(title, max)
@@ -104,15 +113,14 @@ export interface ScopeMenuOption {
 /**
  * Last turn · This thread · Uncommitted, then the turns (newest first, by the user's prompt words).
  * Non-grouped entries come first, as `ui/Select` expects. Without a worktree of its own a thread has
- * only Uncommitted.
+ * only Uncommitted. Last turn needs an ended turn and This thread any turn; the shown scope always stays.
  */
 export function scopeMenuOptions(input: { choices: readonly TurnChoice[]; ownWorktree: boolean; current: ChangesScopeId }): ScopeMenuOption[] {
   if (!input.ownWorktree) return [{ value: 'uncommitted', label: 'Uncommitted' }]
-  const options: ScopeMenuOption[] = [
-    { value: 'last', label: 'Last turn' },
-    { value: 'thread', label: 'This thread' },
-    { value: 'uncommitted', label: 'Uncommitted' }
-  ]
+  const options: ScopeMenuOption[] = []
+  if (latestEndedTurn(input.choices) || input.current === 'last') options.push({ value: 'last', label: 'Last turn' })
+  if (input.choices.length > 0 || input.current === 'thread') options.push({ value: 'thread', label: 'This thread' })
+  options.push({ value: 'uncommitted', label: 'Uncommitted' })
   for (const choice of input.choices) options.push({ value: `turn:${choice.turnId}`, label: choice.label, group: 'Turns' })
   // A turn reached from a chat edit line that the list no longer has (undone, or older) stays selectable.
   if (isTurnScopeId(input.current) && !input.choices.some((choice) => `turn:${choice.turnId}` === input.current)) {
@@ -332,8 +340,8 @@ export function revertAllowed(input: { scopeId: ChangesScopeId; showsUncommitted
 
 export interface HeaderContent {
   scopeTitle: string
-  /** "3 files" */
-  count: string
+  /** "3 files"; null when there are none (the empty state says so). */
+  count: string | null
   /** "2 left", once something is viewed. */
   left: string | null
   /** "+12 −3" */
@@ -545,6 +553,27 @@ export function hunkAtLine(hunks: readonly HunkRange[], side: 'additions' | 'del
 /** Where a hunk's actions attach: under its last added line, else under its last removed line. */
 export function hunkAnchor(hunk: HunkRange): { side: 'additions' | 'deletions'; lineNumber: number } {
   return hunk.additions > 0 ? { side: 'additions', lineNumber: hunk.newEnd } : { side: 'deletions', lineNumber: hunk.oldEnd }
+}
+
+/**
+ * The lines `C` or a hunk's Comment button comments on: the selected lines, else the line under the pointer
+ * when it is inside the hunk, else the hunk's first changed line. Never the whole hunk, which can span many
+ * unchanged lines between its changes.
+ */
+export function commentTarget(input: {
+  selection: { side: 'additions' | 'deletions'; start: number; end: number } | null
+  hovered: { side: 'additions' | 'deletions'; line: number } | null
+  hunk: HunkRange | null
+  hunks: readonly HunkRange[]
+}): { side: 'additions' | 'deletions'; start: number; end: number } | null {
+  if (input.selection) return input.selection
+  const hovered = input.hovered
+  if (hovered && (input.hunk === null || hunkAtLine(input.hunks, hovered.side, hovered.line)?.index === input.hunk.index)) {
+    return { side: hovered.side, start: hovered.line, end: hovered.line }
+  }
+  const hunk = input.hunk
+  if (!hunk) return null
+  return hunk.additions > 0 ? { side: 'additions', start: hunk.newStart, end: hunk.newStart } : { side: 'deletions', start: hunk.oldStart, end: hunk.oldStart }
 }
 
 /** `j`/`k` from the focused hunk; from none, `j` starts at the first and `k` at the last. */

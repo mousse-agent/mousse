@@ -10,7 +10,7 @@ import { diffSurfaceStyle, diffUnsafeCSS, useDiffThemeType } from '../../lib/dif
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { commentsForFile } from '../review/reviewComments'
 import { isPlaceholderSide, placeholderFor } from '../review/reviewModel'
-import { contentHash, hunkAnchor, hunkAtLine, hunksFromMetadata, type HunkRange } from './changesModel'
+import { commentTarget, contentHash, hunkAnchor, hunkAtLine, hunksFromMetadata, type HunkRange } from './changesModel'
 import type { IncludeState } from './changesApi'
 
 const NO_REFERENCES: ChatReference[] = []
@@ -76,6 +76,23 @@ function Placeholder({ result }: { result: ReviewFileResult }) {
   return <div className="changes-card-note">{text}</div>
 }
 
+/**
+ * Code reads as typed: no ligatures (`===`, `=>`, `>=`, `...` stay separate characters). In the unified view a
+ * removed line's number is left out of the one-column gutter so the numbers read in order (its red marker stays).
+ */
+const NO_LIGATURES = `
+:host, [data-diff], [data-file], [data-code], [data-line], [data-column-number] {
+  --diffs-font-features: "liga" 0, "calt" 0;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+`
+const UNIFIED_GUTTER = `
+[data-diff-type='single'] [data-column-number][data-line-type='change-deletion'] [data-line-number-content] {
+  visibility: hidden;
+}
+`
+
 const rangeOf = (range: SelectedLineRange): LineRange => ({
   side: range.side === 'deletions' ? 'deletions' : 'additions',
   start: Math.min(range.start, range.end),
@@ -111,6 +128,8 @@ export function ChangesDiff({
   const [failed, setFailed] = useState<{ key: string; message: string } | null>(null)
   const [retry, setRetry] = useState(0)
   const [hovered, setHovered] = useState<number | null>(null)
+  /** The line under the pointer, which `C` and a hunk's Comment button comment on. */
+  const hoveredLine = useRef<{ side: 'additions' | 'deletions'; line: number } | null>(null)
   const [form, setForm] = useState<{ key: string; range: LineRange } | null>(null)
   const [draft, setDraft] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
@@ -180,16 +199,22 @@ export function ChangesDiff({
     setFormError(null)
   }
 
-  // `C`: the selected lines, else the focused hunk's changed lines.
+  /** The selected lines, else the hovered line, else the hunk's first changed line. */
+  const commentOn = useCallback(
+    (hunk: HunkRange | null) => {
+      const range = commentTarget({ selection: selectionRef.current, hovered: hoveredLine.current, hunk, hunks })
+      if (range) openForm(range)
+    },
+    [hunks, openForm, selectionRef]
+  )
+
+  // `C`: the selected lines, else the hovered line, else the focused hunk's first changed line.
   const lastRequest = useRef(commentRequest)
   useEffect(() => {
     if (commentRequest === lastRequest.current) return
     lastRequest.current = commentRequest
-    const selected = selectionRef.current
-    if (selected) return openForm(selected)
-    const hunk = focusedHunk !== null ? hunks[focusedHunk] : undefined
-    if (hunk) openForm(hunkRange(hunk))
-  }, [commentRequest, focusedHunk, hunks, openForm, selectionRef])
+    commentOn(focusedHunk !== null ? hunks[focusedHunk] ?? null : null)
+  }, [commentRequest, focusedHunk, hunks, commentOn])
 
   const addComment = () => {
     const text = draft.trim()
@@ -245,7 +270,7 @@ export function ChangesDiff({
     () => ({
       theme: { dark: 'github-dark', light: 'github-light' } as const,
       themeType,
-      unsafeCSS: diffUnsafeCSS(themeType),
+      unsafeCSS: diffUnsafeCSS(themeType) + NO_LIGATURES + (split ? '' : UNIFIED_GUTTER),
       diffStyle: split ? ('split' as const) : ('unified' as const),
       disableFileHeader: true,
       hunkSeparators: 'line-info' as const,
@@ -259,6 +284,7 @@ export function ChangesDiff({
         selectionRef.current = range ? rangeOf(range) : null
       },
       onLineEnter: ({ lineNumber, annotationSide }: { lineNumber: number; annotationSide: 'additions' | 'deletions' }) => {
+        hoveredLine.current = { side: annotationSide, line: lineNumber }
         const hunk = hunkAtLine(hunksRef.current, annotationSide, lineNumber)
         if (hunk) setHovered(hunk.index)
       }
@@ -307,7 +333,7 @@ export function ChangesDiff({
               <span>Include</span>
             </label>
           )}
-          <button type="button" className="changes-bar-btn" title="Comment (C)" onClick={() => openForm(hunkRange(hunk))}>
+          <button type="button" className="changes-bar-btn" title="Comment (C)" onClick={() => commentOn(hunk)}>
             <MessageSquare size={13} strokeWidth={2} aria-hidden="true" />
             <span>Comment</span>
           </button>
@@ -367,7 +393,10 @@ export function ChangesDiff({
   return (
     <div
       className="changes-diff"
-      onMouseLeave={() => setHovered(null)}
+      onMouseLeave={() => {
+        setHovered(null)
+        hoveredLine.current = null
+      }}
       onFocus={() => { if (focusedHunk === null && hovered !== null) onFocusHunk(hovered) }}
     >
       <FileDiff
@@ -381,11 +410,4 @@ export function ChangesDiff({
       />
     </div>
   )
-}
-
-/** The changed lines of a hunk, on the side it changes. */
-function hunkRange(hunk: HunkRange): LineRange {
-  return hunk.additions > 0
-    ? { side: 'additions', start: hunk.newStart, end: hunk.newEnd }
-    : { side: 'deletions', start: hunk.oldStart, end: hunk.oldEnd }
 }

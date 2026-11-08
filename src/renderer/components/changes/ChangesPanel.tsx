@@ -52,6 +52,7 @@ import {
   reviewScopeFor,
   sameChanges,
   scopeEndpoints,
+  scopeInSentence,
   scopeMenuOptions,
   scopeTitle,
   selectionFromChanges,
@@ -96,17 +97,22 @@ function isTextInput(target: EventTarget | null): boolean {
   return tag === 'TEXTAREA' || (tag === 'INPUT' && !['checkbox', 'radio', 'button'].includes((element as HTMLInputElement).type)) || tag === 'SELECT'
 }
 
-function useWidth(ref: React.RefObject<HTMLElement | null>): number {
+/**
+ * The element's width, followed as it resizes. A callback ref, because the panel first renders a placeholder
+ * without the measured element and a ref object would never see the element arrive.
+ */
+function useWidth(): [(element: HTMLElement | null) => void, number] {
+  const [element, setElement] = useState<HTMLElement | null>(null)
   const [width, setWidth] = useState(800)
   useLayoutEffect(() => {
-    const element = ref.current
-    if (!element || typeof ResizeObserver === 'undefined') return
+    if (!element) return
+    setWidth(Math.round(element.getBoundingClientRect().width) || 800)
+    if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)))
     observer.observe(element)
-    setWidth(element.getBoundingClientRect().width || 800)
     return () => observer.disconnect()
-  }, [ref])
-  return width
+  }, [element])
+  return [setElement, width]
 }
 
 /**
@@ -128,9 +134,8 @@ export function ChangesPanel() {
   const threadState = useChangesStore((s) => (stateKey ? s.byThread[stateKey] : undefined))
   const viewed = useChangesStore((s) => s.viewed)
   const computer = useComputer(thread?.node)
-  const rootRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
-  const width = useWidth(rootRef)
+  const [rootRef, width] = useWidth()
   const turnRunning = phase !== undefined && phase !== 'idle'
   const apiReady = changesApiAvailable()
 
@@ -208,7 +213,8 @@ export function ChangesPanel() {
       lastOpenedAt: saved?.lastOpenedAt ?? null,
       lastTurn: latest ? { turnId: latest.turnId, endedAt: latest.endedAt } : null,
       hasUncommitted: uncommitted > 0,
-      ownWorktree
+      ownWorktree,
+      hasTurns: turnList.length > 0
     })
     const newer = latest && latest.endedAt !== null && (saved?.lastOpenedAt ?? 0) < latest.endedAt
     store.show(stateKey, id, id === 'last' ? (newer || !saved?.pinnedTurnId ? latest?.turnId ?? null : saved.pinnedTurnId) : undefined)
@@ -679,7 +685,6 @@ export function ChangesPanel() {
   const lastTurn = latestEndedTurn(turnList)
   const scopeOptions = scopeMenuOptions({ choices: turnList, ownWorktree: ownTurns, current: scopeId })
   const showEmpty = result !== null && rows.length === 0 && !error
-  const useWidthForStats = width >= 520
 
   return (
     <div className="changes-panel" ref={rootRef} onKeyDown={onKeyDown} tabIndex={-1}>
@@ -698,7 +703,7 @@ export function ChangesPanel() {
         live={turnRunning}
         content={{
           scopeTitle: title,
-          count: plural(rows.length, 'file'),
+          count: rows.length > 0 ? plural(rows.length, 'file') : null,
           left: viewedCount > 0 ? `${rows.length - viewedCount} left` : null,
           totals: [totals.additions > 0 ? `+${totals.additions}` : '', totals.deletions > 0 ? `−${totals.deletions}` : ''].filter(Boolean).join(' ') || null,
           chipText: chip?.text ?? null,
@@ -737,7 +742,7 @@ export function ChangesPanel() {
         {!result && !error && <div className="changes-empty"><DelayedLoader size="small" label="Loading changes" /></div>}
         {showEmpty && !result?.unavailable && (
           <p className="changes-empty">
-            {showsWorktree ? 'No uncommitted changes' : `No changes in ${title}`}
+            {showsWorktree ? 'No uncommitted changes' : `No changes in ${scopeInSentence(title)}`}
             {showsWorktree && lastTurn && lastTurn.files > 0 && stateKey && (
               <>
                 {' · '}
@@ -787,8 +792,21 @@ export function ChangesPanel() {
                 {open ? <ChevronDown size={13} strokeWidth={2} className="changes-chevron" aria-hidden="true" /> : <ChevronRight size={13} strokeWidth={2} className="changes-chevron" aria-hidden="true" />}
                 <span className="changes-path">{row.path}</span>
                 {word && <span className="changes-word" data-word={word}>{word}</span>}
+                {/* Takes room from the path only on hover or focus, so the counts stay on the row's right edge. */}
+                <span className="changes-row-menu" onClick={(event) => event.stopPropagation()}>
+                  <MenuButton
+                    label={`Actions for ${row.path}`}
+                    className="changes-icon-btn changes-row-more"
+                    items={[
+                      ...(canRevert && row.api ? [{ label: 'Revert file', onSelect: () => row.api && void revert(row.api) }] : []),
+                      { label: 'Open in Files', hint: 'O', onSelect: () => openInFiles(row.path) }
+                    ]}
+                  >
+                    <MoreHorizontal size={13} strokeWidth={2} aria-hidden="true" />
+                  </MenuButton>
+                </span>
                 <span className="changes-row-end">
-                  {(useWidthForStats || open) && row.countsExact && !row.binary && (
+                  {row.countsExact && !row.binary && (
                     <span className="changes-stat">
                       {row.additions > 0 && <span className="turn-edits-add">+{row.additions}</span>}
                       {row.deletions > 0 && <span className="turn-edits-del">−{row.deletions}</span>}
@@ -819,18 +837,6 @@ export function ChangesPanel() {
                   ) : viewState === 'changed' ? (
                     <span className="changes-changed-dot" title="Changed since viewed" aria-label="Changed since viewed" />
                   ) : null}
-                  <span onClick={(event) => event.stopPropagation()}>
-                    <MenuButton
-                      label={`Actions for ${row.path}`}
-                      className="changes-icon-btn changes-row-more"
-                      items={[
-                        ...(canRevert && row.api ? [{ label: 'Revert file', onSelect: () => row.api && void revert(row.api) }] : []),
-                        { label: 'Open in Files', hint: 'O', onSelect: () => openInFiles(row.path) }
-                      ]}
-                    >
-                      <MoreHorizontal size={13} strokeWidth={2} aria-hidden="true" />
-                    </MenuButton>
-                  </span>
                 </span>
               </div>
               {open && target && (

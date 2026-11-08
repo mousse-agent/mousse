@@ -229,9 +229,9 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
                 className="changes-commit-input"
                 rows={1}
                 value={message}
-                placeholder={state.placeholder}
                 aria-label="Commit message"
-                title={state.tinted ? `${branch ?? 'This branch'} is the default branch` : undefined}
+                aria-placeholder={state.placeholder}
+                title={message ? undefined : state.tinted ? `${state.placeholder} (the default branch)` : state.placeholder}
                 disabled={busy}
                 onChange={(event) => {
                   if (suggestion.current) {
@@ -248,6 +248,8 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
                   }
                 }}
               />
+              {/* Drawn over the field rather than as its placeholder, which can't end in an ellipsis. */}
+              {!message && <span className="changes-commit-placeholder" aria-hidden="true">{state.placeholder}</span>}
               <button
                 type="button"
                 className="changes-suggest"
@@ -263,7 +265,7 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
             <div className="changes-split">
               <button
                 type="button"
-                className="changes-primary changes-split-main"
+                className={`changes-primary${items.length > 0 ? ' changes-split-main' : ''}`}
                 disabled={blocked || state.disabled || !message.trim()}
                 title={commitLock.reason ?? (message.trim() ? undefined : 'Write a message, or ✦ to suggest one')}
                 onClick={() => void commit('commit')}

@@ -42,9 +42,13 @@
 }
 
 .changes-scope-label {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+.changes-scope-text {
   overflow: hidden;
   min-width: 0;
   text-overflow: ellipsis;
@@ -274,7 +278,7 @@
   min-width: 0;
   height: 30px;
   margin: 0 6px;
-  padding: 0 4px 0 6px;
+  padding: 0 8px 0 6px;
   border-radius: var(--ui-row-radius);
   color: color-mix(in srgb, var(--text-primary) 85%, transparent);
   cursor: pointer;
@@ -389,16 +393,26 @@
   color: var(--success);
 }
 
+/* The row's "…" takes no room until the row is hovered or focused; then it narrows the path, never the counts. */
+.changes-row-menu {
+  display: inline-flex;
+  flex: none;
+  overflow: hidden;
+  width: 0;
+  margin-left: -6px;
+}
+
+.changes-row:hover .changes-row-menu,
+.changes-row:focus-within .changes-row-menu,
+.changes-row-menu:has(.open) {
+  overflow: visible;
+  width: 22px;
+  margin-left: 0;
+}
+
 .changes-row-more {
   width: 22px;
   height: 22px;
-  opacity: 0;
-}
-
-.changes-row:hover .changes-row-more,
-.changes-row:focus-within .changes-row-more,
-.changes-row-more.open {
-  opacity: 1;
 }
 
 .changes-card-body {
@@ -645,8 +659,24 @@
   outline-offset: -1px;
 }
 
-/* The placeholder names the branch; on the default branch it is tinted. */
-.changes-commit[data-tinted] .changes-commit-input::placeholder {
+/* The placeholder names the branch on one line; a long name ends in an ellipsis (the full one is the tooltip).
+   On the default branch it is tinted. */
+.changes-commit-placeholder {
+  position: absolute;
+  top: 50%;
+  right: 30px;
+  left: 10px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.changes-commit[data-tinted] .changes-commit-placeholder {
   color: var(--warning);
 }
 

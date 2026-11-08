@@ -6,6 +6,7 @@ import {
   changesKeyAction,
   commitLabel,
   contentHash,
+  commentTarget,
   defaultScope,
   fileSignature,
   footerState,
@@ -25,6 +26,7 @@ import {
   sameChanges,
   scopeEndpoints,
   scopeIdFor,
+  scopeInSentence,
   scopeMenuOptions,
   scopeTitle,
   selectionFromChanges,
@@ -35,6 +37,7 @@ import {
   viewedMark,
   viewedState,
   type FooterInput,
+  type ChangesScopeId,
   type HeaderContent
 } from '../src/renderer/components/changes/changesModel'
 
@@ -88,6 +91,12 @@ describe('scopes', () => {
     expect(scopeTitle('thread', { pinnedTurnId: null, choices, ownWorktree: false })).toBe('Uncommitted')
   })
 
+  it('lowercases the scope inside a sentence, but not a turn prompt', () => {
+    expect(`No changes in ${scopeInSentence('This thread')}`).toBe('No changes in this thread')
+    expect(scopeInSentence('Last turn · Add login errors')).toBe('last turn · Add login errors')
+    expect(scopeInSentence('Add login errors')).toBe('Add login errors')
+  })
+
   it('lists Last turn, This thread and Uncommitted first, then the turns as a group', () => {
     const options = scopeMenuOptions({ choices: [turn('r2'), turn('r1')], ownWorktree: true, current: 'last' })
     expect(options.map((option) => [option.value, option.group ?? null])).toEqual([
@@ -101,10 +110,19 @@ describe('scopes', () => {
     // A turn reached from a chat edit line stays selectable when the list no longer has it.
     expect(scopeMenuOptions({ choices: [], ownWorktree: true, current: 'turn:gone' }).at(-1)).toEqual({ value: 'turn:gone', label: 'Turn', group: 'Turns' })
   })
+
+  it('offers Last turn only after a turn ended, and This thread only once there is a turn', () => {
+    const values = (choices: TurnChoice[], current: ChangesScopeId = 'uncommitted') => scopeMenuOptions({ choices, ownWorktree: true, current }).map((option) => option.value)
+    expect(values([])).toEqual(['uncommitted'])
+    expect(values([turn('r1', { running: true })])).toEqual(['thread', 'uncommitted', 'turn:r1'])
+    expect(values([turn('r1', { undone: true })])).toEqual(['thread', 'uncommitted', 'turn:r1'])
+    // The shown scope stays in the menu.
+    expect(values([], 'thread')).toEqual(['thread', 'uncommitted'])
+  })
 })
 
 describe('the default scope and freezing', () => {
-  const base = { saved: null, lastOpenedAt: 500, lastTurn: { turnId: 'r1', endedAt: 1000 }, hasUncommitted: true, ownWorktree: true }
+  const base = { saved: null, lastOpenedAt: 500, lastTurn: { turnId: 'r1', endedAt: 1000 }, hasUncommitted: true, ownWorktree: true, hasTurns: true }
 
   it('shows Last turn when it ended since the tab was last opened, or on a first open', () => {
     expect(defaultScope(base)).toBe('last')
@@ -119,6 +137,12 @@ describe('the default scope and freezing', () => {
     expect(defaultScope({ ...base, lastOpenedAt: 2000 })).toBe('uncommitted')
     expect(defaultScope({ ...base, lastOpenedAt: 2000, hasUncommitted: false })).toBe('thread')
     expect(defaultScope({ ...base, lastTurn: null, hasUncommitted: false })).toBe('thread')
+  })
+
+  it('never opens on a scope the menu does not offer', () => {
+    expect(defaultScope({ ...base, lastTurn: null, hasTurns: false, hasUncommitted: false })).toBe('uncommitted')
+    expect(defaultScope({ ...base, lastTurn: null, hasTurns: false, saved: 'thread' })).toBe('uncommitted')
+    expect(defaultScope({ ...base, lastTurn: null, saved: 'last', hasUncommitted: false })).toBe('thread')
   })
 
   it('has only Uncommitted without a worktree of its own', () => {
@@ -314,6 +338,12 @@ describe('the header at narrow widths', () => {
     expect(headerFit(300, remote, false).showChipText).toBe(false)
   })
 
+  it('leaves the count out when there are no files, which leaves the scope more room', () => {
+    const empty = { ...content, left: null, totals: null, chipText: null }
+    expect(headerFit(440, empty).scope).not.toBe(content.scopeTitle)
+    expect(headerFit(440, { ...empty, count: null }).scope).toBe(content.scopeTitle)
+  })
+
   it('drops totals before N left', () => {
     let previous = headerFit(2000, content)
     for (let width = 2000; width > 200; width -= 10) {
@@ -383,6 +413,28 @@ describe('hunks', () => {
     expect(hunkAtLine(hunks, 'additions', 30)?.index).toBe(1)
     expect(hunkAtLine(hunks, 'deletions', 5)?.index).toBe(0)
     expect(hunkAtLine(hunks, 'additions', 12)).toBeNull()
+  })
+
+  it('comments on one line: the selection, else the hovered line in the hunk, else its first changed line', () => {
+    // One hunk: changes at 1, 5 and 11 with unchanged lines between them.
+    const meta = parseDiffFromFile({ name: 'a', contents: lines(30) }, { name: 'a', contents: lines(30, { 1: 'a', 5: 'b', 11: 'c' }) }, { context: 3 })
+    const hunks = hunksFromMetadata(meta)
+    expect(hunks).toHaveLength(1)
+    const [hunk] = hunks
+    expect([hunk.newStart, hunk.newEnd]).toEqual([1, 11])
+    const selection = { side: 'additions' as const, start: 3, end: 6 }
+    expect(commentTarget({ selection, hovered: { side: 'additions', line: 5 }, hunk, hunks })).toEqual(selection)
+    expect(commentTarget({ selection: null, hovered: { side: 'additions', line: 5 }, hunk, hunks })).toEqual({ side: 'additions', start: 5, end: 5 })
+    expect(commentTarget({ selection: null, hovered: { side: 'deletions', line: 5 }, hunk, hunks })).toEqual({ side: 'deletions', start: 5, end: 5 })
+    expect(commentTarget({ selection: null, hovered: null, hunk, hunks })).toEqual({ side: 'additions', start: 1, end: 1 })
+    // The pointer resting outside the focused hunk does not pull the comment there.
+    expect(commentTarget({ selection: null, hovered: { side: 'additions', line: 25 }, hunk, hunks })).toEqual({ side: 'additions', start: 1, end: 1 })
+    // No hunk focused: the hovered line, else nothing.
+    expect(commentTarget({ selection: null, hovered: { side: 'additions', line: 25 }, hunk: null, hunks })).toEqual({ side: 'additions', start: 25, end: 25 })
+    expect(commentTarget({ selection: null, hovered: null, hunk: null, hunks })).toBeNull()
+    // A pure removal comments on its first removed line.
+    const [removal] = hunksFromMetadata(parseDiffFromFile({ name: 'a', contents: lines(10) }, { name: 'a', contents: lines(10).replace('line 4' + String.fromCharCode(10), '') }, { context: 3 }))
+    expect(commentTarget({ selection: null, hovered: null, hunk: removal, hunks: [removal] })).toEqual({ side: 'deletions', start: 4, end: 4 })
   })
 
   it('anchors a pure removal on the side it changes, and keeps an id for the same change elsewhere', () => {
