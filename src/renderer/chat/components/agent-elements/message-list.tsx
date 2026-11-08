@@ -60,6 +60,7 @@ import {
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptEditButton, PromptUndoButton, PromptVersionSwitcher } from "../../../components/PromptUndoControls";
+import { RepeatThisMenu } from "../../../components/automations/RepeatThis";
 import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
@@ -589,6 +590,7 @@ function MessageToolbar({
   metadata,
   speechKey,
   speechText,
+  repeatText,
 }: {
   text?: string;
   timestamp?: string;
@@ -608,6 +610,8 @@ function MessageToolbar({
   speechKey?: string;
   /** What read aloud reads, when not all of `text` (a turn's answer, without its notes). */
   speechText?: string;
+  /** A prompt the person wrote: its menu offers Repeat this… (an automation that sends it again). */
+  repeatText?: string;
 }) {
   const [metadataOpen, setMetadataOpen] = useState(false);
   const reading = useIsReadingAloud(speechKey);
@@ -636,6 +640,7 @@ function MessageToolbar({
       )}
       {text && <CopyButton text={text} onCopied={onCopied} />}
       {forkTurnId && <ForkFromTurnButton turnId={forkTurnId} />}
+      {repeatText && <RepeatThisMenu text={repeatText} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
           <MetadataButton metadata={metadata} onOpenChange={setMetadataOpen} />
@@ -1770,6 +1775,7 @@ export const MessageList = memo(function MessageList({
                             promptTurnId={promptTurnId}
                             onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
                             speechKey={userCopyKey}
+                            repeatText={text}
                           />
                         )}
                       </div>

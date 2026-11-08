@@ -18,7 +18,9 @@ import { draftFromJob, EMPTY_CATALOG, isUnchanged, modelGroups, patchOf, type Sc
 import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
 import { AutomationRow, glyphOf, PausePicker } from './AutomationRows'
-import { CreateRow } from './CreateRow'
+import { CreateRow, type CreatePrefill } from './CreateRow'
+import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest } from '../../stores/automationCreateStore'
+import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, type MetaContext } from './automationList'
@@ -44,6 +46,19 @@ export function pageHasFocus(doc: Pick<Document, 'activeElement' | 'querySelecto
   const page = doc?.querySelector('[data-automations-workspace]:not([hidden])')
   const focused = doc?.activeElement
   return Boolean(page && focused && page.contains(focused))
+}
+
+/** What the create row opens with for a request from another surface: its Who matched to the pickers' lists. */
+export function prefillOf(request: AutomationCreateRequest, catalog: ScheduledCatalog, providers: LlmProviderOption[]): CreatePrefill {
+  const modelKey = request.selection ? modelKeyOf(request.selection, catalog.models, providers) : ''
+  const known = modelKey !== '' && catalog.models.some((group) => group.choices.some((choice) => choice.key === modelKey))
+  return {
+    nonce: request.nonce,
+    ...(request.prompt ? { prompt: request.prompt } : {}),
+    ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
+    ...(request.workflowId ? { workflowId: request.workflowId } : {}),
+    who: request.agentId ? { kind: 'agent', id: request.agentId } : known ? { kind: 'model', key: modelKey } : { kind: 'default' }
+  }
 }
 
 /** The name the page gives an agent: the provider instance's label (Claude, Codex), else the model. */
@@ -80,6 +95,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [createRequest, setCreateRequest] = useState(0)
+  const [prefill, setPrefill] = useState<CreatePrefill | null>(null)
+  const automateRequest = useAutomationCreate((state) => state.request)
   const listRef = useRef<HTMLDivElement>(null)
   const webhookApi = useMemo(browserWebhookApi, [])
   const viewerZone = useMemo(viewerTimeZone, [])
@@ -143,6 +160,14 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   // ⌘N is page-scoped: while focus is on this page, the key press opens the create row. The palette and the menu
   // keep New thread, and anywhere else ⌘N is New thread too.
   useCommand('thread.new', () => { setDetail(null); setCreateRequest((count) => count + 1) }, () => active && pageHasFocus(), { keysOnly: true })
+
+  // Automate… and Repeat this…: once the pickers' lists are read, the create row opens with the request.
+  useEffect(() => {
+    if (!automateRequest || !settings) return
+    setDetail(null)
+    setPrefill(prefillOf(automateRequest, catalog, providers))
+    takeAutomationCreate()
+  }, [automateRequest, settings, catalog, providers])
 
   const items = useMemo(() => index?.items ?? [], [index])
   const detailItem = detail ? items.find((item) => item.key === detail) : undefined
@@ -401,6 +426,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             }}
             onOpenBot={openBot}
             openRequest={createRequest}
+            prefill={prefill}
             title={createTitle}
           />
 

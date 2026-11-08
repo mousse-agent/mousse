@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../stores/appStore'
+import { useAutomationCreate } from '../stores/automationCreateStore'
 import { AutomationsList } from './automations/AutomationsList'
 import { LibraryView } from './automations/LibraryView'
 import '../styles/automations-page.css'
@@ -13,6 +14,9 @@ export function AutomationsPage() {
   const profileId = useAppStore((s) => s.profileId)
   const [view, setView] = useState<'list' | 'library'>('list')
   const pageRef = useRef<HTMLDivElement>(null)
+  // Automate… and Repeat this… open the list, where the create row takes what they carry.
+  const createRequest = useAutomationCreate((state) => state.request)
+  useEffect(() => { if (createRequest) setView('list') }, [createRequest])
   // The page takes focus when it opens, so its page-scoped keys (⌘N) work at once; a click inside keeps it there.
   useEffect(() => {
     if (open && !pageRef.current?.contains(document.activeElement)) pageRef.current?.focus({ preventScroll: true })

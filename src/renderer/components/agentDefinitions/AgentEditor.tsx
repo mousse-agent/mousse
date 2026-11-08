@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ArchiveDefinitionDialog, FixIssuesLink, SaveStateLabel } from '../automations/EditorParts'
 import { definitionSaveState, publishBlockReason } from '../automations/editorState'
 import { RowMenu } from '../integrations/RowMenu'
+import { openAutomationCreate } from '../../stores/automationCreateStore'
 import { Switch } from '../settings/SettingsRow'
 import type {
   AgentDefinitionRecord,
@@ -385,6 +386,14 @@ export function AgentEditor({
             label="Agent actions"
             disabled={saving || archiving}
             items={[
+              {
+                label: 'Automate…',
+                action: 'automate',
+                testId: 'library-automate',
+                disabled: !record.published,
+                title: record.published ? 'Run this agent on a schedule' : 'Publish it first: automations run the published agent.',
+                onSelect: () => requestLeave(() => openAutomationCreate({ agentId: record.id }))
+              },
               { label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(() => void duplicate()) },
               {
                 label: 'Export',

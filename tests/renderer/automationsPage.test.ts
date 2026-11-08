@@ -487,4 +487,35 @@ describe('the Automations page', () => {
     expect($$('[data-testid="automation-run-who"]').map((entry) => entry.textContent)).toEqual(['PR reviewer', 'PR reviewer'])
     expect($$('[data-testid="automation-run-changed"]')).toHaveLength(1)
   })
+
+  it('opens the create row prefilled from Automate… on a saved agent and on a workflow', async () => {
+    const { openAutomationCreate, useAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
+    openAutomationCreate({ agentId: 'agent-1' })
+    await mount([])
+    await act(async () => {})
+    expect($('[data-testid="automation-create"]')?.dataset.open).toBe('true')
+    expect($('[data-testid="automation-create-who"]')?.textContent).toBe('PR reviewer')
+    // The request is taken once: the page does not open it again later.
+    expect(useAutomationCreate.getState().request).toBeNull()
+
+    await act(async () => { openAutomationCreate({ workflowId: 'wf-1' }) })
+    await act(async () => {})
+    expect($('[data-testid="automation-do"]')?.textContent).toBe('/release-notes')
+    expect($('[data-testid="automation-create-who"]')).toBeNull()
+  })
+
+  it('opens the create row from Repeat this… with the prompt, the project and the thread\'s model', async () => {
+    const { openAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
+    const selection = { instanceId: providers[0]!.instanceId, llmProvider: providers[0]!.id, model: providers[0]!.models[0]!.id }
+    openAutomationCreate({ prompt: 'summarize yesterday\'s commits', projectId: 'p1', selection })
+    const mousse = await mount([])
+    await act(async () => {})
+    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
+    expect(input.value).toBe('summarize yesterday\'s commits')
+    expect($('[data-testid="automation-create-when"]')?.textContent).toBe('Choose when')
+    expect($('[data-testid="automation-create-who"]')?.textContent).not.toBe('Claude')
+    await type(input, 'every day at 7 summarize yesterday\'s commits')
+    await click($('[data-testid="automation-create-add"]'))
+    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'summarize yesterday\'s commits', projectId: 'p1', selection: expect.objectContaining({ model: selection.model }) }))
+  })
 })

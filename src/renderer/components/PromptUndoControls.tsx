@@ -177,6 +177,11 @@ export function PromptUndoNotice() {
     onResolved={() => { state.clearError(); changes.retry() }} onDismiss={state.clearError} />
 }
 
+/** The thread whose prompts the toolbar shows; null outside a thread's chat. */
+export function usePromptThreadId(): string | null {
+  return useContext(PromptUndoContext)?.threadId ?? null
+}
+
 /** This is the actual control in each prompt toolbar, not a parallel history action. */
 export function PromptUndoButton({ messageId }: { messageId: string }) {
   const state = useContext(PromptUndoContext)
