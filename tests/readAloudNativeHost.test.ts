@@ -244,6 +244,28 @@ describe('native read aloud slots in main', () => {
     expect(FakeProcess.all).toHaveLength(0)
   })
 
+  it.each([
+    ['reloads', (by: FakeOwner) => by.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })],
+    ['crashes', (by: FakeOwner) => by.emit('render-process-gone')]
+  ])('starts no host when the page %s while the download is being checked', async (_label, pageGoes) => {
+    let answer: ((downloaded: boolean) => void) | null = null
+    slots = new NativeTtsSlots({
+      fork: () => new FakeProcess(),
+      readFile,
+      // Only the first check waits for the test.
+      isDownloaded: () => (answer ? Promise.resolve(true) : new Promise<boolean>((resolve) => (answer = resolve)))
+    })
+    const opening = slots.open(owner, 'kokoro-82m')
+    pageGoes(owner)
+    answer!(true)
+    await expect(opening).rejects.toThrow('reloaded')
+    expect(FakeProcess.all).toHaveLength(0)
+    expect(slots.size).toBe(0)
+    // The new page in the same window opens normally.
+    expect((await openReady()).slotId).toBeGreaterThan(0)
+    expect(FakeProcess.all).toHaveLength(1)
+  })
+
   it('refuses a model that is not downloaded', async () => {
     downloaded = false
     await expect(slots.open(owner, 'kokoro-82m')).rejects.toThrow('not downloaded')

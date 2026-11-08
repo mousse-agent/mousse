@@ -75,6 +75,8 @@ export function nativeTtsHostScript(): string {
 export class NativeTtsSlots {
   private readonly slots = new Map<number, Slot>()
   private readonly watched = new Set<number>()
+  /** Bumped when an owner's page goes away (reload, crash), so opens started for that page give up. */
+  private readonly generations = new Map<number, number>()
   private nextSlotId = 1
   private nextRequestId = 1
 
@@ -84,10 +86,14 @@ export class NativeTtsSlots {
   async open(owner: NativeTtsOwner, modelId: unknown): Promise<number> {
     const model = typeof modelId === 'string' ? findLocalTtsModel(modelId) : undefined
     if (!model || model.runtime !== 'kokoro') throw new Error('This voice model has no native engine')
-    if (!(await this.options.isDownloaded(model.id))) throw new Error(`${model.label} is not downloaded. Download it under Settings, Speech.`)
     if (owner.isDestroyed()) throw new Error('The window is gone')
-    if (this.slotsOf(owner).length >= MAX_SLOTS_PER_OWNER) throw new Error('Too many voice engines are running')
+    // Watched before waiting, so a reload or crash during the wait is seen and no host is started
+    // for a page that is gone.
     this.watch(owner)
+    const generation = this.generationOf(owner)
+    if (!(await this.options.isDownloaded(model.id))) throw new Error(`${model.label} is not downloaded. Download it under Settings, Speech.`)
+    if (owner.isDestroyed() || this.generationOf(owner) !== generation) throw new Error('The window reloaded')
+    if (this.slotsOf(owner).length >= MAX_SLOTS_PER_OWNER) throw new Error('Too many voice engines are running')
 
     const process = this.options.fork()
     const slot: Slot = { id: this.nextSlotId++, owner, model, process, opening: null, pending: new Map() }
@@ -150,6 +156,16 @@ export class NativeTtsSlots {
     return slot
   }
 
+  private generationOf(owner: NativeTtsOwner): number {
+    return this.generations.get(owner.id) ?? 0
+  }
+
+  /** The owner's page went away: opens still waiting give up, and its slots are killed. */
+  private pageGone(owner: NativeTtsOwner): void {
+    this.generations.set(owner.id, this.generationOf(owner) + 1)
+    this.closeAll(owner)
+  }
+
   private slotsOf(owner: NativeTtsOwner): Slot[] {
     return [...this.slots.values()].filter((slot) => slot.owner.id === owner.id)
   }
@@ -160,11 +176,12 @@ export class NativeTtsSlots {
     this.watched.add(owner.id)
     owner.on('destroyed', () => {
       this.watched.delete(owner.id)
+      this.generations.delete(owner.id)
       this.closeAll(owner)
     })
-    owner.on('render-process-gone', () => this.closeAll(owner))
+    owner.on('render-process-gone', () => this.pageGone(owner))
     owner.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) this.closeAll(owner)
+      if (details.isMainFrame && !details.isSameDocument) this.pageGone(owner)
     })
   }
 
