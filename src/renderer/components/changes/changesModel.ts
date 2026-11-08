@@ -328,6 +328,54 @@ export function footerState(input: FooterInput): FooterState {
   return { kind: 'none' }
 }
 
+/**
+ * Whether the Include checkboxes show: while choosing, while anything is left out (or the index was prepared
+ * elsewhere), and never where Include is off.
+ */
+export function showIncludeChecks(input: { canInclude: boolean; choosing: boolean; selection: CommitSelection }): boolean {
+  return input.canInclude && (input.choosing || input.selection.kind !== 'all')
+}
+
+/**
+ * Whether a turn runs where the folder's Git writes would be refused (`thread_busy`): the thread's own worktree
+ * follows that thread; a project folder follows every thread working in it.
+ */
+export function folderTurnRunning(
+  scope: { projectId: string | null; workspaceThreadId: string | null },
+  threads: ReadonlyArray<{ id: string; projectId?: string | null; worktreeEnabled?: boolean }>,
+  phaseOf: (threadId: string) => string | undefined
+): boolean {
+  const running = (threadId: string) => {
+    const phase = phaseOf(threadId)
+    return phase !== undefined && phase !== 'idle'
+  }
+  if (scope.workspaceThreadId) return running(scope.workspaceThreadId)
+  if (!scope.projectId) return false
+  return threads.some((thread) => thread.projectId === scope.projectId && thread.worktreeEnabled === false && running(thread.id))
+}
+
+/** Space on a line selection: leave the lines out when every hunk they touch is fully included, else include them. */
+export function includeValueForLines(hunks: ReadonlyArray<{ id: string; included: 'yes' | 'no' | 'partial' }>, choices: ReadonlyArray<{ hunk: string }>): boolean {
+  const touched = hunks.filter((hunk) => choices.some((choice) => choice.hunk === hunk.id))
+  return !(touched.length > 0 && touched.every((hunk) => hunk.included === 'yes'))
+}
+
+/** The lines of a selection, per daemon hunk; hunks the selection does not touch are left out. */
+export function lineChoicesFor<T extends { id: string; lines: ReadonlyArray<{ kind: ' ' | '-' | '+'; oldNo?: number; newNo?: number }> }>(
+  hunks: readonly T[],
+  range: { side: 'additions' | 'deletions'; start: number; end: number }
+): Array<{ hunk: string; indexes: number[] }> {
+  return hunks.map((hunk) => ({ hunk: hunk.id, indexes: lineIndexesIn(hunk.lines, range) })).filter((choice) => choice.indexes.length > 0)
+}
+
+/** What a listed revert took, without the path the row already shows: "2 hunks", "1 line", "Whole file". */
+export function revertedWhat(entry: { path: string; oldPath?: string; summary: string }): string {
+  const name = entry.oldPath !== undefined ? `${entry.oldPath} → ${entry.path}` : entry.path
+  const suffix = ` of ${name}`
+  if (entry.summary.endsWith(suffix)) return entry.summary.slice(0, -suffix.length)
+  return entry.summary === name ? 'Whole file' : entry.summary
+}
+
 /** Revert is allowed only on the uncommitted diff, and on Last turn while it is identical to it. */
 export function revertAllowed(input: { scopeId: ChangesScopeId; showsUncommitted: boolean; turnRunning: boolean; apiAvailable: boolean }): boolean {
   if (!input.apiAvailable || input.turnRunning) return false

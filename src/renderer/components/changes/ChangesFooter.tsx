@@ -30,7 +30,7 @@ import {
   type GitActionRowModel
 } from '../sideCard/gitSectionLogic'
 import { MenuButton, type MenuItem } from './MenuButton'
-import { changesErrorText, type CommitSelectionField } from './changesApi'
+import { changesErrorCode, changesErrorText, type CommitSelectionField } from './changesApi'
 import { plural, type FooterState } from './changesModel'
 
 interface ChangesFooterProps {
@@ -49,8 +49,16 @@ interface ChangesFooterProps {
   onRetry: () => void
   /** The selection is really empty: the commit menu offers Include all. */
   onIncludeAll?: () => void
-  /** What Commit and Suggest send once the daemon reads selections: everything, or the chosen hunks with their token. */
+  /** What Commit and Suggest send: everything, or the chosen hunks with their token; unset where the scope is not the uncommitted diff. */
   commitSelection?: CommitSelectionField
+  /** The selection changed since it was read (`stale`, `nothing_selected`): the tab reads it again. */
+  onSelectionStale?: () => void
+}
+
+/** The selection moved on since the tab read it: nothing was committed, and the tab reads it again. */
+function selectionMoved(failure: unknown): boolean {
+  const code = changesErrorCode(failure)
+  return code === 'stale' || code === 'nothing_selected'
 }
 
 /** How long a notice stays: it can carry something to act on. */
@@ -61,7 +69,7 @@ const NOTICE_MS = 15_000
  * then Push, Create PR and the pull request's chip. Push is never implicit; Ctrl/Cmd+Enter commits only from the
  * message field.
  */
-export function ChangesFooter({ state, path, scope, commits, model, running, begin, end, onReviewUncommitted, onResolveConflicts, onRetry, onIncludeAll, commitSelection }: ChangesFooterProps) {
+export function ChangesFooter({ state, path, scope, commits, model, running, begin, end, onReviewUncommitted, onResolveConflicts, onRetry, onIncludeAll, commitSelection, onSelectionStale }: ChangesFooterProps) {
   const footerRef = useRef<HTMLDivElement>(null)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const [message, setMessage] = useState('')
@@ -105,6 +113,11 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
     } catch (suggestError) {
       if (suggestion.current !== request) return
       if (gitErrorCode(suggestError) === SUGGEST_NO_MODEL_CODE) setNoModel(true)
+      if (selectionMoved(suggestError)) {
+        // A suggestion is a read: the tab reads the selection again and the person asks again.
+        onSelectionStale?.()
+        return
+      }
       setError(changesErrorText(suggestError, gitErrorMessage))
     } finally {
       if (suggestion.current === request) {
@@ -143,6 +156,9 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
       } else if (commitError instanceof OpenPullRequestError) {
         setMessage('')
         setError(openPullRequestFailedMessage(commitError))
+      } else if (selectionMoved(commitError)) {
+        onSelectionStale?.()
+        setNotice(changesErrorText(commitError, gitErrorMessage))
       } else if (!isGitCancelled(commitError)) {
         setError(changesErrorText(commitError, gitErrorMessage))
       }
@@ -150,7 +166,7 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
       setPhase(null)
       end()
     }
-  }, [begin, end, message, model.createScope, path, scope, commitSelection])
+  }, [begin, end, message, model.createScope, path, scope, commitSelection, onSelectionStale])
 
   const push = async () => {
     if (!begin('push')) return

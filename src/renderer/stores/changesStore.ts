@@ -41,6 +41,9 @@ export interface FileView {
   expanded?: boolean
 }
 
+/** Ctrl/Cmd+Z reaches back this many reverts per folder; older ones stay in Restore reverted…. */
+export const REVERT_UNDO_LIMIT = 50
+
 /** At most this many viewed marks are kept; the oldest go first. */
 export const VIEWED_LIMIT = 3000
 
@@ -70,6 +73,10 @@ interface ChangesStoreState {
   markViewed: (key: string, version: string) => void
   clearViewed: (key: string) => void
   saveFileView: (key: string, view: FileView) => void
+  /** Reverts this session can undo, per folder key, oldest first; Ctrl/Cmd+Z takes the newest. Not saved. */
+  reverts: Record<string, string[]>
+  pushRevert: (folder: string, revertId: string) => void
+  dropRevert: (folder: string, revertId: string) => void
 }
 
 const emptyThread = (): ChangesThreadState => ({ chosen: null, scopeId: null, pinnedTurnId: null, lastOpenedAt: null, openPath: null })
@@ -162,7 +169,16 @@ export const useChangesStore = create<ChangesStoreState>()(
           const { [key]: _old, ...rest } = s.viewed
           return { viewed: rest }
         }),
-      saveFileView: (key, view) => set((s) => ({ fileViews: { ...s.fileViews, [key]: { ...s.fileViews[key], ...view } } }))
+      saveFileView: (key, view) => set((s) => ({ fileViews: { ...s.fileViews, [key]: { ...s.fileViews[key], ...view } } })),
+      reverts: {},
+      pushRevert: (folder, revertId) =>
+        set((s) => ({ reverts: { ...s.reverts, [folder]: [...(s.reverts[folder] ?? []).filter((id) => id !== revertId), revertId].slice(-REVERT_UNDO_LIMIT) } })),
+      dropRevert: (folder, revertId) =>
+        set((s) => {
+          const list = s.reverts[folder]
+          if (!list?.includes(revertId)) return s
+          return { reverts: { ...s.reverts, [folder]: list.filter((id) => id !== revertId) } }
+        })
     }),
     {
       name: 'mousse-changes-tab',

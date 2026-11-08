@@ -9,12 +9,15 @@ import {
   commentTarget,
   defaultScope,
   fileSignature,
+  folderTurnRunning,
   footerState,
   headerFit,
   hunkAnchor,
   hunkAtLine,
   hunksFromMetadata,
+  includeValueForLines,
   latestEndedTurn,
+  lineChoicesFor,
   lineIndexesIn,
   matchDaemonHunk,
   newerTurnNotice,
@@ -22,6 +25,7 @@ import {
   orderRows,
   parseScopeId,
   revertAllowed,
+  revertedWhat,
   reviewScopeFor,
   sameChanges,
   scopeEndpoints,
@@ -31,6 +35,7 @@ import {
   scopeTitle,
   selectionFromChanges,
   selectionFromStatus,
+  showIncludeChecks,
   statusWord,
   stepHunk,
   viewedKey,
@@ -469,5 +474,61 @@ describe('hunks', () => {
     ]
     expect(lineIndexesIn(daemonLines, { side: 'additions', start: 31, end: 30 })).toEqual([2, 3])
     expect(lineIndexesIn(daemonLines, { side: 'deletions', start: 30, end: 30 })).toEqual([1])
+  })
+})
+
+describe('choosing what to commit', () => {
+  it('shows the Include boxes while choosing or while anything is left out, never where Include is off', () => {
+    const all = { kind: 'all', total: 3 } as const
+    const some = { kind: 'some', included: 2, total: 3 } as const
+    expect(showIncludeChecks({ canInclude: true, choosing: false, selection: all })).toBe(false)
+    expect(showIncludeChecks({ canInclude: true, choosing: true, selection: all })).toBe(true)
+    // Esc leaves choosing, but a selection that leaves something out keeps its boxes.
+    expect(showIncludeChecks({ canInclude: true, choosing: false, selection: some })).toBe(true)
+    expect(showIncludeChecks({ canInclude: true, choosing: false, selection: { kind: 'none', total: 3 } })).toBe(true)
+    expect(showIncludeChecks({ canInclude: false, choosing: true, selection: some })).toBe(false)
+  })
+
+  it('reads Commit 2 of 3 once a file is left out, and Commit all when everything is back in', () => {
+    const file = (path: string, included: 'yes' | 'no' | 'partial') => ({ path, included }) as never
+    expect(commitLabel(selectionFromChanges({ selection: { state: 'chosen', token: 't' }, files: [file('a', 'yes'), file('b', 'partial'), file('c', 'no')] }))).toBe('Commit 2 of 3')
+    expect(commitLabel(selectionFromChanges({ selection: { state: 'chosen', token: 't' }, files: [file('a', 'yes'), file('b', 'yes')] }))).toBe('Commit all 2')
+  })
+
+  it('follows the turns that would make a write refuse with thread_busy', () => {
+    const threads = [
+      { id: 'own', projectId: 'p1', worktreeEnabled: true },
+      { id: 'here', projectId: 'p1', worktreeEnabled: false },
+      { id: 'elsewhere', projectId: 'p2', worktreeEnabled: false }
+    ]
+    const phases = (running: string[]) => (id: string) => (running.includes(id) ? 'running' : 'idle')
+    // A thread's worktree: only that thread.
+    expect(folderTurnRunning({ projectId: 'p1', workspaceThreadId: 'own' }, threads, phases(['here']))).toBe(false)
+    expect(folderTurnRunning({ projectId: 'p1', workspaceThreadId: 'own' }, threads, phases(['own']))).toBe(true)
+    // A project folder: any thread working in it, not one in its own worktree or another project.
+    expect(folderTurnRunning({ projectId: 'p1', workspaceThreadId: null }, threads, phases(['own', 'elsewhere']))).toBe(false)
+    expect(folderTurnRunning({ projectId: 'p1', workspaceThreadId: null }, threads, phases(['here']))).toBe(true)
+    expect(folderTurnRunning({ projectId: 'p1', workspaceThreadId: null }, threads, () => undefined)).toBe(false)
+  })
+
+  it('maps a line selection onto the daemon hunks it touches, and Space includes unless all of them are in', () => {
+    const hunks = [
+      { id: 'h1', included: 'yes' as const, lines: [{ kind: ' ' as const, oldNo: 1, newNo: 1 }, { kind: '-' as const, oldNo: 2 }, { kind: '+' as const, newNo: 2 }] },
+      { id: 'h2', included: 'no' as const, lines: [{ kind: '+' as const, newNo: 10 }, { kind: '+' as const, newNo: 11 }] }
+    ]
+    expect(lineChoicesFor(hunks, { side: 'additions', start: 2, end: 10 })).toEqual([{ hunk: 'h1', indexes: [2] }, { hunk: 'h2', indexes: [0] }])
+    expect(lineChoicesFor(hunks, { side: 'deletions', start: 2, end: 2 })).toEqual([{ hunk: 'h1', indexes: [1] }])
+    expect(lineChoicesFor(hunks, { side: 'additions', start: 20, end: 30 })).toEqual([])
+    expect(includeValueForLines(hunks, [{ hunk: 'h1' }])).toBe(false)
+    expect(includeValueForLines(hunks, [{ hunk: 'h1' }, { hunk: 'h2' }])).toBe(true)
+  })
+})
+
+describe('restore reverted', () => {
+  it("says what each revert took without repeating the row's path", () => {
+    expect(revertedWhat({ path: 'src/a.ts', summary: '2 hunks of src/a.ts' })).toBe('2 hunks')
+    expect(revertedWhat({ path: 'src/a.ts', summary: '1 line of src/a.ts' })).toBe('1 line')
+    expect(revertedWhat({ path: 'src/a.ts', summary: 'src/a.ts' })).toBe('Whole file')
+    expect(revertedWhat({ path: 'b.ts', oldPath: 'a.ts', summary: 'a.ts → b.ts' })).toBe('Whole file')
   })
 })

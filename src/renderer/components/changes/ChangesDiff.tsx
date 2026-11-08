@@ -24,6 +24,9 @@ export interface DiffTarget {
 /** What a hunk's hover bar can do here; Include and Revert only where the scope and the daemon allow. */
 export interface HunkActions {
   canRevert: boolean
+  /** Revert would be allowed here but is off for now (a turn runs, whitespace is ignored): the reason, shown on a disabled button. */
+  revertOff: string | null
+  /** The Include checkboxes show: every hunk carries one, not only the hovered or focused one. */
   canInclude: boolean
   /** The hunk's include state from the daemon, or null when it is not known. */
   includedOf: (hunk: HunkRange) => IncludeState | null
@@ -42,6 +45,7 @@ type Annotation =
   | { kind: 'comment'; reference: ChatReference }
   | { kind: 'form' }
   | { kind: 'hunk'; hunk: HunkRange }
+  | { kind: 'include'; hunk: HunkRange }
   | { kind: 'reveal' }
 
 export interface ChangesDiffProps {
@@ -258,9 +262,16 @@ export function ChangesDiff({
     }
     if (activeForm) list.push({ side: activeForm.range.side, lineNumber: activeForm.range.end, metadata: { kind: 'form' } })
     if (barHunk && !activeForm) list.push({ ...hunkAnchor(barHunk), metadata: { kind: 'hunk', hunk: barHunk } })
+    // While choosing, every other hunk shows its Include box too, so what is left out reads at a glance.
+    if (actions.canInclude) {
+      for (const hunk of hunks) {
+        if (hunk === barHunk && !activeForm) continue
+        list.push({ ...hunkAnchor(hunk), metadata: { kind: 'include', hunk } })
+      }
+    }
     if (reveal) list.push({ side: 'additions', lineNumber: reveal.line, metadata: { kind: 'reveal' } })
     return list
-  }, [fileComments, activeForm, barHunk, reveal])
+  }, [fileComments, activeForm, barHunk, reveal, actions.canInclude, hunks])
 
   const hunksRef = useRef(hunks)
   hunksRef.current = hunks
@@ -315,30 +326,43 @@ export function ChangesDiff({
         </div>
       )
     }
+    const includeBox = (hunk: HunkRange) => {
+      const included = actions.canInclude ? actions.includedOf(hunk) : null
+      if (included === null) return null
+      return (
+        <label className="changes-include" data-included={included} title="Include in the commit (Space)">
+          <input
+            type="checkbox"
+            checked={included === 'yes'}
+            ref={(element) => {
+              if (element) element.indeterminate = included === 'partial'
+            }}
+            onChange={(event) => actions.onInclude(hunk, event.target.checked)}
+          />
+          <span>{included === 'no' ? 'Left out' : 'Include'}</span>
+        </label>
+      )
+    }
+    if (data.kind === 'include') {
+      return <div className="changes-hunk-bar" data-quiet="true">{includeBox(data.hunk)}</div>
+    }
     if (data.kind === 'hunk') {
       const hunk = data.hunk
-      const included = actions.canInclude ? actions.includedOf(hunk) : null
       return (
         <div className="changes-hunk-bar" role="toolbar" aria-label="Hunk actions">
-          {included !== null && (
-            <label className="changes-include" title="Include in the commit (Space)">
-              <input
-                type="checkbox"
-                checked={included === 'yes'}
-                ref={(element) => {
-                  if (element) element.indeterminate = included === 'partial'
-                }}
-                onChange={(event) => actions.onInclude(hunk, event.target.checked)}
-              />
-              <span>Include</span>
-            </label>
-          )}
+          {includeBox(hunk)}
           <button type="button" className="changes-bar-btn" title="Comment (C)" onClick={() => commentOn(hunk)}>
             <MessageSquare size={13} strokeWidth={2} aria-hidden="true" />
             <span>Comment</span>
           </button>
-          {actions.canRevert && (
-            <button type="button" className="changes-bar-btn" title="Revert this hunk (X)" onClick={() => actions.onRevert(hunk)}>
+          {(actions.canRevert || actions.revertOff) && (
+            <button
+              type="button"
+              className="changes-bar-btn"
+              title={actions.revertOff ?? 'Revert this hunk (X)'}
+              disabled={!actions.canRevert}
+              onClick={() => actions.onRevert(hunk)}
+            >
               <Undo2 size={13} strokeWidth={2} aria-hidden="true" />
               <span>Revert</span>
             </button>

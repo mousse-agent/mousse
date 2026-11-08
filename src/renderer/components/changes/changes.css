@@ -474,6 +474,32 @@
   accent-color: var(--accent);
 }
 
+/* A hunk's own Include box while choosing: quieter than the hovered hunk's bar. */
+.changes-hunk-bar[data-quiet] {
+  background: transparent;
+  padding-block: 1px;
+}
+
+.changes-include[data-included='no'] {
+  color: var(--ui-faint);
+}
+
+.changes-bar-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.changes-bar-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+/* A file being reverted: dimmed in place until Git answers, so no row moves under the pointer. */
+.changes-card[data-pending] > .changes-row {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .changes-comment {
   display: flex;
   align-items: flex-start;
@@ -847,4 +873,15 @@
   align-items: center;
   gap: 8px;
   min-height: 30px;
+}
+
+.changes-restore-what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.changes-restore-what .changes-faint {
+  font-size: 11px;
 }

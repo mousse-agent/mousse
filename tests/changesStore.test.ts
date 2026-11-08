@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import { capViewed, useChangesStore } from '../src/renderer/stores/changesStore'
+import { capViewed, REVERT_UNDO_LIMIT, useChangesStore } from '../src/renderer/stores/changesStore'
 
 describe('changes store', () => {
   beforeEach(() => {
-    useChangesStore.setState({ byThread: {}, viewed: {}, fileViews: {} })
+    useChangesStore.setState({ byThread: {}, viewed: {}, fileViews: {}, reverts: {} })
   })
 
   it('asks for a turn for one thread without touching another', () => {
@@ -55,6 +55,26 @@ describe('changes store', () => {
     expect(capViewed({ a: '1', b: '2', c: '3' }, 2)).toEqual({ b: '2', c: '3' })
     const small = { a: '1' }
     expect(capViewed(small, 2)).toBe(small)
+  })
+
+  it('keeps the reverts Ctrl/Cmd+Z can undo per folder, newest last, for this session only', () => {
+    const store = useChangesStore.getState()
+    store.pushRevert('project:p1', 'r1')
+    store.pushRevert('project:p1', 'r2')
+    store.pushRevert('thread:t1', 'r3')
+    expect(useChangesStore.getState().reverts).toEqual({ 'project:p1': ['r1', 'r2'], 'thread:t1': ['r3'] })
+    // Restored from the list or the toast: gone from the undo stack too.
+    store.dropRevert('project:p1', 'r2')
+    expect(useChangesStore.getState().reverts['project:p1']).toEqual(['r1'])
+    const before = useChangesStore.getState()
+    store.dropRevert('project:p1', 'missing')
+    expect(useChangesStore.getState()).toBe(before)
+    for (let index = 0; index < REVERT_UNDO_LIMIT + 5; index++) store.pushRevert('thread:t2', `x${index}`)
+    expect(useChangesStore.getState().reverts['thread:t2']).toHaveLength(REVERT_UNDO_LIMIT)
+    expect(useChangesStore.getState().reverts['thread:t2'].at(-1)).toBe(`x${REVERT_UNDO_LIMIT + 4}`)
+    // Never written to disk: a restart starts with an empty stack.
+    const saved = useChangesStore.persist.getOptions().partialize!(useChangesStore.getState()) as Record<string, unknown>
+    expect(saved).not.toHaveProperty('reverts')
   })
 
   it("merges a file's scroll and expanded context", () => {

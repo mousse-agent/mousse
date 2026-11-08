@@ -1,62 +1,35 @@
 // The one place the Changes tab reaches the daemon's selection, undo and revert methods (`git.changes`,
 // `git.include`, `git.undoLastCommit`, `git.revert`, `git.restoreReverted`, `git.revertedList` and the
-// `git.selectionChanged` event; see docs/plans/changes-tab.md). They ship in their own PRs; until the preload
-// exposes them, the feature checks below are false and the tab hides Include, Revert, Undo last commit and the
-// selection UI, and reads the uncommitted diff through `review.file` instead.
-import type { GitScope } from '../../../shared/types'
+// `git.selectionChanged` event; see docs/plans/changes-tab.md). Like the other Git calls they name their folder by
+// `GitScope`; the main process turns it into the daemon's `{ threadId? | projectId? }`. The app refuses a local
+// service without these methods (`GUI_REQUIRED_METHODS`); an older computer over Bridge answers with an error code.
+import type {
+  GitChangedFile,
+  GitChangeHunk,
+  GitChangeLine,
+  GitChangesResult,
+  GitCommitSelection,
+  GitIncluded,
+  GitIncludeRequest,
+  GitRestoreRevertedResult,
+  GitRevertedItem,
+  GitRevertRequest,
+  GitRevertResult,
+  GitScope,
+  GitSelectionState
+} from '../../../shared/types'
 
-export type IncludeState = 'yes' | 'no' | 'partial'
-
-export interface ChangeLine {
-  kind: ' ' | '-' | '+'
-  text: string
-  oldNo?: number
-  newNo?: number
-}
-
-export interface ChangeHunk {
-  /** Hash of oldStart and the hunk's lines; unique within the file. */
-  id: string
-  oldStart: number
-  oldLines: number
-  newStart: number
-  newLines: number
-  lines: ChangeLine[]
-  included: IncludeState
-}
-
-export interface ChangedFile {
-  /** A rename is one entry covering both paths. */
-  path: string
-  oldPath?: string
-  change: 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict'
-  kind: 'file' | 'symlink' | 'submodule'
-  binary: boolean
-  /** Mode-only changes have no hunks. */
-  mode?: { old: string; new: string }
-  /** Include and Revert take the whole file only (binary, symlink, rename, conflict, filters, a diverged selection…). */
-  wholeFileOnly: boolean
-  /** The selection holds content that is not HEAD plus some of these hunks. */
-  indexDiverged: boolean
-  tooLarge: boolean
-  /** Checked by every write: HEAD, paths, modes, index stages, working-tree digest and the selection token. */
-  version: string
-  hunks: ChangeHunk[]
-  included: IncludeState
-}
-
-export interface SelectionState {
-  /** `untouched`: nothing chosen yet (index equal to HEAD in a project folder, no overlay in a thread). */
-  state: 'untouched' | 'chosen'
-  token: string
-}
-
-export interface ChangesResult {
-  files: ChangedFile[]
-  selection: SelectionState
-  /** The file count went over the limit; a single large file says `tooLarge`. */
-  truncated: boolean
-}
+export type IncludeState = GitIncluded
+export type ChangeLine = GitChangeLine
+export type ChangeHunk = GitChangeHunk
+export type ChangedFile = GitChangedFile
+export type SelectionState = GitSelectionState
+export type ChangesResult = GitChangesResult
+export type RevertResult = GitRevertResult
+export type RestoreResult = GitRestoreRevertedResult
+export type RevertedEntry = GitRevertedItem
+/** What `git.commit` and `git.suggestCommitMessage` take as `selection`. */
+export type CommitSelectionField = GitCommitSelection
 
 export interface LineChoice {
   /** Hunk id; `indexes` point into `hunk.lines`. */
@@ -64,43 +37,14 @@ export interface LineChoice {
   indexes: number[]
 }
 
-export type IncludeInput =
-  | { path: string; version: string; include: boolean; hunks?: string[]; lines?: LineChoice[] }
-  | { all: true; include: boolean }
+/** Which hunks or lines of a file; neither means the whole file. */
+export type FileChoice = Pick<GitIncludeRequest, 'hunks' | 'lines'>
 
-export type IncludeResult =
-  | { path: string; version: string; included: IncludeState; selection: SelectionState }
-  | { selection: SelectionState }
-
-export interface RevertInput {
-  path: string
-  version: string
-  hunks?: string[]
-  lines?: LineChoice[]
+/** Who `git.selectionChanged` is about: a thread's worktree (`threadId` alone) or a project's folder (`projectId`). */
+export interface SelectionChangedEvent {
+  threadId?: string
+  projectId?: string
 }
-
-export interface RevertResult {
-  revertId: string
-  keptUntil: number
-  path: string
-  version: string
-}
-
-export type RestoreResult =
-  | { restored: true }
-  | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }
-
-export interface RevertedEntry {
-  revertId: string
-  path: string
-  oldPath?: string
-  at: number
-  keptUntil: number
-  summary: string
-}
-
-/** What `git.commit` and `git.suggestCommitMessage` take as `selection`. */
-export type CommitSelectionField = { mode: 'all' } | { mode: 'chosen'; token: string }
 
 /** The errors these methods reject with, besides today's Git errors. */
 export type ChangesErrorCode =
@@ -117,60 +61,30 @@ export type ChangesErrorCode =
   | 'computerOutdated'
   | 'remote_offline'
 
-/** Which folder a call is about: the thread whose own worktree it is, else the project. */
-export type ChangesTarget = { threadId: string } | { projectId: string }
-
-export function changesTarget(scope: GitScope): ChangesTarget | null {
-  if (scope.workspaceThreadId) return { threadId: scope.workspaceThreadId }
-  return scope.projectId ? { projectId: scope.projectId } : null
-}
-
-interface ChangesBridge {
-  changes: (params: ChangesTarget & { paths?: string[] }) => Promise<ChangesResult>
-  include: (params: ChangesTarget & IncludeInput) => Promise<IncludeResult>
-  undoLastCommit: (params: { projectId: string; expectedHead: string }) => Promise<unknown>
-  revert: (params: ChangesTarget & RevertInput) => Promise<RevertResult>
-  restoreReverted: (params: ChangesTarget & { revertId: string }) => Promise<RestoreResult>
-  revertedList: (params: ChangesTarget) => Promise<RevertedEntry[]>
-  onSelectionChanged: (cb: (event: Partial<ChangesTarget>) => void) => () => void
-}
-
-function bridge(): Partial<ChangesBridge> | undefined {
-  if (typeof window === 'undefined') return undefined
-  return (window as unknown as { mousse?: { git?: Partial<ChangesBridge> } }).mousse?.git
-}
-
-function method<K extends keyof ChangesBridge>(name: K): ChangesBridge[K] {
-  const fn = bridge()?.[name]
-  if (typeof fn !== 'function') throw Object.assign(new Error('Not available in this version'), { code: 'unavailable' })
-  return fn as ChangesBridge[K]
-}
-
-const has = (name: keyof ChangesBridge) => typeof bridge()?.[name] === 'function'
-
-/** True once the preload exposes the hunk reads and the selection (A1). */
-export function changesApiAvailable(): boolean {
-  return has('changes') && has('include')
-}
-
-/** True once Revert and its restore are exposed (A2). Revert ships only with restore. */
-export function revertAvailable(): boolean {
-  return has('revert') && has('restoreReverted') && has('revertedList')
-}
-
-export function undoLastCommitAvailable(): boolean {
-  return has('undoLastCommit')
-}
-
 export const changesApi = {
-  changes: (target: ChangesTarget, paths?: string[]) => method('changes')({ ...target, ...(paths ? { paths } : {}) }),
-  include: (target: ChangesTarget, input: IncludeInput) => method('include')({ ...target, ...input }),
-  undoLastCommit: (projectId: string, expectedHead: string) => method('undoLastCommit')({ projectId, expectedHead }),
-  revert: (target: ChangesTarget, input: RevertInput) => method('revert')({ ...target, ...input }),
-  restoreReverted: (target: ChangesTarget, revertId: string) => method('restoreReverted')({ ...target, revertId }),
-  revertedList: (target: ChangesTarget) => method('revertedList')(target),
-  /** Another view changed the selection; nothing to unsubscribe when the event is not exposed. */
-  onSelectionChanged: (cb: (event: Partial<ChangesTarget>) => void): (() => void) => (has('onSelectionChanged') ? method('onSelectionChanged')(cb) : () => undefined)
+  /** HEAD → working tree as hunks, and what the next commit takes; `paths` re-reads just those. */
+  changes: (scope: GitScope, paths?: string[]): Promise<ChangesResult> => window.mousse.git.changes(scope, paths ? { paths } : undefined),
+  include: (scope: GitScope, file: Pick<ChangedFile, 'path' | 'version'>, include: boolean, choice: FileChoice = {}) =>
+    window.mousse.git.include(scope, { path: file.path, version: file.version, include, ...choice }),
+  includeAll: async (scope: GitScope, include: boolean): Promise<SelectionState> => {
+    const result = await window.mousse.git.include(scope, { all: true, include })
+    return result.selection
+  },
+  undoLastCommit: (scope: GitScope, expectedHead: string) => window.mousse.git.undoLastCommit(scope, expectedHead),
+  revert: (scope: GitScope, file: Pick<ChangedFile, 'path' | 'version'>, choice: FileChoice = {}): Promise<RevertResult> =>
+    window.mousse.git.revert(scope, { path: file.path, version: file.version, ...choice } satisfies GitRevertRequest),
+  restoreReverted: (scope: GitScope, revertId: string): Promise<RestoreResult> => window.mousse.git.restoreReverted(scope, revertId),
+  revertedList: (scope: GitScope): Promise<RevertedEntry[]> => window.mousse.git.revertedList(scope),
+  onSelectionChanged: (cb: (event: SelectionChangedEvent) => void): (() => void) => window.mousse.git.onSelectionChanged(cb)
+}
+
+/**
+ * Whether a `git.selectionChanged` event is about the folder the tab shows. A thread's worktree is named by its
+ * thread alone; a project folder by its project (a thread working there may be named too).
+ */
+export function selectionEventMatches(scope: GitScope, event: SelectionChangedEvent): boolean {
+  if (scope.workspaceThreadId) return event.threadId === scope.workspaceThreadId && !event.projectId
+  return scope.projectId !== null && event.projectId === scope.projectId
 }
 
 /** The `selection` a commit or a suggestion sends: exactly the chosen hunks, or everything. */
@@ -194,10 +108,52 @@ export function changesErrorText(error: unknown, fallback: (error: unknown) => s
     case 'nothing_selected':
       return 'Include something to commit'
     case 'stale':
-      return 'Changed meanwhile; showing it again'
+      return 'Changed meanwhile · try again'
     case 'computerOutdated':
       return 'Update Mousse on that computer to commit a selection'
+    case 'git_undo_in_thread':
+      return 'Use Undo in the chat'
+    case 'git_undo_root':
+      return "The first commit can't be undone"
+    case 'git_undo_merge':
+      return "A merge commit can't be undone here"
     default:
       return fallback(error)
   }
+}
+
+/** A daemon file with a choice applied at once, so the checkboxes and the footer move on the next frame. */
+export function withInclude(file: ChangedFile, include: boolean, choice: FileChoice = {}): ChangedFile {
+  const whole = !choice.hunks?.length && !choice.lines?.length
+  const value: IncludeState = include ? 'yes' : 'no'
+  const hunks = file.hunks.map((hunk) => {
+    if (whole || choice.hunks?.includes(hunk.id)) return { ...hunk, included: value }
+    if (choice.lines?.some((line) => line.hunk === hunk.id && line.indexes.length > 0)) return hunk.included === value ? hunk : { ...hunk, included: 'partial' as const }
+    return hunk
+  })
+  return { ...file, hunks, included: whole ? value : fileIncluded(hunks, file.included) }
+}
+
+/** A file's state from its hunks; a file without hunks keeps what it had. */
+export function fileIncluded(hunks: readonly ChangeHunk[], fallback: IncludeState): IncludeState {
+  if (hunks.length === 0) return fallback
+  if (hunks.every((hunk) => hunk.included === 'yes')) return 'yes'
+  if (hunks.every((hunk) => hunk.included === 'no')) return 'no'
+  return 'partial'
+}
+
+/** Fresh files for some paths put in place of the old ones, in the same order; paths no longer changed drop out. */
+export function mergeFiles(current: readonly ChangedFile[], paths: readonly string[], fresh: readonly ChangedFile[]): ChangedFile[] {
+  const asked = new Set(paths)
+  const byPath = new Map(fresh.map((file) => [file.path, file]))
+  const merged: ChangedFile[] = []
+  for (const file of current) {
+    // A rename read under its new path takes its old entry's place.
+    const replacement = byPath.get(file.path) ?? [...byPath.values()].find((item) => item.oldPath === file.path)
+    if (replacement) {
+      merged.push(replacement)
+      byPath.delete(replacement.path)
+    } else if (!asked.has(file.path) && !(file.oldPath && asked.has(file.oldPath))) merged.push(file)
+  }
+  return [...merged, ...byPath.values()]
 }

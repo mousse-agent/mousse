@@ -11,7 +11,7 @@ import { offlineLabel, refreshComputers, threadComputerState, UNKNOWN_COMPUTER_N
 import { openFileInPanel } from '../../utils/chatLinks'
 import { DelayedLoader } from '../ui/DelayedLoader'
 import { Modal } from '../ui/Modal'
-import { showToast } from '../ui/Toast'
+import { dismissToastByKey, showToast } from '../ui/Toast'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { runSync, whileFolder, type SyncRequest } from '../git/gitSyncActions'
 import { IDLE_SYNC_ACTIVITY, syncLabel, syncState, type SyncActivity } from '../git/gitSyncLogic'
@@ -21,16 +21,15 @@ import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type 
 import { turnChoices, type TurnChoice } from '../review/reviewModel'
 import {
   changesApi,
-  changesApiAvailable,
   changesErrorCode,
   changesErrorText,
-  changesTarget,
   commitSelectionFor,
-  revertAvailable,
-  undoLastCommitAvailable,
+  mergeFiles,
+  selectionEventMatches,
+  withInclude,
   type ChangedFile,
   type ChangesResult,
-  type LineChoice,
+  type FileChoice,
   type RevertedEntry,
   type SelectionState
 } from './changesApi'
@@ -38,10 +37,12 @@ import {
   changesKeyAction,
   defaultScope,
   fileSignature,
+  folderTurnRunning,
   footerState,
+  includeValueForLines,
   KEY_HELP,
   latestEndedTurn,
-  lineIndexesIn,
+  lineChoicesFor,
   matchDaemonHunk,
   newerTurnNotice,
   nextUnviewed,
@@ -49,6 +50,7 @@ import {
   parseScopeId,
   plural,
   revertAllowed,
+  revertedWhat,
   reviewScopeFor,
   sameChanges,
   scopeEndpoints,
@@ -57,6 +59,7 @@ import {
   scopeTitle,
   selectionFromChanges,
   selectionFromStatus,
+  showIncludeChecks,
   SPLIT_MIN_WIDTH,
   statusWord,
   stepHunk,
@@ -76,6 +79,12 @@ import './changes.css'
 
 const NO_REFERENCES: ChatReference[] = []
 const NO_COUNTS: ReadonlyMap<string, number> = new Map()
+const NO_REVERTS: string[] = []
+/** Each revert's toast is keyed by this and its id, so Undo from anywhere closes it. */
+const REVERT_TOAST = 'changes-revert'
+
+/** What happened to an entry of Restore reverted…. */
+type RestoreOutcome = 'pending' | 'changed' | 'expired'
 
 interface Row extends ReviewFileEntry {
   conflict: boolean
@@ -137,7 +146,9 @@ export function ChangesPanel() {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [rootRef, width] = useWidth()
   const turnRunning = phase !== undefined && phase !== 'idle'
-  const apiReady = changesApiAvailable()
+  // Git writes are refused (`thread_busy`) while a turn runs where they would land: this worktree, or any thread in the project folder.
+  const folderBusy = useAppStore((s) => folderTurnRunning(gitScope, s.threads, (id) => s.turnStates[id]?.phase))
+  const reverts = useChangesStore((s) => (folderId ? s.reverts[folderId] ?? NO_REVERTS : NO_REVERTS))
 
   const [availability, setAvailability] = useState<{ threadId: string; value: WorkspaceAvailability } | null>(null)
   const [choices, setChoices] = useState<{ threadId: string; list: TurnChoice[] } | null>(null)
@@ -155,9 +166,12 @@ export function ChangesPanel() {
   const [jumpOpen, setJumpOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [reverted, setReverted] = useState<RevertedEntry[] | null>(null)
+  const [restoreOutcomes, setRestoreOutcomes] = useState<Record<string, RestoreOutcome>>({})
+  const [reverting, setReverting] = useState<string | null>(null)
   const [activity, setActivity] = useState<SyncActivity>(IDLE_SYNC_ACTIVITY)
   const [message, setMessage] = useState<{ text: string; tone: 'error' | 'notice' } | null>(null)
-  const undoStack = useRef<string[]>([])
+  /** Bumped by every selection write, so a read that started before it never overwrites what the write shows. */
+  const apiSeq = useRef(0)
   const selectionRef = useRef<LineRange | null>(null)
   const folderRef = useRef(folderId)
   folderRef.current = folderId
@@ -270,17 +284,22 @@ export function ChangesPanel() {
   }, [targetJson, showsWorktree, uncommitted, isRepo, uncommittedKey])
 
   const apiKey = `${folderId ?? ''}\0${gitScope.projectId ?? ''}\0${gitScope.workspaceThreadId ?? ''}`
-  const apiTarget = useMemo(() => changesTarget(gitScope), [gitScope])
+  const hasFolder = gitScope.projectId !== null || gitScope.workspaceThreadId !== null
   const loadApi = useCallback(async () => {
-    if (!apiReady || !apiTarget || !folderId || !isRepo || uncommitted === 0) return
+    if (!hasFolder || !folderId || !isRepo || uncommitted === 0) return
+    const seq = ++apiSeq.current
     try {
-      setApiResult({ key: apiKey, result: await changesApi.changes(apiTarget) })
-    } catch (error) {
-      setMessage({ text: changesErrorText(error, gitErrorMessage), tone: 'error' })
+      const result = await changesApi.changes(gitScope)
+      if (seq === apiSeq.current) setApiResult({ key: apiKey, result })
+    } catch {
+      // Without hunks (an older computer, a read that failed) the tab still shows the diff; Include and Revert stay off.
+      if (seq === apiSeq.current) setApiResult((current) => (current?.key === apiKey ? null : current))
     }
-  }, [apiReady, apiTarget, folderId, isRepo, uncommitted, apiKey])
-  // Another window, computer or view changed the selection.
-  useEffect(() => (apiReady ? changesApi.onSelectionChanged(() => void loadApi()) : undefined), [apiReady, loadApi])
+  }, [hasFolder, gitScope, folderId, isRepo, uncommitted, apiKey])
+  // Another window, computer or view changed the selection of this folder.
+  useEffect(() => changesApi.onSelectionChanged((event) => {
+    if (selectionEventMatches(gitScope, event)) void loadApi()
+  }), [gitScope, loadApi])
 
   // Every status change (a commit, a stage, files written by a turn) re-reads what is shown, in place.
   useEffect(() => {
@@ -303,7 +322,6 @@ export function ChangesPanel() {
     setActivity(IDLE_SYNC_ACTIVITY)
     setMessage(null)
     setChoosing(false)
-    undoStack.current = []
   }, [folderId])
 
   const result = list?.key === listKey ? list.result : null
@@ -373,9 +391,12 @@ export function ChangesPanel() {
     pullRequest: prRow?.kind === 'found' ? { number: prRow.value, checks: prRow.checks } : null
   })
   // Hunks are computed with whitespace changes, so Include and Revert wait while the tab ignores whitespace.
-  const canRevert = revertAllowed({ scopeId, showsUncommitted, turnRunning, apiAvailable: apiReady && revertAvailable() && !ignoreWhitespace })
-  const canInclude = apiReady && showsUncommitted && !turnRunning && !ignoreWhitespace
-  const showChecks = canInclude && (choosing || api?.selection.state === 'chosen' || (!inThread && counts.stagedCount > 0 && counts.stagedCount < counts.changedCount))
+  const revertScope = revertAllowed({ scopeId, showsUncommitted, turnRunning: false, apiAvailable: api !== null })
+  const canRevert = revertScope && !folderBusy && !ignoreWhitespace
+  const canInclude = api !== null && showsUncommitted && !folderBusy && !ignoreWhitespace
+  /** Why Include and Revert are off where the scope would allow them; a tooltip says it. */
+  const offReason = folderBusy ? 'Off while a turn runs' : ignoreWhitespace ? 'Off while ignoring whitespace' : null
+  const showChecks = showIncludeChecks({ canInclude, choosing, selection })
 
   // ---- Actions
   const refreshAll = useCallback(() => {
@@ -428,93 +449,116 @@ export function ChangesPanel() {
     openFileInPanel({ path: joinReviewPath(result.root, path), ...(threadId ? { threadId } : {}) })
   }, [result, threadId])
 
-  const replaceApiFile = useCallback((file: ChangedFile) => {
-    setApiResult((current) => (current ? { ...current, result: { ...current.result, files: current.result.files.map((item) => (item.path === file.path ? file : item)) } } : current))
-  }, [])
+  /** A write the daemon refused: `stale` re-reads quietly, the rest say why in a few words and re-read too. */
+  const writeFailed = useCallback((writeError: unknown) => {
+    const code = changesErrorCode(writeError)
+    if (code !== 'stale') setMessage({ text: changesErrorText(writeError, gitErrorMessage), tone: code === 'thread_busy' ? 'notice' : 'error' })
+    void loadApi()
+  }, [loadApi])
 
-  /** Re-reads the given paths after a write and keeps the rest; the daemon's write results stay small for Bridge. */
-  const refreshPaths = useCallback(async (paths: string[], selection?: SelectionState) => {
-    if (!apiTarget) return
+  /** Re-reads the given paths after a write and keeps the rest in place; the daemon's write results stay small for Bridge. */
+  const refreshPaths = useCallback(async (paths: string[], selection: SelectionState) => {
+    const seq = ++apiSeq.current
     try {
-      const fresh = await changesApi.changes(apiTarget, paths)
+      const fresh = await changesApi.changes(gitScope, paths)
+      if (seq !== apiSeq.current) return
       setApiResult((current) => {
         if (!current || current.key !== apiKey) return current
-        const others = current.result.files.filter((file) => !paths.includes(file.path))
-        return { ...current, result: { ...current.result, selection: selection ?? fresh.selection, files: [...others, ...fresh.files] } }
+        return { ...current, result: { ...current.result, selection, files: mergeFiles(current.result.files, paths, fresh.files) } }
       })
     } catch {
       void loadApi()
     }
-  }, [apiTarget, apiKey, loadApi])
+  }, [gitScope, apiKey, loadApi])
 
-  const include = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: LineChoice[]; include: boolean }) => {
-    if (!apiTarget) return
-    // The screen moves on the next frame; Git confirms in the background.
-    const whole = !input.hunks && !input.lines
-    replaceApiFile({
-      ...file,
-      included: whole ? (input.include ? 'yes' : 'no') : 'partial',
-      hunks: file.hunks.map((hunk) => (whole || input.hunks?.includes(hunk.id) ? { ...hunk, included: input.include ? 'yes' : 'no' } : input.lines?.some((line) => line.hunk === hunk.id) ? { ...hunk, included: 'partial' } : hunk))
-    })
+  /** Applies a change to the shown files at once (the next frame), before Git confirms it. */
+  const showAtOnce = useCallback((change: (result: ChangesResult) => ChangesResult) => {
+    apiSeq.current++
+    setApiResult((current) => (current && current.key === apiKey ? { ...current, result: change(current.result) } : current))
+  }, [apiKey])
+
+  const include = useCallback(async (file: ChangedFile, value: boolean, choice: FileChoice = {}) => {
+    const before = api?.selection.state
+    setChoosing(true)
+    showAtOnce((current) => ({
+      ...current,
+      selection: { ...current.selection, state: 'chosen' },
+      files: current.files.map((item) => (item.path === file.path ? withInclude(item, value, choice) : item))
+    }))
     try {
-      const outcome = await changesApi.include(apiTarget, { path: file.path, version: file.version, ...input })
-      await refreshPaths([file.path, ...(file.oldPath ? [file.oldPath] : [])], outcome.selection)
+      const outcome = await changesApi.include(gitScope, file, value, choice)
+      // The first choice changes every file's version (everything gets staged first in a project folder): read them all.
+      if (before !== outcome.selection.state) void loadApi()
+      else await refreshPaths([file.path, ...(file.oldPath ? [file.oldPath] : [])], outcome.selection)
     } catch (includeError) {
-      setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: changesErrorCode(includeError) === 'stale' ? 'notice' : 'error' })
-      void loadApi()
+      writeFailed(includeError)
     }
-  }, [apiTarget, replaceApiFile, refreshPaths, loadApi])
+  }, [api, gitScope, showAtOnce, loadApi, refreshPaths, writeFailed])
 
   const includeAll = useCallback(async (value: boolean) => {
-    if (!apiTarget) return
+    setChoosing(true)
+    showAtOnce((current) => ({ ...current, selection: { ...current.selection, state: 'chosen' }, files: current.files.map((item) => withInclude(item, value)) }))
     try {
-      await changesApi.include(apiTarget, { all: true, include: value })
-      void loadApi()
+      await changesApi.includeAll(gitScope, value)
     } catch (includeError) {
-      setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: 'error' })
+      if (changesErrorCode(includeError) !== 'stale') setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: 'error' })
     }
-  }, [apiTarget, loadApi])
+    void loadApi()
+  }, [gitScope, showAtOnce, loadApi])
 
-  const restore = useCallback(async (revertId: string) => {
-    if (!apiTarget) return
+  /** Puts a revert back. Reports what happened so Restore reverted… can say it on the entry. */
+  const restore = useCallback(async (revertId: string): Promise<RestoreOutcome | 'restored' | 'failed'> => {
     try {
-      const outcome = await changesApi.restoreReverted(apiTarget, revertId)
+      const outcome = await changesApi.restoreReverted(gitScope, revertId)
+      if (folderId) useChangesStore.getState().dropRevert(folderId, revertId)
+      dismissToastByKey(`${REVERT_TOAST}:${revertId}`)
       if (outcome.restored) {
-        undoStack.current = undoStack.current.filter((id) => id !== revertId)
         refreshAll()
-      } else {
-        setMessage({ text: outcome.reason === 'expired' ? 'The kept copy is gone' : 'Changed since the revert; nothing restored', tone: 'error' })
+        return 'restored'
       }
+      return outcome.reason
     } catch (restoreError) {
-      setMessage({ text: changesErrorText(restoreError, gitErrorMessage), tone: 'error' })
+      setMessage({ text: changesErrorText(restoreError, gitErrorMessage), tone: changesErrorCode(restoreError) === 'thread_busy' ? 'notice' : 'error' })
+      return 'failed'
     }
-  }, [apiTarget, refreshAll])
+  }, [gitScope, folderId, refreshAll])
 
-  const revert = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: LineChoice[] } = {}) => {
-    if (!apiTarget) return
+  /** Undo of the toast and Ctrl/Cmd+Z: a revert that can't come back says why. */
+  const undoRevert = useCallback(async (revertId: string) => {
+    const outcome = await restore(revertId)
+    if (outcome === 'changed') setMessage({ text: 'Changed since the revert · nothing restored', tone: 'notice' })
+    else if (outcome === 'expired') setMessage({ text: 'The kept copy is gone', tone: 'notice' })
+  }, [restore])
+
+  const revert = useCallback(async (file: ChangedFile, choice: FileChoice = {}) => {
+    setReverting(file.path)
+    apiSeq.current++
     try {
-      const outcome = await changesApi.revert(apiTarget, { path: file.path, version: file.version, ...input })
-      undoStack.current.push(outcome.revertId)
-      showToast({ message: 'Reverted', action: { label: 'Undo', run: () => void restore(outcome.revertId) }, key: `revert:${outcome.revertId}` })
+      const outcome = await changesApi.revert(gitScope, file, choice)
+      if (folderId) useChangesStore.getState().pushRevert(folderId, outcome.revertId)
+      showToast({ message: 'Reverted', action: { label: 'Undo', run: () => void undoRevert(outcome.revertId) }, key: `${REVERT_TOAST}:${outcome.revertId}` })
+      if (outcome.left) setMessage({ text: outcome.left, tone: 'notice' })
       refreshAll()
     } catch (revertError) {
-      setMessage({ text: changesErrorText(revertError, gitErrorMessage), tone: changesErrorCode(revertError) === 'stale' ? 'notice' : 'error' })
-      void loadApi()
+      writeFailed(revertError)
+    } finally {
+      setReverting(null)
     }
-  }, [apiTarget, restore, refreshAll, loadApi])
+  }, [gitScope, folderId, undoRevert, refreshAll, writeFailed])
 
   const undoLastCommit = useCallback(async () => {
     const head = git.commits[0]
-    if (!projectId || !head || !begin('commit')) return
+    if (!head || !begin('commit')) return
     try {
-      await changesApi.undoLastCommit(projectId, head.hash)
+      await changesApi.undoLastCommit(gitScope, head.hash)
+      showToast({ message: 'Last commit undone', key: 'changes-undo-commit' })
       refreshAll()
     } catch (undoError) {
-      setMessage({ text: changesErrorText(undoError, gitErrorMessage), tone: 'error' })
+      writeFailed(undoError)
     } finally {
       end()
     }
-  }, [git.commits, projectId, begin, end, refreshAll])
+  }, [git.commits, gitScope, begin, end, refreshAll, writeFailed])
 
   const openRow = rows.find((row) => row.path === openPath)
   const openHunks = hunks.path === openPath ? hunks.list : []
@@ -523,6 +567,7 @@ export function ChangesPanel() {
   const daemonHunk = useCallback((hunk: HunkRange) => (openRow?.api ? matchDaemonHunk(hunk, openRow.api.hunks) : null), [openRow])
   const hunkActions: HunkActions = {
     canRevert: canRevert && hunkChoices,
+    revertOff: revertScope && hunkChoices && !canRevert ? offReason : null,
     canInclude: canInclude && showChecks && hunkChoices,
     includedOf: (hunk) => daemonHunk(hunk)?.included ?? null,
     onRevert: (hunk) => {
@@ -531,7 +576,7 @@ export function ChangesPanel() {
     },
     onInclude: (hunk, value) => {
       const match = daemonHunk(hunk)
-      if (openRow?.api && match) void include(openRow.api, { hunks: [match.id], include: value })
+      if (openRow?.api && match) void include(openRow.api, value, { hunks: [match.id] })
     }
   }
 
@@ -541,13 +586,44 @@ export function ChangesPanel() {
   }, [folderId, gitScope, begin, end])
 
   const openRestore = useCallback(async () => {
-    if (!apiTarget) return
+    setRestoreOutcomes({})
     try {
-      setReverted(await changesApi.revertedList(apiTarget))
+      setReverted(await changesApi.revertedList(gitScope))
     } catch (listError) {
       setMessage({ text: changesErrorText(listError, gitErrorMessage), tone: 'error' })
     }
-  }, [apiTarget])
+  }, [gitScope])
+
+  const restoreFromList = useCallback(async (entry: RevertedEntry) => {
+    setRestoreOutcomes((current) => ({ ...current, [entry.revertId]: 'pending' }))
+    const outcome = await restore(entry.revertId)
+    if (outcome === 'restored') setReverted((current) => current?.filter((item) => item.revertId !== entry.revertId) ?? null)
+    setRestoreOutcomes((current) => {
+      const { [entry.revertId]: _pending, ...rest } = current
+      return outcome === 'changed' || outcome === 'expired' ? { ...rest, [entry.revertId]: outcome } : rest
+    })
+  }, [restore])
+
+  /** What Space and X act on: the selected lines, else the focused hunk, else the focused row's whole file. */
+  const keyTarget = (target: EventTarget | null): { file: ChangedFile; choice: FileChoice } | null => {
+    const rowPath = (target as HTMLElement | null)?.closest?.<HTMLElement>('.changes-row')?.closest<HTMLElement>('[data-path]')?.dataset.path
+    if (rowPath) {
+      const file = rows.find((row) => row.path === rowPath)?.api
+      return file ? { file, choice: {} } : null
+    }
+    const file = openRow?.api
+    if (!file || !hunkChoices) return null
+    const selected = selectionRef.current
+    if (selected) {
+      const lines = lineChoicesFor(file.hunks, selected)
+      return lines.length > 0 ? { file, choice: { lines } } : null
+    }
+    if (focusedHunk !== null && openHunks[focusedHunk]) {
+      const match = daemonHunk(openHunks[focusedHunk])
+      return match ? { file, choice: { hunks: [match.id] } } : null
+    }
+    return null
+  }
 
   // ---- Keys
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -578,30 +654,25 @@ export function ChangesPanel() {
         setFocusedHunk(stepHunk(openHunks.length, focusedHunk, action === 'next-hunk' ? 1 : -1))
         break
       case 'include': {
-        if (!canInclude || !openRow?.api || !hunkChoices || (onButton && (event.target as HTMLElement).tagName !== 'DIV')) return
-        const selected = selectionRef.current
-        const file = openRow.api
-        if (selected) {
-          const lines = file.hunks.map((hunk) => ({ hunk: hunk.id, indexes: lineIndexesIn(hunk.lines, selected) })).filter((choice) => choice.indexes.length > 0)
-          if (lines.length > 0) void include(file, { lines, include: true })
-        } else if (focusedHunk !== null && openHunks[focusedHunk]) {
-          const match = daemonHunk(openHunks[focusedHunk])
-          if (match) void include(file, { hunks: [match.id], include: match.included !== 'yes' })
-        } else return
-        setChoosing(true)
+        // A checkbox toggles itself; Space elsewhere includes or leaves out what is focused, else starts choosing.
+        if (!canInclude || (event.target as HTMLElement).closest('button, input[type="checkbox"]')) return
+        const found = keyTarget(event.target)
+        if (found) {
+          const { file, choice } = found
+          const value = choice.lines
+            ? includeValueForLines(file.hunks, choice.lines)
+            : choice.hunks
+              ? file.hunks.find((hunk) => hunk.id === choice.hunks![0])?.included !== 'yes'
+              : file.included !== 'yes'
+          void include(file, value, choice)
+        } else setChoosing(true)
         break
       }
       case 'revert': {
-        if (!canRevert || !openRow?.api || !hunkChoices) return
-        const file = openRow.api
-        const selected = selectionRef.current
-        if (selected) {
-          const lines = file.hunks.map((hunk) => ({ hunk: hunk.id, indexes: lineIndexesIn(hunk.lines, selected) })).filter((choice) => choice.indexes.length > 0)
-          if (lines.length > 0) void revert(file, { lines })
-        } else if (focusedHunk !== null && openHunks[focusedHunk]) {
-          const match = daemonHunk(openHunks[focusedHunk])
-          if (match) void revert(file, { hunks: [match.id] })
-        } else return
+        if (!canRevert) return
+        const found = keyTarget(event.target)
+        if (!found) return
+        void revert(found.file, found.choice)
         break
       }
       case 'comment':
@@ -612,9 +683,9 @@ export function ChangesPanel() {
         setJumpOpen(true)
         break
       case 'undo-revert': {
-        const last = undoStack.current[undoStack.current.length - 1]
+        const last = reverts[reverts.length - 1]
         if (!last) return
-        void restore(last)
+        void undoRevert(last)
         break
       }
       case 'leave-selection':
@@ -647,13 +718,26 @@ export function ChangesPanel() {
   })()
   const newer = newerTurnNotice({ scopeId, pinnedTurnId, choices: turnList })
   const menu = [
-    ...(canInclude ? [{ label: 'Choose what to commit', hint: 'Space', checked: showChecks, onSelect: () => setChoosing((value) => !value) }] : []),
+    // Choosing needs every whitespace change on screen, so it turns Ignore whitespace off.
+    ...(api !== null && showsUncommitted
+      ? [{
+        label: 'Choose what to commit',
+        hint: 'Space',
+        checked: showChecks,
+        disabled: folderBusy,
+        title: folderBusy ? 'Off while a turn runs' : undefined,
+        onSelect: () => {
+          if (ignoreWhitespace) setIgnoreWhitespace(false)
+          setChoosing(!showChecks)
+        }
+      }]
+      : []),
     { label: 'Ignore whitespace', checked: ignoreWhitespace, onSelect: () => setIgnoreWhitespace(!ignoreWhitespace) },
     ...(width >= SPLIT_MIN_WIDTH ? [{ label: 'Split', checked: split, onSelect: () => setSplit((value) => !value) }] : []),
-    ...(!inThread && projectId && undoLastCommitAvailable() && canAmendCommit(git.commits)
-      ? [{ label: 'Undo last commit', title: git.commits[0]?.message, disabled: running !== null, onSelect: () => void undoLastCommit() }]
+    ...(!inThread && projectId && canAmendCommit(git.commits)
+      ? [{ label: 'Undo last commit', title: folderBusy ? 'Off while a turn runs' : git.commits[0]?.message, disabled: running !== null || folderBusy, onSelect: () => void undoLastCommit() }]
       : []),
-    ...(revertAvailable() ? [{ label: 'Restore reverted…', onSelect: () => void openRestore() }] : []),
+    ...(isRepo ? [{ label: 'Restore reverted…', onSelect: () => void openRestore() }] : []),
     { label: 'Keyboard shortcuts', hint: '?', onSelect: () => setHelpOpen(true) }
   ]
 
@@ -760,7 +844,7 @@ export function ChangesPanel() {
           const word = row.conflict ? 'conflict' : statusWord(row.status)
           const included = row.api?.included ?? null
           return (
-            <div key={row.path} className="changes-card" data-path={row.path} data-open={open || undefined}>
+            <div key={row.path} className="changes-card" data-path={row.path} data-open={open || undefined} data-pending={reverting === row.path || undefined}>
               <div
                 className="changes-row"
                 role="button"
@@ -786,7 +870,7 @@ export function ChangesPanel() {
                       if (element) element.indeterminate = included === 'partial'
                     }}
                     onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => row.api && void include(row.api, { include: event.target.checked })}
+                    onChange={(event) => row.api && void include(row.api, event.target.checked)}
                   />
                 )}
                 {open ? <ChevronDown size={13} strokeWidth={2} className="changes-chevron" aria-hidden="true" /> : <ChevronRight size={13} strokeWidth={2} className="changes-chevron" aria-hidden="true" />}
@@ -798,7 +882,9 @@ export function ChangesPanel() {
                     label={`Actions for ${row.path}`}
                     className="changes-icon-btn changes-row-more"
                     items={[
-                      ...(canRevert && row.api ? [{ label: 'Revert file', onSelect: () => row.api && void revert(row.api) }] : []),
+                      ...(revertScope && row.api
+                        ? [{ label: 'Revert file', hint: 'X', disabled: !canRevert, title: canRevert ? undefined : offReason ?? undefined, onSelect: () => row.api && void revert(row.api) }]
+                        : []),
                       { label: 'Open in Files', hint: 'O', onSelect: () => openInFiles(row.path) }
                     ]}
                   >
@@ -890,7 +976,8 @@ export function ChangesPanel() {
             refreshAll()
           }}
           onIncludeAll={canInclude ? () => void includeAll(true) : undefined}
-          commitSelection={apiReady ? commitSelectionFor(api?.selection) : undefined}
+          commitSelection={showsUncommitted ? commitSelectionFor(api?.selection) : undefined}
+          onSelectionStale={() => void loadApi()}
         />
       )}
       <FileJump
@@ -922,22 +1009,29 @@ export function ChangesPanel() {
           <p className="changes-empty">Nothing to restore</p>
         ) : (
           <div className="changes-restore-list">
-            {reverted?.map((entry) => (
-              <div key={entry.revertId} className="changes-restore-row">
-                <span className="changes-path" title={`${entry.summary} · kept until ${new Date(entry.keptUntil).toLocaleDateString()}`}>{entry.path}</span>
-                <span className="changes-faint">{new Date(entry.at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
-                <button
-                  type="button"
-                  className="changes-secondary"
-                  onClick={() => {
-                    void restore(entry.revertId)
-                    setReverted((current) => current?.filter((item) => item.revertId !== entry.revertId) ?? null)
-                  }}
-                >
-                  Restore
-                </button>
-              </div>
-            ))}
+            {reverted?.map((entry) => {
+              const outcome = restoreOutcomes[entry.revertId]
+              return (
+                <div key={entry.revertId} className="changes-restore-row">
+                  <span className="changes-restore-what">
+                    <span className="changes-path" title={`${entry.oldPath ? `${entry.oldPath} → ` : ''}${entry.path} · kept until ${new Date(entry.keptUntil).toLocaleDateString()}`}>{entry.path}</span>
+                    <span className="changes-faint">
+                      {outcome === 'changed' ? 'Changed since' : outcome === 'expired' ? 'Expired' : `${revertedWhat(entry)} · ${new Date(entry.at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}`}
+                    </span>
+                  </span>
+                  {outcome === 'changed' ? (
+                    // Nothing was written: the file as it is now opens in Files; the kept copy stays listed.
+                    <button type="button" className="changes-link" title="The file changed after the revert" onClick={() => { setReverted(null); openInFiles(entry.path) }}>
+                      Open file
+                    </button>
+                  ) : outcome !== 'expired' && (
+                    <button type="button" className="changes-secondary" disabled={outcome === 'pending'} onClick={() => void restoreFromList(entry)}>
+                      Restore
+                    </button>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
       </Modal>
