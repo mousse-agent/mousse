@@ -10,7 +10,8 @@
 /* The header row: the title (with Search and Refresh) or the search field (with Close). Both layers share one grid
    cell, so switching never moves the row; the leaving one fades and slides out as the other comes in. */
 .files-sidebar .files-toolbar-actions { display: flex; align-items: center; gap: 2px; }
-.files-panel .files-header { display: grid; align-items: center; overflow: hidden; }
+/* One full-width column: .panel-toolbar's `justify-content: space-between` would otherwise pack it to the start. */
+.files-panel .files-header { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; overflow: hidden; }
 .files-header-layer {
   grid-area: 1 / 1;
   display: flex;
