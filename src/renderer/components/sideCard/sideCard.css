@@ -206,13 +206,13 @@
   flex: none;
   opacity: 0;
   transform: rotate(90deg);
-  /* The turn follows the section body's Collapse: same easing, 160ms open and 130ms close. */
+  /* The turn follows the section body's Collapse: same easing, 160ms open and 180ms close. */
   transition: opacity 120ms ease, transform 160ms var(--ui-collapse-ease);
 }
 
 .side-card-section[data-collapsed='true'] .side-card-section-chevron {
   transform: none;
-  transition-duration: 120ms, 130ms;
+  transition-duration: 120ms, 180ms;
   transition-timing-function: ease, var(--ui-collapse-ease-close);
 }
 

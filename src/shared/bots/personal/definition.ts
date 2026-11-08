@@ -198,8 +198,10 @@ export type BotActivationTrigger =
   | { kind: 'manual'; input: string }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
 
-/** The default active time of one activation: 15 minutes. */
-export const DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
+/** The default active time of one activation: an hour. */
+export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000
+/** The default active time before it became an hour: grants that still hold it are upgraded (`BotEngine.upgradeWorkTime`). */
+export const OLD_DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
 /** Most context threads one bot may have. */
 export const MAX_BOT_CONTEXT_THREADS = 8
 /** Most activations one bot keeps queued; the oldest is dropped beyond this. */

@@ -1,0 +1,124 @@
+/* Sidebar tab switch motion (ThreadsSidebar: `shownView`, `data-view-leaving`).
+   Switching tabs: the open view folds up and fades out (140ms), then the new view unfolds and fades in
+   (180ms, from @starting-style as its panel stops being hidden). Panels stay `hidden` whenever they are not
+   on screen; the leaving one is `inert` while it fades. Transform and opacity only, so the scroll area, its
+   scroll position and the footer do not move. Durations follow Settings > Animation speed
+   (`--ui-motion-scale`, SIDEBAR_VIEW_OUT_MS); with motion off (that setting or the OS reduced-motion
+   setting) views swap at once (lib/motion.ts, global.css).
+   `.view-swap` gives another tab bar's panels the same swap (useViewSwap, `data-view-leaving`). */
+
+.threads-sidebar-scroll > .threads-sidebar-section[role='tabpanel'],
+.view-swap > [role='tabpanel'] {
+  transform-origin: 50% 0;
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+}
+
+@starting-style {
+  .threads-sidebar-scroll > .threads-sidebar-section[role='tabpanel'],
+  .view-swap > [role='tabpanel'] {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.97);
+  }
+}
+
+.threads-sidebar-scroll[data-view-leaving] > .threads-sidebar-section[role='tabpanel']:not([hidden]),
+.view-swap[data-view-leaving] > [role='tabpanel'] {
+  opacity: 0;
+  transform: translateY(-4px) scaleY(0.97);
+  pointer-events: none;
+  transition-duration: calc(140ms * var(--ui-motion-scale, 1));
+  transition-timing-function: var(--ui-collapse-ease-close);
+}
+
+/* The tabs: the selected highlight (background and its ring) crossfades between tabs. */
+.app .threads-sidebar-tabs .threads-sidebar-tab {
+  transition:
+    background-color calc(160ms * var(--ui-motion-scale, 1)) ease-out,
+    color calc(160ms * var(--ui-motion-scale, 1)) ease-out,
+    box-shadow calc(160ms * var(--ui-motion-scale, 1)) ease-out,
+    flex-grow calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    min-width calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    padding calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    gap calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+}
+
+/* 240-319px wide, where only the open tab shows its word (threads-sidebar.css): the word widens into the
+   newly open tab while the old one narrows to its icon. At rest a word is shown whole or not at all. */
+@container pill-tabs (min-width: 240px) and (max-width: 319px) {
+  .threads-sidebar-tabs .threads-sidebar-tab { flex: 1 1 auto; gap: 0; }
+  .threads-sidebar-tabs .threads-sidebar-tab.active { flex: 0 0 auto; gap: 5px; }
+  .threads-sidebar-tabs .threads-sidebar-tab[role='tab'] .threads-sidebar-tab-label {
+    display: inline-block;
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition:
+      max-width calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+      opacity calc(120ms * var(--ui-motion-scale, 1)) ease-out;
+  }
+  .threads-sidebar-tabs .threads-sidebar-tab[role='tab'].active .threads-sidebar-tab-label {
+    max-width: 80px;
+    opacity: 1;
+    transition-delay: 0ms, 40ms;
+  }
+}
+
+/* Add project slides in beside the tabs on the Projects tab; the tabs give it the room as it grows. When it
+   leaves, ThreadsSidebar eases the tab list back out over the space. */
+.threads-sidebar-tabs-row > .threads-sidebar-add-project {
+  transition:
+    width calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+}
+
+@starting-style {
+  .threads-sidebar-tabs-row > .threads-sidebar-add-project {
+    width: 0;
+    opacity: 0;
+  }
+}
+
+/* The workspace beside the sidebar (App: `workspaceMode`, `data-workspace-swap`) swaps with the tabs, in step
+   with the lists: going to or from Chats, the conversation and app panel (or the chats pane) fade out with a
+   slight lift (140ms, inert), then the other side fades in from it (180ms). Only during a swap, so hiding the
+   app panel or opening Usage stays as it was. Same speed scale and motion-off rules as the lists. */
+.app-workspace[data-workspace-swap] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
+  transform-origin: 50% 0;
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    transform calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
+}
+
+@starting-style {
+  .app-workspace[data-workspace-swap='in'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* The app panel stays laid out while inactive (KeepMounted preserveLayout), so it comes back from here. A lift
+   only, no scale: KeepMounted remembers the panel's measured size for its live browser views. */
+.app-workspace[data-workspace-swap] > .main-area.keep-mounted-layout-inactive,
+.app-workspace[data-workspace-swap='out'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
+  transform: translateY(-4px);
+}
+
+.app-workspace[data-workspace-swap='out'] > :is(.sidebar, .keep-mounted-pane, .resizer, .main-area) {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: calc(140ms * var(--ui-motion-scale, 1));
+  transition-timing-function: var(--ui-collapse-ease-close);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .threads-sidebar-scroll > .threads-sidebar-section[role='tabpanel'],
+  .view-swap > [role='tabpanel'],
+  .threads-sidebar-tabs .threads-sidebar-tab,
+  .threads-sidebar-tabs .threads-sidebar-tab .threads-sidebar-tab-label,
+  .threads-sidebar-tabs-row > .threads-sidebar-add-project,
+  .app-workspace[data-workspace-swap] > * {
+    transition: none !important;
+  }
+}

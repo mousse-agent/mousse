@@ -24,8 +24,8 @@ export async function createComposerThread(deps: {
  */
 export async function prepareComposerThread(deps: {
   thread?: Thread
-  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean }
-  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }) => Promise<Thread>
+  workspace: { projectId?: string; worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiryMs?: number; expiryStopsRun?: boolean; baseBranch?: string }
+  create: (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: NodeId; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => Promise<Thread>
   setWorktreeEnabled: (id: string, enabled: boolean) => Promise<Thread>
   /** Gives a reused empty draft the expiry picked for it. */
   setExpiry?: (id: string, expiresAt: string, stopsRun: boolean) => Promise<Thread>
@@ -41,13 +41,16 @@ export async function prepareComposerThread(deps: {
   // The expiry counts from now, when the chat is created; a chat on another computer has none (it is set there).
   const expiresAt = workspace.expiryMs !== undefined && !workspace.node ? new Date((deps.now?.() ?? Date.now()) + workspace.expiryMs).toISOString() : undefined
   const expiry = expiresAt ? { expiresAt, ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}) } : {}
+  // A worktree from another branch is made on this computer, and only a new thread can carry it.
+  const baseBranch = enabled && !workspace.node && workspace.baseBranch ? workspace.baseBranch : undefined
   // An empty thread is reused only where the chat is to run: the same computer, the same project, and the
   // same mode (Private is fixed when a thread is created).
   if (
     !thread ||
     thread.projectId !== workspace.projectId ||
     (thread.node ?? undefined) !== (workspace.node ?? undefined) ||
-    Boolean(thread.localOnly) !== Boolean(workspace.localOnly)
+    Boolean(thread.localOnly) !== Boolean(workspace.localOnly) ||
+    baseBranch
   ) {
     return createComposerThread({
       ...deps,
@@ -55,7 +58,8 @@ export async function prepareComposerThread(deps: {
         deps.create(workspace.projectId, {
           worktreeEnabled: enabled,
           ...(workspace.localOnly ? { localOnly: true } : workspace.node ? { node: workspace.node } : {}),
-          ...expiry
+          ...expiry,
+          ...(baseBranch ? { baseBranch } : {})
         })
     })
   }

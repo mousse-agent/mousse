@@ -153,6 +153,107 @@ export function useFloatingPosition({
   return style
 }
 
+export interface PinnedPopoverOptions {
+  open: boolean
+  anchorRef: RefObject<HTMLElement | null>
+  contentRef: RefObject<HTMLElement | null>
+  /** The tallest the layer may be; less where the window has less room. */
+  maxHeight: number
+  /** Below this much room above the anchor (and more below it), the layer opens below instead. */
+  minHeight?: number
+  gap?: number
+  padding?: number
+  /** `right`: beside the anchor, bottom edges aligned, growing upward (a rail item's menu). */
+  side?: 'above' | 'right'
+}
+
+/**
+ * Fixed coordinates for a popover pinned above its anchor, start-aligned to it. The edge next to the
+ * anchor is set (`bottom`), not the far one, so the layer grows and shrinks away from the anchor as
+ * its content changes and never moves or covers it. The room it has is `--floating-max-height`; it
+ * opens below only when even `minHeight` does not fit above. Positioned before the first paint, from
+ * layout sizes (a scale animation on the layer does not skew them).
+ */
+export function usePinnedPopover({
+  open,
+  anchorRef,
+  contentRef,
+  maxHeight,
+  minHeight = 220,
+  gap = 6,
+  padding = 8,
+  side = 'above'
+}: PinnedPopoverOptions): CSSProperties {
+  const hidden: CSSProperties = { position: 'fixed', top: 0, left: 0, zIndex: FLOATING_LAYER_Z_INDEX, visibility: 'hidden' }
+  const [style, setStyle] = useState<CSSProperties>(hidden)
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setStyle(hidden)
+      return
+    }
+    let last = ''
+    const update = () => {
+      const anchor = anchorRef.current
+      const content = contentRef.current
+      if (!anchor || !content) return
+      const rect = anchor.getBoundingClientRect()
+      const viewportHeight = window.innerHeight
+      const viewportWidth = window.innerWidth
+      if (side === 'right') {
+        const width = content.offsetWidth
+        const bottom = Math.round(Math.max(padding, viewportHeight - rect.bottom))
+        const next: CSSProperties & Record<'--floating-max-height', string> = {
+          position: 'fixed',
+          left: Math.round(Math.max(padding, Math.min(rect.right + gap, viewportWidth - width - padding))),
+          bottom,
+          zIndex: FLOATING_LAYER_Z_INDEX,
+          transformOrigin: '0 100%',
+          '--floating-max-height': `${Math.max(0, Math.floor(Math.min(maxHeight, viewportHeight - bottom - padding)))}px`
+        }
+        const key = JSON.stringify(next)
+        if (key !== last) { last = key; setStyle(next) }
+        return
+      }
+      const roomAbove = rect.top - gap - padding
+      const roomBelow = viewportHeight - rect.bottom - gap - padding
+      const above = roomAbove >= Math.min(minHeight, maxHeight) || roomAbove >= roomBelow
+      const room = Math.max(0, Math.floor(Math.min(maxHeight, above ? roomAbove : roomBelow)))
+      const width = content.offsetWidth
+      const left = Math.round(Math.max(padding, Math.min(rect.left, viewportWidth - width - padding)))
+      const originX = Math.round(Math.max(0, Math.min(width, rect.left + Math.min(rect.width, 40) / 2 - left)))
+      const next: CSSProperties & Record<'--floating-max-height', string> = {
+        position: 'fixed',
+        left,
+        ...(above ? { bottom: Math.round(viewportHeight - rect.top + gap) } : { top: Math.round(rect.bottom + gap) }),
+        zIndex: FLOATING_LAYER_Z_INDEX,
+        transformOrigin: `${originX}px ${above ? '100%' : '0'}`,
+        '--floating-max-height': `${room}px`
+      }
+      const key = JSON.stringify(next)
+      if (key === last) return
+      last = key
+      setStyle(next)
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    // The anchor moves when the composer around it changes size (a new thread's rows, a taller draft).
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    const anchor = anchorRef.current
+    for (const frame of new Set([anchor?.closest<HTMLElement>('.composer'), anchor?.closest<HTMLElement>('.chat-input-area'), anchor?.parentElement])) {
+      if (observer && frame) observer.observe(frame)
+    }
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+      observer?.disconnect()
+    }
+  }, [open, anchorRef, contentRef, maxHeight, minHeight, gap, padding, side])
+
+  return style
+}
+
 /**
  * A ref to the closest element around `ref`'s that matches `selector`, or `ref`'s own element when
  * none does; read when used. A composer's menus anchor to the whole composer so they open above it,

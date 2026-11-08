@@ -23,6 +23,8 @@ export function openPersonalBots(
     engine.upgradeDefinitions()
     // File access is one permission: an older build's open folder asks become the one file ask.
     engine.upgradeFileAsks()
+    // The base work time is an hour: grants that still hold the old 15 minutes get it.
+    engine.upgradeWorkTime()
     return { store: opened, engine }
   } catch (error) {
     try { store?.close() } catch { /* already unusable */ }

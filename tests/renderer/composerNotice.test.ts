@@ -225,7 +225,7 @@ describe('the dock on the composer', () => {
     expect(queue).toMatch(/border:\s*1px solid var\(--ui-line-strong\);\s*border-bottom:\s*0;/)
     expect(queue).toMatch(/border-radius:\s*16px 16px 0 0;/)
     expect(queue).toMatch(/background:\s*var\(--ui-raised\);/)
-    expect(body('.app .chat-input-area:has(> .queued-messages):not(:has(.composer-workspace-toolbar)) .composer'))
+    expect(body('.app .chat-input-area:has(> .queued-messages):not(:has(> .new-thread-row)) .composer'))
       .toMatch(/border-top-left-radius:\s*0;\s*border-top-right-radius:\s*0;/)
   })
 

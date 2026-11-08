@@ -273,3 +273,12 @@ describe('chat Markdown math', () => {
     expect(off).toContain('$a^2$')
   })
 })
+
+describe('MarkdownPreview highlighting', () => {
+  it('highlights code in every preview and language with its one shared highlighter', () => {
+    const first = renderToStaticMarkup(createElement(MarkdownPreview, { value: '```js\nconst a = 1\n```' }))
+    const second = renderToStaticMarkup(createElement(MarkdownPreview, { value: '```python\ndef f():\n    return 1\n```' }))
+    expect(first).toContain('<span class="hljs-keyword">const</span>')
+    expect(second).toContain('<span class="hljs-keyword">def</span>')
+  })
+})

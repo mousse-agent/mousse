@@ -41,8 +41,8 @@ export function isOwnBotAppTool(tool: string): boolean {
 
 /**
  * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder until
- * the owner lets it use files on this computer; the web and its own tools; no file access; 15
- * minutes per activation. Pressing Create bot approves it.
+ * the owner lets it use files on this computer; the web and its own tools; no file access; an hour
+ * per activation. Pressing Create bot approves it.
  */
 export function botStarterManifest(): BotManifest {
   return {

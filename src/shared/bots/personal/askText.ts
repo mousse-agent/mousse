@@ -30,6 +30,11 @@ export const FILES_TEXT: AskText = { title: 'use files on this computer', note: 
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
+/** "45 minutes", "2 hours", "90 minutes": whole hours read as hours. */
+const duration = (ms: number) => {
+  const count = minutes(ms)
+  return count >= 60 && count % 60 === 0 ? plural(count / 60, 'hour') : plural(count, 'minute')
+}
 /** "400,000 tokens". */
 const tokens = (count: number) => `${Math.round(count).toLocaleString('en-US')} tokens`
 
@@ -38,7 +43,7 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
   const total = amount !== undefined && held !== undefined ? held + amount : undefined
   switch (key) {
     case 'maxActiveMs':
-      return total !== undefined ? { title: `work for up to ${plural(minutes(total), 'minute')} per run`, note: '' } : { title: 'work longer on each run', note: '' }
+      return total !== undefined ? { title: `work for up to ${duration(total)} per run`, note: '' } : { title: 'work longer on each run', note: '' }
     case 'maxTurns':
       return total !== undefined ? { title: `take up to ${plural(Math.round(total), 'step')} per run`, note: '' } : { title: 'take more steps on each run', note: '' }
     case 'maxToolCalls':

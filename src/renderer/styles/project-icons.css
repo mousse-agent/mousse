@@ -1,0 +1,29 @@
+/* A project's own icon (ProjectIcon.tsx), in place of its folder glyph. */
+.project-icon {
+  flex-shrink: 0;
+  display: block;
+  object-fit: contain;
+  border-radius: 3px;
+  transition: opacity var(--ui-dur, 160ms) ease, filter var(--ui-dur, 160ms) ease;
+}
+
+/* In the Projects tree the folder glyph shows open or closed; an icon shows it by brightness instead. The fade is
+   divided by the row's own while the row sits back (threads-sidebar.css), so the icon ends at 0.55 either way. */
+.project-icon-closed {
+  opacity: calc(0.55 / var(--sidebar-icon-fade, 1));
+  filter: saturate(0.45);
+}
+
+.threads-sidebar-project-row:hover .project-icon-closed,
+.threads-sidebar-project-toggle:focus-visible .project-icon-closed {
+  opacity: 0.8;
+}
+
+.project-icon-open {
+  opacity: 1;
+  filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-icon { transition: none; }
+}

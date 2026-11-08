@@ -344,7 +344,9 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
     await finish(f, payload, 'completed', { text: 'May I?' })
     const ask = f.store.openAsks(botId)[0]!
     expect(ask.permission).toEqual({ budget: { key: 'maxActiveMs', amount: held } })
-    expect(ask.title).toBe(`work for up to ${Math.round((2 * held) / 60_000)} minutes per run`)
+    // The starter hour, doubled.
+    expect(held).toBe(60 * 60_000)
+    expect(ask.title).toBe('work for up to 2 hours per run')
     await f.bots.service.answer(botId, ask.id, 'allow')
     expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(2 * held)
   })

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import type { Components } from 'react-markdown'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
@@ -60,6 +60,13 @@ function PreviewImage({
 const remarkPlugins = [remarkGfm]
 const remarkPluginsWithMath = [remarkGfm, remarkMousseMath]
 
+/**
+ * rehype-highlight registers every common grammar each time it is attached, and react-markdown
+ * attaches it on each render of each preview. One highlighter serves them all.
+ */
+let highlight: ReturnType<typeof rehypeHighlight> | undefined
+const rehypePlugins = [() => (highlight ??= rehypeHighlight())]
+
 /** Math arrives as `code` tagged by remarkMousseMath: inline, or inside `pre` for blocks. */
 const mathComponents: Components = {
   code: ({ className, children, ...props }) => {
@@ -86,7 +93,12 @@ const mathComponents: Components = {
   }
 }
 
-export function MarkdownPreview({
+/**
+ * Markdown rendered for reading. Parsing and highlighting are the costly part, so the same text
+ * renders again only when its props change: a parent that renders for something else (a poll, a
+ * status line) leaves it alone.
+ */
+export const MarkdownPreview = memo(function MarkdownPreview({
   value,
   className = 'files-text-preview chat-markdown',
   allowRelativeImages = false
@@ -105,11 +117,11 @@ export function MarkdownPreview({
       <ReactMarkdown
         skipHtml
         remarkPlugins={math ? remarkPluginsWithMath : remarkPlugins}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={rehypePlugins}
         components={components}
       >
         {value}
       </ReactMarkdown>
     </article>
   )
-}
+})

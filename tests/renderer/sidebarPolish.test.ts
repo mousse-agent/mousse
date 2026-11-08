@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Sidebar rows show their state: an empty project offers New thread, project rows have a disclosure chevron and a
- * tooltip with their folder, pinned threads list first, pinned cards carry the pin on their meta line, "No project"
- * rows sit at the tree's indent and form a tree the keyboard walks, thread titles end in an ellipsis and never move
+ * tooltip with their folder, pinned threads list first, pinned cards carry the pin on their meta line, threads
+ * of no project form "Other threads", the Projects tree's last group, thread titles end in an ellipsis and never move
  * on hover, and the project menu holds every project action, the rare Git one in a submenu. While a menu is open
  * the sidebar is marked so other rows do not light their actions.
  */
@@ -101,18 +101,16 @@ const menuItem = (label: string) => [...document.querySelectorAll<HTMLElement>('
 const openMenu = (name = 'Mousse') => click(host.querySelector(`[aria-label="More actions for ${name}"]`)!)
 
 describe('project rows', () => {
-  it('say "No threads" when empty, with a New thread icon button in the Tab order that starts one in the project', () => {
+  it('say only "No threads" when empty, leaving the header New thread as the one way to start one', () => {
     show([])
     openProject()
     const empty = host.querySelector('.threads-sidebar-empty-nested')!
     expect(empty.textContent).toBe('No threads')
-    const button = empty.querySelector('button')!
-    expect(button.getAttribute('aria-label')).toBe('New thread in Mousse')
-    expect(button.title).toBe('New thread in Mousse')
-    expect(button.querySelector('svg')).not.toBeNull()
-    expect(button.tabIndex).toBe(0)
-    expect(button.classList.contains('threads-sidebar-inline-action')).toBe(false)
-    click(button)
+    expect(empty.querySelector('button')).toBeNull()
+    const row = projectRow().closest('.threads-sidebar-project-row')!
+    expect(row.classList.contains('empty')).toBe(true)
+    expect(host.querySelectorAll('[aria-label="New thread in Mousse"]')).toHaveLength(1)
+    click(row.querySelector('.threads-sidebar-project-new-chat')!)
     expect(actions.createAndSelectProjectThread).toHaveBeenCalledWith('p1')
   })
 
@@ -172,36 +170,52 @@ describe('pinned threads', () => {
   })
 })
 
-describe('No project', () => {
-  it('lists its threads at the tree’s indent, with the same rows as a project', () => {
-    show([thread('a', 'Loose', { projectId: undefined })])
-    click([...host.querySelectorAll('.threads-sidebar-heading-toggle')].find((item) => item.textContent?.startsWith('No project'))!)
-    const row = host.querySelector('section[aria-label="No project"] button[data-thread-id="a"]')!
-    expect(row.closest('.threads-sidebar-children')).not.toBeNull()
-    expect(row.classList.contains('threads-sidebar-thread-root')).toBe(false)
+describe('Other threads', () => {
+  const groupNames = () => [...host.querySelectorAll<HTMLElement>('.threads-sidebar-project-toggle')].map((item) => item.textContent)
+
+  it('is the Projects tree’s last group, with the same rows as a project and no project actions', () => {
+    show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined }), thread('c', 'Stray', { projectId: 'gone' })])
+    expect(groupNames()).toEqual(['Mousse', 'Other threads'])
+    expect(host.querySelector('.threads-sidebar-footer')?.textContent).not.toContain('No project')
+    openProject('Other threads')
+    const row = host.querySelector<HTMLElement>('button[data-thread-id="b"]')!
+    expect(row.closest('.threads-sidebar-other-threads .threads-sidebar-children')).not.toBeNull()
+    expect(row.closest('[role="tree"]')?.getAttribute('aria-label')).toBe('Projects')
+    expect(row.getAttribute('aria-level')).toBe('2')
+    expect(host.querySelector('button[data-thread-id="c"]')).not.toBeNull()
+    const group = host.querySelector('.threads-sidebar-other-threads')!
+    expect(group.querySelector('.threads-sidebar-project-more')).toBeNull()
+    // Its one action is the global new thread, with no project.
+    expect(group.querySelector('.threads-sidebar-project-new-chat')?.getAttribute('aria-label')).toBe('New thread')
+    act(() => { projectRow('Other threads').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
+    expect(menu()).toBeNull()
   })
 
-  it('is a tree the keyboard walks, with one Tab stop of its own', () => {
+  it('is hidden without threads, and shown under No projects', () => {
+    show([thread('a', 'Fix tests')])
+    expect(groupNames()).toEqual(['Mousse'])
+    show([thread('b', 'Loose', { projectId: undefined })], { projects: [] })
+    expect(host.textContent).toContain('No projects')
+    expect(groupNames()).toEqual(['Other threads'])
+  })
+
+  it('is walked as part of the Projects tree, its one Tab stop', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined, order: 0 }), thread('c', 'Stray', { projectId: undefined, order: 1 })])
-    click([...host.querySelectorAll('.threads-sidebar-heading-toggle')].find((item) => item.textContent?.startsWith('No project'))!)
-    const tree = host.querySelector('section[aria-label="No project"] [role="tree"]')!
-    expect(tree.getAttribute('aria-label')).toBe('No project')
-    const items = () => [...tree.querySelectorAll<HTMLElement>('[role="treeitem"]')]
-    expect(items().map((item) => [item.dataset.threadId, item.getAttribute('aria-level'), item.tabIndex])).toEqual([['b', '1', 0], ['c', '1', -1]])
-    // The Projects tree keeps its own Tab stop.
-    expect(projectRow().tabIndex).toBe(0)
-    items()[0].focus()
-    key(items()[0], { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(items()[1])
-    expect(items().map((item) => item.tabIndex)).toEqual([-1, 0])
-    key(items()[1], { key: 'Home' })
-    expect(document.activeElement).toBe(items()[0])
-    key(items()[0], { key: 'End' })
-    expect(document.activeElement).toBe(items()[1])
-    // No parent row to go back to: Left stays put.
-    key(items()[1], { key: 'ArrowLeft' })
-    expect(document.activeElement).toBe(items()[1])
-    expect(projectRow().tabIndex).toBe(0)
+    expect(host.querySelectorAll('[role="tree"]')).toHaveLength(1)
+    const items = () => [...host.querySelectorAll<HTMLElement>('[role="tree"] [role="treeitem"]')].filter((item) => !item.closest('[inert]'))
+    expect(items().map((item) => item.tabIndex)).toEqual([0, -1])
+    projectRow().focus()
+    key(projectRow(), { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(projectRow('Other threads'))
+    key(projectRow('Other threads'), { key: 'ArrowRight' })
+    expect(projectRow('Other threads').getAttribute('aria-expanded')).toBe('true')
+    key(projectRow('Other threads'), { key: 'ArrowRight' })
+    expect((document.activeElement as HTMLElement).dataset.threadId).toBe('b')
+    key(document.activeElement!, { key: 'End' })
+    expect((document.activeElement as HTMLElement).dataset.threadId).toBe('c')
+    expect(items().filter((item) => item.tabIndex === 0)).toEqual([document.activeElement])
+    key(document.activeElement!, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(projectRow('Other threads'))
   })
 })
 
@@ -234,7 +248,7 @@ describe('the project menu', () => {
     expect(menuEntries()).toEqual([
       'New thread', 'New thread from a pull request', '—',
       'Open in Cursor', 'Show in Finder', 'Copy path', '—',
-      'Pin', 'Rename', 'Git', '—',
+      'Pin', 'Rename', 'Change icon…', 'Git', '—',
       'Remove project…'
     ])
   })
@@ -310,5 +324,50 @@ describe('while a menu is open', () => {
     expect(aside.classList.contains('menu-open')).toBe(true)
     key(document.activeElement!, { key: 'Escape' })
     expect(aside.classList.contains('menu-open')).toBe(false)
+  })
+
+  it('keeps the project row whose menu is open lit', () => {
+    show([thread('a', 'Fix tests')])
+    openMenu()
+    expect(projectRow().closest('.threads-sidebar-project-row')?.hasAttribute('data-menu-open')).toBe(true)
+  })
+})
+
+describe('focus dimming', () => {
+  const projects = [project('p1', 'Mousse'), project('p2', 'Docs', { order: 1 })]
+  const threads = [thread('a', 'Fix tests'), thread('b', 'Write guide', { projectId: 'p2' }), thread('c', 'Loose', { projectId: undefined })]
+  const open = (id: string | null) => act(() => { useAppStore.setState({ activeThreadId: id }) })
+  const activeGroups = () => [...host.querySelectorAll<HTMLElement>('[role="tree"] [data-active-project]')].map((item) => item.dataset.projectId)
+  const tree = () => host.querySelector('[role="tree"]')!
+
+  it('marks the open thread’s project as the one in focus', () => {
+    show(threads, { projects })
+    open('b')
+    expect(tree().hasAttribute('data-has-active')).toBe(true)
+    expect(activeGroups()).toEqual(['p2'])
+  })
+
+  it('marks "Other threads" when the open thread has no project', () => {
+    show(threads, { projects })
+    open('c')
+    expect(activeGroups()).toHaveLength(1)
+    expect(host.querySelector('.threads-sidebar-other-threads')?.hasAttribute('data-active-project')).toBe(true)
+  })
+
+  it('marks a new draft’s project, and dims nothing with no thread open', () => {
+    show([...threads, thread('d', 'New Thread', { projectId: 'p2', startedAt: undefined })], { projects })
+    open('d')
+    expect(activeGroups()).toEqual(['p2'])
+    open(null)
+    expect(tree().hasAttribute('data-has-active')).toBe(false)
+    expect(activeGroups()).toEqual([])
+  })
+
+  it('dims the Threads tab only while the open thread has a card there', () => {
+    show(threads, { projects, view: 'threads' })
+    const feed = () => host.querySelector('.threads-sidebar-feed-list')!
+    expect(feed().hasAttribute('data-has-active')).toBe(false)
+    open('a')
+    expect(feed().hasAttribute('data-has-active')).toBe(true)
   })
 })

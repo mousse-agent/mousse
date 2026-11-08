@@ -105,23 +105,24 @@ const click = (target: Element) => act(() => { (target as HTMLElement).click() }
 const openProject = () => click(projectToggle())
 
 describe('naming', () => {
-  it('says thread, Chats, No project and Archived', () => {
+  it('says thread, Chats and Archived', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests')], threadsSidebarView: 'threads', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
     // New thread may live in the sidebar header or in the title bar; either way it says "thread".
     const shell = renderToStaticMarkup(createElement(TitleBar)) + html
     expect(shell).toContain('aria-label="New thread"')
     expect(html).toContain('aria-label="Chats"')
-    expect(html).toContain('<span>No project · 0</span>')
-    expect(html).toContain('<span>Archived · 0</span>')
+    expect(html).toContain('<span>Archived</span>')
+    expect(html).not.toContain('threads-sidebar-settled-count')
     expect(html).toContain('aria-label="New thread in Mousse"')
     expect(html).not.toMatch(/Settle|Recent chats|New chat/)
   })
 
-  it('lists a thread whose project was removed under No project', () => {
+  it('lists a thread whose project was removed under Other threads', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests', { projectId: 'gone' })], threadsSidebarView: 'projects', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    expect(html).toContain('<span>No project · 1</span>')
+    expect(html).toContain('<span class="threads-sidebar-project-name">Other threads</span>')
+    expect(html).not.toContain('No project ·')
   })
 })
 
@@ -204,7 +205,7 @@ describe('the row menu', () => {
   it('opens on a project row from its "…" button, with Remove project…', () => {
     show([thread('a', 'Fix tests')])
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
-    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Git', 'Remove project…'])
+    expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change icon…', 'Git', 'Remove project…'])
   })
 })
 
@@ -227,7 +228,7 @@ describe('archive and delete', () => {
     show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="More actions for Old work"]')!)
-    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete after', 'Delete…'])
+    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete…', 'Delete all archived…'])
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')

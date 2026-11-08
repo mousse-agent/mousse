@@ -79,7 +79,7 @@ html:not(.platform-darwin) .app {
 }
 
 /* No bottom margin: inside the Collapse it would add to the project's 4px. */
-.app .threads-sidebar-children { margin: 1px 0 0 14px; padding-left: 4px; }
+.app .threads-sidebar-children { margin: 1px 0 0 14px; padding-left: 5px; }
 .app .threads-sidebar-thread { gap: 7px; padding: 4px 7px; border-radius: 5px; font-size: 13px; }
 .app .threads-sidebar-thread-root { padding-left: 9px; }
 .app .threads-sidebar-thread.active { background: rgba(var(--accent-rgb), 0.09); }
@@ -153,9 +153,8 @@ html:not(.platform-darwin) .app {
 .app .threads-sidebar-section-feed {
   flex: 1 0 auto;
 }
-/* The footer is the one scroll container for these; a height cap of their own would clip their rows. */
-.app .threads-sidebar-section-settled,
-.app .threads-sidebar-bottom-recent {
+/* The footer is the one scroll container for Archived; a height cap of its own would clip its rows. */
+.app .threads-sidebar-section-settled {
   flex: 0 0 auto;
   margin-top: 0;
   padding-top: 8px;

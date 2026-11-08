@@ -28,7 +28,7 @@ import { instanceBadges } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { useCommandBindings, useCommandOverlay, useCommands } from '../commands/commandRegistry'
-import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, usePinnedPopover } from '../lib/floatingLayer'
 import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/modelFavorites'
 import type { StatusDescription } from '../../shared/harness/status'
 import { formatBinding, type CommandId } from '../../shared/commands'
@@ -46,6 +46,9 @@ export interface ModelPickTarget {
 
 /** How long the pointer rests on a model before its run settings show, so crossing rows on the way to them changes nothing. */
 const RUN_SETTINGS_HOVER_MS = 90
+
+/** The tallest the picker gets; the model list scrolls inside it. */
+const PICKER_MAX_HEIGHT = 400
 
 /** The commands behind Ctrl/Cmd+1-5, in list order. */
 const MODEL_PICK_COMMANDS: readonly CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
@@ -65,6 +68,8 @@ interface ModelFamilyMenuProps {
   anchorRef?: RefObject<HTMLElement | null>
   /** Optional ref to the floating shell (outside-click handling). */
   contentRef?: RefObject<HTMLDivElement | null>
+  /** The picker is fading out after closing: it takes no input and gives up the keyboard. */
+  closing?: boolean
   /**
    * Run settings for the highlighted model (the composer's). The picker is then one fixed box: nothing
    * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
@@ -219,6 +224,7 @@ function ProfileModelFamilyMenu({
   emptyState,
   anchorRef,
   contentRef,
+  closing = false,
   runSettings
 }: ModelFamilyMenuProps) {
   const favorites = useModelFavorites()
@@ -314,7 +320,10 @@ function ProfileModelFamilyMenu({
 
   const [searchQuery, setSearchQuery] = useState('')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
-  const [railFilter, setRailFilter] = useState<string | null>(null)
+  // The provider chosen on the rail; until one is, the selected model's provider (else the first).
+  const [railChoice, setRailChoice] = useState<string | null>(null)
+  // Counts switches of the rail, so a new list fades in (not on open, nor while typing).
+  const [listSwitches, setListSwitches] = useState(0)
   const [highlightIndex, setHighlightIndex] = useState(0)
   const [activeFamily, setActiveFamily] = useState<{
     entry: FlatModelEntry
@@ -327,7 +336,7 @@ function ProfileModelFamilyMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const scrollHighlightRef = useRef(true)
   // Mounted only while the picker is open, so it owns the keyboard for as long as it exists.
-  useCommandOverlay('model-picker', true)
+  useCommandOverlay('model-picker', !closing)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
@@ -353,12 +362,13 @@ function ProfileModelFamilyMenu({
   // Providers whose older models are shown; folded until opened, or until the selected model is one.
   const [openOlder, setOpenOlder] = useState<ReadonlySet<string>>(() => new Set())
 
-  const floatingStyle = useFloatingPosition({
+  // Pinned by its bottom edge just above the anchor (the model button): switching providers, Show more
+  // and search change its height upward and never move it.
+  const floatingStyle = usePinnedPopover({
     open: portaled,
     anchorRef: anchorRef ?? localShellRef,
     contentRef: localShellRef,
-    placement: 'above-start',
-    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, openOlder, runSettings ? highlightIndex : null]
+    maxHeight: PICKER_MAX_HEIGHT
   })
 
   const isEntrySelected = useCallback(
@@ -367,6 +377,25 @@ function ProfileModelFamilyMenu({
       isFamilySelected(entry.family, selectedModelId),
     [selectedInstanceId, selectedProviderId, selectedModelId]
   )
+
+  // One provider's models at a time: the one picked on the rail, else the selected model's. Favorites
+  // (on the rail) lists every provider's starred models instead; a search looks through all of them.
+  const searching = searchQuery.trim() !== ''
+  const selectedListing = allEntries.find((entry) => isEntrySelected(entry))?.listing
+  const railListing =
+    railItems.length <= 1
+      ? null
+      : (railItems.find((item) => item.key === railChoice) ?? railItems.find((item) => item.key === selectedListing) ?? railItems[0]!).key
+  const railFilter = favoritesOnly || searching ? null : railListing
+  // With no rail the star sits beside the search and narrows it.
+  const favoritesShown = favoritesOnly && (!searching || railItems.length <= 1)
+  const listView = searching ? 'search' : favoritesShown ? 'favorites' : railListing ?? 'all'
+  const chooseRail = (next: { favorites: boolean; listing?: string }) => {
+    setFavoritesOnly(next.favorites)
+    if (next.listing) setRailChoice(next.listing)
+    setSearchQuery('')
+    setListSwitches((count) => count + 1)
+  }
 
   // The selected model's section opens once its row is known, whenever that is (models that arrive
   // after the menu opened, another selection); closing it by hand again sticks until the next one.
@@ -379,7 +408,7 @@ function ProfileModelFamilyMenu({
     const query = searchQuery.trim().toLowerCase()
 
     const list = allEntries.filter((entry) => {
-      if (favoritesOnly && !isEntryFavorite(entry)) return false
+      if (favoritesShown && !isEntryFavorite(entry)) return false
       if (railFilter) {
         if (entry.listing !== railFilter) return false
       }
@@ -399,7 +428,7 @@ function ProfileModelFamilyMenu({
     // As in Settings > Providers: favorites first, then providers in their order, then each
     // provider's models in the saved order.
     return sortPickerEntries(list, isEntryFavorite)
-  }, [allEntries, isEntryFavorite, favoritesOnly, railFilter, searchQuery])
+  }, [allEntries, isEntryFavorite, favoritesShown, railFilter, searchQuery])
 
   const listItems = useMemo(
     () => foldOlderEntries(sortedEntries, { searching: searchQuery.trim() !== '', open: openOlder, isFavorite: isEntryFavorite }),
@@ -543,6 +572,7 @@ function ProfileModelFamilyMenu({
   )
 
   useEffect(() => {
+    if (closing) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') return
 
@@ -555,6 +585,11 @@ function ProfileModelFamilyMenu({
         return
       }
 
+      if (event.key === 'Tab' && !event.shiftKey && event.target === searchInputRef.current) {
+        // The rows follow the search by Up and Down, so Tab goes on to the reasoning column.
+        enterRunSettings(event)
+        return
+      }
       if (event.key === 'ArrowRight') {
         // From the end of the search text, Right moves into the highlighted model's run settings.
         const input = searchInputRef.current
@@ -586,7 +621,7 @@ function ProfileModelFamilyMenu({
 
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [filteredEntries, highlightIndex, selectEntry])
+  }, [closing, filteredEntries, highlightIndex, selectEntry])
 
   useLayoutEffect(() => {
     if (!scrollHighlightRef.current) return
@@ -690,8 +725,8 @@ function ProfileModelFamilyMenu({
             </span>
           )}
           <span className="model-picker-row-text">
-            {/* Beside the maker's logo the brand is not repeated ("Opus 5.5"). */}
-            <span className="model-picker-row-title">{compactRows ? entry.family.familyLabel : shortModelName(entry.family.familyLabel)}</span>
+            {/* Beside the maker's logo, or under its selected rail item, the brand is not repeated ("Opus 5.5"). */}
+            <span className="model-picker-row-title">{shortModelName(entry.family.familyLabel)}</span>
             {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
                 {subtitle ? <span className="model-picker-row-provider">{subtitle}</span> : null}
@@ -722,13 +757,13 @@ function ProfileModelFamilyMenu({
   const favoritesToggle = (className: string) => (
     <button
       type="button"
-      className={`${className}${favoritesOnly ? ' selected active' : ''}`}
-      aria-pressed={favoritesOnly}
-      aria-label={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-      title={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-      onClick={() => setFavoritesOnly((value) => !value)}
+      className={`${className}${favoritesShown ? ' selected active' : ''}`}
+      aria-pressed={favoritesShown}
+      aria-label={favoritesShown ? 'Show all models' : 'Show favorites only'}
+      title={favoritesShown ? 'Show all models' : 'Favorites'}
+      onClick={() => (railItems.length > 1 ? chooseRail({ favorites: !favoritesShown }) : setFavoritesOnly(!favoritesShown))}
     >
-      <Star size={railItems.length > 1 ? 16 : 14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
+      <Star size={railItems.length > 1 ? 16 : 14} strokeWidth={2} fill={favoritesShown ? 'currentColor' : 'none'} />
     </button>
   )
 
@@ -736,11 +771,12 @@ function ProfileModelFamilyMenu({
     <div
       className={`composer-model-picker-shell model-picker-shell${
         portaled ? ' composer-model-picker-shell-floating' : ''
-      }`}
+      }${closing ? ' is-closing' : ''}`}
+      aria-hidden={closing || undefined}
       ref={setShellNode}
       style={portaled ? floatingStyle : undefined}
     >
-      <div className={`model-picker-panel${runSettings ? ' is-fixed' : ''}${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
+      <div className={`model-picker-panel${runSettings ? ' is-fixed' : ''}${railItems.length > 1 ? ' has-rail' : ''}${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
         <div className="model-picker-main">
           {railItems.length > 1 ? (
             <div className="model-picker-rail" data-tooltip-placement="outside-left">
@@ -756,7 +792,9 @@ function ProfileModelFamilyMenu({
                     className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
                     title={item.label}
                     aria-label={item.label}
-                    onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
+                    onClick={() => {
+                      if (railFilter !== item.key) chooseRail({ favorites: false, listing: item.key })
+                    }}
                   >
                     <ProviderIcon providerId={item.iconId} size={16} />
                     {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
@@ -787,16 +825,17 @@ function ProfileModelFamilyMenu({
             </div>
 
             <div
+              key={listView}
               ref={menuRef}
               id={listId}
-              className="composer-model-menu model-picker-list scrollbar-ultra-thin"
+              className={`composer-model-menu model-picker-list scrollbar-ultra-thin${listSwitches > 0 && !searching ? ' is-switched' : ''}`}
               role="listbox"
               aria-label="Select model"
               onScroll={handleMenuScroll}
             >
               {filteredEntries.length === 0 ? (
                 <div className="model-picker-empty">
-                  {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
+                  {favoritesShown && !searching ? 'No favorites yet' : 'No matches'}
                 </div>
               ) : (
                 listItems.map((item) =>
