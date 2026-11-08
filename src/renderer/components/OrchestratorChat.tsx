@@ -1474,18 +1474,20 @@ export function OrchestratorChat() {
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
               enabledSkills={enabledSkills}
-              providers={providers}
-              selectedProviderId={selectedProviderId}
-              selectedInstanceId={selectedInstanceId}
-              selectedModelId={selectedModelId}
-              modelMenuOpen={modelMenuOpen}
-              onModelMenuOpenChange={setModelMenuOpen}
-              onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
-              onOpenSettings={() => setSettingsOpen(true)}
-              contextUsage={contextUsage}
-              contextCompactionSetting={contextCompactionSetting}
-              contextOpen={contextOpen}
-              onContextOpenChange={setContextOpen}
+              run={{
+                providers,
+                selectedProviderId,
+                selectedInstanceId,
+                selectedModelId,
+                modelMenuOpen,
+                onModelMenuOpenChange: setModelMenuOpen,
+                onModelSelect: (providerId, modelId) => void handleModelSelect(providerId, modelId),
+                onOpenSettings: () => setSettingsOpen(true),
+                contextUsage,
+                contextCompactionSetting,
+                contextOpen,
+                onContextOpenChange: setContextOpen
+              }}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
               placeholder={!workspaceReady ? ''

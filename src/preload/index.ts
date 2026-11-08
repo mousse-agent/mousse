@@ -1,5 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -693,7 +693,10 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
-    }
+    },
+    /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
+    attachmentPath: async (file: File): Promise<string> =>
+      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer()))
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
@@ -1192,10 +1195,7 @@ const api = {
       ipcRenderer.invoke('dialog:pickExecutable', options ?? {}),
     /** Native folder picker; resolves to the chosen absolute path, or null when cancelled. */
     pickFolder: (options?: { title?: string; buttonLabel?: string }): Promise<string | null> =>
-      ipcRenderer.invoke('dialog:pickFolder', options ?? {}),
-    /** Native multi-file picker; resolves to the chosen absolute paths, empty when cancelled. */
-    pickFiles: (options?: { title?: string }): Promise<string[]> =>
-      ipcRenderer.invoke('dialog:pickFiles', options ?? {})
+      ipcRenderer.invoke('dialog:pickFolder', options ?? {})
   },
   window: {
     resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),

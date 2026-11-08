@@ -64,11 +64,19 @@ export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 /** Most messages one `bots.chat.list` page returns. */
 export const MAX_BOT_CHAT_PAGE = 100
 
-/** An attachment the owner sends with a chat message: a file on this computer. */
+/**
+ * An attachment the owner sends with a chat message: a file on this computer. The service copies it
+ * into the bot's files folder, where the bot may read it, and the message names that copy.
+ */
 export interface BotChatAttachment {
   name: string
   path: string
 }
+
+/** Most files one chat message carries. */
+export const MAX_BOT_CHAT_ATTACHMENTS = 10
+/** The largest file a chat message carries. */
+export const MAX_BOT_CHAT_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 /** Each v2 method's params (`profileId` aside) and result. */
 export interface BotsPersonalV2Api {

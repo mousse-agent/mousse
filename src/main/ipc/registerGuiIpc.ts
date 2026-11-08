@@ -77,6 +77,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
+import { stageBotAttachment } from './botAttachments'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -2768,13 +2769,10 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  registerHandler('dialog:pickFiles', async (event, request: unknown) => {
-    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
-    const title = (request as { title?: unknown } | null)?.title
-    const options: Electron.OpenDialogOptions = { ...(typeof title === 'string' ? { title } : {}), properties: ['openFile', 'multiSelections'] }
-    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    return result.canceled ? [] : result.filePaths
-  })
+  // A file pasted into a bot's composer has no path: it waits in the temporary folder until the service copies it.
+  registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
+    stageBotAttachment(app.getPath('temp'), name, bytes)
+  )
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

@@ -27,6 +27,8 @@ Each bot has two lanes. At most one chat activation and one run activation exist
 - Ordinary sends, steers and queue writes to a bot's threads are still refused (`bot_thread_read_only`). The owner's chat goes through `bots.chat.*`, so every turn keeps the bot's grant and lock.
 - **The bot chat is `bot_messages`** in `bots.db`: owner messages, replies, run reports, notices with ask cards, error lines, and the chips of each message. The renderer reads only this table, never transcripts, so tool rows and model names can't leak.
 - Each activation has a scratch folder, deleted when it ends. Documents the bot keeps go to its **files folder**, `<profile>/bots/files/<botId>/`, which every bot may write and which About never lists.
+- **The bot chat's composer** is the thread composer (`ChatComposer`) without a thread's run settings: no model picker, reasoning level, permission mode, context ring, `/` commands or skills, since a bot picks its own model. It keeps the same box, attach (the button, dropping files and pasting images), dictation, Up for the last message, and Send or Stop.
+- **Attached files** are copied into the bot's files folder, under `attachments/<date>/`, and the message and the bot's input name the copies (`copyBotAttachments`). The starter grant reads them, so the bot never needs the folder the owner keeps them in, and its edits never touch the originals. A pasted file has no path: it waits in a temporary folder until it is copied. At most 10 files of 50 MB each per message. Images reach the bot as files it reads, not as pictures in the message.
 
 ## Asks
 

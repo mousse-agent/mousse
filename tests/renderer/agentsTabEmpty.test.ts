@@ -17,6 +17,8 @@ vi.mock('../../src/renderer/components/chats/NetworkTranscript', () => ({ Networ
 vi.mock('../../src/renderer/components/chats/NetworkChatActions', () => ({ NetworkChatActions: () => null }))
 vi.mock('../../src/renderer/components/chats/NetworkTaskPicker', () => ({ NetworkTaskPicker: () => null }))
 vi.mock('../../src/renderer/components/chats/ChatBrowserAccess', () => ({ ChatBrowserAccess: () => null }))
+// A bot's chat has the thread composer, whose microphone pulls in audio worklets jsdom does not have.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/components/editors/MarkdownPreview', () => ({ MarkdownPreview: () => null }))
 vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ ComposerQuestionModal: () => null }))
 // Automations' sections, reduced to a mark: the tests only check which one is showing.
