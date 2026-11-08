@@ -7,9 +7,9 @@ import type { BotFaceState } from '../components/bots/face/BotFace'
 import { createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 
 /**
- * The owner's bots in the Agents tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
+ * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
  * was read, the live chip of a working bot, owner messages on their way, and About's detail.
- * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Agents tab is open,
+ * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Chats tab is open,
  * `useBotsPolling` lists them again every 2 seconds, in case an event was missed.
  */
 
@@ -380,12 +380,26 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 })
 
-/** Lists the bots now and every 2 seconds while the calling view (the Agents tab) is shown. */
+let pollers = 0
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+/**
+ * Lists the bots now and every 2 seconds while a view that shows them is mounted: the Chats tab's
+ * sidebar and the chat pane. The sidebar can be shown without the pane (after a restart the pane
+ * opens on Projects), so each lists them; they share one timer.
+ */
 export function useBotsPolling(): void {
   const profileId = useBotsStore((s) => s.profileId)
   useEffect(() => {
     void useBotsStore.getState().refresh()
-    const timer = setInterval(() => { void useBotsStore.getState().refresh() }, POLL_MS)
-    return () => clearInterval(timer)
+    pollers += 1
+    pollTimer ??= setInterval(() => { void useBotsStore.getState().refresh() }, POLL_MS)
+    return () => {
+      pollers -= 1
+      if (pollers === 0 && pollTimer !== undefined) {
+        clearInterval(pollTimer)
+        pollTimer = undefined
+      }
+    }
   }, [profileId])
 }

@@ -139,3 +139,32 @@ describe('the Bots section', () => {
     expect(host.querySelector('.chat-recent-section .chat-list-preview')?.textContent).toBe('All done')
   })
 })
+
+describe('after a restart', () => {
+  it('lists the bots in the sidebar when the chat pane is not shown', async () => {
+    fake.bots = [summary('b1', { name: 'noobesh' })]
+    await act(async () => { useChatsStore.getState().activate('p1') })
+    // The sidebar comes back on the Chats tab while the pane opens on Projects: the sidebar alone.
+    await act(async () => root.render(createElement(ChatsSidebar)))
+    await act(async () => {})
+    expect(host.querySelector('.bot-roster')?.textContent).toContain('noobesh')
+  })
+
+  it('shares one 2-second poll between the sidebar and the pane, and stops it when both are gone', async () => {
+    vi.useFakeTimers()
+    try {
+      await show([summary('b1', { name: 'noobesh' })])
+      const lists = () => fake.calls.filter(([name]) => name === 'list').length
+      const before = lists()
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      expect(lists() - before).toBe(1)
+      act(() => root.unmount())
+      const after = lists()
+      await act(async () => { vi.advanceTimersByTime(6000) })
+      expect(lists()).toBe(after)
+      root = createRoot(host)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
