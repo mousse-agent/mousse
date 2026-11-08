@@ -134,7 +134,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
   'source',
   'projectPath',
   'profileId',
-  'expectedProfileId'
+  'expectedProfileId',
+  // The folder the Files panel of a window on the computer itself browses (any folder of that computer).
+  'root'
 ] as const
 
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
@@ -819,6 +821,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
+  },
+  {
+    methods: ['files.drives'],
+    reason: 'The drives of a computer are browsed from a window on that computer only; another computer sees the thread’s folder.'
   },
   {
     methods: [

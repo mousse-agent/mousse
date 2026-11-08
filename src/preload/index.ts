@@ -450,14 +450,17 @@ const api = {
     }
   },
   fs: {
-    listDir: (dirPath?: string, projectId?: string, threadId?: string | null): Promise<FileEntry[]> =>
-      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
-    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
-    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
+    /** `root`: an absolute folder the Files panel browses instead of the thread's (this computer's window only). */
+    listDir: (dirPath?: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileEntry[]> =>
+      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
+    readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
+    /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
+    listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
       query: string,
       options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
