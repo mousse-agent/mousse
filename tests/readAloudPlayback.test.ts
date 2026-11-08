@@ -100,7 +100,7 @@ describe('splitSpeechSegments', () => {
       'The replacement loads the model in the background while you read. After that, every read starts quickly.'
     const segments = splitSpeechSegments(text)
     expect(segments).toEqual([
-      'Sure. The engine that was still voicing the old text is.',
+      'Sure. The engine that was still voicing the old text is,',
       'shut down and replaced right away, so the next read does not wait behind it and starts within seconds.',
       'The replacement loads the model in the background while you read. After that, every read starts quickly.'
     ])
@@ -112,10 +112,10 @@ describe('splitSpeechSegments', () => {
     expect(
       splitSpeechSegments('When the voice model has finished loading in the background, the first segment is voiced at once and playback starts. Then the rest follows.')
     ).toEqual(['When the voice model has finished loading in the background,', 'the first segment is voiced at once and playback starts. Then the rest follows.'])
-    // The segment that ends mid-sentence ends with a full stop, as every segment does.
+    // A cut between words ends with a comma, so the voice does not close the sentence there.
     expect(
       splitSpeechSegments('The voice model keeps running in its own process for five minutes after the last read ends and then exits. Then the rest follows.')
-    ).toEqual(['The voice model keeps running in its own process for five.', 'minutes after the last read ends and then exits. Then the rest follows.'])
+    ).toEqual(['The voice model keeps running in its own process for five,', 'minutes after the last read ends and then exits. Then the rest follows.'])
   })
 
   it('counts a paragraph break as a sentence end, so a short opening paragraph is joined too', () => {
@@ -124,7 +124,7 @@ describe('splitSpeechSegments', () => {
         'Summary.\n\nThe engine that was still voicing the old text is shut down and replaced right away, so the next read does not wait behind it. That is all.'
       )
     ).toEqual([
-      'Summary. The engine that was still voicing the old text is.',
+      'Summary. The engine that was still voicing the old text is,',
       'shut down and replaced right away, so the next read does not wait behind it. That is all.'
     ])
   })

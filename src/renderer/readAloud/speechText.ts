@@ -6,7 +6,7 @@ const TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
 
 function endWithPunctuation(line: string): string {
-  return /[.!?:;,]["')\]]*$/.test(line) ? line : `${line}.`
+  return /[.!?:;,—]["')\]]*$/.test(line) ? line : `${line}.`
 }
 
 function stripInline(text: string): string {
@@ -190,9 +190,13 @@ export function takeLeading(text: string, max: number): [head: string, rest: str
     clause = at
   }
   if (clause > 0) return split(clause)
-  // One character is kept free for the full stop a segment that ends mid-sentence gets.
+  // A cut between words ends with a comma, so the voice keeps the sentence going instead of
+  // closing it; one character is kept free for it.
   for (let at = max - 1; at > fit; at--) {
-    if (/\s/.test(trimmed[at])) return split(at)
+    if (/\s/.test(trimmed[at])) {
+      const [head, rest] = split(at)
+      return [/[.!?:;,—]["')\]]*$/.test(head) ? head : `${head},`, rest]
+    }
   }
   return split(fit > 0 ? fit : max - 1)
 }
