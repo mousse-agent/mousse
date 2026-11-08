@@ -234,8 +234,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   const openItem = (item: AutomationItem) => {
     setSelected([])
-    if (item.link.kind === 'job' && item.link.botId) openBot(item.link.botId)
-    else if (item.link.kind === 'thread' || item.link.kind === 'ask') goThread(item.link.threadId)
+    if (item.link.kind === 'thread' || item.link.kind === 'ask') goThread(item.link.threadId)
     else { setDetail(item.key); void loadCatalog() }
   }
 
@@ -251,18 +250,28 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   }
   const keep = (jobId: string) => act(() => client.keep(jobId))
   const resume = (jobIds: string[]) => act(async () => { for (const id of jobIds) await window.mousse.scheduled.resume(id) })
+  // A row paused because its bot is paused resumes the bot (all its schedules), as the bot's own Resume does.
+  const resumeItem = (item: AutomationItem) => {
+    if (item.pausedBy === 'bot' && item.link.kind === 'job' && item.link.botId) {
+      const botId = item.link.botId
+      return act(() => createPersonalBotsClient(window.mousse.platformRequest).resume(botId))
+    }
+    return item.link.kind === 'job' ? resume([item.link.jobId]) : Promise.resolve()
+  }
 
   const primary = (item: AutomationItem) => {
     const kind = primaryOf(item).kind
     if (kind === 'allow') { answer(item, true); return }
     if (kind === 'open') {
       const thread = item.attention?.threadId ?? item.active?.threadId
-      if (item.kind === 'job' && thread) goThread(thread)
+      // A bot's row opens its chat, where its runs report.
+      if (item.link.kind === 'job' && item.link.botId) openBot(item.link.botId)
+      else if (item.kind === 'job' && thread) goThread(thread)
       else openItem(item)
       return
     }
     if (item.link.kind !== 'job') return
-    if (kind === 'resume') void resume([item.link.jobId])
+    if (kind === 'resume') void resumeItem(item)
     else void runNow(item.link.jobId)
   }
 
@@ -272,9 +281,19 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       : []
     const askThread = item.attention?.threadId
     if (item.link.kind === 'ask') return [...notNow, { label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
-    if (item.link.kind === 'job' && item.link.botId) { const botId = item.link.botId; return [...notNow, { label: 'Open bot chat', onSelect: () => openBot(botId) }] }
     if (item.link.kind === 'thread') return [{ label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
     const jobId = item.link.jobId
+    // A bot's automation: its runs report in the bot chat; When, Do and Tell me are edited here, Who stays the bot.
+    if (item.link.botId) {
+      const botId = item.link.botId
+      return [
+        ...notNow,
+        { label: 'Open bot chat', onSelect: () => openBot(botId) },
+        item.paused ? { label: 'Resume', onSelect: () => void resumeItem(item) } : { label: 'Pause…', onSelect: () => setPausing([item.key]) },
+        { label: 'Edit', onSelect: () => openItem(item) },
+        { label: 'Delete', danger: true, onSelect: () => setDeleting([item.key]) }
+      ]
+    }
     const kind = primaryOf(item).kind
     const thread = item.active?.threadId ?? item.last?.threadId
     return [
@@ -382,11 +401,12 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             onBack={() => setDetail(null)}
             onRunNow={() => void runNow(detailJob.id)}
             onPause={() => setPausing([detailItem.key])}
-            onResume={() => void resume([detailJob.id])}
+            onResume={() => void resumeItem(detailItem)}
             onDelete={() => setDeleting([detailItem.key])}
             onWebhook={() => setWebhookJobId(detailJob.id)}
             onKeep={() => void keep(detailJob.id)}
             onOpenThread={goThread}
+            onOpenBot={openBot}
           />
           {actionError ? <p className="scheduled-action-error" role="alert">{actionError}</p> : null}
         </div>

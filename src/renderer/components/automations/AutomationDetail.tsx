@@ -34,6 +34,7 @@ import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
 import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
+import { BotFaceStill } from '../bots/face/BotFace'
 
 /** The custom schedule builder's choices. Daily and Weekly are plain forms that save as cron. */
 type BuilderKind = 'interval' | 'daily' | 'weekly' | 'cron' | 'once' | 'manual'
@@ -46,6 +47,19 @@ const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
   { value: 'once', label: 'Once' },
   { value: 'manual', label: 'On demand' }
 ]
+/** A bot repeats: Once and On demand are something you ask it in its chat. */
+const BOT_BUILDER_KINDS = BUILDER_KINDS.filter((option) => option.value !== 'once' && option.value !== 'manual')
+
+/** Why a bot can't keep this When, by field; empty when it can. A bot runs at most every 5 minutes. */
+export function botScheduleErrors(draft: JobDraft): Partial<Record<DraftField, string>> {
+  if (draft.scheduleKind === 'once' || draft.scheduleKind === 'manual') return { schedule: 'A bot repeats. For one run, ask it in its chat.' }
+  if (draft.scheduleKind === 'interval' && Number(draft.minutes) < 5) return { minutes: 'A bot runs at most every 5 minutes.' }
+  if (draft.scheduleKind === 'cron') {
+    const cron = parseSimpleCron(draft.expr)
+    if (cron?.kind === 'minutes' && cron.every < 5) return { expr: 'A bot runs at most every 5 minutes.' }
+  }
+  return {}
+}
 
 export const PROJECT_WORKSPACE_WARNING =
   'The run works in your own checkout, unattended, with no checkpoints or undo. For a Git project, a new worktree per run is safer.'
@@ -108,7 +122,8 @@ function MoreRow({ title, htmlFor, description, control, children, field, testId
 /**
  * An automation's detail: the sentence is the editor ("Every [weekday at 9:00], [Claude] does [this] in [mousse]."),
  * then the prompt, May and Tell me, the next run with its reasons, the runs, and More with everything technical.
- * Saving sends only what changed. Escape goes back.
+ * Saving sends only what changed. Escape goes back. A bot's automation is the same record: its Who stays the bot,
+ * its May is the bot's grant, and only When, Do, the name and Tell me change.
  */
 export function AutomationDetail({
   job,
@@ -127,7 +142,8 @@ export function AutomationDetail({
   onDelete,
   onWebhook,
   onKeep,
-  onOpenThread
+  onOpenThread,
+  onOpenBot
 }: {
   job: ScheduledJob
   item?: AutomationItem
@@ -149,6 +165,8 @@ export function AutomationDetail({
   /** Keep: an agent-added automation loses only its end. */
   onKeep: () => void
   onOpenThread: (threadId: string) => void
+  /** A bot's automation: opens the bot's chat, where its grant (its May) is shown. */
+  onOpenBot?: (botId: string) => void
 }) {
   const [draft, setDraft] = useState<JobDraft>(initial)
   const [builderOpen, setBuilderOpen] = useState(false)
@@ -167,8 +185,12 @@ export function AutomationDetail({
 
   const held = heldPermissionMode(draft, catalog, job)
   const choosingPermission = draft.permissionMode !== initial.permissionMode
+  const bot = job.bot && item?.who.kind === 'bot' ? { id: job.bot.botId, name: item.who.name, look: item.who.look } : undefined
   const errors = useMemo(
-    () => validateDraft(draft, { hasWebhook: Boolean(job.trigger?.webhook), requireName: true, ...(choosingPermission ? { held: held.mode } : {}) }),
+    () => ({
+      ...validateDraft(draft, { hasWebhook: Boolean(job.trigger?.webhook), requireName: true, ...(choosingPermission ? { held: held.mode } : {}) }),
+      ...(job.bot ? botScheduleErrors(draft) : {})
+    }),
     [draft, job, choosingPermission, held.mode]
   )
   const shown = attempted ? errors : {}
@@ -177,7 +199,8 @@ export function AutomationDetail({
   const lowered = loweredPermission(draft, initial, catalog, job)
   const builderKind: BuilderKind = draft.scheduleKind === 'cron' ? cronForm : draft.scheduleKind
   const parts = cronParts(draft.expr)
-  const paused = job.state === 'paused'
+  // A bot's row is paused too while its bot is (Resume then resumes the bot).
+  const paused = job.state === 'paused' || item?.pausedBy === 'bot'
   const owner = item?.computer ?? { name: 'This computer', timeZone: viewerZone, local: true }
   const now = new Date()
 
@@ -284,10 +307,15 @@ export function AutomationDetail({
   const creatorThread = job.createdBy ? catalog.threads.find((thread) => thread.id === job.createdBy!.threadId)?.name : undefined
   const workspaceShown = showsWorkspace(draft) || draft.workspaceKind === 'worktree'
 
-  const menu: RowMenuItem[] = [
-    { label: job.trigger?.webhook ? 'Request URL…' : 'Add request URL…', onSelect: onWebhook },
-    { label: 'Delete', danger: true, onSelect: onDelete }
-  ]
+  const menu: RowMenuItem[] = bot
+    ? [
+        ...(onOpenBot ? [{ label: 'Open bot chat', onSelect: () => onOpenBot(bot.id) }] : []),
+        { label: 'Delete', danger: true, onSelect: onDelete }
+      ]
+    : [
+        { label: job.trigger?.webhook ? 'Request URL…' : 'Add request URL…', onSelect: onWebhook },
+        { label: 'Delete', danger: true, onSelect: onDelete }
+      ]
 
   return (
     <form
@@ -311,7 +339,7 @@ export function AutomationDetail({
         </button>
         <h2 className="automation-detail-name">{draft.name.trim() || job.name}</h2>
         <div className="automation-detail-actions">
-          <button type="button" className="settings-btn" onClick={onRunNow} disabled={Boolean(item?.active && item.active.state !== 'waiting')}>Run now</button>
+          {bot ? null : <button type="button" className="settings-btn" onClick={onRunNow} disabled={Boolean(item?.active && item.active.state !== 'waiting')}>Run now</button>}
           {paused
             ? <button type="button" className="settings-btn" onClick={onResume} data-testid="automation-detail-resume">Resume</button>
             : <button type="button" className="settings-btn" onClick={onPause} title="Pause…" aria-label="Pause…" data-testid="automation-detail-pause">⏸</button>}
@@ -327,7 +355,12 @@ export function AutomationDetail({
           ,
         </span>
         {' '}
-        {workflow ? null : (
+        {bot ? (
+          <span className="automation-chip readonly" data-testid="automation-who" title={`${bot.name} does it, in its own way and with its own permissions`}>
+            <span className="automation-bot-face" aria-hidden="true"><BotFaceStill look={bot.look} state="idle" size={16} view="head" /></span>
+            {bot.name}
+          </span>
+        ) : workflow ? null : (
           <Select
             ariaLabel="Who"
             className="automation-chip-select"
@@ -340,15 +373,17 @@ export function AutomationDetail({
           />
         )}
         {workflow ? null : ' does '}
-        <DoPicker
-          value={doWorkflow?.id ?? (workflow ? draft.prompt.trim().split(/\s+/)[0] ?? '' : '')}
-          workflows={doWorkflow || !workflow ? library.workflows : [...library.workflows, { id: draft.prompt.trim().split(/\s+/)[0] ?? '/', slug: (draft.prompt.trim().split(/\s+/)[0] ?? '/').slice(1), name: 'Workflow not found', revisionId: '' }]}
-          promptLabel="this"
-          onChange={chooseDo}
-        />
+        {bot ? <span className="automation-sentence-glue">this.</span> : (
+          <DoPicker
+            value={doWorkflow?.id ?? (workflow ? draft.prompt.trim().split(/\s+/)[0] ?? '' : '')}
+            workflows={doWorkflow || !workflow ? library.workflows : [...library.workflows, { id: draft.prompt.trim().split(/\s+/)[0] ?? '/', slug: (draft.prompt.trim().split(/\s+/)[0] ?? '/').slice(1), name: 'Workflow not found', revisionId: '' }]}
+            promptLabel="this"
+            onChange={chooseDo}
+          />
+        )}
         {workflow ? ' runs' : null}
-        {' in '}
-        <span className="automation-sentence-glue">
+        {bot ? null : ' in '}
+        {bot ? null : <span className="automation-sentence-glue">
           <Select
             id={id('project')}
             ariaLabel="Where"
@@ -362,13 +397,13 @@ export function AutomationDetail({
             }}
           />
           .
-        </span>
+        </span>}
       </p>
 
       {builderOpen ? (
         <div className="scheduled-builder automation-builder">
           <div className="scheduled-segmented" role="radiogroup" aria-label="When" {...field('schedule')}>
-            {BUILDER_KINDS.map((option) => (
+            {(bot ? BOT_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
               <button
                 key={option.value}
                 type="button"
@@ -433,7 +468,7 @@ export function AutomationDetail({
             ref={promptRef}
             id={id('prompt')}
             className="scheduled-prompt"
-            placeholder="What should the agent do?"
+            placeholder={bot ? `What should ${bot.name} do?` : 'What should the agent do?'}
             rows={3}
             value={draft.prompt}
             {...field('prompt')}
@@ -445,7 +480,12 @@ export function AutomationDetail({
 
       <div className="automation-detail-pair">
         <span className="automation-detail-label" id={id('may-label')}>May</span>
-        {draft.agentId && !workflow ? (
+        {bot ? (
+          <span className="automation-detail-value" data-testid="automation-may-bot" title={`What ${bot.name} may do is set by asking it, in its chat`}>
+            {`${bot.name}'s grant`}
+            {onOpenBot ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenBot(bot.id)}>View</button> : null}
+          </span>
+        ) : draft.agentId && !workflow ? (
           <span className="automation-detail-value" data-testid="automation-may-agent" title="A saved agent keeps to what it may use, set in the Library">{`What ${whoLabel} may use`}</span>
         ) : (
           <Select<PermissionMode>
@@ -478,7 +518,7 @@ export function AutomationDetail({
         <span className="automation-detail-label">Next</span>
         <span className="automation-detail-value" data-testid="automation-next">
           {paused
-            ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : 'Paused'
+            ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : item?.pausedBy === 'bot' ? `${item.pausedReason ?? 'Paused'} · the bot is paused` : 'Paused'
             : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? 'When you run it' : 'None'}
         </span>
         <button type="button" className="scheduled-link-btn" aria-expanded={whyOpen} onClick={() => setWhyOpen((open) => !open)} data-testid="automation-why">(why?)</button>
@@ -523,7 +563,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">thread · worktree · mode · limits · request URL · added by</span>
+        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · limits · request URL · added by'}</span>
       </button>
 
       {moreOpen ? (
@@ -532,6 +572,7 @@ export function AutomationDetail({
             <input id={id('name')} className="scheduled-input" placeholder={nameFromPrompt(draft.prompt) || 'Name'} value={draft.name} {...field('name')} onChange={(event) => patch({ name: event.target.value })} />
           }>{fieldError('name')}</MoreRow>
 
+          {bot ? null : <>
           <MoreRow title="Thread" htmlFor={id('thread')} control={
             <Select id={id('thread')} className="scheduled-select" value={threadLocked ? '' : draft.threadId} options={threadOptions} disabled={threadLocked} onChange={(threadId) => patch({ threadId })} />
           } />
@@ -582,6 +623,8 @@ export function AutomationDetail({
               </>
             } />
           ) : null}
+          </>}
+          {bot ? <MoreRow title="Added by" testId="bot-added-by" description={job.bot?.createdBy === 'bot' ? bot.name : 'You'} /> : null}
         </div>
       ) : null}
 

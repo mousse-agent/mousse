@@ -813,6 +813,7 @@ html[data-theme='high-contrast'] .automations-page {
 .automation-row-seg.tone-warn { color: var(--warning); }
 
 .automation-bot-face { display: inline-flex; flex: none; width: 16px; height: 16px; }
+.automation-chip .automation-bot-face { margin-right: 5px; }
 
 .automation-primary { flex: none; }
 .automation-row .settings-btn { height: 24px; padding: 0 10px; }

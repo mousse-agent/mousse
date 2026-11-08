@@ -414,6 +414,29 @@ describe('the Automations page', () => {
     expect($('[data-testid="automation-why-panel"]')?.textContent).toContain(ZONE)
   })
 
+  it('opens a bot\'s automation as a normal editable row: Who stays the bot, May is its grant, When and Tell me save', async () => {
+    const stored = job({ id: 'b--s', name: 'Weather', prompt: 'Tell me if it rains', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'bot' } })
+    const pip = { kind: 'bot' as const, name: 'Pip', look: { colour: 'teal', accessory: 'none' } as const }
+    const mousse = await mount([item({ key: 'job:b--s', name: 'Weather', who: pip, mayIsGrant: true, next: { at: stored.nextRunAt!, timeZone: ZONE }, tellMe: 'news', link: { kind: 'job', jobId: 'b--s', botId: 'b' } })], [stored])
+    // Its row's menu has Pause… and Delete, and no Run now.
+    await click($('[aria-label="More actions for Weather"]'))
+    const labels = $$('[role="menuitem"]').map((entry) => entry.textContent)
+    expect(labels).toEqual(expect.arrayContaining(['Open bot chat', 'Pause…', 'Edit', 'Delete']))
+    expect(labels).not.toContain('Run now')
+    await click($$('[role="menuitem"]').find((entry) => entry.textContent === 'Edit'))
+    expect($('[data-testid="automation-detail"]')).not.toBeNull()
+    expect($('[data-testid="automation-sentence"]')?.textContent).toMatch(/^Every 30 minutes, Pip does this\.$/)
+    expect($('[aria-label="Where"]')).toBeNull()
+    expect([...document.querySelectorAll('button')].some((button) => button.textContent === 'Run now')).toBe(false)
+    expect($('[data-testid="automation-may-bot"]')?.textContent).toContain("Pip's grant")
+    await click($('[data-testid="automation-when"]'))
+    expect($$('[role="radiogroup"][aria-label="When"] [role="radio"]').map((entry) => entry.textContent)).toEqual(['Every…', 'Daily', 'Weekly', 'Cron'])
+    await click($('[aria-labelledby$="tell-label"]'))
+    await click(option('Only problems'))
+    await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Save'))
+    expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'problems' })
+  })
+
   it('shows search past twelve rows, and opens the Library from the header', async () => {
     const openLibrary = vi.fn()
     await mount(Array.from({ length: 13 }, (_, at) => item({ key: `job:${at}`, name: `Job ${at}`, trigger: 'on_demand' })), [], openLibrary)
@@ -535,9 +558,9 @@ describe('the Automations page', () => {
         attention: { kind: 'ask', text: 'Wants your approval', threadId: 't2', answer: { kind: 'thread_approval', threadId: 't2', requestId: 'r2', questionId: 'q', allow: 'yes', deny: 'no' } }
       } as Parameters<typeof item>[0]),
       item({
-        key: 'bot:b:s', kind: 'bot', name: 'every day · 08:00', who: { kind: 'bot', name: 'Pip', look: { colour: 'teal', accessory: 'none' } },
+        key: 'job:b--s', kind: 'job', name: 'every day · 08:00', who: { kind: 'bot', name: 'Pip', look: { colour: 'teal', accessory: 'none' } },
         attention: { kind: 'ask', text: 'Wants to read files in Notes', answer: { kind: 'bot_ask', botId: 'b', askId: 'esc_1' } },
-        link: { kind: 'bot', botId: 'b', scheduleId: 's' }
+        link: { kind: 'job', jobId: 'b--s', botId: 'b' }
       })
     ])
     expect($$('[data-group="needs"] [data-testid="automation-ask-allow"]')).toHaveLength(3)
