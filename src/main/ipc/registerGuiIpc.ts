@@ -143,7 +143,7 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
-import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
+import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
   PullRequestActionResult,
@@ -1692,8 +1692,11 @@ export function registerGuiIpc(
   // passes that turn's run: the fork starts after it, from the code it left.
   registerHandler('threads:fork', async (_e, threadId: string, options?: { atRunId?: string }) => {
     const atRunId = typeof options?.atRunId === 'string' && options.atRunId ? options.atRunId : undefined
-    const at = atRunId
-      ? { atRunOrdinal: (await guiMms.request<{ run: { ordinal: number; threadId: string } }>('runs.get', { threadId, runId: atRunId })).run.ordinal }
+    const run = atRunId ? (await guiMms.request<{ run: { ordinal: number; threadId: string } }>('runs.get', { threadId, runId: atRunId })).run : undefined
+    // The turn must be this thread's: an ordinal of another thread's run would fork this one at an unrelated turn.
+    if (run && unqualifyId(run.threadId) !== unqualifyId(threadId)) throw new Error("That turn isn't part of this thread.")
+    const at = run
+      ? { atRunOrdinal: run.ordinal }
       // Only when the latest run kept no code checkpoint (a /compact, an undo): the thread's code as it is now. An
       // earlier turn without one is refused instead of starting from today's code.
       : { atRunOrdinal: 'latest_stable', seedFrom: 'current_head' }
