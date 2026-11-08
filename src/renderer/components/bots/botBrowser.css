@@ -33,7 +33,7 @@
 .bot-browser-preview.is-live .bot-browser-dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .2); }
 
 /* The split view: as wide as the chat, the bot's tab and its controls. */
-.bot-browser-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); background: rgba(var(--surface-base-rgb, 24, 21, 28), .25); }
+.bot-browser-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); background: rgba(var(--surface-base-rgb), .25); }
 .bot-browser-bar { display: flex; align-items: center; gap: 4px; padding: 10px 12px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }
 .bot-browser-bar > button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--text-secondary); flex-shrink: 0; }
 .bot-browser-bar > button:hover:not(:disabled) { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
