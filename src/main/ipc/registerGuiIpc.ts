@@ -22,7 +22,9 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
+import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams } from './daemonGitParams'
+import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -1426,6 +1428,38 @@ export function registerGuiIpc(
   registerHandler('projects:trustGitSettings', async (_e, projectId: string) =>
     guiMms.request<{ filters: string[] }>('projects.trustGitSettings', { projectId })
   )
+  // A project's icon: the daemon reads and checks the file and answers a data URL, so the window never reads files.
+  registerHandler('projects:icon', async (_e, projectId: string) => {
+    try {
+      const res = await guiMms.request<{ icon: ProjectIconImage | null }>('projects.icon', { projectId })
+      return res.icon ?? null
+    } catch (error) {
+      // A daemon from before project icons: the folder glyph.
+      if ((error as { code?: unknown } | null)?.code === 'method_not_allowed') return null
+      throw error
+    }
+  })
+  registerHandler('projects:setIcon', async (_e, projectId: string, choice: ProjectIconChoice) => {
+    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>('projects.setIcon', {
+      projectId,
+      mode: choice?.mode,
+      ...(choice?.mode === 'custom' ? { path: choice.path } : {})
+    })
+    broadcast('projects:updated', res.projects)
+    return res.project
+  })
+  /** The icon file picker, starting in the project's folder. */
+  registerHandler('projects:pickIcon', async (_e, defaultPath: unknown) => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an icon',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: [...PROJECT_ICON_EXTENSIONS] }],
+      ...(typeof defaultPath === 'string' && defaultPath.length <= 4096 ? { defaultPath } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds
@@ -2174,23 +2208,32 @@ export function registerGuiIpc(
     return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id))).root
   })
 
+  // `root` is a folder the Files panel browses instead of the thread's; the daemon accepts it from this computer's
+  // window only. It is sent only to a service that understands it: an older one would answer for the thread's folder.
+  const browseSupported = browseSupport(() => guiMms.hello?.instanceId, () => guiMms.request('capabilities'))
+  const browsedRoot = (root: unknown) => browsedRootParams(root, browseSupported)
+
+  registerHandler('fs:listDrives', () => guiMms.request<{ home: string; drives: Array<{ path: string; label: string }> }>('files.drives'))
+
   registerHandler(
     'fs:listDir',
-    async (_e, dirPath?: string, projectId?: string, threadId?: string | null) =>
-      (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), path: dirPath ?? '' })).entries
+    async (_e, dirPath?: string, projectId?: string, threadId?: string | null, root?: string) =>
+      (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: dirPath ?? '' })).entries
   )
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
+      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
   )
   registerHandler(
     'fs:readAsset',
     // The daemon sends a preview in pieces that fit a message; they are joined here.
-    (_e, filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
-      readAssetInPieces((offset, length) =>
-        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), path: filePath, offset, length })
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
+      const browsed = await browsedRoot(root)
+      return readAssetInPieces((offset, length) =>
+        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
+    }
   )
   registerHandler(
     'fs:writeFile',
@@ -2199,12 +2242,14 @@ export function registerGuiIpc(
       filePath: string,
       content: string,
       projectId?: string,
-      threadId?: string | null
+      threadId?: string | null,
+      root?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
       await guiMms.request('files.writeDirect', {
         ...filesScope(projectId, threadId),
+        ...await browsedRoot(root),
         path: filePath,
         content,
         expectedProfileId: guiMms.getWindowBinding()?.profileId

@@ -86,6 +86,94 @@ describe('the toast stack', () => {
   })
 })
 
+describe('a toast whose text is cut off', () => {
+  const LONG = 'Could not change the icon · Method not allowed while the project is on another computer that is offline'
+  const card = () => document.querySelector<HTMLElement>('.ui-toast')!
+  const text = () => card().querySelector<HTMLElement>('.ui-toast-text')!
+  const hover = (over: boolean) => act(() => {
+    card().dispatchEvent(new PointerEvent(over ? 'pointerover' : 'pointerout', { bubbles: true, relatedTarget: document.body }))
+  })
+
+  beforeEach(() => {
+    // jsdom lays nothing out: a long message reads as wider than its line.
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+      configurable: true,
+      get(this: HTMLElement) { return this.classList.contains('ui-toast-message') && (this.textContent ?? '').length > 40 ? 500 : 0 }
+    })
+  })
+  afterEach(() => { delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth })
+
+  it('shows its tone as a tint, not a dot, and names an error for screen readers', () => {
+    act(() => { showToast({ message: 'Could not pin', tone: 'error' }) })
+    expect(card().classList.contains('ui-toast-error')).toBe(true)
+    expect(card().querySelector('.ui-toast-dot, .ui-toast-mark')).toBeNull()
+    expect(card().getAttribute('role')).toBe('alert')
+    expect(card().querySelector('.sr-only')?.textContent).toContain('Error:')
+  })
+
+  it('offers no expanding when the text fits', () => {
+    act(() => { showToast({ message: 'Archived' }) })
+    expect(text().getAttribute('role')).toBeNull()
+    expect(text().hasAttribute('aria-expanded')).toBe(false)
+  })
+
+  it('opens on click and stays open until clicked again, keeping Retry', () => {
+    act(() => { showToast({ message: LONG, tone: 'error', action: { label: 'Retry', run: () => {} } }) })
+    expect(text().getAttribute('role')).toBe('button')
+    expect(text().getAttribute('aria-expanded')).toBe('false')
+    act(() => { text().click() })
+    expect(text().getAttribute('aria-expanded')).toBe('true')
+    expect(card().classList.contains('is-open')).toBe(true)
+    expect(card().querySelector('[data-action="retry"]')).not.toBeNull()
+    hover(false)
+    expect(text().getAttribute('aria-expanded')).toBe('true')
+    act(() => { text().click() })
+    expect(text().getAttribute('aria-expanded')).toBe('false')
+    expect(card().querySelector('[data-action="copy"]')).toBeNull()
+  })
+
+  it('opens from the keyboard with Enter', () => {
+    act(() => { showToast({ message: LONG, tone: 'error' }) })
+    act(() => { text().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    expect(text().getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('opens on hover and waits while hovered, then closes and runs out when the pointer leaves', () => {
+    vi.useFakeTimers()
+    act(() => { showToast({ message: LONG, tone: 'error', durationMs: 1_000 }) })
+    hover(true)
+    expect(text().getAttribute('aria-expanded')).toBe('true')
+    act(() => { vi.advanceTimersByTime(5_000) })
+    expect(toasts()).toHaveLength(1)
+    hover(false)
+    expect(text().getAttribute('aria-expanded')).toBe('false')
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(toasts()).toHaveLength(0)
+  })
+
+  it('waits after the pointer leaves when it was clicked open', () => {
+    vi.useFakeTimers()
+    act(() => { showToast({ message: LONG, tone: 'error', durationMs: 1_000 }) })
+    hover(true)
+    act(() => { text().click() })
+    hover(false)
+    act(() => { vi.advanceTimersByTime(5_000) })
+    expect(toasts()).toHaveLength(1)
+  })
+
+  it('copies the full text, then says Copied', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    act(() => { showToast({ message: LONG, tone: 'error' }) })
+    act(() => { text().click() })
+    const copy = card().querySelector<HTMLButtonElement>('[data-action="copy"]')!
+    expect(copy.getAttribute('aria-label')).toBe('Copy error')
+    await act(async () => { copy.click() })
+    expect(writeText).toHaveBeenCalledWith(LONG)
+    expect(card().querySelector('.ui-toast-copied')?.textContent).toBe('Copied')
+  })
+})
+
 describe('the toast stack after it empties', () => {
   const section = () => document.querySelector<HTMLElement>('.ui-toaster')
 

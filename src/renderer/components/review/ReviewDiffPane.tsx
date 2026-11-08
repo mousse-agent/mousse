@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { DiffEditor, type BeforeMount, type DiffOnMount, type Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { MessageSquare } from '../../lib/icons'
+import { Check, MessageSquare, MoreHorizontal } from '../../lib/icons'
 import { createReviewComment, joinReviewPath, REVIEW_EXCERPT_MAX_LINES, type ChatReference } from '../../../shared/chatReferences'
 import type { ReviewFileResult, ReviewFileSide, ReviewScope } from '../../../shared/review'
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
-import { Switch } from '../settings/SettingsRow'
+import { useMenuKeyboard } from '../../hooks/useMenuKeyboard'
+import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useMonacoCodeFont } from '../../lib/monacoCodeFont'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
 import { languageForPath } from '../../utils/fileEditor'
 import { commentDecorations, commentScopeLabel, commentsForFile, scopeKey, selectedLineRange } from './reviewComments'
 import { isPlaceholderSide, placeholderFor, viewChangeLabel } from './reviewModel'
 import { DelayedLoader } from '../ui/DelayedLoader'
+import '../../styles/composer-workspace.css'
 
 const NO_REFERENCES: ChatReference[] = []
 
@@ -49,20 +51,85 @@ export interface ReviewDiffPaneProps {
 
 const textOf = (side: ReviewFileSide): string => (side && 'content' in side ? side.content : '')
 
-const WHITESPACE_LABEL = 'Ignore leading/trailing whitespace'
-
 /**
- * The whitespace switch shared by the Review and Git toolbars. It changes highlighting only. The app's switch, labelled
- * by its text: clicking either toggles it, and Space or Enter does on the switch.
+ * The "…" button in the Review and Git diff headers and its options menu. Ignore whitespace changes the
+ * highlighting only. Picking it keeps the menu open so the check mark shows; Escape, Tab or a click outside close it.
  */
-export function WhitespaceToggle() {
+export function DiffOptionsMenu() {
   const ignore = useAppStore((s) => s.reviewIgnoreWhitespace)
   const setIgnore = useAppStore((s) => s.setReviewIgnoreWhitespace)
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const firstItemRef = useRef<HTMLButtonElement>(null)
+  const menuId = useId()
+  const menuStyle = useFloatingPosition({ open, anchorRef: triggerRef, contentRef: menuRef, placement: 'below-end' })
+  const close = () => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+  const menuKeyDown = useMenuKeyboard(menuRef, close)
+
+  useEffect(() => {
+    if (!open) return
+    if (menuStyle.visibility === 'visible') firstItemRef.current?.focus()
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', outside)
+    return () => document.removeEventListener('pointerdown', outside)
+  }, [open, menuStyle.visibility])
+
   return (
-    <label className="review-toggle" title="Changes the highlighting only; counts stay the same.">
-      <Switch checked={ignore} label={WHITESPACE_LABEL} onChange={setIgnore} />
-      <span>{WHITESPACE_LABEL}</span>
-    </label>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`btn btn-ghost btn-sm diff-options-trigger${open ? ' open' : ''}`}
+        title="Diff options"
+        aria-label="Diff options"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => (open ? close() : setOpen(true))}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+          event.preventDefault()
+          setOpen(true)
+        }}
+      >
+        <MoreHorizontal size={14} strokeWidth={2} />
+      </button>
+      {open && (
+        <FloatingPortal>
+          <div
+            ref={menuRef}
+            id={menuId}
+            className="composer-workspace-menu diff-options-menu"
+            role="menu"
+            aria-label="Diff options"
+            style={menuStyle}
+            onKeyDown={menuKeyDown}
+          >
+            <button
+              ref={firstItemRef}
+              type="button"
+              role="menuitemcheckbox"
+              tabIndex={-1}
+              aria-checked={ignore}
+              className="composer-workspace-menu-item"
+              title="Changes the highlighting only; counts stay the same."
+              onClick={() => setIgnore(!ignore)}
+            >
+              <span>Ignore whitespace</span>
+              <span className="composer-workspace-menu-hint">Leading and trailing</span>
+              <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" style={ignore ? undefined : { visibility: 'hidden' }} />
+            </button>
+          </div>
+        </FloatingPortal>
+      )}
+    </>
   )
 }
 

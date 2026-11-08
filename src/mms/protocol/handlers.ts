@@ -5,6 +5,8 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
+import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
+import type { ProjectIconChoice } from '../../shared/projectIcon'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -141,6 +143,8 @@ import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } fr
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
+import { listFilesPlaces } from '../files/drives'
+import { browsedRootRefusal, browsedSaveRefusal, normalizedBrowsedRoot } from '../files/browsedRoot'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -568,6 +572,26 @@ async function localFilesRoot(ctx: HandlerContext, params: Record<string, unknow
 async function filesRootContext(ctx: HandlerContext, params: Record<string, unknown>): Promise<string> {
   await materializeRequestedWorkspace(ctx, params)
   return isLocalWindow(ctx) ? await localFilesRoot(ctx, params) : projectRootContext(ctx, params)
+}
+
+/** The calls that take a browsed folder (`root`). */
+const BROWSED_ROOT_METHODS = new Set(['files.list', 'files.read', 'files.readAsset', 'files.writeDirect'])
+
+/**
+ * The folder the Files panel of this computer's window browses instead of the thread's (`root`), or undefined
+ * when the call names none. Only such a window may name one, never another computer, a phone, the CLI or an
+ * agent; the rules for the path are in `files/browsedRoot.ts`. The path guard still holds every path of the call
+ * inside it, and its volume has already answered: `root` is one of the folders a request waits for
+ * (`waitForRequestFolders`), so a drive that hangs fails the call at once.
+ */
+function browsedFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): string | undefined {
+  const root = asOptionalString(params.root, 4096)
+  if (root === undefined) return undefined
+  if (!isLocalWindow(ctx) || ctx.connection?.bridgeCaller)
+    throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer browses other folders')
+  const refusal = browsedRootRefusal(root)
+  if (refusal) throw new DomainRpcError('invalid_params', refusal)
+  return normalizedBrowsedRoot(root)
 }
 
 /** The folder of a `pullRequests.*` call; a missing or doubled reference is the caller's mistake, not an internal error. */
@@ -1286,7 +1310,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
  */
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
-  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry',
   'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
@@ -1371,6 +1395,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
+  // A browsed folder is checked before its volume is waited for, so one that is refused (a network share, a
+  // device path, a caller that is not this computer's window) is never touched.
+  if (BROWSED_ROOT_METHODS.has(method) && isObject(params)) browsedFilesRoot(ctx, params)
   // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
   await waitForRequestFolders(ctx, method, params)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
@@ -1496,6 +1523,36 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const projectId = asString(p.projectId, 'projectId', 256)
       return ctx.mms.projects.trustGitSettings(projectId)
+    }
+    case 'projects.icon': {
+      // The icon of a project of this computer, as a checked image data URL; null shows the folder glyph. Only a
+      // window on this computer reads it: a chosen icon can be any image file the user can read.
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const project = connectionIsLocal(ctx.connection) ? ctx.mms.projects.getProject(projectId) : undefined
+      if (!project) return { icon: null }
+      return { icon: await projectIconFor(project, ctx.mms.projects) }
+    }
+    case 'projects.setIcon': {
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A project icon is set on its own computer')
+      const mode = asString(p.mode, 'mode', 16)
+      let choice: ProjectIconChoice
+      if (mode === 'auto' || mode === 'off') choice = { mode }
+      else if (mode === 'custom') {
+        const project = ctx.mms.projects.getProject(projectId)
+        if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
+        const path = asString(p.path, 'path', 4096)
+        if (!(await readIconFile(resolveStoredIconPath(project.path, path)))) {
+          throw new DomainRpcError('invalid_params', 'Choose an SVG, PNG, ICO, JPEG, WebP or GIF image up to 512 KB')
+        }
+        choice = { mode, path }
+      } else throw new DomainRpcError('invalid_params', 'mode must be auto, off or custom')
+      const project = ctx.mms.projects.setProjectIcon(projectId, choice)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}
@@ -3440,17 +3497,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await materializeRequestedWorkspace(ctx, p)
       return { root: await localFilesRoot(ctx, p) }
     }
+    case 'files.drives': {
+      // The drives (or root and volumes) and home folder the Files panel of this computer's window offers.
+      if (!isLocalWindow(ctx) || ctx.connection?.bridgeCaller)
+        throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer lists its drives')
+      return await listFilesPlaces()
+    }
     case 'files.list': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = await filesRootContext(ctx, p)
+        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         return { entries: await ctx.mms.fileService.listDir(root, containedPath(ctx, root, p.path), guardFor(ctx)) }
       })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = await filesRootContext(ctx, p)
+        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         return { path, content: await ctx.mms.fileService.readFile(root, path, guardFor(ctx)) }
       })
@@ -3461,7 +3524,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
       const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
       return await fileCall(ctx, async () => {
-        const root = await filesRootContext(ctx, p)
+        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
         return { path, mimeType: piece.mimeType, size: piece.size, offset, data: Buffer.from(piece.data).toString('base64') }
@@ -3481,10 +3544,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (saveExceedsRequest(p.content)) throw new DomainRpcError('file_too_large', SAVE_TOO_LARGE_MESSAGE)
       const content = p.content
       return await fileCall(ctx, async () => {
+        const browsed = browsedFilesRoot(ctx, p)
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
-        await materializeRequestedWorkspace(ctx, p)
-        const root = await localFilesRoot(ctx, p)
+        if (!browsed) await materializeRequestedWorkspace(ctx, p)
+        const root = browsed ?? await localFilesRoot(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
+        if (browsed) {
+          // A folder the person browsed to is any folder of this computer: Git's own files, the Mousse data
+          // folders and the folders of the user's sign-ins and keys are never saved into from there.
+          const refusal = browsedSaveRefusal(resolve(root, path), [ctx.mms.getHomeDir(), ctx.mms.getProfileHomeDir()])
+          if (refusal) throw new DomainRpcError('path_protected', refusal)
+        }
         const lines = await ctx.mms.fileService.writeFile(root, path, content)
         ctx.mms.lineEditStats.record('manual', lines)
         return { path }

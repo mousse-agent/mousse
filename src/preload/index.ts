@@ -7,6 +7,7 @@ import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
+import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -450,14 +451,17 @@ const api = {
     }
   },
   fs: {
-    listDir: (dirPath?: string, projectId?: string, threadId?: string | null): Promise<FileEntry[]> =>
-      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
-    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
-    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
+    /** `root`: an absolute folder the Files panel browses instead of the thread's (this computer's window only). */
+    listDir: (dirPath?: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileEntry[]> =>
+      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
+    readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
+    /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
+    listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
       query: string,
       options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
@@ -769,6 +773,12 @@ const api = {
       ipcRenderer.invoke('projects:reorder', projectIds),
     trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>
       ipcRenderer.invoke('projects:trustGitSettings', projectId),
+    /** The project's icon as a checked data URL, or null for the folder glyph. */
+    icon: (projectId: string): Promise<ProjectIconImage | null> => ipcRenderer.invoke('projects:icon', projectId),
+    setIcon: (projectId: string, choice: ProjectIconChoice): Promise<Project> =>
+      ipcRenderer.invoke('projects:setIcon', projectId, choice),
+    /** Opens the icon file picker in `defaultPath`; null when cancelled. */
+    pickIcon: (defaultPath?: string): Promise<string | null> => ipcRenderer.invoke('projects:pickIcon', defaultPath),
     listThreads: (projectId: string): Promise<Thread[]> =>
       ipcRenderer.invoke('projects:threads', projectId),
     onUpdated: (cb: (projects: Project[]) => void): (() => void) => {
