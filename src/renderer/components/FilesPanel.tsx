@@ -2,10 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
-import { AlertTriangle, Eye, Pencil, Search } from '../lib/icons'
+import { AlertTriangle, Eye, Pencil, Search, X } from '../lib/icons'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useCommand } from '../commands/commandRegistry'
-import { useFilesRoot } from '../hooks/useActiveProjectPath'
+import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { useMonacoCodeFont } from '../lib/monacoCodeFont'
@@ -15,7 +15,10 @@ import { isAssetView, isBinaryContent, languageForPath, viewKindForPath, type Fi
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { MarkdownDocumentEditor } from './editors/MarkdownDocumentEditor'
 import { FileTree, FileTreeToolbar } from './FileTree'
-import { FilesSearch, type FilesSearchOpenRequest } from './FilesSearch'
+import { FilesPathBar, type FilesPlaceItem } from './FilesPathBar'
+import { fileLocation, filesBrowseRoot, isAbsolutePath, joinFolder, normalizeFolderPath, pathInside, resolveTypedPath, samePath } from '../utils/filesBrowse'
+import { absoluteFilesPath } from '../utils/fileReference'
+import { FilesSearchField, FilesSearchResults, useFilesSearch, type FilesSearchOpenRequest } from './FilesSearch'
 import { openLineDetail, type FilesSearchMode } from './filesSearchState'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ensureProjectReferenceThread } from '../utils/chatLinks'
@@ -68,6 +71,26 @@ function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
   return file.saveState === 'error' ? { refreshFailed: false } : { refreshFailed: false, error: null }
 }
 
+// A file opened while the tree shows a folder outside the thread's is named by its absolute path and read from its own folder.
+function readText(path: string, threadId: string | null): Promise<string> {
+  const at = fileLocation(path)
+  return window.mousse.fs.readFile(at.path, undefined, threadId, at.root)
+}
+function readAssetAt(path: string, threadId: string | null) {
+  const at = fileLocation(path)
+  return window.mousse.fs.readAsset(at.path, undefined, threadId, at.root)
+}
+function writeText(path: string, content: string, threadId: string | null): Promise<void> {
+  const at = fileLocation(path)
+  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root)
+}
+
+/** Whether a key press belongs to a text field or the code editor, which keep their own Escape and Ctrl+L. */
+function typingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"], .monaco-editor'))
+}
+
 function assetSignature(data: ArrayLike<number>, mimeType: string): string {
   let hash = data.length
   const stride = Math.max(1, Math.floor(data.length / 64))
@@ -86,9 +109,32 @@ export function FilesPanel() {
   const openFile = useFileWorkspaceStore((s) => s.openFile)
   const activateFile = useFileWorkspaceStore((s) => s.activateFile)
   const closeFileInStore = useFileWorkspaceStore((s) => s.closeFile)
+  const deactivateFile = useFileWorkspaceStore((s) => s.deactivateFile)
   const openPaths = workspace?.openPaths ?? []
   const selectedPath = workspace?.activePath ?? null
-  const { root: filesRoot, label: rootLabel } = useFilesRoot()
+  const { root: filesRoot } = useFilesRoot()
+  const location = useActiveProjectLocation()
+  const projects = useAppStore((s) => s.projects)
+  // A thread of another computer shows its own folder; so does an app whose main process cannot browse others yet.
+  const remote = Boolean(threads.find((thread) => thread.id === activeThreadId)?.node) || typeof window.mousse.fs.listDrives !== 'function'
+  // Where the person went in this panel, per thread; a thread they never moved in follows its own folder.
+  const navKey = `${profileId}:${activeThreadId ?? '__blank__'}`
+  const [navigated, setNavigated] = useState<Record<string, string>>({})
+  const [home, setHome] = useState<string | null>(null)
+  const [pathEditRequest, setPathEditRequest] = useState(0)
+  const threadFolder = remote ? null : location.path
+  const browseInput = { threadFolder, threadFolderLoading: location.loading, filesRoot, remote }
+  const defaultFolder = filesBrowseRoot({ ...browseInput, navigated: undefined })
+  const browseRoot = filesBrowseRoot({ ...browseInput, navigated: navigated[navKey] })
+  // The folder the daemon gives the thread is listed by the thread; any other folder is named to it.
+  const listRootFor = useCallback((folder: string) => (!folder || samePath(folder, filesRoot) ? undefined : folder), [filesRoot])
+  const listRoot = listRootFor(browseRoot)
+  /** A workspace path (relative to the thread's folder, or absolute) as the tree names it, or null outside the tree's folder. */
+  const treePathOf = useCallback((path: string | null) => {
+    if (!path || !browseRoot) return null
+    if (!isAbsolutePath(path) && !filesRoot) return null
+    return pathInside(isAbsolutePath(path) ? path : absoluteFilesPath(path, filesRoot), browseRoot)
+  }, [browseRoot, filesRoot])
   const [files, setFiles] = useState<Record<string, OpenFileState>>({})
   const [preview, setPreview] = useState<Record<string, boolean>>({})
   const [positions, setPositions] = useState<Record<string, { line: number; column: number }>>({})
@@ -113,7 +159,7 @@ export function FilesPanel() {
 
   const openSearch = useCallback((mode: FilesSearchMode) => {
     const active = document.activeElement
-    if (active instanceof HTMLElement && !active.closest('.files-search')) searchReturnFocus.current = active
+    if (active instanceof HTMLElement && !active.closest('.files-search-field')) searchReturnFocus.current = active
     setSearchOpen(true)
     setSearchRequest((current) => ({ mode, nonce: current.nonce + 1 }))
   }, [])
@@ -121,7 +167,8 @@ export function FilesPanel() {
     setSearchOpen(false)
     const previous = searchReturnFocus.current
     searchReturnFocus.current = null
-    if (previous?.isConnected) previous.focus()
+    if (previous?.isConnected && !previous.closest('[inert]')) previous.focus()
+    else panelRef.current?.querySelector<HTMLElement>('.files-header-title .files-icon-btn')?.focus()
   }, [])
   // Ctrl/Cmd+P and Ctrl/Cmd+Shift+F come through the command registry, which only lets a key typed inside this
   // panel through. The panel stays mounted while another surface shows, so it must also be on screen.
@@ -140,6 +187,20 @@ export function FilesPanel() {
     // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
     window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: openLineDetail(match, activeThreadId) }))
   }, [activeThreadId])
+  // Search looks in the folder the path bar shows: through the project's index when that folder is in it, else by walking it.
+  const search = useFilesSearch({
+    open: searchOpen, openRequest: searchRequest, scopeKey: scope, projectId, threadId: activeThreadId,
+    browseRoot, listRoot, indexRoot: projectId && filesRoot ? filesRoot : null
+  })
+  const searchRoot = search.state.meta?.root || filesRoot
+  // A picked result opens beside the results, which stay for the next pick. Its path is relative to the folder searched.
+  const searchHandlers = useMemo(() => ({
+    onAction: search.onAction,
+    onOpenFile: (path: string) => openSearchedFile(joinFolder(searchRoot, path), false),
+    onOpenLine: openSearchedLine,
+    onClose: closeSearch
+  }), [closeSearch, openSearchedFile, openSearchedLine, search.onAction, searchRoot])
+  const searchShowsResults = searchOpen && search.state.query.trim() !== ''
 
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
   const selectedKey = selectedPath ? fileKey(selectedPath) : null
@@ -169,11 +230,11 @@ export function FilesPanel() {
     queue = new SerializedAutosave({
       read: () => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return window.mousse.fs.readFile(path, undefined, threadId)
+        return readText(path, threadId)
       },
       write: (content) => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return window.mousse.fs.writeFile(path, content, undefined, threadId)
+        return writeText(path, content, threadId)
       },
       onSaved: (savedContent) => {
         if (!isCurrent()) return
@@ -214,14 +275,14 @@ export function FilesPanel() {
     loadSequences.current.set(key, sequence)
     try {
       if (isAssetView(kind)) {
-        const asset = await window.mousse.fs.readAsset(path, undefined, threadId)
+        const asset = await readAssetAt(path, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const bytes = Uint8Array.from(asset.data)
         const assetUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
         if (useAppStore.getState().profileId !== ownerProfileId) { URL.revokeObjectURL(assetUrl); return }
         patchFile(key, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })
       } else {
-        const content = await window.mousse.fs.readFile(path, undefined, threadId)
+        const content = await readText(path, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const binary = isBinaryContent(content)
         if (useAppStore.getState().profileId !== ownerProfileId) return
@@ -269,7 +330,7 @@ export function FilesPanel() {
         const sequence = loadSequences.current.get(key) ?? 0
         const pollProfileId = profileId
         if (isAssetView(file.kind)) {
-          void window.mousse.fs.readAsset(path, undefined, file.threadId).then((asset) => {
+          void readAssetAt(path, file.threadId).then((asset) => {
             const current = filesRef.current[key]
             const signature = assetSignature(asset.data, asset.mimeType)
             if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId) return
@@ -286,7 +347,7 @@ export function FilesPanel() {
         }
         if (file.binary) continue
         const savedAtReadStart = file.savedContent
-        void window.mousse.fs.readFile(path, undefined, file.threadId).then((diskContent) => {
+        void readText(path, file.threadId).then((diskContent) => {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
           if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
@@ -432,21 +493,87 @@ export function FilesPanel() {
     saveBlockers.current.delete(key)
     if (current?.assetUrl) URL.revokeObjectURL(current.assetUrl)
     replaceFiles((all) => { const next = { ...all }; delete next[key]; return next })
-    if (panelRef.current?.querySelector('.files-editor > .ui-tabs')?.contains(document.activeElement)) closedFromStrip.current = path
+    if (panelRef.current?.querySelector('.files-editor-toolbar > .ui-tabs')?.contains(document.activeElement)) closedFromStrip.current = path
     closeFileInStore(scope, path)
     return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
 
-  // With other files open the strip moves focus to the next tab. Closing the last one removes the strip,
-  // so focus goes to the closed file's row in the tree, or to the empty editor when that row is not shown.
+  /** Puts focus on the file's row in the tree, or on the first row when that one is not shown. */
+  const focusTreeRow = useCallback((path: string) => {
+    const panel = panelRef.current
+    const treePath = treePathOf(path)
+    const rows = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])]
+    ;(rows.find((element) => element.dataset.path === treePath) ?? rows[0])?.focus()
+  }, [treePathOf])
+
+  // With other files open the strip moves focus to the next tab. Closing the last one removes the strip and
+  // the preview, so focus goes to the closed file's row in the tree.
   useLayoutEffect(() => {
     const closed = closedFromStrip.current
     closedFromStrip.current = null
     if (!closed || openPaths.length > 0) return
-    const panel = panelRef.current
-    const row = [...(panel?.querySelectorAll<HTMLElement>('.file-tree-row') ?? [])].find((element) => element.dataset.path === closed)
-    ;(row ?? panel?.querySelector<HTMLElement>('.files-editor-empty'))?.focus()
-  }, [openPaths.length])
+    focusTreeRow(closed)
+  }, [focusTreeRow, openPaths.length])
+
+  /** Hides the preview; the tree takes the width back and its row of the file takes focus. */
+  const previewClosedFrom = useRef<string | null>(null)
+  const closePreview = useCallback(() => {
+    previewClosedFrom.current = selectedPath
+    deactivateFile(scope)
+  }, [deactivateFile, scope, selectedPath])
+  useLayoutEffect(() => {
+    const closed = previewClosedFrom.current
+    if (!closed || selectedPath) return
+    previewClosedFrom.current = null
+    focusTreeRow(closed)
+  }, [focusTreeRow, selectedPath])
+
+  const navigate = useCallback(async (target: string): Promise<string | null> => {
+    const folder = normalizeFolderPath(target)
+    try {
+      await window.mousse.fs.listDir('', undefined, activeThreadId, listRootFor(folder))
+    } catch (error) {
+      return message(error)
+    }
+    setNavigated((current) => {
+      const next = { ...current }
+      if (samePath(folder, defaultFolder)) delete next[navKey]
+      else next[navKey] = folder
+      return next
+    })
+    return null
+  }, [activeThreadId, defaultFolder, listRootFor, navKey])
+
+  const loadDrives = useCallback(async (): Promise<FilesPlaceItem[]> => {
+    const places = await window.mousse.fs.listDrives()
+    setHome(places.home)
+    // A volume name is shown when the service sends one (`volume`); the letter alone otherwise.
+    return places.drives.map((drive) => {
+      const volume = (drive as { volume?: unknown }).volume
+      return { kind: 'drive', label: drive.label, path: drive.path, ...(typeof volume === 'string' && volume ? { detail: volume } : {}) }
+    })
+  }, [])
+
+  const navigateTyped = useCallback(async (text: string): Promise<string | null> => {
+    let homeFolder = home
+    if (!homeFolder && text.trim().startsWith('~')) {
+      homeFolder = (await window.mousse.fs.listDrives().catch(() => null))?.home ?? null
+      if (homeFolder) setHome(homeFolder)
+    }
+    const target = resolveTypedPath(text, browseRoot, homeFolder)
+    return target ? navigate(target) : 'Type a folder path'
+  }, [browseRoot, home, navigate])
+
+  const projectFolder = projects.find((project) => project.id === (location.projectId ?? projectId))?.path ?? null
+  const quickPlaces = useMemo(() => {
+    const places: FilesPlaceItem[] = []
+    if (threadFolder) places.push({ kind: 'thread', label: 'Thread folder', path: threadFolder })
+    if (projectFolder && !samePath(projectFolder, threadFolder)) places.push({ kind: 'project', label: 'Project folder', path: projectFolder })
+    // A thread without a folder shows home; the daemon names it.
+    const homeFolder = home ?? (!threadFolder && !location.loading ? filesRoot : null)
+    if (homeFolder && !places.some((place) => samePath(place.path, homeFolder))) places.push({ kind: 'home', label: 'Home', path: homeFolder })
+    return places
+  }, [filesRoot, home, location.loading, projectFolder, threadFolder])
 
   const beforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco
@@ -478,23 +605,60 @@ export function FilesPanel() {
   const supportsPreview = selected?.kind === 'html'
 
   return (
-    <div className="files-panel" ref={panelRef}>
-      <ResizablePanelSidebar className="files-sidebar" defaultWidth={260}>
-        <div className="panel-toolbar">
-          <span className="panel-toolbar-label">Explorer</span>
-          <div className="files-toolbar-actions">
-            <button type="button" className={`btn btn-ghost btn-sm${searchOpen ? ' active' : ''}`} aria-pressed={searchOpen}
-              aria-label="Search files" title="Search files (quick open or text)"
-              onClick={() => (searchOpen ? closeSearch() : openSearch('files'))}><Search size={14} strokeWidth={2} /></button>
-            <FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} />
+    <div className="files-panel" ref={panelRef} onKeyDown={(event) => {
+      if (event.altKey || typingTarget(event.target)) return
+      const command = event.ctrlKey || event.metaKey
+      const key = event.key.toLowerCase()
+      // Ctrl+F, or `/` in the tree, searches file names, as in a file manager.
+      if ((command && !event.shiftKey && key === 'f') || (!command && event.key === '/' && (event.target as HTMLElement).closest?.('.file-tree'))) {
+        event.preventDefault()
+        openSearch('files')
+        return
+      }
+      // Ctrl+L edits the folder path as text, as a file manager's address bar does.
+      if (remote || event.shiftKey || !command || key !== 'l') return
+      event.preventDefault()
+      setPathEditRequest((request) => request + 1)
+    }}>
+      {/* Until a file is picked the tree has the whole panel; the preview takes the saved split width back. */}
+      <ResizablePanelSidebar className="files-sidebar" defaultWidth={260} fill={!selectedPath}>
+        <div className="files-sidebar-body">
+        {/* The title and the search field share the row: one fades and slides out as the other comes in. */}
+        <div className={`panel-toolbar files-header${searchOpen ? ' searching' : ''}`}>
+          <div className="files-header-layer files-header-title" inert={searchOpen}>
+            <span className="panel-toolbar-label">Explorer</span>
+            <div className="files-toolbar-actions">
+              <button type="button" className="files-icon-btn" aria-label="Search files" title="Search files (Ctrl+F)"
+                onClick={() => openSearch('files')}><Search size={14} strokeWidth={2} /></button>
+              <FileTreeToolbar onRefresh={() => setRefreshKey((key) => key + 1)} />
+            </div>
+          </div>
+          <div className="files-header-layer files-header-search" inert={!searchOpen}>
+            <FilesSearchField state={search.state} inputRef={search.inputRef} {...searchHandlers} />
+            <button type="button" className="files-icon-btn" aria-label="Close search" title="Close search (Esc)"
+              onClick={closeSearch}><X size={14} strokeWidth={2} /></button>
           </div>
         </div>
-        {searchOpen && <FilesSearch openRequest={searchRequest} scopeKey={scope} projectId={projectId} threadId={activeThreadId}
-          onOpenFile={openSearchedFile} onOpenLine={openSearchedLine} onClose={closeSearch} />}
-        <FileTree filesRoot={filesRoot} rootLabel={rootLabel} threadId={activeThreadId} selectedPath={selectedPath}
-          onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(path, filesRoot))} refreshKey={refreshKey} />
+        {searchShowsResults && <FilesSearchResults state={search.state} onAction={searchHandlers.onAction}
+          onOpenFile={searchHandlers.onOpenFile} onOpenLine={searchHandlers.onOpenLine} />}
+        {/* Hidden, not unmounted, while results show: the tree keeps its open folders. */}
+        <div className="files-browse" hidden={searchShowsResults}>
+          {browseRoot && <FilesPathBar path={browseRoot} canBrowse={!remote} quickPlaces={quickPlaces} loadDrives={loadDrives}
+            onNavigate={navigate} onNavigateTyped={navigateTyped} editRequest={pathEditRequest} />}
+          <FileTree key={`${navKey}|${browseRoot}`} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
+            selectedPath={treePathOf(selectedPath)} refreshKey={refreshKey}
+            onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
+        </div>
+        </div>
       </ResizablePanelSidebar>
-      <div className="files-editor">
+      {selectedPath && <div className="files-editor" role="region" aria-label={selectedPath} onKeyDown={(event) => {
+        // Escape closes the preview, except where a text field or the code editor uses it.
+        if (event.key !== 'Escape' || event.defaultPrevented || typingTarget(event.target)) return
+        event.preventDefault()
+        closePreview()
+      }}>
+        {/* The tab names the file (its tooltip has the full path), so the file's controls sit at the end of the tab row. */}
+        <div className="files-editor-toolbar">
         {openPaths.length > 0 && <TabBar
           label="Open files"
           activeId={selectedPath}
@@ -510,17 +674,16 @@ export function FilesPanel() {
             event.dataTransfer.setData('text/plain', path)
           }}
         />}
-        {/* Until a file is open the body alone says what to do; the header only ever names a real file. */}
-        {selectedPath && <div className="panel-toolbar files-editor-toolbar">
-          <span className="panel-toolbar-path" title={selectedPath}>{selectedPath}</span>
           <div className="files-toolbar-actions">
             {supportsPreview && <div className="files-view-toggle" role="group" aria-label="File view">
               <button type="button" className={`btn btn-sm ${!selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: false }))}><Pencil size={13} /> Edit</button>
               <button type="button" className={`btn btn-sm ${selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: true }))}><Eye size={13} /> Preview</button>
             </div>}
             {saveLabel && selected && <span className={`files-save-status ${selected.saveState}`}>{saveLabel}</span>}
+            <button type="button" className="files-icon-btn" aria-label="Close preview" title="Close preview (Esc)"
+              onClick={closePreview}><X size={14} strokeWidth={2} /></button>
           </div>
-        </div>}
+        </div>
         {selected?.error && <div className={`panel-error ${selected.saveState === 'conflict' ? 'files-conflict' : ''}`}>
           {selected.saveState === 'conflict' && <AlertTriangle size={15} />}{selected.error}
           {selected.initialLoadFailed && selectedKey && <div className="files-conflict-actions">
@@ -553,9 +716,9 @@ export function FilesPanel() {
           : selected?.binary ? <div className="files-editor-empty">Binary files cannot be edited.</div>
           : selected && selected.kind === 'markdown' && !(selectedKey && positions[selectedKey]) ? <MarkdownDocumentEditor key={selectedKey} path={selected.path} value={selected.content} onChange={updateContent} onSave={() => void flushPath(selectedKey)} defaultViewMode="preview" aria-label={selected.path} />
           : selected && selected.kind === 'html' && selectedPreview ? <iframe className="files-asset-preview files-html-preview" srcDoc={selected.content} sandbox="" title={`HTML preview: ${selected.path}`} />
-          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
-          : <div className="files-editor-empty" tabIndex={-1}><p>Select a file from the tree</p></div>}
-      </div>
+          : selected ? <div className="files-monaco-editor"><Editor path={selectedKey ?? selected.path} value={selected.content} language={languageForPath(selected.path, availableLanguageIds)} theme={MOUSSE_EDITOR_THEME} beforeMount={beforeMount} onMount={onMount} onChange={(value) => updateContent(value ?? '')} options={{ automaticLayout: true, bracketPairColorization: { enabled: true }, matchBrackets: 'always', minimap: { enabled: true }, lineNumbers: 'on', scrollBeyondLastLine: false, fontFamily: codeFont, ariaLabel: selected.path, fontSize: 13, tabSize: 2, detectIndentation: true, wordWrap: 'off' }} /></div>
+          : <DelayedLoader label={`Opening ${basename(selectedPath)}`} className="files-editor-loader" />}
+      </div>}
     </div>
   )
 }

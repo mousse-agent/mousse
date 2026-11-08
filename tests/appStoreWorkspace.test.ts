@@ -20,7 +20,17 @@ describe('sanitizeSavedWorkspace', () => {
   })
 
   it('keeps unrelated saved fields', () => {
-    expect(sanitizeSavedWorkspace({ ...legacy('agents', ['agents']), sidebarWidth: 41 })).toMatchObject({ sidebarWidth: 41 })
+    expect(sanitizeSavedWorkspace({ ...legacy('agents', ['agents']), threadsSidebarWidth: 300 })).toMatchObject({ threadsSidebarWidth: 300 })
+  })
+
+  it('drops the old conversation share and keeps a saved panel width', () => {
+    const saved = sanitizeSavedWorkspace({ ...legacy('git', ['git']), sidebarWidth: 70, mainAreaWidth: 512.4 })
+    expect(saved).not.toHaveProperty('sidebarWidth')
+    expect(saved).toMatchObject({ mainAreaWidth: 512 })
+  })
+
+  it.each([NaN, -40, 0, '900', null])('resets an unusable saved panel width (%s) to the default', (mainAreaWidth) => {
+    expect(sanitizeSavedWorkspace({ ...legacy('git', ['git']), mainAreaWidth })).toMatchObject({ mainAreaWidth: null })
   })
 
   it.each(['plan', 'build'] as const)('resets a saved %s mode to agent', (chatMode) => {
@@ -31,14 +41,14 @@ describe('sanitizeSavedWorkspace', () => {
 describe('profile activation with saved workspaces', () => {
   it('drops the retired view when a profile loads and keeps it dropped across profile switches', () => {
     const saved = new Map<string, string>([
-      ['mousse-profile-old-workspace', JSON.stringify({ mainView: 'agents', openedSurfaceKinds: ['agents', 'terminal'], sidebarWidth: 37 })],
+      ['mousse-profile-old-workspace', JSON.stringify({ mainView: 'agents', openedSurfaceKinds: ['agents', 'terminal'], mainAreaWidth: 500 })],
       ['mousse-profile-only-agents-workspace', JSON.stringify({ mainView: 'agents', openedSurfaceKinds: ['agents'] })]
     ])
     vi.stubGlobal('window', { localStorage: { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => { saved.set(key, value) }, removeItem: (key: string) => { saved.delete(key) } } })
     const { activateProfile } = useAppStore.getState()
 
     activateProfile('old')
-    expect(useAppStore.getState()).toMatchObject({ profileId: 'old', mainView: 'terminal', openedSurfaceKinds: ['terminal'], sidebarWidth: 37 })
+    expect(useAppStore.getState()).toMatchObject({ profileId: 'old', mainView: 'terminal', openedSurfaceKinds: ['terminal'], mainAreaWidth: 500 })
 
     activateProfile('only-agents')
     expect(useAppStore.getState()).toMatchObject({ profileId: 'only-agents', mainView: 'browser', openedSurfaceKinds: [] })

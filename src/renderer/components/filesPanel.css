@@ -1,44 +1,81 @@
-.files-editor-toolbar { flex: 0 0 auto; }
+/* One row above the file: its tab strip, then its controls (view switch, save state, close) at the end. */
+.files-editor-toolbar { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; border-bottom: 1px solid var(--border-subtle); }
+.files-editor-toolbar > .ui-tabs { flex: 1 1 auto; border-bottom: 0; }
+.files-editor-toolbar > .files-toolbar-actions { flex: none; margin-left: auto; padding: 0 6px 0 4px; }
 .files-save-status { white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
 .files-save-status.error, .files-save-status.conflict { color: var(--danger); }
 .files-conflict { display: flex; align-items: center; gap: 8px; }
 .files-conflict-actions { display: flex; gap: 6px; margin-left: auto; }
 
-/* Search box above the tree: quick open by name, or text search across files. A selected row only gets a background. */
+/* The header row: the title (with Search and Refresh) or the search field (with Close). Both layers share one grid
+   cell, so switching never moves the row; the leaving one fades and slides out as the other comes in. */
 .files-sidebar .files-toolbar-actions { display: flex; align-items: center; gap: 2px; }
-.files-sidebar .files-toolbar-actions .btn.active { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
-
-.files-search-host { display: flex; flex: 2 1 0; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--border-subtle); }
-.files-search { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; font-size: 12px; }
-.files-search-bar { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; padding: 8px; }
-.files-search-modes { display: flex; align-items: center; gap: 2px; }
-.files-search-mode.active { background: rgba(var(--accent-rgb), 0.18); color: var(--text-primary); }
-.files-search-close { margin-left: auto; }
-.files-search-field {
+/* One full-width column: .panel-toolbar's `justify-content: space-between` would otherwise pack it to the start. */
+.files-panel .files-header { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; overflow: hidden; }
+.files-header-layer {
+  grid-area: 1 / 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
-  padding: 0 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--surface-primary);
+  transition: opacity var(--ui-dur) ease, transform var(--ui-dur) ease, visibility 0s linear 0s;
 }
-.files-search-field:focus-within { border-color: rgba(var(--accent-rgb), 0.5); }
-.files-search-field-icon { flex: none; color: var(--text-secondary); }
-.files-search-input {
+.files-header-title { justify-content: space-between; }
+.files-header .files-header-search { opacity: 0; transform: translateX(10px); visibility: hidden; transition-delay: 0s, 0s, var(--ui-dur); }
+.files-header.searching .files-header-title { opacity: 0; transform: translateX(-10px); visibility: hidden; transition-delay: 0s, 0s, var(--ui-dur); }
+.files-header.searching .files-header-search { opacity: 1; transform: none; visibility: visible; transition-delay: 0s; }
+
+/* ONE field: a rounded box with the icon inside at the left and a bare input filling the rest. Focus shows on the
+   box only, as a slightly stronger hairline; the app's input rules (border, fill, focus ring) are taken off the input. */
+.files-search-field {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 26px;
+  margin-left: -5px;
+  padding: 0 4px 0 2px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  border-radius: 6px;
+  background: rgba(var(--surface-soft-rgb), 0.45);
+  transition: border-color var(--ui-dur-fast) ease, background var(--ui-dur-fast) ease;
+}
+.files-search-field:focus-within { border-color: rgba(var(--accent-pale-rgb), 0.3); background: rgba(var(--surface-soft-rgb), 0.6); }
+.files-search-mode-toggle {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.files-search-mode-toggle:hover { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.12); }
+.files-search-field .files-search-input,
+.files-search-field .files-search-input:focus,
+.files-search-field .files-search-input:focus-visible {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 6px 0;
+  height: 100%;
+  padding: 0;
   border: 0;
+  border-radius: 0;
   outline: 0;
+  box-shadow: none;
   color: var(--text-primary);
   background: transparent;
   font: inherit;
+  font-size: 12px;
 }
+.files-search-input::placeholder { color: var(--text-secondary); opacity: 0.8; }
 .files-search-options { display: flex; flex: none; gap: 2px; }
 .files-search-option {
-  min-width: 22px;
+  min-width: 20px;
   padding: 1px 4px;
   border: 0;
   border-radius: 4px;
@@ -50,6 +87,11 @@
 }
 .files-search-option:hover { background: rgba(var(--accent-rgb), 0.1); }
 .files-search-option.active { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.22); }
+
+/* Results take the tree's place; a selected row only gets a background. */
+.files-browse { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.files-browse[hidden] { display: none; }
+.files-search-results-host { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-top: 4px; font-size: 12px; }
 
 .files-search-notes { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; padding: 0 8px 6px; }
 .files-search-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text-secondary); line-height: 1.4; }
@@ -65,7 +107,8 @@
   gap: 6px;
   width: 100%;
   min-width: 0;
-  padding: 3px 6px;
+  min-height: 26px;
+  padding: 3px 8px;
   border: 0;
   border-radius: 4px;
   color: var(--text-secondary);
@@ -79,7 +122,7 @@
 .files-search-row-icon { flex: none; opacity: 0.75; }
 .files-search-row-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .files-search-row-dir { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
-.files-search-row-name mark, .files-search-row-dir mark { color: var(--text-primary); background: transparent; font-weight: 700; }
+.files-search-row-name mark, .files-search-row-dir mark { color: var(--accent); background: transparent; font-weight: 600; }
 
 .files-search-group { display: flex; align-items: center; gap: 6px; padding: 6px 6px 2px; color: var(--text-primary); font-weight: 600; }
 .files-search-count { flex: none; margin-left: auto; padding: 0 6px; color: var(--text-secondary); font-size: 10px; line-height: 16px; background: rgba(var(--accent-pale-rgb), 0.14); border-radius: 8px; }
@@ -118,3 +161,132 @@
 .file-tree-retry { flex: none; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--text-primary); background: var(--ui-hover); }
 .file-tree-retry:hover { background: color-mix(in srgb, var(--text-primary) 12%, transparent); }
 .files-editor-loader { flex: 1; display: flex; align-items: center; justify-content: center; }
+
+/* The sidebar's one child keeps the tree's state while the preview opens and closes beside it. */
+.files-sidebar-body { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
+.file-tree-note { padding: 6px 16px; font-size: 12px; color: var(--text-secondary); }
+
+/* Quiet icon buttons (header, path bar, preview): no fill at rest, a soft one on hover, press or keyboard focus.
+   Their own class, so the shared `.btn` fills and `.app .btn-sm` padding never reach them. */
+.files-panel .files-icon-btn {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background var(--ui-dur-fast) ease, color var(--ui-dur-fast) ease;
+}
+.files-panel .files-icon-btn svg { display: block; width: 14px; height: 14px; flex: none; }
+.files-panel .files-icon-btn:hover:not(:disabled),
+.files-panel .files-icon-btn:active:not(:disabled) { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); }
+.files-panel .files-icon-btn:focus-visible { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.14); outline: 2px solid rgba(var(--accent-rgb), 0.5); outline-offset: -2px; }
+.files-panel .files-icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* The folder the tree shows, as a path to click through. The current folder and an open menu only get a background. */
+.files-path { flex: 0 0 auto; padding: 4px 6px 2px; }
+.files-path-bar { display: flex; align-items: center; gap: 4px; min-width: 0; height: 28px; }
+.files-path-crumbs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-radius: 6px;
+  cursor: text;
+}
+.files-path-crumbs::-webkit-scrollbar { display: none; }
+.files-path-crumbs:hover { background: rgba(var(--accent-rgb), 0.05); }
+.files-path-step { display: flex; flex: none; align-items: center; }
+.files-path-sep { padding: 0 1px; color: var(--text-secondary); opacity: 0.6; font-size: 12px; }
+.files-path-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.files-path-crumb:hover:not(:disabled), .files-path-crumb.open { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.12); }
+.files-path-crumb.current { color: var(--text-primary); font-weight: 600; cursor: default; }
+.files-path-crumb.current:hover { background: transparent; }
+.files-path-crumb.root { font-weight: 600; }
+.files-path-crumb:disabled { cursor: default; }
+.files-path-crumb.static { cursor: default; }
+.files-path-crumb:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.6); outline-offset: -2px; }
+.files-path-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 6px;
+  outline: 0;
+  color: var(--text-primary);
+  background: var(--surface-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.files-path-input.invalid { border-color: var(--danger); }
+.files-path-error { padding: 2px 6px 0 32px; font-size: 11px; color: var(--danger); }
+
+/* The drive menu, drawn like the composer's branch menu. Its own classes only: the shared row-menu sheet loads
+   later in the real app and its block items would win over anything set here at equal specificity. */
+.files-places-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--floating-surface, rgb(var(--surface-elevated-rgb)));
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  font-size: 13px;
+}
+.files-places-menu .files-places-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 400;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+.files-places-menu .files-places-item svg { display: block; flex: none; color: var(--text-secondary); }
+.files-places-menu .files-places-item:hover,
+.files-places-menu .files-places-item:focus-visible { background: rgba(var(--accent-rgb), 0.12); outline: none; }
+.files-places-menu .files-places-item.current { background: rgba(var(--accent-rgb), 0.16); }
+.files-places-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-places-detail { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.files-places-menu .files-places-item .files-places-check { margin-left: auto; padding-left: 8px; color: var(--accent); box-sizing: content-box; }
+.files-places-separator { flex: none; height: 1px; margin: 4px 5px; background: var(--border); }
+.files-places-note { padding: 7px 10px; font-size: 12px; color: var(--text-secondary); }

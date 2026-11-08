@@ -12,14 +12,14 @@ vi.mock('@monaco-editor/react', () => ({
     createElement('textarea', { className: 'editor-stub', value, onChange: (event: { target: { value: string } }) => onChange(event.target.value) })
 }))
 vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({ MarkdownDocumentEditor: () => null }))
-vi.mock('../../src/renderer/components/FilesSearch', () => ({ FilesSearch: () => null }))
-/** The tree stub shows one file row, or none when its folder is collapsed. */
+/** The tree stub shows the file's row, or not when its folder is collapsed, and always a README row. */
 const tree = { showRow: true }
 vi.mock('../../src/renderer/components/FileTree', () => ({
   FileTreeToolbar: () => null,
   FileTree: ({ onSelectFile }: { onSelectFile: (path: string) => void }) => createElement('div', null,
     createElement('button', { type: 'button', className: 'tree-open', onClick: () => onSelectFile('notes.txt') }, 'open notes.txt'),
-    tree.showRow && createElement('button', { type: 'button', className: 'file-tree-row', 'data-path': 'notes.txt' }, 'notes.txt'))
+    tree.showRow && createElement('button', { type: 'button', className: 'file-tree-row', 'data-path': 'notes.txt' }, 'notes.txt'),
+    createElement('button', { type: 'button', className: 'file-tree-row', 'data-path': 'README.md' }, 'README.md'))
 }))
 
 const { FilesPanel } = await import('../../src/renderer/components/FilesPanel')
@@ -69,7 +69,7 @@ describe('closing the last open file', () => {
     expect(document.activeElement).toBe(host.querySelector('.file-tree-row'))
   })
 
-  it('with the close button, puts focus on the empty editor when the file’s row is not shown', async () => {
+  it('with the close button, puts focus on the tree’s first row when the file’s row is not shown', async () => {
     tree.showRow = false
     await openNotes()
     const close = host.querySelector<HTMLButtonElement>('.ui-tab-close')!
@@ -77,8 +77,8 @@ describe('closing the last open file', () => {
     await act(async () => close.click())
     await flush()
     expect(host.querySelector('[role="tablist"]')).toBeNull()
-    expect(document.activeElement).toBe(host.querySelector('.files-editor-empty'))
-    expect(document.activeElement?.textContent).toBe('Select a file from the tree')
+    expect(host.querySelector('.files-editor')).toBeNull()
+    expect(document.activeElement).toBe(host.querySelector('.file-tree-row[data-path="README.md"]'))
   })
 
   it('keeps the tab, and focus on it, when unsaved edits cannot be saved', async () => {

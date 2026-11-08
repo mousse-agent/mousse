@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -68,6 +68,36 @@ describe('files and Git reads by thread, through the daemon', () => {
       expect(root).not.toBe(p.path)
       // A project named next to the thread is only the fallback; the ready worktree still wins.
       expect(await rootOf({ threadId: t.threadId, projectId: p.id })).toBe(t.path)
+    })
+
+    it('is another folder a window names (`root`), still held inside it; a script cannot name one', async () => {
+      const p = project()
+      const thread = mms.threads.createThread('Plain thread', p.id)
+      const elsewhere = mkdtempSync(join(tmpdir(), 'mousse-browse-'))
+      try {
+        writeFileSync(join(elsewhere, 'outside.txt'), 'elsewhere')
+        const listed = await window.request<{ entries: Array<{ name: string }> }>('files.list', { threadId: thread.id, root: elsewhere, path: '' })
+        expect(listed.entries.map((entry) => entry.name)).toContain('outside.txt')
+        expect((await window.request<{ content: string }>('files.read', { threadId: thread.id, root: elsewhere, path: 'outside.txt' })).content).toBe('elsewhere')
+        await window.request('files.writeDirect', { root: elsewhere, path: 'outside.txt', content: 'changed' })
+        expect(readFileSync(join(elsewhere, 'outside.txt'), 'utf8')).toBe('changed')
+        await expect(window.request('files.read', { root: elsewhere, path: '../escape.txt' })).rejects.toThrow()
+        // The Mousse data folder is browsed but never saved into.
+        writeFileSync(join(f.home, 'data.txt'), 'kept')
+        await expect(window.request('files.writeDirect', { root: f.home, path: 'data.txt', content: 'x' })).rejects.toThrow(/Mousse data folder/)
+        expect(readFileSync(join(f.home, 'data.txt'), 'utf8')).toBe('kept')
+        await expect(window.request('files.list', { root: 'relative/folder' })).rejects.toThrow(/full path/)
+        await expect(script.request('files.list', { threadId: thread.id, root: elsewhere })).rejects.toThrow(/this computer/)
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true })
+      }
+    })
+
+    it('lists the drives and home folder for a window only', async () => {
+      const places = await window.request<{ home: string; drives: Array<{ path: string; label: string }> }>('files.drives')
+      expect(places.home).toBe(homedir())
+      expect(places.drives.length).toBeGreaterThan(0)
+      await expect(script.request('files.drives')).rejects.toThrow(/this computer/)
     })
 
     it('is the home folder for a thread without a project and for nothing selected', async () => {

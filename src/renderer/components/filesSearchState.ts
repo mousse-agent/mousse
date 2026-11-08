@@ -24,6 +24,10 @@ export const FILES_SEARCH_LIMIT = 50
 
 /** What the last answer said besides its rows; the view turns it into notes. */
 export interface FilesSearchMeta {
+  /** The absolute folder the result paths are relative to. */
+  root: string
+  /** A walk of a folder without an index is still going; its rows so far are shown. */
+  searching: boolean
   fallbackReason?: FileSearchResponse['fallbackReason']
   /** The index hit its path cap (quick open) or a result limit cut the matches short (text). */
   truncated: boolean
@@ -86,7 +90,8 @@ export function searchKey(state: Pick<FilesSearchState, 'mode' | 'query' | 'opti
 }
 
 export type FilesSearchResult =
-  | { mode: 'files'; response: FileSearchResponse }
+  /** `partial`: a walk's report so far; more follow under the same request. */
+  | { mode: 'files'; response: FileSearchResponse; partial?: boolean }
   | { mode: 'text'; response: FileGrepResponse; timeoutMs: number }
 
 export type FilesSearchAction =
@@ -152,23 +157,28 @@ export function filesSearchReducer(state: FilesSearchState, action: FilesSearchA
       const { result } = action
       if (result.mode === 'files') {
         const { response } = result
+        const files = rankFileResults(action.key.slice('files\0'.length), response.results)
+        // A walk reports as it goes: a later report of the same search keeps the row the person moved to.
+        const sameSearch = state.resultsKey === action.key
         return {
           ...state,
-          files: response.results,
+          files,
           groups: [],
           resultsKey: action.key,
-          selected: 0,
-          status: response.indexing ? 'indexing' : 'ready',
+          selected: sameSearch ? Math.min(state.selected, Math.max(0, files.length - 1)) : 0,
+          status: result.partial ? 'loading' : response.indexing ? 'indexing' : 'ready',
           error: null,
           meta: {
+            root: response.root,
+            searching: Boolean(result.partial),
             fallbackReason: response.fallbackReason,
             truncated: response.truncated,
             timedOut: false,
             indexing: response.indexing,
             skippedLongLines: 0,
             timeoutMs: 0,
-            matchCount: response.results.length,
-            fileCount: response.results.length
+            matchCount: files.length,
+            fileCount: files.length
           }
         }
       }
@@ -182,6 +192,8 @@ export function filesSearchReducer(state: FilesSearchState, action: FilesSearchA
         status: response.indexing ? 'indexing' : 'ready',
         error: null,
         meta: {
+          root: response.root,
+          searching: false,
           fallbackReason: response.fallbackReason,
           truncated: response.truncated,
           timedOut: response.timedOut,
@@ -280,7 +292,9 @@ export function openSearchRow(state: FilesSearchState, index: number, handlers: 
 /** Carries out what a key in the box does. */
 export function applySearchKey(action: FilesSearchKeyAction, state: FilesSearchState, handlers: FilesSearchHandlers): void {
   if (action.type === 'close') {
-    handlers.onClose()
+    // Escape clears the text first, then leaves search.
+    if (state.query) handlers.onAction({ type: 'query', query: '' })
+    else handlers.onClose()
   } else if (action.type === 'move') {
     handlers.onAction({ type: 'move', key: action.key })
   } else {
@@ -334,4 +348,66 @@ export function snippetHighlight(match: Pick<FileGrepMatch, 'text' | 'column' | 
 export function splitPath(path: string): { dir: string; name: string } {
   const slash = path.lastIndexOf('/')
   return { dir: path.slice(0, slash + 1), name: path.slice(slash + 1) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ranking of file-name results
+// ---------------------------------------------------------------------------------------------
+
+/** How a file matches, best first: its whole name, its start, a word in it, anywhere in it, its folder, or loosely. */
+export type FileMatchTier = 0 | 1 | 2 | 3 | 4 | 5
+
+function isWordStart(name: string, index: number): boolean {
+  if (index === 0) return true
+  const before = name[index - 1]!
+  const at = name[index]!
+  if (/[-_. \s]/.test(before)) return true
+  return /[a-z0-9]/.test(before) && /[A-Z]/.test(at)
+}
+
+function range(start: number, length: number): number[] {
+  return Array.from({ length }, (_, index) => start + index)
+}
+
+/**
+ * How `path` matches `query` and which characters to mark. Case is ignored. A query with a `/` is matched
+ * against the whole path; any other against the file name first, then its folder. Tier 5 keeps the loose
+ * match the index found (`positions`).
+ */
+export function fileMatch(query: string, path: string, positions: number[] = []): { tier: FileMatchTier; positions: number[] } {
+  const q = query.trim().toLowerCase()
+  const slash = path.lastIndexOf('/')
+  const name = path.slice(slash + 1)
+  const lowerName = name.toLowerCase()
+  const lowerPath = path.toLowerCase()
+  if (!q) return { tier: 5, positions }
+  if (!q.includes('/')) {
+    const stem = lowerName.replace(/\.[^.]*$/, '')
+    if (lowerName === q || stem === q) return { tier: 0, positions: range(slash + 1, q.length) }
+    if (lowerName.startsWith(q)) return { tier: 1, positions: range(slash + 1, q.length) }
+    for (let at = lowerName.indexOf(q, 1); at !== -1; at = lowerName.indexOf(q, at + 1)) {
+      if (isWordStart(name, at)) return { tier: 2, positions: range(slash + 1 + at, q.length) }
+    }
+    const inside = lowerName.indexOf(q)
+    if (inside !== -1) return { tier: 3, positions: range(slash + 1 + inside, q.length) }
+  }
+  const inPath = lowerPath.indexOf(q)
+  if (inPath !== -1) return { tier: 4, positions: range(inPath, q.length) }
+  return { tier: 5, positions }
+}
+
+/**
+ * The index's results for `query`, best first: exact name, name prefix, a word in the name, anywhere in the
+ * name, the folder, then the index's own loose matches. Within a tier a shorter path wins, then the index's
+ * score, then the path. The marked characters follow the tier.
+ */
+export function rankFileResults(query: string, results: readonly FileSearchResult[]): FileSearchResult[] {
+  return results
+    .map((result, order) => ({ result, order, match: fileMatch(query, result.path, result.positions) }))
+    .sort((a, b) =>
+      a.match.tier - b.match.tier
+      || a.result.path.length - b.result.path.length
+      || b.result.score - a.result.score
+      || (a.result.path < b.result.path ? -1 : a.result.path > b.result.path ? 1 : a.order - b.order))
+    .map(({ result, match }) => ({ ...result, positions: match.positions }))
 }

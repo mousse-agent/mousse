@@ -120,7 +120,7 @@ describe('Files tree', () => {
     ;(window as unknown as { mousse: unknown }).mousse = { fs: { listDir } }
     useAppStore.setState({ activeThreadId: 't1', threads: [{ id: 't1', projectId: 'p1' }] as never })
     return act(async () => root.render(createElement(FileTree, {
-      filesRoot: '/work/app', rootLabel: 'app', threadId: 't1', selectedPath: null, onSelectFile: () => undefined, refreshKey: 0
+      filesRoot: '/work/app', threadId: 't1', selectedPath: null, onSelectFile: () => undefined, refreshKey: 0
     })))
   }
   const row = (name: string) => must([...host.querySelectorAll<HTMLButtonElement>('.file-tree-row')].find((button) => button.textContent === name), name)
