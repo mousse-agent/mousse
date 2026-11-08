@@ -115,6 +115,16 @@ describe('no model name on any bot screen', () => {
     expect(found()).toEqual([])
   })
 
+  it('is absent while the bot waits for the internet: the sidebar, header and status line say only that', async () => {
+    const waiting = { ...bot, stateText: 'Waiting for internet', waiting: 'internet' } as BotSummary
+    await act(async () => useBotsStore.setState((state) => ({ bots: state.bots.map((entry) => (entry.id === 'b1' ? waiting : entry)) })))
+    await act(async () => useChatsStore.getState().openBot('b1'))
+    expect(host.querySelector('.chat-run-status')?.textContent).toBe('Waiting for internet')
+    expect(host.querySelector('.chat-conversation-header span')?.textContent).toBe('Waiting for internet')
+    expect(host.textContent).toContain('Waiting for internet')
+    expect(found()).toEqual([])
+  })
+
   it('is absent from the menu, About and every dialog', async () => {
     await act(async () => useChatsStore.getState().openBot('b1'))
     await click(button('Bot menu'))

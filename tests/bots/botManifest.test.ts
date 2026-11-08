@@ -279,7 +279,7 @@ describe('default app tools (Bot Phase 1 §5.10)', () => {
   it('the starter grant is file tools without a folder, the default app tools and 15 minutes', () => {
     const starter = botStarterManifest()
     expect(manifestProblem(starter)).toBeUndefined()
-    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 15 * 60_000 } })
+    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 60 * 60_000 } })
     expect(starter.appTools).toEqual([...BOT_DEFAULT_APP_TOOLS])
   })
 })

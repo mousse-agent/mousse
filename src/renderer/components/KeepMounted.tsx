@@ -6,12 +6,14 @@ interface KeepMountedProps {
   className?: string
   /** Retain the last viewport for live browser guests while excluding human input. */
   preserveLayout?: boolean
+  /** Still shown while it fades out for the view replacing it; inert, like an inactive pane. */
+  leaving?: boolean
   as?: 'div' | 'main'
   style?: CSSProperties
 }
 
 /** Renders children always but hides inactive panes to avoid mount/unmount flicker. */
-export function KeepMounted({ active, children, className, preserveLayout = false, as: Tag = 'div', style }: KeepMountedProps) {
+export function KeepMounted({ active, children, className, preserveLayout = false, leaving = false, as: Tag = 'div', style }: KeepMountedProps) {
   const ref = useRef<HTMLDivElement & HTMLElement>(null)
   useLayoutEffect(() => {
     const element = ref.current
@@ -35,7 +37,7 @@ export function KeepMounted({ active, children, className, preserveLayout = fals
   }, [active, preserveLayout])
   return (
     <Tag ref={ref} className={[className, preserveLayout && !active ? 'keep-mounted-layout-inactive' : ''].filter(Boolean).join(' ')}
-      style={style} hidden={!preserveLayout && !active} inert={!active} aria-hidden={!active}>
+      style={style} hidden={!preserveLayout && !active} inert={!active || leaving} aria-hidden={!active}>
       {children}
     </Tag>
   )

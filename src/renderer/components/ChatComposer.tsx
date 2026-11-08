@@ -109,8 +109,6 @@ export interface ChatComposerProps {
   disableSkillsPicker?: boolean
   /** A row above the input, such as a subagent asking a question; it brings its own layout. */
   banner?: ReactNode
-  /** The chat is private (`Thread.localOnly`): the composer is tinted so the mode is always visible. */
-  privateChat?: boolean
   /** Searches the project's files and folders for an `@` mention; rejects when there is no project to search. */
   searchMentions?: (query: string) => Promise<FileSearchResponse>
   /**
@@ -191,7 +189,6 @@ export function ChatComposer({
   lastPrompt,
   disableSkillsPicker = false,
   banner,
-  privateChat,
   searchMentions,
   mentionScope,
   permission
@@ -699,7 +696,7 @@ export function ChatComposer({
   }
 
   return (
-    <div className={privateChat ? 'composer composer-private' : 'composer'} onDragOver={handleDragOver} onDrop={handleDrop}>
+    <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
       {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">

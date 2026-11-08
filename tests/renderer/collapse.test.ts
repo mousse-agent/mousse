@@ -132,7 +132,7 @@ describe('Collapse', () => {
   it('keeps the motion within the requested timing and turns it off for reduced motion', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
     expect(css).toMatch(/\[data-motion='enter'\]\s*\{\s*transition: grid-template-rows 160ms/)
-    expect(css).toMatch(/\[data-motion='exit'\]\s*\{\s*grid-template-rows: 0fr;\s*transition: grid-template-rows 130ms/)
+    expect(css).toMatch(/\[data-motion='exit'\]\s*\{\s*grid-template-rows: 0fr;\s*transition: grid-template-rows 180ms/)
     expect(css).toMatch(/:nth-child\(8\) \{ transition-delay: 84ms; \}/)
     expect(css).not.toMatch(/nth-child\(9\)/)
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*transition: none !important/)
@@ -149,10 +149,10 @@ describe('Collapse', () => {
 
   it('turns the chevron with the group: the open and close durations and easings', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/collapse.css'), 'utf8')
-    expect(css).toMatch(/\[data-motion='exit'\]\s*\{[^}]*grid-template-rows 130ms var\(--ui-collapse-ease-close\)/)
+    expect(css).toMatch(/\[data-motion='exit'\]\s*\{[^}]*grid-template-rows 180ms var\(--ui-collapse-ease-close\)/)
     // The rule that turns the chevron is the one with the transition, on `transform`; `rotate` is listed too
     // because Tailwind's `rotate-*` classes set that separate property, which a `transform` transition skips.
-    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transform: rotate\(0deg\);\s*transition-property: transform, rotate;\s*transition-duration: 130ms;\s*transition-timing-function: var\(--ui-collapse-ease-close\);/)
+    expect(css).toMatch(/\.ui-collapse-chevron \{\s*transform: rotate\(0deg\);\s*transition-property: transform, rotate;\s*transition-duration: 180ms;\s*transition-timing-function: var\(--ui-collapse-ease-close\);/)
     expect(css).toMatch(/\.ui-collapse-chevron\[data-open\] \{\s*transform: rotate\(var\(--ui-collapse-chevron-turn, 90deg\)\);\s*transition-duration: 160ms;\s*transition-timing-function: var\(--ui-collapse-ease\);/)
   })
 

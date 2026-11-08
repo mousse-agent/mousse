@@ -176,3 +176,53 @@ describe('after a restart', () => {
     }
   })
 })
+
+describe('the poll', () => {
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+  afterEach(() => { delete (document as { visibilityState?: unknown }).visibilityState })
+
+  it('keeps the bots held when a list brings nothing new, and replaces only a bot that changed', async () => {
+    await show([summary('b1', { name: 'noobesh' }), summary('b2')])
+    const held = useBotsStore.getState().bots
+    const live = useBotsStore.getState().live
+    await act(async () => { await useBotsStore.getState().refresh() })
+    expect(useBotsStore.getState().bots).toBe(held)
+    expect(useBotsStore.getState().live).toBe(live)
+    fake.bots = [summary('b1', { name: 'noobesh', state: 'working', stateText: 'Working…' }), summary('b2')]
+    await act(async () => { await useBotsStore.getState().refresh() })
+    const [first, second] = useBotsStore.getState().bots
+    expect(first).not.toBe(held[0])
+    expect(first).toMatchObject({ state: 'working' })
+    expect(second).toBe(held[1])
+  })
+
+  it('skips its ticks while the window is hidden, and lists again as soon as it shows', async () => {
+    vi.useFakeTimers()
+    try {
+      await show([summary('b1', { name: 'noobesh' })])
+      const lists = () => fake.calls.filter(([name]) => name === 'list').length
+      const before = lists()
+      act(() => setVisibility('hidden'))
+      await act(async () => { vi.advanceTimersByTime(10_000) })
+      expect(lists()).toBe(before)
+      await act(async () => setVisibility('visible'))
+      expect(lists()).toBe(before + 1)
+      await act(async () => { vi.advanceTimersByTime(2000) })
+      expect(lists()).toBe(before + 2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops following the window once no view polls', async () => {
+    await show([summary('b1', { name: 'noobesh' })])
+    act(() => root.unmount())
+    const before = fake.calls.filter(([name]) => name === 'list').length
+    await act(async () => setVisibility('visible'))
+    expect(fake.calls.filter(([name]) => name === 'list').length).toBe(before)
+    root = createRoot(host)
+  })
+})

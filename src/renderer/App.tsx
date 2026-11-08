@@ -32,6 +32,7 @@ import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './li
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
+import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
 import { useAppCommands } from './commands/useAppCommands'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
@@ -87,6 +88,9 @@ export default function App() {
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
+  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
+  // fades out, inert, then the new one fades in, in step with the sidebar lists (sidebar-view-motion.css).
+  const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
   useEffect(() => {
     if (!profileReady) return
     useChatsStore.getState().activate(profileId)
@@ -531,7 +535,7 @@ export default function App() {
         <NavigationRail key={`${profileId}:${bootstrapAttempt}`} />
 
         {profileReady && <ScheduledPage />}
-        <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
+        <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
@@ -586,7 +590,8 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : undefined}
+          style={workspaceMode === 'chats' && !usageOpen ? { display: 'none' } : undefined}
+          inert={workspaceSwap === 'out' || undefined}
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
@@ -600,15 +605,16 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {sidebarMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
+        {workspaceMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <ChatWorkspace key={profileId} />}
         </KeepMounted>}
 
-        {mainAreaOpen && sidebarMode === 'projects' && (
+        {mainAreaOpen && workspaceMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
+            inert={workspaceSwap === 'out' || undefined}
             onPointerDown={(event) => startResize('main', event)}
             onKeyDown={onMainResizerKey}
             onDoubleClick={() => setMainAreaWidth(null)}
@@ -622,7 +628,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area"
+        <KeepMounted as="main" active={mainAreaOpen && workspaceMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
           // Beside it: the threads sidebar and its divider when open, and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
