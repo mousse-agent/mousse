@@ -1,19 +1,6 @@
-/* Private threads (`Thread.localOnly`): a tint on the composer, a bar above the transcript and a lock on the row. */
+/* Private threads (`Thread.localOnly`): a bar above the transcript and an incognito toggle under a new thread's composer. The composer itself looks like a normal one. */
 :root {
   --private-tint: var(--hue-5, #7fa4f8);
-}
-
-.app .chat-input-area .composer.composer-private {
-  border-color: color-mix(in srgb, var(--private-tint) 45%, var(--ui-line-strong));
-  background: color-mix(in srgb, var(--private-tint) 7%, var(--ui-raised));
-}
-
-.app .chat-input-area .composer.composer-private:focus-within {
-  border-color: color-mix(in srgb, var(--private-tint) 70%, var(--ui-line-strong));
-}
-
-.composer-workspace-private.active {
-  color: var(--private-tint);
 }
 
 .thread-mode-bar {
@@ -84,26 +71,6 @@
 
 .thread-mode-bar-error {
   color: var(--danger, var(--warning, var(--text-secondary)));
-}
-
-/* The composer's icon buttons are a fixed 30px square; this one also shows the length, so it grows. */
-.app .chat-input-area .composer-icon-btn.composer-workspace-expiry,
-.composer-workspace-expiry {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  width: auto;
-  min-width: 30px;
-  padding-inline: 6px;
-}
-
-.composer-workspace-expiry.active {
-  color: var(--private-tint);
-}
-
-.composer-workspace-expiry-label {
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
 }
 
 .expiry-menu-custom {

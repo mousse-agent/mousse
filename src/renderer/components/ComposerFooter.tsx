@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { modelPickerRunSettings, PermissionChip, runFasterSpeed, runLevelText } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
-import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { motionScale, scaleMotionMs } from '../lib/motion'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
@@ -16,6 +17,9 @@ import { useAppStore } from '../stores/appStore'
 
 /** Alt+Enter in the composer while a run is going sends the text as a steer. */
 export const STEER_BINDING = 'Alt+Enter'
+
+/** The model picker's fade-out, before the speed scale; matches its close animation in composer-run-controls.css. */
+const MODEL_PICKER_EXIT_MS = 90
 
 function useMenuScrollFade() {
   const scrollFadeTimerRef = useRef<number | null>(null)
@@ -128,8 +132,19 @@ export function ComposerFooter({
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
-  // The picker opens above the whole composer, as wide as it at most, so it never covers the draft.
-  const composerAnchorRef = useClosestAnchor(modelButtonRef, '.composer')
+  // After closing, the picker stays a moment to fade out (none with motion off). Set while rendering, so
+  // it never unmounts for a frame in between.
+  const [modelMenuLeaving, setModelMenuLeaving] = useState(false)
+  const [modelMenuWasOpen, setModelMenuWasOpen] = useState(modelMenuOpen)
+  if (modelMenuWasOpen !== modelMenuOpen) {
+    setModelMenuWasOpen(modelMenuOpen)
+    setModelMenuLeaving(!modelMenuOpen && motionScale() > 0)
+  }
+  useEffect(() => {
+    if (!modelMenuLeaving) return
+    const timer = window.setTimeout(() => setModelMenuLeaving(false), scaleMotionMs(MODEL_PICKER_EXIT_MS))
+    return () => window.clearTimeout(timer)
+  }, [modelMenuLeaving])
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
   const namedParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
@@ -231,9 +246,9 @@ export function ComposerFooter({
         <div className="composer-run-controls">
           {permissionControl ? <PermissionChip control={permissionControl} /> : null}
           <div className="composer-model-picker" ref={modelPickerRef}>
-            {!modelReadOnly && modelMenuOpen && (
+            {!modelReadOnly && (modelMenuOpen || modelMenuLeaving) && (
               <>
-                {providers.length === 0 ? (
+                {providers.length === 0 ? (modelMenuOpen &&
                   <FloatingPortal>
                     <div
                       ref={modelMenuContentRef}
@@ -267,8 +282,9 @@ export function ComposerFooter({
                     selectedModelId={selectedModelId}
                     onSelect={onModelSelect}
                     onMenuScroll={handleMenuScroll}
-                    anchorRef={composerAnchorRef}
+                    anchorRef={modelButtonRef}
                     contentRef={modelMenuContentRef}
+                    closing={!modelMenuOpen}
                     runSettings={runSettings}
                   />
                 )}
