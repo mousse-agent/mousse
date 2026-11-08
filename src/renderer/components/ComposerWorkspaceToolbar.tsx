@@ -11,6 +11,7 @@ import { workspaceWithProject, type ComposerWorkspace } from '../lib/newThread'
 import { LOCAL_RUN_ON_ID, buildRunOnOptions, canPickComputer, runOnLabel } from './sideCard/deviceMenu'
 import { RemoteProjectDialog } from './RemoteProjectDialog'
 import { Segmented, type SegmentedOption } from './settings/SettingsRow'
+import { ProjectIcon } from './ProjectIcon'
 import '../styles/composer-workspace.css'
 
 /** Where a new thread in a project works: the project's own checkout or a new worktree. */
@@ -112,7 +113,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
           }
         }}
       >
-        <Folder size={16} aria-hidden="true" />
+        <ProjectIcon project={project} fallback={<Folder size={16} aria-hidden="true" />} />
         <span>{project?.name ?? (workspace.projectId ? 'Unavailable project' : 'No project')}</span>
         <ChevronDown size={12} aria-hidden="true" />
       </button>
@@ -143,7 +144,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, device
                   closeMenu()
                 }}
               >
-                <Folder size={16} aria-hidden="true" />
+                <ProjectIcon project={'path' in entry ? entry : undefined} fallback={<Folder size={16} aria-hidden="true" />} />
                 <span>{entry.name}</span>
                 {entry.id === (workspace.projectId ?? '') && <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" />}
               </button>
