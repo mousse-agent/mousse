@@ -700,7 +700,7 @@ export function ChangesPanel() {
           scopeTitle: title,
           count: plural(rows.length, 'file'),
           left: viewedCount > 0 ? `${rows.length - viewedCount} left` : null,
-          totals: totals.additions + totals.deletions > 0 ? `+${totals.additions} −${totals.deletions}` : null,
+          totals: [totals.additions > 0 ? `+${totals.additions}` : '', totals.deletions > 0 ? `−${totals.deletions}` : ''].filter(Boolean).join(' ') || null,
           chipText: chip?.text ?? null,
           chipCore: chip?.core ?? null
         }}
