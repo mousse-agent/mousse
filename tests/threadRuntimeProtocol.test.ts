@@ -142,6 +142,36 @@ describe('ThreadRuntime over the protocol', () => {
     await c.close()
   })
 
+  it('opens a second terminal on the same thread, and closing it leaves the first one working', async () => {
+    const thread = mms.threads.createThread('TwoTerminals')
+    const c = await client()
+    const script = join(home, 'keep-alive.cjs')
+    writeFileSync(script, 'process.stdin.on("data",(d)=>process.stdout.write("echo:"+d));setInterval(()=>{},1000)')
+    const quote = (value: string) => process.platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, `'"'"'`)}'`
+    const command = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
+    const first = await c.request<{ ptyId: string }>('pty.create', { threadId: thread.id, agentId: '__project-shell__:tab-1', command })
+    const second = await c.request<{ ptyId: string }>('pty.create', { threadId: thread.id, agentId: '__project-shell__:tab-2', command })
+    expect(mms.ptyManager.isAlive(first.ptyId)).toBe(true)
+    expect(mms.ptyManager.isAlive(second.ptyId)).toBe(true)
+    const lease = join(mms.threads.getThreadDir(thread.id), 'execution.lease')
+    const owner = readFileSync(lease, 'utf8')
+
+    await c.request('pty.kill', { ptyId: second.ptyId })
+    expect(mms.ptyManager.isAlive(second.ptyId)).toBe(false)
+    // The first terminal keeps the thread's lease and still takes input past its ownership check.
+    expect(JSON.parse(readFileSync(lease, 'utf8')).token).toBe(JSON.parse(owner).token)
+    await c.request('pty.write', { ptyId: first.ptyId, data: 'still-here\r' })
+    await vi.waitFor(async () => {
+      const { scrollback } = await c.request<{ scrollback: string }>('pty.scrollback', { ptyId: first.ptyId })
+      expect(scrollback).toContain('echo:still-here')
+    }, { timeout: 10_000 })
+    expect(mms.ptyManager.isAlive(first.ptyId)).toBe(true)
+
+    await c.request('pty.kill', { ptyId: first.ptyId })
+    expect(existsSync(lease)).toBe(false)
+    await c.close()
+  })
+
   it('PTY output is replayable from the sequence and scrollback after client disconnect', async () => {
     const t1 = mms.threads.createThread('PtyReplay')
     const c = await client()
