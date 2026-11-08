@@ -11,7 +11,7 @@ import type { LoginSession } from '../../providers/LoginSession'
 import { CODEX_CAPABILITIES, CodexAdapter } from './codex/adapter'
 import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
 import { telemetryOf } from '../telemetry'
-import { usageWindows } from '../vendors/codex/rateLimits'
+import { reportedUsageWindows, usageWindows } from '../vendors/codex/rateLimits'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../vendors/codex/managedRuntime'
 import { ownedHomeProblem } from '../ownedHome'
@@ -168,12 +168,12 @@ function readAuth(service: CodexProviderService, status: Awaited<ReturnType<Code
  */
 async function readUsage(service: CodexProviderService, signal: AbortSignal): Promise<RuntimeUsage> {
   const limits = await service.rateLimits(signal)
-  const windows = usageWindows(limits.snapshot)
+  const windows = limits.live ? usageWindows(limits.snapshot) : reportedUsageWindows(limits.snapshot, Date.now())
   if (!windows.length) return { status: 'unavailable', windows: [], message: 'Codex reported no usage limits for this plan.' }
   return {
     status: 'available',
     windows,
-    ...(limits.live ? {} : { message: `Codex could not be reached; these are the limits it last reported (${new Date(limits.at).toISOString()}).` })
+    ...(limits.live ? {} : { message: "Codex couldn't be reached.", readAt: new Date(limits.at).toISOString() })
   }
 }
 

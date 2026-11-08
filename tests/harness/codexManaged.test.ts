@@ -209,14 +209,14 @@ describe('managed Codex: launch', () => {
     expect(server.methods()).not.toContain('account/read')
   })
 
-  it('has no usage meter: it points to ChatGPT, and starts nothing and contacts nothing to say so', async () => {
+  it('before any turn has reported limits it says so beside the ChatGPT link, and starts nothing and contacts nothing to say so', async () => {
     const { runtime, auth, server } = setup()
     await signIn(issuer, auth, alice)
     const requests = issuer.modelRequests.length
     expect(await runtime.usage!(new AbortController().signal)).toEqual({
       status: 'unavailable',
       windows: [],
-      message: "ChatGPT shows this plan's usage on its own page.",
+      message: 'Limits show after the next turn.',
       manageUrl: CHATGPT_USAGE_URL
     })
     expect(server.launches).toHaveLength(0)

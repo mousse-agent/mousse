@@ -14,7 +14,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   vi.useRealTimers()
 })
-function fixture(query: (input: { options: Options; prompt: unknown }) => Query) {
+function fixture(query: (input: { options: Options; prompt: unknown }) => Query, extra: Partial<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'claude-usage-'))
   homes.push(home)
   const binary = join(home, 'claude')
@@ -28,7 +28,8 @@ function fixture(query: (input: { options: Options; prompt: unknown }) => Query)
     JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
   )
   const runAuth = async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
-  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query, runAuth, launchConfig: () => ({ binaryPath: binary }) })
+  // No local proxy unless a test sets one: nothing reads the network.
+  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query, runAuth, launchConfig: () => ({ binaryPath: binary }), proxyUsage: async () => undefined, ...extra })
   services.push(service)
   return { home, service }
 }
@@ -120,6 +121,28 @@ describe('Claude subscription account quota', () => {
     expect(read).toHaveBeenCalledWith({ skipBehaviors: true })
     expect(query.close).toHaveBeenCalledOnce()
     expect(service.configuredProvider()?.id).toBe('claude-subscription')
+  })
+  it('when Claude Code has no limits, those of the local proxy its base URL points at stand in, labelled', async () => {
+    const query = { close: vi.fn() } as unknown as Query
+    const proxyUsage = vi.fn(async () => ({ status: 'available' as const, windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 63 }], source: 'via local proxy' }))
+    const { service, home } = fixture(() => query, {
+      proxyUsage,
+      // Claude's own settings folder is the fixture's: the user's real settings are not read.
+      baseEnv: () => ({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317', CLIPROXY_MANAGEMENT_KEY: 'mgmt', CLAUDE_CONFIG_DIR: join(tmpdir(), 'no-claude-settings') })
+    })
+    expect(await service.getUsage(home)).toEqual({
+      id: 'claude-subscription', label: 'Claude Subscription', status: 'available', source: 'via local proxy',
+      windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 63 }]
+    })
+    expect(proxyUsage).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'http://127.0.0.1:8317', managementKey: 'mgmt' }))
+  })
+  it('asks no proxy when Claude Code reports its own limits, or when no base URL is set', async () => {
+    const proxyUsage = vi.fn(async () => undefined)
+    const { service, home } = fixture(() => fakeQuery(), { proxyUsage, baseEnv: () => ({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317' }) })
+    expect(await service.getUsage(home)).toMatchObject({ status: 'available' })
+    const older = fixture(() => ({ close: vi.fn() }) as unknown as Query, { proxyUsage, baseEnv: () => ({ CLAUDE_CONFIG_DIR: join(tmpdir(), 'no-claude-settings') }) })
+    expect(await older.service.getUsage(older.home)).toMatchObject({ status: 'unavailable', message: 'Claude account usage limits are unavailable.' })
+    expect(proxyUsage).not.toHaveBeenCalled()
   })
   it('supports older SDKs without the experimental method', async () => {
     const query = { close: vi.fn() } as unknown as Query

@@ -48,7 +48,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -56,6 +56,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
+import { PROXY_KEY_VARIABLES, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from '../../../providers/localProxyUsage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
@@ -227,6 +228,8 @@ type Dependencies = {
   live?: false | Partial<LiveTimings>
   /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
   usageLimitHoldMs?: number
+  /** Reads the limits of a local proxy Claude Code's base URL points at (default `readLocalProxyClaudeUsage`; tests). */
+  proxyUsage?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
   /**
    * Ends a closed Claude Code process that has not exited by itself (`reapProcessTree`), with the
    * commands it started; tests substitute the grace or the kill.
@@ -1397,7 +1400,29 @@ export class ClaudeSubscriptionProviderService {
       /* a listener must not break provider work */
     }
   }
+  /**
+   * The account's plan limits from Claude Code itself; when it has none to give, the limits of the
+   * local CLI-to-API proxy its base URL points at, if it is one (labelled with that source).
+   */
   async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
+    const usage = await this.accountUsage(cwd, signal)
+    if (usage.status === 'available' || signal?.aborted) return usage
+    const proxy = await this.localProxyUsage(signal).catch(() => undefined)
+    if (!proxy) return usage
+    const { message: _own, ...named } = usage
+    return { ...named, ...proxy }
+  }
+
+  /** Only Claude Code's own base URL counts, and the key only from the user's Claude environment. */
+  private async localProxyUsage(signal?: AbortSignal): Promise<ProxyUsage | undefined> {
+    const env = this.environment()
+    const baseUrl = claudeEffectiveVariable(env, 'ANTHROPIC_BASE_URL')
+    if (!baseUrl) return undefined
+    const managementKey = PROXY_KEY_VARIABLES.map((name) => claudeEffectiveVariable(env, name)).find(Boolean)
+    return (this.dependencies.proxyUsage ?? readLocalProxyClaudeUsage)({ baseUrl, managementKey, ...(signal ? { signal } : {}) })
+  }
+
+  private async accountUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
     const unavailable = parseClaudeSubscriptionUsage(undefined)
     if (this.checkDue()) await this.status()
     if (!this.configured()) return unavailable

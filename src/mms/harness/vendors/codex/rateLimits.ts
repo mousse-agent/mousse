@@ -66,3 +66,15 @@ export function isUsageLimitInfo(info: CodexErrorInfo | null | undefined): boole
 export function isUsageLimitText(message: string | undefined): boolean {
   return /usage limit|rate limit/i.test(message ?? '')
 }
+
+/**
+ * The usage page's windows for a snapshot Codex sent at some earlier time. A window whose reset
+ * has passed since then has started over: it reads as all left, with no reset time.
+ */
+export function reportedUsageWindows(snapshot: RateLimitSnapshot | null | undefined, nowMs: number): ProviderUsageWindow[] {
+  return usageWindows(snapshot).map((window) => {
+    if (!window.resetsAt || Date.parse(window.resetsAt) > nowMs) return window
+    const { resetsAt: _passed, ...rest } = window
+    return { ...rest, remainingPercent: 100 }
+  })
+}

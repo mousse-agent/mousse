@@ -7,7 +7,9 @@ import { CODEX_PROVIDER_ID, codexEnvironment, CodexProviderService, type CodexAc
 import { CodexAdapter } from '../../drivers/codex/adapter'
 import { ChatGptAuth, type ChatGptAuthOptions, type ChatGptStatus } from '../../chatgpt/chatgptAuth'
 import type { ChatGptModel } from '../../chatgpt/models'
-import type { AuthReading, DriverContext, DriverRuntime } from '../../driver'
+import type { AuthReading, DriverContext, DriverRuntime, RuntimeUsage } from '../../driver'
+import type { RateLimitSnapshot } from './protocol'
+import { reportedUsageWindows } from './rateLimits'
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
 import { CodexInstallation } from './installation'
 import { CODEX_MANAGED_VERSION } from './release'
@@ -89,6 +91,19 @@ export function managedAuthReading(status: ChatGptStatus, subject: string | unde
     default:
       return { ...base, state: 'unknown', ...(status.message ? { message: status.message } : {}) }
   }
+}
+
+/**
+ * A managed entry's usage: the windows of the snapshot Codex last sent during one of the plan's
+ * turns (`account/rateLimits/updated`), dated, with ChatGPT's own page beside it.
+ */
+export function managedCodexUsage(signedIn: boolean, reported: { snapshot: RateLimitSnapshot; at: number } | undefined, nowMs: number): RuntimeUsage {
+  const link = { manageUrl: CHATGPT_USAGE_URL }
+  if (!signedIn) return { status: 'unavailable', windows: [], message: 'Sign in with ChatGPT to see limits.', ...link }
+  if (!reported) return { status: 'unavailable', windows: [], message: 'Limits show after the next turn.', ...link }
+  const windows = reportedUsageWindows(reported.snapshot, nowMs)
+  if (!windows.length) return { status: 'unavailable', windows: [], message: 'No limits reported for this plan.', ...link }
+  return { status: 'available', windows, readAt: new Date(reported.at).toISOString(), ...link }
 }
 
 function modelOption(model: ChatGptModel): LlmModelOption {
@@ -279,9 +294,12 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
       return reading
     },
     identity: async () => auth.identity(),
-    // OpenAI publishes no usage API for ChatGPT plan use and asks apps not to call its web backend,
-    // so Mousse shows no meter: the usage page points to ChatGPT's own.
-    usage: async () => ({ status: 'unavailable', windows: [], message: "ChatGPT shows this plan's usage on its own page.", manageUrl: CHATGPT_USAGE_URL }),
+    // OpenAI publishes no usage API for ChatGPT plan use and asks apps not to call its web backend:
+    // the meter shows the limits Codex itself reported on the plan's last turn (no request of its own).
+    usage: async () => {
+      const signedIn = auth.status().state === 'signed_in'
+      return managedCodexUsage(signedIn, signedIn ? codex.reportedRateLimits(auth.identity()) : undefined, Date.now())
+    },
     refreshModels: async () => void (await codex.refreshModels()),
     signIn: (session, _cwd, method) => auth.signIn(session, method),
     signOut: async () => {

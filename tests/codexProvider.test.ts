@@ -862,4 +862,30 @@ describe('plan usage limits for the usage page', () => {
     const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { error: { code: -32601, message: 'method not found' } } : chatgpt))
     await expect(create(server).rateLimits()).rejects.toThrow(/method not found/)
   })
+
+  it('keeps the last reported limits across a restart, saved under a hash of the account only', async () => {
+    let used = 40
+    // Codex may send more than the windows (credits, a plan name): only the windows' numbers are saved.
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { result: { rateLimits: { ...limits(used), credits: { balance: '12' } } } } : chatgpt))
+    const service = create(server)
+    await service.status({ force: true })
+    await service.rateLimits()
+    const subject = service.account()?.subject
+    expect(subject).toBe('chatgpt:me@example.com')
+    expect(service.reportedRateLimits()).toEqual({ snapshot: limits(40), at: expect.any(Number) })
+    const saved = () => readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')
+    expect(saved()).not.toContain('me@example.com')
+    expect(saved()).not.toContain('credits')
+    // A second report within the minute is kept in memory; the file is not written again for it.
+    used = 55
+    await service.rateLimits()
+    expect(service.reportedRateLimits()).toMatchObject({ snapshot: limits(55) })
+    expect(JSON.parse(saved()).rateLimits.snapshot).toEqual(limits(40))
+    // A new service on the same folder (a daemon restart) has them for that account, and for no other.
+    const again = new CodexProviderService(home, questions, { launch: server.launch }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+    services.push(again)
+    expect(again.reportedRateLimits(subject)).toMatchObject({ snapshot: limits(40), at: expect.any(Number) })
+    expect(again.reportedRateLimits('chatgpt:other@example.com')).toBeUndefined()
+    expect(again.reportedRateLimits(undefined)).toBeUndefined()
+  })
 })

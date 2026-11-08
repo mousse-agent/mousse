@@ -124,6 +124,10 @@ export interface ProviderUsage {
   message?: string
   /** Where the provider's own usage page is, when Mousse cannot show the numbers itself. */
   manageUrl?: string
+  /** Where the numbers came from when it is not the provider itself (for example "via local proxy"). */
+  source?: string
+  /** ISO time the windows were reported, when that is not now (the last snapshot a provider sent). */
+  readAt?: string
 }
 
 export interface ProvidersUsageResponse {

@@ -42,6 +42,21 @@ export function parseClaudeSubscriptionUsage(value: unknown): ProviderUsage {
   if (root?.rate_limits_available !== true) return result
   const limits = object(root.rate_limits)
   if (!limits) return result
+  result.windows.push(...claudeLimitWindows(limits))
+  if (result.windows.length) {
+    result.status = 'available'
+    delete result.message
+  }
+  return result
+}
+
+/**
+ * The windows of Claude's account limits object (`five_hour`, `seven_day`, … with `utilization`
+ * and `resets_at`): the shape of the official SDK's `rate_limits` and of the account usage a
+ * local proxy reads for its Claude sign-ins.
+ */
+export function claudeLimitWindows(limits: Record<string, unknown>): ProviderUsageWindow[] {
+  const result: { windows: ProviderUsageWindow[] } = { windows: [] }
   for (const [id, label] of windows) {
     const parsed = parseWindow(id, label, limits[id])
     if (parsed) result.windows.push(parsed)
@@ -61,9 +76,5 @@ export function parseClaudeSubscriptionUsage(value: unknown): ProviderUsage {
     const parsed = parseWindow('extra_usage', 'Extra usage', extra)
     if (parsed) result.windows.push(parsed)
   }
-  if (result.windows.length) {
-    result.status = 'available'
-    delete result.message
-  }
-  return result
+  return result.windows
 }
