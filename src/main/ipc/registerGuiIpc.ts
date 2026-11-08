@@ -120,6 +120,7 @@ import type {
   GitCommitOptions,
   GitCommitSelection,
   GitIncludeRequest,
+  GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
   GitDeleteBranchOptions,
@@ -2351,6 +2352,10 @@ export function registerGuiIpc(
   gitMutation('git:changes', 'git.changes', (options?: { paths?: string[] }) => ({ paths: options?.paths }))
   gitMutation('git:include', 'git.include', (input: GitIncludeRequest | { all: true; include: boolean }) => ({ ...input }))
   gitMutation('git:undoLastCommit', 'git.undoLastCommit', (expectedHead: string) => ({ expectedHead }))
+  // Revert hunks or files with a kept copy, put one back, and list those that can be.
+  gitMutation('git:revert', 'git.revert', (input: GitRevertRequest) => ({ ...input }))
+  gitMutation('git:restoreReverted', 'git.restoreReverted', (revertId: string) => ({ revertId }))
+  gitMutation('git:revertedList', 'git.revertedList')
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))

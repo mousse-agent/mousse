@@ -42,7 +42,8 @@ export interface MmsClient {
 /** Git methods that change the repository and may run hooks or talk to a remote. */
 const GIT_MUTATION_METHODS: ReadonlySet<string> = new Set([
   'git.checkout', 'git.commit', 'git.push', 'git.stage', 'git.unstage', 'git.discard', 'git.fetch', 'git.pull',
-  'git.abortInProgress', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.init', 'git.include', 'git.undoLastCommit'
+  'git.abortInProgress', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.init', 'git.include', 'git.undoLastCommit',
+  'git.revert', 'git.restoreReverted'
 ])
 
 /** The service refused the hello; `code` says why (`protocol_version`: it speaks another protocol). */
@@ -113,6 +114,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
   'git.changes',
   'git.diffStats',
   'git.log',
+  'git.revertedList',
   'git.status',
   'integrations.snapshot',
   'net.status',

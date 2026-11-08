@@ -42,7 +42,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -1183,6 +1183,41 @@ function selectionMarkerOf(place: () => SelectionPlace): { markerFile: string } 
   let found: SelectionPlace
   try { found = place() } catch { return undefined }
   return found.kind === 'project' ? { markerFile: found.markerFile } : undefined
+}
+
+/**
+ * Whose journal records the reverts of the folder a request names, as `git.revert` chooses it (`recordedThreadTarget`):
+ * a thread working in its own worktree, or ready in its project's folder; otherwise the project. Only reads.
+ */
+function revertOwnerFor(ctx: HandlerContext, p: Record<string, unknown>): string | undefined {
+  const threadId = asOptionalString(p.threadId, 256)
+  if (threadId) {
+    const directory = ctx.mms.threads.getThreadDir(threadId)
+    const workspace = new ThreadWorkspaceManager(directory).load()
+    if (workspace && (!isProjectFolderWorkspace(workspace) ? threadPlacement(ctx.mms.threads.getThread(threadId)) !== 'project-folder' : workspace.lifecycle === 'ready')) return directory
+  }
+  const projectId = requestProjectId(ctx, p)
+  try { return projectId ? projectKeptFilesOwner(profileHome(ctx), projectId) : undefined } catch { return undefined }
+}
+
+/**
+ * Every journal the reverts of the folder a request names may be in, `revertOwnerFor`'s first: a thread's own and its
+ * project's. A thread working in its project's folder records its reverts in its own journal only while it is ready
+ * there, and the project records them otherwise, so a revert made in one state is still listed and restored in the
+ * other. Each record names its folder, so a journal's reverts of other folders are never taken. Only reads.
+ */
+function revertJournalsFor(ctx: HandlerContext, p: Record<string, unknown>): string[] {
+  const journals: string[] = []
+  const first = revertOwnerFor(ctx, p)
+  if (first) journals.push(first)
+  const threadId = asOptionalString(p.threadId, 256)
+  if (threadId) {
+    const directory = ctx.mms.threads.getThreadDir(threadId)
+    if (new ThreadWorkspaceManager(directory).load()) journals.push(directory)
+  }
+  const projectId = requestProjectId(ctx, p)
+  try { if (projectId) journals.push(projectKeptFilesOwner(profileHome(ctx), projectId)) } catch { /* no project: the thread's journal only */ }
+  return [...new Set(journals)]
 }
 
 /** Whose Undo window a Discard requested with these parameters keeps its copy for; only reads. */
@@ -4015,6 +4050,56 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ctx.mms.gitService.undoLastCommit(target.root, gitUserAction(ctx, 'Undo last commit'), asString(p.expectedHead, 'expectedHead', 128), place)
       announceSelection(ctx, p, place)
       return gitStatusResult(ctx, target.root)
+    }
+    case 'git.revert': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'path', 'version', 'hunks', 'lines'])
+      const target = await gitMutationTarget(ctx, p)
+      const [path] = await gitPaths(ctx, target.root, [asString(p.path, 'path', 4096)])
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      // Before a snapshot is taken for the recorded action: a running turn refuses at once.
+      place.assertIdle?.()
+      // Owned as a Discard's copy is: a thread's revert, in its worktree or its project's folder, is a recorded action of
+      // the person and the thread keeps the copy; the person's own checkout keeps it for the project.
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      const revertFile = () => ctx.mms.gitService.revert(target.root, gitUserAction(ctx, 'Revert'), place, { path: path!, version: asString(p.version, 'version', 128), ...asIncludeParts(p) }, { owner })
+      const result = thread
+        ? await runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Reverted changes in ${path}`, reversible: false }] }, revertFile)
+        : await revertFile()
+      announceSelection(ctx, p, place)
+      return result
+    }
+    case 'git.restoreReverted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'revertId'])
+      const target = await gitMutationTarget(ctx, p)
+      const revertId = asString(p.revertId, 'revertId', 128)
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      place.assertIdle?.()
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      // A revert recorded while the thread stood otherwise in its project's folder is in the other journal.
+      const also = revertJournalsFor(ctx, p).filter((journal) => journal !== owner)
+      const restoreKept = (check: boolean) => ctx.mms.gitService.restoreReverted(target.root, gitUserAction(ctx, 'Restore reverted changes'), place, revertId, { owner, also }, { check })
+      // A thread's restore writes files as a recorded action; one that has nothing to write (already restored, changed,
+      // expired) records none.
+      let result = await restoreKept(Boolean(thread))
+      if ('pending' in result) {
+        result = await runUserThreadGitAction(ctx, thread!, { externalEffects: [{ kind: 'unknown', description: 'Restored reverted changes', reversible: false }] }, () => restoreKept(false))
+        // Changed in the moment between the check and the action: the answer is still one of the three.
+        if ('pending' in result) result = { restored: false, reason: 'changed' }
+      }
+      if (result.restored) announceSelection(ctx, p, place)
+      return result satisfies GitRestoreRevertedResult
+    }
+    case 'git.revertedList': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId'])
+      await materializeRequestedWorkspace(ctx, p)
+      const root = projectRootContext(ctx, p)
+      const journals = revertJournalsFor(ctx, p)
+      return journals.length ? await ctx.mms.gitService.revertedList(root, journals) : []
     }
     case 'git.cancelOperation': {
       const p = isObject(params) ? params : {}
