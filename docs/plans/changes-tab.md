@@ -112,11 +112,12 @@ type ChangedFile = {
   mode?: { old: string; new: string }      // mode-only changes have no hunks
   wholeFileOnly: boolean                   // binary, symlink, submodule, mode, rename, too large, conflict,
                                            // index diverged, or bytes that don't round-trip (see below)
-  indexDiverged: boolean                   // project folders: the index holds content that is neither HEAD
-                                           // nor HEAD plus some of these hunks
+  indexDiverged: boolean                   // the selection holds content that is neither HEAD nor HEAD plus
+                                           // some of these hunks (project index), or was chosen against an
+                                           // older HEAD or working tree (thread overlay)
   tooLarge: boolean
   version: string                          // HEAD oid, oldPath, path, modes, every index stage,
-                                           // working-tree digest, and (threads) the selection token
+                                           // working-tree digest, and the selection token
   hunks: ChangeHunk[]
   included: 'yes' | 'no' | 'partial'
 }
@@ -127,21 +128,29 @@ type ChangesResult = {
 }
 ```
 
-- The list is HEAD → working tree, plus untracked files (as `added`), plus project-folder files whose index differs from HEAD even when the working tree equals HEAD.
-- `included` is derived from HEAD → selection and selection → working tree, mapped onto the HEAD → working tree hunks. The selection is the index (project folders) or the thread's selection index (threads).
+- The list is HEAD → working tree, plus untracked files (as `added`), plus files whose selection differs from HEAD even when the working tree equals HEAD.
+- `included` is derived from HEAD → selection and selection → working tree, mapped onto the HEAD → working tree hunks. The selection is the index (project folders) or the commit index the thread overlay would build (threads).
 - **Round-trip rule.** Hunks are in Git's clean form. A file is `wholeFileOnly` when its bytes might not survive a round trip: any filter or clean driver (LFS included), `ident`, `working-tree-encoding`, or an untrusted repository where drivers are off. Line-ending conversion is allowed only through Git's built-in conversion, never by writing clean text over the file.
 - Results over Bridge are ephemeral reads and page above 63 KiB.
 
 ### Selection state
 
-- **Project folders:** the selection is the real index. Mousse never rebuilds an entry from HEAD when the index is diverged; such files allow only whole-file include and exclude (exclude keeps the staged blob as a kept copy first). Choosing in Mousse records a per-folder marker with the index's tree id. While the index still has that tree, `selection.state` is `chosen`, even if the index equals HEAD (everything excluded). Any outside change to the index clears the marker.
-- **Thread worktrees:** the selection is a private index file in the thread's folder (`privateIndexEnv`, as snapshots use). It survives restarts and is shared by every client. It starts `untouched` (no file). The `token` changes on every write to it.
-- After Undo, Redo, a branch switch or a turn ending, `included` is recomputed against the new HEAD and working tree; the stored selection blobs stay valid.
-- A `git.selectionChanged { threadId? | projectId? }` event tells other views to re-read.
+- **First choice.** From `untouched`, the first include or exclude starts from everything included (the state `Commit all N` showed), then applies the choice. In a project folder that first step stages everything (`add -A`, excluding `.mousse/**`) before applying the exclusion.
+- **Project folders:** the selection is the real index. Mousse never rebuilds an entry from HEAD when the index is diverged; such files allow only whole-file include and exclude (exclude keeps the staged blob as a kept copy first).
+  - Choosing in Mousse records a marker keyed by **(HEAD oid, index tree id)**, stored in the daemon's per-project state (the project's kept-files owner folder), never in `.git`. While both still match, `state` is `chosen`, even if the index equals HEAD (everything excluded).
+  - The marker is cleared by any successful commit, by `git.undoLastCommit`, and by any index or HEAD change Mousse did not make. Mousse's own index writes while the marker is set (`git.include`, `git.revert`, `git.restoreReverted`, `git.discard`, and `git.stage`/`git.unstage` from older clients) re-record it, so `Commit 1 of 3` never silently becomes `Commit all 3`.
+  - `write-tree` (which adds tree objects to the repository's object store, harmlessly) failing, for example with unmerged entries, means `untouched`.
+  - `token` = hash of (HEAD oid, index tree id, marker).
+- **Thread worktrees:** the selection is an **overlay**, not a whole index: only the paths the person changed, each with its chosen entry (blob and mode, or "left out") plus the HEAD entry and working-tree digest it was chosen against. It is stored in the thread's folder, survives restarts and is shared by every client. No overlay = `untouched`.
+  - Paths not in the overlay are included as they are in the working tree.
+  - When a path's HEAD entry or working-tree digest no longer matches what it was chosen against (an agent or terminal commit, Undo, Redo, pull, a later edit), that path is `indexDiverged` (whole-file only, listed even when the working tree equals HEAD) until the person chooses it again.
+  - The commit index is built fresh at commit time: `read-tree <current HEAD>`, then the working tree for changed paths outside the overlay, then the overlay entries. A commit can therefore never reverse a newer commit.
+  - `token` = hash of (HEAD oid, overlay revision). It changes when HEAD moves or the overlay is written.
+- A `git.selectionChanged { threadId? | projectId? }` event tells other views to re-read. It is declared with the other daemon events and forwarded over Bridge like `actions.updated`.
 
 ### Include and exclude: `git.include`
 
-`git.include({ threadId?, projectId?, path, version, include, hunks?, lines? })` and `git.include({ threadId?, projectId?, all: true, include })` → `{ path, version, included, selection: { state, token } }` (small, for the Bridge ledger; the tab re-reads with `git.changes({ paths })`).
+`git.include({ threadId?, projectId?, path, version, include, hunks?, lines? })` → `{ path, version, included, selection: { state, token } }`, and `git.include({ threadId?, projectId?, all: true, include })` → `{ selection: { state, token } }`. Results stay small for the Bridge ledger; the tab re-reads with `git.changes({ paths })`.
 
 - No `hunks` and no `lines` = the whole file. `lines: { hunk, indexes }[]` index into `hunk.lines`: leaving out a `-` line keeps that line; leaving out a `+` line drops it.
 - A rename includes or excludes both paths together.
@@ -151,16 +160,21 @@ type ChangesResult = {
 
 New field `selection?: { mode: 'all' } | { mode: 'chosen'; token: string }`.
 
-- `all`: today's behavior (`add -A` in threads; stage everything in project folders).
+- `all`: `add -A` (the existing `options.all` path, which excludes `.mousse/**`), in threads and project folders alike.
+- `chosen`: the token must match the current selection, else `stale`. This applies to project folders too, so a `git add -A` in a terminal while the tab is open can't sneak excluded files into the commit.
 - `chosen`, project folders: commit exactly the index, never `add -A`; an index equal to HEAD → `nothing_selected`.
-- `chosen`, threads: the token must match the current selection, else `stale`. Commits through a copy of the selection index, as one recorded thread action, without touching the private snapshots (#466). On success the real index is reset to the new HEAD (mixed; working tree untouched) and the selection file is removed. If HEAD did not move (hook refused, cancel, timeout), the selection and the real index stay as they were.
-- Hooks run with the temporary index. A hook that reformats and re-adds files is supported and tested.
-- **No field** (older clients): unchanged behavior; in a thread with a chosen selection the commit still takes everything, as the older client's own UI says.
-- `git.suggestCommitMessage` with `selection: chosen` describes only the selection.
+- `chosen`, threads: commits through the fresh commit index described above, as one recorded thread action, without touching the private snapshots (#466). On success the real index is reset to the new HEAD (mixed; working tree untouched) and the overlay is removed. If HEAD did not move (hook refused, cancel, timeout), the overlay and the real index stay as they were. A crash between the commit and removing the overlay is harmless: the overlay's paths become diverged against the new HEAD.
+- Hooks run with the temporary index (as `git commit -- <paths>` already does). A hook that reformats and re-adds files is supported and tested.
+- **No field** (older clients): unchanged behavior. A new client sending `selection` to an older computer over Bridge is refused (`computerOutdated`), never downgraded. Both the `git.commit` and `git.suggestCommitMessage` routed rows get `since: { selection: 2 }`.
+- `git.suggestCommitMessage` with `selection: chosen` (same token check) describes only the selection.
 
 ### Undo last commit: `git.undoLastCommit`
 
-`git.undoLastCommit({ projectId, expectedHead })`: soft reset of one local, unpushed commit (the same pushed-commit check as `assertAmendable`); working tree and index keep the changes. Project folders only; threads use Undo in the chat (`git_undo_in_thread`).
+`git.undoLastCommit({ projectId, expectedHead })`: soft reset of one local, unpushed commit (the same checks as `assertAmendable`); working tree and index keep the changes, and the selection marker is cleared.
+
+- Project folders only; threads use Undo in the chat (`git_undo_in_thread`).
+- Refused: pushed (`git_amend_pushed`), no commit (`git_amend_no_commit`), a root commit (`git_undo_root`), a merge commit (`git_undo_merge`), a merge or rebase in progress (`git_merge_unresolved`), `expectedHead` mismatch (`stale`).
+- A last commit made by a thread working in the project folder can be undone like any other, without a recorded action (amend's precedent).
 
 ### Revert and restore (A2)
 
@@ -169,9 +183,12 @@ New field `selection?: { mode: 'all' } | { mode: 'chosen'; token: string }`.
   - Just before writing, the kept digests are compared with the file again, as `provenDiscard` does; a changed path is left as it is and the call returns `stale`.
   - The owner is chosen like `git.discard`: `recordedThreadTarget` (a thread's worktree, or a thread working in its project's folder) → the thread's folder, and the revert is a recorded thread action; otherwise `projectKeptFilesOwnerFor`.
   - Retention is the owner's window (`keptCopyWindowMs(owner)`), not a fixed 30 days.
+  - Whole-file working-tree writes follow `git.discard`'s path and driver rules (LFS and filter files included). Where those rules can't write the file safely, the call is refused with `whole_file_only` and the tab offers Discard instead.
+  - In a thread, the reverted paths leave the overlay (they now equal HEAD).
 - The record `revertId → { kept ref, paths, post-revert digests and index entries, at }` is written to the owner's journal, so the list and restore work after a restart.
 - `git.restoreReverted({ threadId?, projectId?, revertId })` → `{ restored: true } | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }`.
-  - Restores only if the paths still match what the revert left (working tree and index); otherwise returns blob ids for a comparison and writes nothing.
+  - Restores only if the paths still match what the revert left: the working tree, and in project folders also the index. (A thread's selection is not compared, so choosing another hunk of the same file doesn't block Undo.) Otherwise it returns blob ids for a comparison and writes nothing.
+  - Restored hunks come back included in project folders (the staged entry is restored) and included in threads (they are outside the overlay). Chat Undo of a recorded revert behaves the same way.
   - Idempotent: if the paths already equal the kept content (a retry, or chat Undo already put it back), returns `restored: true`.
   - `expired` when the kept ref is gone, whatever `keptUntil` said.
   - Reuses `writeBackKeptFiles` and a staged restore from the kept ref; in the thread cases it is a recorded thread action.
@@ -181,19 +198,22 @@ New field `selection?: { mode: 'all' } | { mode: 'chosen'; token: string }`.
 
 | Error | Methods |
 | --- | --- |
-| `stale` | include, commit (chosen), revert |
+| `stale` | include, commit (chosen, threads and project folders), suggestCommitMessage (chosen), revert, undoLastCommit |
 | `thread_busy` | include, commit (chosen), revert, restore, undoLastCommit |
 | `whole_file_only` | include, revert |
-| `git_merge_unresolved` | include, revert |
+| `git_merge_unresolved` | include, revert, undoLastCommit |
 | `nothing_selected` | commit (chosen) |
-| `git_undo_in_thread`, `commit_pushed` | undoLastCommit |
+| `git_undo_in_thread`, `git_amend_pushed`, `git_amend_no_commit`, `git_undo_root`, `git_undo_merge` | undoLastCommit |
+| `computerOutdated` | commit and suggestCommitMessage with `selection`, over Bridge to an older computer |
 | `remote_offline` | all, from Bridge |
+
+`thread_busy` in a project folder also covers chat history work on any thread in that folder (`isConversationHistoryBusy`), as the operations handlers do.
 
 ## Delivery
 
-- **A1:** `git.changes`, `git.include`, the selection marker and thread selection index, `git.commit` selection field (routed row version bump), `git.suggestCommitMessage` with a selection, `git.undoLastCommit`, `git.selectionChanged`.
+- **A1:** `git.changes`, `git.include`, the project marker and thread overlay, `git.commit` and `git.suggestCommitMessage` selection fields (both routed rows bumped), `git.undoLastCommit`, `git.selectionChanged`.
 - **A2:** `git.revert`, `git.restoreReverted`, `git.revertedList`, the new kept-copy operation.
-- Tests for A1 and A2: project folder and thread worktree; restart with a held selection; an older client committing without the field; an index-diverged project file; untracked files; renames; submodule and mode-only changes; duplicate hunks; autocrlf on Windows with a CRLF file and `.gitattributes eol=crlf`; an LFS/filter file falling back to whole-file; a hook refusing a selection commit (selection and real index unchanged); a hook reformatting during a selection commit; Bridge containment through a junction for revert; `thread_busy`; restore after later edits (`changed`), after chat Undo (idempotent) and after expiry; `suggestCommitMessage` with a selection; the `gitAccessTable` and routed-version tests.
+- Tests for A1 and A2: project folder and thread worktree; restart with a held selection; choose a hunk, an agent commits another file, then a chosen commit does not reverse it; a chosen commit after a terminal `git add -A` returns `stale`; after a chosen commit in a project folder the rest reads `Commit all`; a revert while the marker is set keeps it `chosen`; an older client committing without the field; an index-diverged project file; untracked files; renames; submodule and mode-only changes; duplicate hunks; autocrlf on Windows with a CRLF file and `.gitattributes eol=crlf`; an LFS/filter file falling back to whole-file; a hook refusing a selection commit (selection and real index unchanged); a hook reformatting during a selection commit; Bridge containment through a junction for revert; `thread_busy`; restore after later edits (`changed`), after chat Undo (idempotent) and after expiry; `suggestCommitMessage` with a selection; the `gitAccessTable` and routed-version tests.
 - Each daemon PR is reviewed by the council before and after coding.
 - **B:** the tab, the store migration (`review` surfaces and saved `mainView: 'review'` become `git`; `surface.review` shortcut overrides are dropped), the side card glance, removal of `GitPanel`/`ReviewPanel` and the tests that only covered them, before/after screenshots.
 
