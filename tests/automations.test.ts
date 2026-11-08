@@ -171,11 +171,11 @@ describe('the automation index', () => {
     expect(index.unavailable).toEqual(['bots'])
   })
 
-  it('shows the effective May: the strictest of the job, its ceiling and its thread, and none for a workflow', () => {
+  it('shows the effective May: the strictest of the job, its ceiling and its thread, for a workflow too (#338)', () => {
     expect(jobEffectiveMay(job({ permissionMode: 'full', permissionCeiling: 'auto' }), 'accept_edits')).toBe('accept_edits')
     expect(jobEffectiveMay(job({ permissionCeiling: 'ask' }), 'full')).toBe('ask')
     expect(jobEffectiveMay(job({}), 'auto')).toBe('auto')
-    expect(jobEffectiveMay(job({ prompt: '/release-notes' }), 'auto')).toBeUndefined()
+    expect(jobEffectiveMay(job({ prompt: '/release-notes', permissionCeiling: 'ask' }), 'auto')).toBe('ask')
   })
 
   it('marks a paused job with the time it resumes, and gives it no next run', () => {

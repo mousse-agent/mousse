@@ -12,10 +12,6 @@ function read(value: PermissionMode | undefined): PermissionMode | undefined {
   return value === undefined ? undefined : normalizePermissionMode(value)
 }
 
-/** Why a workflow job (a prompt starting with `/`) takes no permission mode. */
-export const WORKFLOW_PERMISSION_REFUSAL =
-  'A job that runs a workflow (its prompt starts with /) takes no permission mode: workflows do not run under one. Remove the permission mode, or use a plain prompt.'
-
 /**
  * The mode a run of the job asks for: the stricter of the job's mode and its ceiling, or nothing when the
  * job has neither (the run then follows its thread). The turn builder narrows this further by the thread's

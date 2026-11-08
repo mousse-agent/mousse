@@ -5,7 +5,7 @@ import {
   normalizePermissionMode,
   type PermissionMode
 } from '../../../shared/permissionMode'
-import { isExecutableJobEdit, isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
+import { isExecutableJobEdit } from '../../../shared/jobPermissionEdit'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../../shared/providerInstances'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { findListedModel, modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
@@ -167,9 +167,6 @@ export function modeChoices(draft: JobDraft): Array<{ value: JobDraft['mode']; l
   return choices
 }
 
-/** A prompt that starts with `/` runs a workflow, which takes no permission mode: the form hides the choice. */
-export const takesPermissionMode = (draft: JobDraft): boolean => !isWorkflowPrompt(draft.prompt)
-
 /**
  * The permission mode the person holds for this job, which is the job's ceiling: its target thread's mode, else the mode
  * threads start in. The profile works it out the same way and has the last word. `exact` is false when the form cannot
@@ -274,7 +271,7 @@ export function validateDraft(draft: JobDraft, context: { hasWebhook: boolean; r
   if (draft.scheduleKind === 'once' && context.hasWebhook) {
     errors.schedule = 'An automation with a webhook cannot be one-time. Use On demand, or turn its webhook off first.'
   }
-  if (takesPermissionMode(draft) && draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
+  if (draft.permissionMode !== '' && context.held !== undefined && isStricter(context.held, draft.permissionMode)) {
     errors.permission = `An automation cannot run above the mode you hold here. ${describePermissionMode(draft.permissionMode)} is wider than ${describePermissionMode(context.held)}; choose ${describePermissionMode(context.held)} or stricter.`
   }
   if (showsWorkspace(draft) || draft.workspaceKind === 'worktree') {
@@ -312,9 +309,7 @@ export function patchOf(initial: JobDraft, draft: JobDraft, catalog: ScheduledCa
   if (draft.modelKey !== initial.modelKey) patch.selection = choiceOf(draft, catalog)?.selection ?? null
   if (draft.agentId !== initial.agentId) patch.agent = draft.agentId ? { definitionId: draft.agentId } : null
   if (draft.mode !== initial.mode) patch.mode = draft.mode || null
-  // A prompt that became a workflow loses its permission mode: workflows do not run under one.
-  const wantedPermission = takesPermissionMode(draft) ? draft.permissionMode : ''
-  if (wantedPermission !== initial.permissionMode) patch.permissionMode = wantedPermission || null
+  if (draft.permissionMode !== initial.permissionMode) patch.permissionMode = draft.permissionMode || null
   if (draft.projectId !== initial.projectId) patch.projectId = draft.projectId || null
   if (draft.tellMe !== initial.tellMe) patch.tellMe = draft.tellMe
   const workspace = workspaceOf(draft) ?? null

@@ -39,7 +39,7 @@ import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type P
 import { AGENT_JOBS_OFF_REASON, agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
-import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, WORKFLOW_PERMISSION_REFUSAL, type JobPermissionEdit } from './jobPermission'
+import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
   ReceiptsUnreadableError,
   appendDelivery,
@@ -451,7 +451,6 @@ export class ScheduledJobStore {
   createJob(input: CreateScheduledJobInput): ScheduledJob {
     const now = new Date().toISOString()
     const nextRunAt = computeNextRun(input.schedule)
-    if (input.permissionMode && isWorkflowPrompt(input.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
     // A mode with no ceiling to bound it gets the strictest ceiling, and the mode is brought down to it.
     const permissionCeiling = input.permissionCeiling ?? (input.permissionMode ? 'ask' : undefined)
     const permissionMode = input.permissionMode && !input.permissionCeiling ? narrowPermissionMode(input.permissionMode, 'ask') : input.permissionMode
@@ -514,11 +513,9 @@ export class ScheduledJobStore {
         id: jobs[index].id,
         updatedAt: new Date().toISOString()
       }
-      // However an edit arrives, a job's mode never exceeds its ceiling, a mode with no ceiling gets the strictest, and a
-      // workflow job has no mode. (A job the file already holds out of range is not made un-editable for other
+      // However an edit arrives, a job's mode never exceeds its ceiling, and a mode with no ceiling gets the strictest. (A job the file already holds out of range is not made un-editable for other
       // changes; the run narrows it anyway.)
       if ('permissionMode' in applied || 'permissionCeiling' in applied || 'prompt' in applied) {
-        if (updated.permissionMode && isWorkflowPrompt(updated.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
         if (updated.permissionMode && !updated.permissionCeiling) {
           updated.permissionCeiling = 'ask'
           updated.permissionMode = narrowPermissionMode(updated.permissionMode, 'ask')

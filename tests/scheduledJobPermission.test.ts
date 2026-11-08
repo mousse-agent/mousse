@@ -143,24 +143,19 @@ describe('the protocol refuses a ceiling', () => {
   })
 })
 
-describe('workflow jobs take no permission mode', () => {
+describe('workflow jobs take a permission mode like any job (#338)', () => {
   let home: string
   beforeEach(() => { home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-job-workflow-')) })
   afterEach(() => { rmSync(home, { recursive: true, force: true }) })
   const open = () => new ScheduledJobStore(MousseConfigStore.load(home))
 
-  it('refuses a permission mode on a prompt that starts with / (after leading space), at creation and on an edit', () => {
+  it('keeps a mode on a prompt that starts with /, at creation and on an edit, held to its ceiling', () => {
     const store = open()
-    for (const prompt of ['/deploy', '   /deploy staging']) {
-      expect(() => store.createJob({ name: 'W', prompt, schedule: { kind: 'manual' }, permissionMode: 'ask', permissionCeiling: 'ask' })).toThrow(/takes no permission mode/)
-    }
-    expect(store.listJobs()).toHaveLength(0)
+    const workflow = store.createJob({ name: 'W', prompt: '/deploy', schedule: { kind: 'manual' }, permissionMode: 'accept_edits', permissionCeiling: 'full' })
+    expect(workflow).toMatchObject({ permissionMode: 'accept_edits', permissionCeiling: 'full' })
     const plain = store.createJob({ name: 'P', prompt: 'work', schedule: { kind: 'manual' }, permissionMode: 'ask', permissionCeiling: 'ask' })
-    // Turning it into a workflow while it still has a mode is refused; clearing the mode in the same edit is not.
-    expect(() => store.updateJob(plain.id, { prompt: '/deploy' })).toThrow(/takes no permission mode/)
-    expect(store.updateJob(plain.id, { prompt: '/deploy', permissionMode: undefined })?.prompt).toBe('/deploy')
-    // A workflow job can still get a ceiling (migration stamps every job) but no mode.
-    expect(() => store.updateJob(plain.id, { permissionMode: 'ask' })).toThrow(/takes no permission mode/)
+    expect(store.updateJob(plain.id, { prompt: '/deploy' })).toMatchObject({ prompt: '/deploy', permissionMode: 'ask' })
+    expect(() => store.createJob({ name: 'Wide', prompt: '/deploy', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'ask' })).toThrow(/wider than/)
   })
 })
 
@@ -425,28 +420,13 @@ describe('creating and editing a job through the protocol', () => {
   })
 
   describe('workflow jobs', () => {
-    it('refuses a permission mode on a prompt that starts with /, and tells the person why', async () => {
-      await setDefaultMode('full')
-      const refused = /takes no permission mode/
-      await expect(create({ prompt: '/deploy', permissionMode: 'ask' })).rejects.toThrow(refused)
-      await expect(create({ prompt: '  /deploy', permissionMode: 'ask' })).rejects.toThrow(refused)
-      expect((await client.request<{ jobs: ScheduledJob[] }>('scheduled.list')).jobs).toHaveLength(0)
-
-      // A workflow job without a mode is created as before, with a ceiling, and refuses one on an edit.
-      const { job } = await create({ prompt: '/deploy' })
-      expect(job.permissionMode).toBeUndefined()
-      await expect(update(job.id, { permissionMode: 'ask' })).rejects.toThrow(refused)
-      expect(mms.scheduled.getJob(job.id)?.permissionMode).toBeUndefined()
-    })
-
-    it('refuses turning a plain job with a mode into a workflow unless the mode is cleared in the same edit', async () => {
-      await setDefaultMode('full')
-      const { job } = await create({ permissionMode: 'ask' })
-      await expect(update(job.id, { prompt: '/deploy' })).rejects.toThrow(/takes no permission mode/)
-      expect(mms.scheduled.getJob(job.id)).toMatchObject({ prompt: 'work', permissionMode: 'ask' })
-      await update(job.id, { prompt: '/deploy', permissionMode: null })
-      expect(mms.scheduled.getJob(job.id)).toMatchObject({ prompt: '/deploy' })
-      expect(mms.scheduled.getJob(job.id)?.permissionMode).toBeUndefined()
+    it('take a permission mode, never above the mode the person holds (#338)', async () => {
+      await setDefaultMode('accept_edits')
+      const { job } = await create({ prompt: '/deploy', permissionMode: 'ask' })
+      expect(job).toMatchObject({ prompt: '/deploy', permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+      await update(job.id, { permissionMode: 'accept_edits' })
+      expect(mms.scheduled.getJob(job.id)?.permissionMode).toBe('accept_edits')
+      await expect(create({ prompt: '/deploy', permissionMode: 'full' })).rejects.toThrow(/wider than/)
     })
   })
 

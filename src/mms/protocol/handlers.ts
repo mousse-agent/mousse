@@ -412,7 +412,9 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
   if (!bridge || !ctx.connection) return buildSendInput(input.content, input.mode, input.images)
-  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli')
+  // A workflow typed on a thread runs under that thread's mode (#338).
+  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, isPerson(ctx.connection) ? 'gui' : 'cli',
+    ctx.mms.orchestrator.workflowPermissionMode(threadId))
   if (prepared.workflowInvocationId) {
     // A workflow's steps run under the workflow's own policy, not under the permission mode of a turn, so a
     // device's limit cannot bind them. Until workflows have a permission mode, a /workflow command typed on

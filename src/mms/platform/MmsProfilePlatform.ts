@@ -98,6 +98,8 @@ export class MmsProfilePlatform {
     this.workflowBrowser = new MmsWorkflowBrowser(services, () => this.browser,
       async (context) => this.workflowRuns.runtime.get(context.runId!, { profileId }))
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
+      // A run started from the Library or the CLI is held to its thread's mode, else the profile default (#338).
+      defaultPermissionMode: (threadId) => services.orchestrator.scheduledCreatorCeiling(threadId),
       threads: services.threads, projects: services.projects,
       adapters: { agent: this.workflowAgents.agent, tool: this.workflowTools.adapter, mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill, browser: this.workflowBrowser.adapter },
       prepareExecution: async (request, record) => {

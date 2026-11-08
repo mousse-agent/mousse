@@ -59,9 +59,8 @@ function lineOf(text: string, max = 70): string {
   return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line
 }
 
-/** The effective May of a job: the strictest of its mode, its ceiling and the mode its thread runs in. Workflows take none. */
-export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): PermissionMode | undefined {
-  if (isWorkflowPrompt(job.prompt)) return undefined
+/** The effective May of a job: the strictest of its mode, its ceiling and the mode its thread runs in (a workflow's too, #338). */
+export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): PermissionMode {
   return narrowPermissionMode(job.permissionMode, job.permissionCeiling, threadMode)
 }
 
@@ -82,7 +81,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const creator = job.createdBy ? sources.thread(job.createdBy.threadId) : undefined
   const projectName = job.projectId ? sources.projectName(job.projectId) : undefined
   // A saved agent keeps to what it may use (its grants), not a permission mode.
-  const may = job.agent ? undefined : jobEffectiveMay(job, sources.threadMode(job.threadId))
+  const may = job.agent && !workflow ? undefined : jobEffectiveMay(job, sources.threadMode(job.threadId))
   const attention = attentionOf({ ...(ask ? { ask } : {}), ...(last ? { last } : {}) })
   return {
     key: `job:${job.id}`,

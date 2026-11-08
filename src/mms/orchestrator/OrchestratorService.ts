@@ -4874,6 +4874,14 @@ export class OrchestratorService extends EventEmitter {
    * bound to (its own, never above its lineage's ceiling), else the mode threads start in. Whatever
    * cannot be read asks. The job's ceiling is this value; no request carries one.
    */
+  /**
+   * The mode a workflow started on a thread is held to (#338): the thread's mode, else the mode threads start in, and
+   * never wider than `held` (a scheduled job's mode and ceiling).
+   */
+  workflowPermissionMode(threadId?: string, held?: PermissionMode): PermissionMode {
+    return narrowPermissionMode(held, this.scheduledCreatorCeiling(threadId))
+  }
+
   scheduledCreatorCeiling(threadId?: string): PermissionMode {
     try {
       if (threadId && this.threadStore?.getThread(threadId)) return this.requestedPermissionMode(threadId)
@@ -12417,7 +12425,9 @@ export class OrchestratorService extends EventEmitter {
             threadId: workflowThreadId,
             signal: this.lifecycle.signal,
             terminalOnly: ingress.resumeWaiting === true,
-            onWorkflowPrepared: ingress.onWorkflowPrepared
+            onWorkflowPrepared: ingress.onWorkflowPrepared,
+            // Held to the strictest of the job's mode, its ceiling and the thread's (#338).
+            permissionMode: this.workflowPermissionMode(workflowThreadId, jobPermissionRequest(ingress))
           })
         : null
       if (workflow) return workflow
@@ -12821,11 +12831,14 @@ export class OrchestratorService extends EventEmitter {
     onAdmissionHandedOff?: () => void
     /** Called once the workflow command is stored on the thread. */
     onUserInputAccepted?: () => void
+    /** The mode the workflow is held to; the thread's when absent. */
+    permissionMode?: PermissionMode
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
     try {
-      prepared = await this.workflowChat.prepare(input.threadId, { content: input.content, requestId: input.requestId }, input.source)
+      prepared = await this.workflowChat.prepare(input.threadId, { content: input.content, requestId: input.requestId }, input.source,
+        input.permissionMode ?? this.workflowPermissionMode(input.threadId))
     } catch (error) {
       if (error instanceof DomainRpcError) return { text: '', silent: false, error: error.message }
       throw error

@@ -164,7 +164,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
           ...(projectId && gitProject ? { workspace: { kind: 'newWorktree' as const } } : {}),
           ...(savedAgent ? { agent: { definitionId: savedAgent.id } } : {}),
           ...(model ? { selection: model.selection } : {}),
-          ...(!workflow && !savedAgent ? { permissionMode: may } : {}),
+          ...(!savedAgent ? { permissionMode: may } : {}),
           tellMe: 'news'
         })
       }
@@ -298,8 +298,6 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
           <span className="automation-create-may" data-testid="automation-create-may" title="A saved agent keeps to what it may use, set in the Library">
             {`May: what ${savedAgent.name} may use`}
           </span>
-        ) : workflow ? (
-          <span className="automation-create-may" data-testid="automation-create-may" title="A workflow runs itself; its steps follow its own nodes">Runs the workflow</span>
         ) : (
           <span className="automation-create-may">
             May:

@@ -19,7 +19,6 @@ import {
   patchOf,
   scheduleOf,
   showsWorkspace,
-  takesPermissionMode,
   validateDraft,
   workspaceChoices,
   type CronForm,
@@ -31,6 +30,7 @@ import {
 import { describeScheduleLong, errorText, nameFromPrompt, scheduleCode, WEEKDAY_OPTIONS } from '../scheduled/scheduledLabels'
 import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTime'
 import { runText } from './automationList'
+import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
 import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
@@ -47,7 +47,6 @@ const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
   { value: 'manual', label: 'On demand' }
 ]
 
-export const WORKFLOW_PERMISSION_NOTE = 'A prompt that starts with / runs a workflow, which takes no permission mode.'
 export const PROJECT_WORKSPACE_WARNING =
   'The run works in your own checkout, unattended, with no checkpoints or undo. For a Git project, a new worktree per run is safer.'
 
@@ -265,7 +264,7 @@ export function AutomationDetail({
   }
 
   // May: the effective mode a run gets, from what is chosen here, held to what the person holds.
-  const workflow = !takesPermissionMode(draft)
+  const workflow = isWorkflowPrompt(draft.prompt)
   const effectiveMay: PermissionMode = narrowPermissionMode(draft.permissionMode || undefined, job.permissionCeiling, held.mode)
   const mayOptions: SelectOption<PermissionMode>[] = PERMISSION_MODES.map((mode) => ({
     value: mode,
@@ -449,8 +448,6 @@ export function AutomationDetail({
         <span className="automation-detail-label" id={id('may-label')}>May</span>
         {draft.agentId && !workflow ? (
           <span className="automation-detail-value" data-testid="automation-may-agent" title="A saved agent keeps to what it may use, set in the Library">{`What ${whoLabel} may use`}</span>
-        ) : workflow ? (
-          <span className="automation-detail-value" title={WORKFLOW_PERMISSION_NOTE}>No permission mode (workflow)</span>
         ) : (
           <Select<PermissionMode>
             id={id('may')}
