@@ -406,6 +406,7 @@ export const PROTOCOL_METHODS = [
   'files.write',
   'files.stat',
   'files.root',
+  'files.drives',
   'files.readAsset',
   'files.writeDirect',
   'files.search',

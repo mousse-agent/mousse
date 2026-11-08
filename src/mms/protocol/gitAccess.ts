@@ -196,6 +196,7 @@ export const GIT_ACCESS = {
   'files.write': 'owned',
   'files.stat': 'owned',
   'files.root': 'owned',
+  'files.drives': 'none',
   'files.readAsset': 'owned',
   'files.writeDirect': 'owned',
   'files.search': 'owned',
