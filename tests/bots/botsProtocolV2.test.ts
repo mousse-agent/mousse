@@ -4,14 +4,14 @@
  * creation through its chat, an ask, About and its menu to deletion; and no result or event ever
  * carries a model or an instance id.
  */
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
 import type { BotChatMessage, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
-import { BOTS_PERSONAL_V2_METHODS } from '../../src/shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
 import { botFixture, flush, runDispatch, start, finish, type BotFixture } from './botFixture'
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
@@ -77,6 +77,7 @@ describe('validation', () => {
       ['bots.chat.send', { botId, text: '  ', clientRequestId: 'm1', attachments: [] }],
       ['bots.chat.send', { botId, text: 'hi', clientRequestId: 'm1', attachments: [{ name: 'a.pdf', path: 'relative/a.pdf' }] }],
       ['bots.chat.send', { botId, text: 'hi', clientRequestId: 'm1', attachments: [{ name: 'a.pdf' }] }],
+      ['bots.chat.send', { botId, text: 'hi', clientRequestId: 'm1', attachments: Array.from({ length: 11 }, (_, n) => ({ name: `${n}.txt`, path: `/home/me/${n}.txt` })) }],
       ['bots.chat.markRead', { botId, seq: -1 }],
       ['bots.asks.answer', { botId, askId: 'esc_00000000-0000-4000-8000-000000000000', answer: 'allow_bot' }],
       ['bots.asks.answer', { botId, askId: 'nope', answer: 'allow' }],
@@ -89,12 +90,41 @@ describe('validation', () => {
     for (const [method, params] of bad) await expect(domains.dispatch(context, method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code: expect.stringMatching(/^(invalid_params|unknown_field)$/) })
   })
 
-  it('accepts a message of files alone', async () => {
+  it('accepts a message of files alone, copied into the bot\'s files folder where its grant reads them', async () => {
     const botId = await created()
-    const path = join(f.base, 'list.txt')
-    const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: '', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path }] })
+    const original = join(f.base, 'Groceries', 'list.txt')
+    mkdirSync(dirname(original))
+    writeFileSync(original, 'milk, eggs')
+    const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: '', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path: original }] })
+    const copy = sent.message.attachments?.[0]?.path ?? ''
     expect(sent.message).toMatchObject({ author: 'owner', kind: 'text', text: '', attachments: [{ name: 'list.txt' }] })
-    expect(f.store.activationByKey('chat:m1')?.trigger).toMatchObject({ input: `Attached files:\n- list.txt: ${path}` })
+    expect(dirname(dirname(copy))).toBe(join(f.bots.filesFolder(botId), 'attachments'))
+    expect(readFileSync(copy, 'utf8')).toBe('milk, eggs')
+    expect(f.store.activationByKey('chat:m1')?.trigger).toMatchObject({ input: `Attached files:\n- list.txt: ${copy}` })
+    // The starter grant reads its files folder, so the bot opens the copy without asking; the owner's folder stays closed.
+    const [chat] = f.store.laneActivations(botId, 'chat', ['running'])
+    const { prepared } = await start(f, chat!.id)
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: copy } })).toEqual({ ok: true })
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: original } })).toMatchObject({ ok: false })
+    // The same request again copies nothing more.
+    await call('bots.chat.send', { botId, text: '', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path: original }] })
+    expect(readdirSync(dirname(copy))).toEqual(['list.txt'])
+  })
+
+  it('refuses a file that is gone, a folder, or one over the size limit, and copies nothing', async () => {
+    const botId = await created()
+    const kept = join(f.base, 'kept.txt')
+    writeFileSync(kept, 'kept')
+    const refusal = (path: string, name = 'x') => call('bots.chat.send', { botId, text: 'hi', clientRequestId: `r-${name}`, attachments: [{ name: 'kept.txt', path: kept }, { name, path }] })
+      .then(() => null, (error: { code?: string; message?: string }) => ({ code: error.code, message: error.message }))
+    expect(await refusal(join(f.base, 'gone.pdf'), 'gone.pdf')).toEqual({ code: 'bot_attachment_refused', message: 'gone.pdf is no longer there.' })
+    expect(await refusal(f.base, 'Documents')).toEqual({ code: 'bot_attachment_refused', message: 'Documents is a folder. Attach the files in it instead.' })
+    const big = join(f.base, 'film.mov')
+    writeFileSync(big, '')
+    truncateSync(big, MAX_BOT_CHAT_ATTACHMENT_BYTES + 1)
+    expect(await refusal(big, 'film.mov')).toEqual({ code: 'bot_attachment_refused', message: 'film.mov is larger than 50 MB.' })
+    expect(() => readdirSync(join(f.bots.filesFolder(botId), 'attachments'))).toThrow()
+    expect(f.store.activationByKey('chat:r-gone.pdf')).toBeUndefined()
   })
 
   it('keeps the engine\'s error codes', async () => {
@@ -115,6 +145,7 @@ describe('a bot through the v2 methods', () => {
     // The owner asks; the chat turn asks for a folder with `escalate`, and the card lands on its reply.
     const invoices = join(f.base, 'Invoices')
     mkdirSync(invoices)
+    writeFileSync(join(f.base, 'list.txt'), 'March, April')
     const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: 'Sum up my invoices', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path: join(f.base, 'list.txt') }] })
     expect(sent.message).toMatchObject({ author: 'owner', kind: 'text', text: 'Sum up my invoices', attachments: [{ name: 'list.txt' }] })
     // A repeat of the request returns the same row.

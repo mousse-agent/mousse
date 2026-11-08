@@ -2,9 +2,11 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
-import type { BotChatAttachment } from '../../shared/bots/personal/methods'
+import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
+import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
-import { createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
+import type { AttachedFile } from '../components/ChatComposer'
+import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -41,7 +43,8 @@ interface BotsState {
   /** Until when (epoch ms) a bot's face plays "done". */
   happy: Record<string, number>
   drafts: Record<string, string>
-  attachments: Record<string, BotChatAttachment[]>
+  /** The files in each bot's composer: picked, dropped or pasted. */
+  attachments: Record<string, AttachedFile[]>
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
   errorBotId: string | null
@@ -55,7 +58,7 @@ interface BotsState {
   loadOlder(botId: string): Promise<void>
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
-  setAttachments(botId: string, attachments: BotChatAttachment[]): void
+  setAttachments(botId: string, attachments: AttachedFile[]): void
   send(botId: string): Promise<void>
   stop(botId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
@@ -96,6 +99,18 @@ function upsert(messages: BotChatMessage[], incoming: BotChatMessage[]): BotChat
 }
 const replaceBot = (list: BotSummary[], bot: BotSummary) =>
   removed.has(bot.id) ? list : list.some((entry) => entry.id === bot.id) ? list.map((entry) => (entry.id === bot.id ? bot : entry)) : [...list, bot]
+
+/** A composer file as `bots.chat.send` names it: its name and its path on this computer. */
+async function attachmentOf(attached: AttachedFile): Promise<BotChatAttachment> {
+  return { name: attached.file.name || 'file', path: await attachmentPath(attached.file) }
+}
+
+/** Why these files can't be sent, or null when they can. */
+function attachmentsRefusal(files: readonly AttachedFile[]): string | null {
+  if (files.length > MAX_BOT_CHAT_ATTACHMENTS) return `Attach at most ${MAX_BOT_CHAT_ATTACHMENTS} files.`
+  const large = files.find((attached) => attached.file.size > MAX_BOT_CHAT_ATTACHMENT_BYTES)
+  return large ? attachmentTooLargeText(large.file.name) : null
+}
 
 /** The face a bot shows now: its state, or "done" for a moment after it finished well. */
 export function botFaceState(bot: BotSummary, happyUntil: number | undefined, now = Date.now()): BotFaceState {
@@ -236,6 +251,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const text = (get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
       if (!text && !attachments.length) return
+      const refusal = attachmentsRefusal(attachments)
+      if (refusal) {
+        set({ error: refusal, errorBotId: botId })
+        return
+      }
       const owner = epoch
       // The same words sent again after a failure reuse their request id, so they are not sent twice.
       const previous = pendingSends.get(botId)
@@ -243,7 +263,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       pendingSends.set(botId, admission)
       const shown: BotChatMessage = {
         seq: Number.MAX_SAFE_INTEGER, id: `pending:${admission.clientRequestId}`, at: new Date().toISOString(), author: 'owner', kind: 'text',
-        text, chips: [], ...(attachments.length ? { attachments } : {})
+        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {})
       }
       set((state) => ({
         error: null,
@@ -252,14 +272,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
         pending: { ...state.pending, [botId]: [...(state.pending[botId] ?? []), shown] }
       }))
       try {
-        const message = await bots().send(botId, text, admission.clientRequestId, attachments)
+        const files = await Promise.all(attachments.map(attachmentOf))
+        const message = await bots().send(botId, text, admission.clientRequestId, files)
+        for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
         if (owner !== epoch) return
         pendingSends.delete(botId)
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
         putMessages(botId, [message])
       } catch (cause) {
         if (owner !== epoch) return
-        // Nothing was sent: the words go back into the composer.
+        // Nothing was sent: the words and files go back into the composer.
         set((state) => ({
           error: errorText(cause),
           errorBotId: botId,

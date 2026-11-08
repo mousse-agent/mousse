@@ -17,6 +17,9 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
 })
 
+// The chat's composer pulls in the microphone's audio worklets, which jsdom does not have; these tests never record.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
+
 const { BotAskCard, askAnswerLine } = await import('../../src/renderer/components/bots/BotAskCard')
 const { BotChatView } = await import('../../src/renderer/components/bots/BotChatView')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')

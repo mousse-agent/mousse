@@ -116,6 +116,7 @@ describe('bots.chat.send', () => {
       await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
       const continueChatWith = f.bots.continueChatWith.bind(f.bots)
       f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
+      writeFileSync(join(f.base, 'list.txt'), 'milk, eggs')
       const attachments = [{ name: 'list.txt', path: join(f.base, 'list.txt') }]
       await expect(f.bots.service.chatSend({ botId, text: 'Use this list instead', attachments, clientRequestId: `${recover}-2` })).rejects.toThrow('Mousse stopped')
       f.bots.continueChatWith = continueChatWith

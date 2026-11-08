@@ -20,6 +20,8 @@ vi.mock('../../src/renderer/components/chats/NetworkTaskPicker', () => ({ Networ
 vi.mock('../../src/renderer/components/chats/ChatBrowserAccess', () => ({ ChatBrowserAccess: () => null }))
 vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', () => ({ OpenNetworkChatDialog: () => null }))
 vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ ComposerQuestionModal: () => null }))
+// The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   const { createElement: h } = await import('react')
   return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
