@@ -1158,17 +1158,12 @@ html[data-theme='high-contrast'] .chat-input-area {
   transition: opacity var(--composer-dock-fade) ease, border-color 0.18s;
 }
 
-.chat-input-area:has(.composer:focus-within) > .queued-messages {
-  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
-}
-
 .chat-input-area > .queued-messages.is-leaving {
   opacity: 0;
 }
 
-/* On a new thread the workspace row is the composer's own tab; the queue sits above it and the composer
-   keeps its corners. */
-.app .chat-input-area:has(> .queued-messages):not(:has(.composer-workspace-toolbar)) .composer {
+/* On a new thread the project row sits between the queue and the composer, so the composer keeps its corners. */
+.app .chat-input-area:has(> .queued-messages):not(:has(> .new-thread-row)) .composer {
   border-top-left-radius: 0;
   border-top-right-radius: 0;
 }
@@ -1177,7 +1172,7 @@ html[data-theme='high-contrast'] .chat-input-area {
   from { opacity: 0; }
 }
 
-/* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
+/* In the flow under the composer, centred, so it never sits on the new thread's settings row. */
 /* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
 .chat-empty-action {
   --space-4: 4px;
@@ -1908,6 +1903,7 @@ html[data-theme='high-contrast'] .chat-input-area {
   flex-direction: column;
   min-width: min(340px, calc(100vw - 48px));
   max-width: min(420px, calc(100vw - 48px));
+  max-height: var(--floating-max-height, none);
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
   background: var(--ui-raised);
@@ -1962,6 +1958,7 @@ html[data-theme='high-contrast'] .chat-input-area {
    list only. */
 .model-picker-main {
   display: flex;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -1970,6 +1967,7 @@ html[data-theme='high-contrast'] .chat-input-area {
   flex: 1;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .model-picker-rail {
@@ -2082,7 +2080,7 @@ html[data-theme='high-contrast'] .chat-input-area {
   gap: var(--ui-menu-row-x);
   flex: 1;
   min-width: 0;
-  padding: 5px 4px 5px var(--ui-menu-row-x);
+  padding: 4px 4px 4px var(--ui-menu-row-x);
   text-align: left;
   color: color-mix(in srgb, var(--text-primary) 80%, transparent);
 }
@@ -2128,9 +2126,9 @@ html[data-theme='high-contrast'] .chat-input-area {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  line-height: 1.3;
+  line-height: 1.25;
 }
 
 /* The instance name stays whole; its status gives way first. */
@@ -2180,7 +2178,7 @@ html[data-theme='high-contrast'] .chat-input-area {
 
 /* One provider's models: name only, so rows are shorter and the status needs no separator. */
 .model-picker-row.compact .model-picker-row-main {
-  padding-block: 7px;
+  padding-block: 6px;
 }
 
 .model-picker-row.compact .model-picker-row-status::before,
@@ -2214,7 +2212,7 @@ html[data-theme='high-contrast'] .chat-input-area {
 
 /* In a multi-brand provider's list, a model with no maker line keeps the height of its neighbours. */
 .model-picker-row.bare .model-picker-row-main {
-  min-height: 44px;
+  min-height: 38px;
 }
 
 /* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
@@ -6218,11 +6216,6 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   /* Visible so the slash-command dropdown (absolute, above the composer)
      is not clipped. Children are transparent / self-radiused, so no bleed. */
   overflow: visible;
-}
-
-.composer:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.28);
-  box-shadow: 0 8px 28px rgba(0,0,0,0.16), 0 0 0 3px rgba(var(--accent-rgb), 0.10);
 }
 
 .composer-input {

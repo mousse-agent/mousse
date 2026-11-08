@@ -635,14 +635,7 @@ html .chat-avatar.group[class*='chat-color-'] {
 }
 
 /* ---------- Home and composer ---------- */
-/* An accent aura gives the start page a focal point without tinting surfaces. */
-.app .chat--empty {
-  background-image: radial-gradient(
-    52% 46% at 50% 44%,
-    rgba(var(--accent-rgb), var(--ui-aura-strength)) 0%,
-    transparent 72%
-  );
-}
+/* The start page's accent aura (a wavy glow that lights the composer's rim) is in ambient-glow.css. */
 
 .app .chat-empty-logo {
   bottom: calc(100% + 76px);
@@ -734,11 +727,6 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
     --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
     --ui-raised-shadow: inherit;
   }
-}
-
-.app .chat-input-area .composer:focus-within {
-  border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
-  box-shadow: var(--ui-raised-shadow);
 }
 
 .app .chat-input-area .composer-input,
@@ -949,8 +937,7 @@ textarea:focus {
   background-clip: padding-box;
 }
 
-/* Focusing the field plays the rim glint once, then leaves it centred. */
-.app .chat-input-area .composer:focus-within,
+/* Focusing the agent chat field plays the rim glint once, then leaves it centred. The main composer looks the same focused or not. */
 .app .agent-chat-composer:focus-within {
   animation: ui-composer-glint calc(640ms * var(--ui-motion-scale)) ease-out 1;
 }

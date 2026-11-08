@@ -1,0 +1,95 @@
+/* A private thread (`Thread.localOnly`) is "incognito": the empty chat's logo wears sunglasses (IncognitoGlasses)
+   and a started thread's header shows a small pair. */
+.incognito-glasses-lens {
+  fill: color-mix(in srgb, currentColor 70%, #000);
+  stroke: currentColor;
+  stroke-width: 9;
+  stroke-linejoin: round;
+}
+
+.incognito-glasses-line {
+  stroke: currentColor;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.incognito-glasses-brow {
+  stroke-width: 13;
+}
+
+.incognito-glasses-glint {
+  stroke: #fff;
+  stroke-width: 6;
+  stroke-linecap: round;
+  opacity: 0.4;
+}
+
+.incognito-glasses-shine {
+  fill: #fff;
+  opacity: 0.75;
+}
+
+/* Over the logo. Hidden above it until the thread is private, then it slides down into place. */
+.chat-empty-logo .incognito-glasses {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateY(-22%);
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale, 1)) ease,
+    transform calc(280ms * var(--ui-motion-scale, 1)) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-empty-logo .incognito-glasses[data-on] {
+  opacity: 1;
+  transform: none;
+}
+
+/* A quick glint across the lenses (about 0.6s), then a few seconds' pause. */
+.incognito-glasses[data-on] .incognito-glasses-shine {
+  animation: incognito-shine calc(4.2s * var(--ui-motion-scale, 1)) cubic-bezier(0.45, 0, 0.3, 1) 0.8s infinite;
+}
+
+@keyframes incognito-shine {
+  0% { transform: translateX(0); }
+  14% { transform: translateX(290px); }
+  100% { transform: translateX(290px); }
+}
+
+[data-motion='off'] .incognito-glasses[data-on] .incognito-glasses-shine {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .incognito-glasses[data-on] .incognito-glasses-shine {
+    animation: none;
+  }
+}
+
+.chat-empty-logo .mousse-logo-outline-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The header's small pair: heavier lines so they read at icon size. */
+.incognito-icon {
+  display: block;
+  flex-shrink: 0;
+}
+
+.incognito-icon .incognito-glasses-line {
+  stroke-width: 20;
+}
+
+.incognito-icon .incognito-glasses-brow {
+  stroke-width: 24;
+}
+
+.incognito-icon .incognito-glasses-lens {
+  stroke-width: 14;
+}
+
+.thread-mode-bar-private {
+  color: var(--private-tint, var(--accent));
+}
