@@ -139,13 +139,14 @@ export function splitSpeechChunks(text: string, maxChars: number | ((index: numb
 }
 
 /** The first local segment is short so audio starts within about two seconds. */
-export const FIRST_SEGMENT_CHARS = 60
+export const FIRST_SEGMENT_CHARS = 40
 /** A shorter first segment still sizes the next ones as if it were this long. */
 const MIN_FIRST_SEGMENT_CHARS = 30
 /** Later segments grow from this size to the largest one; it is also where sentences are cut at words. */
 const SEGMENT_CHARS = 100
 export const MAX_SEGMENT_CHARS = 220
 const SEGMENT_GROWTH = 1.25
+const RAMP_GROWTH = 1.5
 /** A cut at a comma or similar leaves at least this much of the sentence on each side. */
 const MIN_CLAUSE_CHARS = 20
 
@@ -206,8 +207,8 @@ export function takeLeading(text: string, max: number): [head: string, rest: str
  * pass, so paragraph breaks inside it become sentence ends instead of newlines.
  *
  * The first segment is at most `FIRST_SEGMENT_CHARS`, so the first audio is ready soon. Each later
- * segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k, L0 × 2^k)` long, where L0 is the first
- * segment's length (at least 30): doubling at most keeps synthesis ahead of playback from the
+ * segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k, L0 × 1.5^k)` long, where L0 is the first
+ * segment's length (at least 30): growing by 1.5× at most keeps synthesis ahead of playback from the
  * first clip on. Segments whose limit is under 100 are cut with `takeLeading` too; from the first
  * limit of 100 on, the rest is split as before, cutting sentences over 100 characters at words.
  */
@@ -217,7 +218,7 @@ export function splitSpeechSegments(text: string): string[] {
   if (head) segments.push(head)
   const first = Math.max(head.length, MIN_FIRST_SEGMENT_CHARS)
   const limit = (index: number): number =>
-    Math.min(MAX_SEGMENT_CHARS, SEGMENT_CHARS * SEGMENT_GROWTH ** index, first * 2 ** index)
+    Math.min(MAX_SEGMENT_CHARS, SEGMENT_CHARS * SEGMENT_GROWTH ** index, first * RAMP_GROWTH ** index)
   let index = 1
   while (rest && limit(index) < SEGMENT_CHARS) {
     ;[head, rest] = takeLeading(rest, Math.floor(limit(index)))

@@ -18,8 +18,8 @@ const SHORT = 'Hello there, this is the first message.'
 const OTHER_SHORT = 'And this is the next paragraph.'
 /** Two segments, so two workers. */
 const LONG =
-  'The quick brown fox jumps over the lazy dog at dusk. ' +
-  'Meanwhile the river keeps running past the old stone bridge and the quiet village.'
+  'The quick brown fox jumps over the dog. ' +
+  'Meanwhile the river runs past the old stone bridge.'
 
 const loud = (): Float32Array => new Float32Array(2400).fill(0.3)
 
