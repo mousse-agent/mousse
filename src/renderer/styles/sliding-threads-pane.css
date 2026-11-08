@@ -49,6 +49,14 @@
 
 .app .sliding-threads-pane--overlay.is-expanded { width: var(--threads-pane-width); }
 .app .sliding-threads-pane--overlay .threads-sidebar { border-right: 1px solid rgba(var(--accent-pale-rgb), 0.12); }
+
+/* Acrylic makes the sidebar transparent, and Chromium cannot blur app content
+   behind an element in a see-through window. The hover sidebar floats over the
+   chat, so it takes the theme's solid surface instead. */
+html[data-acrylic='true'] .app .sliding-threads-pane--overlay .sliding-threads-pane-content {
+  background: rgb(var(--surface-strong-rgb));
+}
+
 .app .sliding-threads-pane.is-resizing,
 .app .sliding-threads-pane.is-resizing .sliding-threads-pane-content { transition: none; }
 
