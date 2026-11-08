@@ -108,6 +108,16 @@ function recoverableOneshotRunAt(schedule: JobSchedule, now: Date, lastRunAt?: s
   return null
 }
 
+/**
+ * How far ahead a cron time is searched: past the longest gap between two Feb 29ths (8 years, 2096 to 2104), so a
+ * leap-day schedule (`0 0 29 2 *`) always finds its next run, and a time no calendar has (Feb 30) is found to never run.
+ */
+export const CRON_SEARCH_YEARS = 9
+
+/**
+ * The first minute after `base` that the cron fields allow, on this computer's clock. A month, day or hour that does
+ * not match is skipped whole, so a search over years costs a few hundred steps, not millions of minutes.
+ */
 function nextCronRun(expr: string, base: Date): Date | null {
   const fields = parseCron(expr)
   if (!fields) return null
@@ -115,12 +125,23 @@ function nextCronRun(expr: string, base: Date): Date | null {
   candidate.setSeconds(0, 0)
   candidate.setMinutes(candidate.getMinutes() + 1)
 
-  const limit = base.getTime() + 366 * 24 * 60 * 60 * 1000
+  const limit = base.getTime() + CRON_SEARCH_YEARS * 366 * 24 * 60 * 60 * 1000
   while (candidate.getTime() <= limit) {
-    if (matchesCron(fields, candidate)) {
-      return new Date(candidate.getTime())
+    if (matchesCron(fields, candidate)) return new Date(candidate.getTime())
+    const before = candidate.getTime()
+    if (!fields[3]!.has(candidate.getMonth() + 1)) {
+      candidate.setMonth(candidate.getMonth() + 1, 1)
+      candidate.setHours(0, 0, 0, 0)
+    } else if (!fields[2]!.has(candidate.getDate()) || !fields[4]!.has(candidate.getDay())) {
+      candidate.setDate(candidate.getDate() + 1)
+      candidate.setHours(0, 0, 0, 0)
+    } else if (!fields[1]!.has(candidate.getHours())) {
+      candidate.setHours(candidate.getHours() + 1, 0, 0, 0)
+    } else {
+      candidate.setMinutes(candidate.getMinutes() + 1, 0, 0)
     }
-    candidate.setMinutes(candidate.getMinutes() + 1)
+    // A clock change can land a jump on the same instant (a midnight that does not exist): always move on.
+    if (candidate.getTime() <= before) candidate.setTime(before + 60_000)
   }
   return null
 }

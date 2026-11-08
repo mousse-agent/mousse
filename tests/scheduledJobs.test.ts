@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { computeNextRun, isSilentOutput, minCronGapMinutes } from '../src/mms/scheduled/computeNextRun'
+import { botScheduleProblem, scheduleProblem } from '../src/mms/scheduled/botJobs'
 import { AGENT_JOB_LIMIT_DEFAULTS } from '../src/mms/scheduled/agentJobLimits'
 import { asJobSchedule } from '../src/mms/protocol/validators'
 import { scheduleRefusal } from '../src/mms/run/mcp/appTools/schedules'
@@ -47,6 +48,41 @@ describe('computeNextRun', () => {
     // Valid forms still run: steps, ranges, lists, and 7 as Sunday.
     expect(computeNextRun({ kind: 'cron', expr: '*/15 9-17 * * 1-5' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 1, 9, 0).toISOString())
     expect(computeNextRun({ kind: 'cron', expr: '0 9 * * 7' }, null, new Date(2026, 5, 1, 8, 0))).toBe(new Date(2026, 5, 7, 9, 0).toISOString())
+  })
+
+  it('finds a leap day years ahead (#334), and says a date no calendar has never runs', () => {
+    const started = Date.now()
+    expect(computeNextRun({ kind: 'cron', expr: '0 0 29 2 *' }, null, new Date(2026, 10, 9, 8, 0))).toBe(new Date(2028, 1, 29, 0, 0).toISOString())
+    // 2100 is not a leap year: the longest gap, eight years.
+    expect(computeNextRun({ kind: 'cron', expr: '30 6 29 2 *' }, null, new Date(2096, 2, 1))).toBe(new Date(2104, 1, 29, 6, 30).toISOString())
+    expect(computeNextRun({ kind: 'cron', expr: '0 0 30 2 *' }, null, new Date(2026, 0, 1))).toBeNull()
+    expect(Date.now() - started).toBeLessThan(500)
+    // Published, not refused: a bot's schedule and a person's job both take it.
+    expect(scheduleProblem({ id: 'leap', when: { kind: 'cron', expr: '0 0 29 2 *' }, prompt: 'Happy leap day' })).toBeUndefined()
+    expect(botScheduleProblem({ kind: 'cron', expr: '0 0 29 2 *' }, 'Happy leap day')).toBeUndefined()
+    expect(scheduleProblem({ id: 'never', when: { kind: 'cron', expr: '0 0 30 2 *' }, prompt: 'p' })).toMatch(/never runs/)
+    expect(asJobSchedule({ kind: 'cron', expr: '0 0 29 2 *' })).toEqual({ kind: 'cron', expr: '0 0 29 2 *' })
+  })
+
+  it('skips whole months, days and hours in the search and finds the same minute as a minute-by-minute walk', () => {
+    const walk = (expr: string, from: Date): string | null => {
+      const fields = expr.split(' ')
+      const allows = (field: string, value: number) => field === '*' || field.split(',').some((part) => {
+        const [range, step] = part.split('/')
+        const [lo, hi] = range === '*' ? [0, 59] : range!.includes('-') ? range!.split('-').map(Number) as [number, number] : [Number(range), step ? 59 : Number(range)]
+        return value >= lo! && value <= hi! && (value - lo!) % Number(step ?? 1) === 0
+      })
+      const at = new Date(from.getTime())
+      at.setSeconds(0, 0)
+      for (let i = 0; i < 400 * 24 * 60; i += 1) {
+        at.setMinutes(at.getMinutes() + 1)
+        if (allows(fields[0]!, at.getMinutes()) && allows(fields[1]!, at.getHours()) && allows(fields[2]!, at.getDate()) && allows(fields[3]!, at.getMonth() + 1) && allows(fields[4]!, at.getDay())) return at.toISOString()
+      }
+      return null
+    }
+    const from = new Date(2026, 10, 9, 8, 17)
+    for (const expr of ['*/7 * * * *', '0 9 * * 1-5', '15 3 1 * *', '0 0 31 * *', '45 23 * 12 0', '0 12 15 6 *', '5 4 * * 6'])
+      expect(computeNextRun({ kind: 'cron', expr }, null, from), expr).toBe(walk(expr, from))
   })
 
   it('computes interval from last run', () => {

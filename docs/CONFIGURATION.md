@@ -204,7 +204,7 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, â€
 | `id` | `string` (UUID) | yes | Stable job ID |
 | `name` | `string` | yes | Display name |
 | `prompt` | `string` | yes | Prompt each run sends as a turn; a prompt starting with `/` runs a workflow |
-| `schedule` | `JobSchedule` | yes | `once`, `interval`, cron-style, or `manual` (no clock: runs only when started) |
+| `schedule` | `JobSchedule` | yes | `once`, `interval`, cron-style, or `manual` (no clock: runs only when started). See "Cron times" below |
 | `enabled` | `boolean` | yes | Whether job is eligible to run |
 | `threadId` | `string` | no | Run as a turn on this thread, with its history and its own workspace |
 | `projectId` | `string` | no | Project the run works in |
@@ -212,6 +212,7 @@ Job **definitions** only. Runtime fields (`state`, `nextRunAt`, `runHistory`, â€
 | `selection` | `{ instanceId, llmProvider, model }` | no | Provider instance and model of every run. Absent: the thread's own model (bound job) or the profile default (per-run thread) |
 | `mode` | `agent` \| `plan` | no | Mode of every run; default `agent` |
 | `workspace` | `{ kind: 'project' }` \| `{ kind: 'newWorktree' }` \| `{ kind: 'worktree', path }` | no | Per-run threads only. `project` (default) works on the project's own checkout and provisions nothing (see the warning below); `newWorktree` gives each run's thread its own worktree (needs a Git project, not `plan` mode); `worktree` runs on the thread that owns that worktree. A job bound to a thread uses that thread's workspace |
+| `bot` | `{ botId, scheduleId, createdBy }` | no | Set by the daemon only: the job is one of a bot's schedules and runs in the bot's run lane under its grant (see `docs/bots.md`). Its `threadId` then names a thread that does not exist, so a build that knows no `bot` field pauses the job instead of running it |
 | `permissionMode` | `ask` \| `accept_edits` \| `auto` \| `full` | no | How much a run may do without asking. Never above `permissionCeiling`. Absent: the run follows its thread's mode, up to the job's ceiling. A workflow job (a prompt starting with `/`) takes one too |
 | `permissionCeiling` | `ask` \| `accept_edits` \| `auto` \| `full` | set by the daemon | The widest mode a run may have: the mode the job's creator held when they created or last edited it. Every job has one, whoever created it. No request can set it (the protocol refuses the key). A mode with no ceiling in a stored job gets `ask` |
 | `createdBy` | `{ threadId, runId?, requestId? }` | no | The agent that created the job (and the creating call's key, so a retry finds the job it made); absent for jobs people create. Shown as "Created by an agent", and every run record of the job is labelled the same way. Set by Mousse; no request can set it |
@@ -240,6 +241,7 @@ A plain-prompt run is a turn on a thread, admitted by the Run Engine like any me
 - **Bound threads.** A job with a `threadId` adds its prompt and the reply to that thread's history on every run, so a frequent job makes the thread's context grow and compact sooner. The prompt is marked as the job's (`scheduled` on the message), not as typed by a person.
 - **"Run now".** It starts the job at once. While the job's run is in progress or waiting in a queue, it is refused with a message instead of being dropped.
 - **Catch-up.** After the daemon was down, overdue jobs start a few at a time (3 per tick, then the next tick follows within seconds), not all in one second.
+- **Cron times.** Five fields (minute, hour, day of month, month, day of week; 7 is Sunday too) on the owning computer's clock, with `*`, numbers, ranges, lists and steps of at least 1; a malformed field is refused, never searched. The next run is searched up to 9 years ahead, skipping whole months, days and hours that cannot match, so a leap-day time such as `0 0 29 2 *` gets its next run (#334) and a date no calendar has, such as `0 0 30 2 *`, is refused as never running. A day of the month and a day of the week must both match. Times a clock change skips are not run; the detail's "(why?)" lists them.
 - **Questions and approvals.** A scheduled turn asks for tool approval and questions like any turn. Nobody is likely watching a per-run thread, so a question or approval waits for its timeout (10 minutes; up to an hour for `ask_user`) and is then denied; a person's message on a bound thread dismisses it and stops the run. The job's occurrence and the thread stay held for that time. A scheduled turn has no time limit of its own yet.
 
 > **Warning: `workspace: project` lets an unattended agent edit your own checkout.** The run works in the same folder you work in, with no worktree, no checkpoints and no undo, and two jobs on one project can edit it at the same time. For an agent-mode job in a Git project, use `newWorktree` (`--workspace new-worktree`), or `mode: plan` if the job should not change files.
