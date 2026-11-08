@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
-import type { BotManifest } from './definition'
-import { isAbsolutePath } from './manifest'
+import { foldersOf, workspaceOf, type BotManifest } from './definition'
+import { BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -117,6 +117,16 @@ const BUDGET_WORDS: Record<BotBudgetWallKey, string> = {
   maxUsd: 'spend'
 }
 
+/**
+ * `request` as the one permission it falls under: an ask for any browser tool (`browser_act`) is
+ * "use the browser" (`{tool: 'browser'}`), so it has one card, one fingerprint and one grant.
+ */
+export function grantRequestOf<T extends BotAskRequest>(request: T): T {
+  if (!('tool' in request) || typeof request.tool !== 'string') return request
+  const tool = botGrantTool(request.tool)
+  return (tool === request.tool ? request : { tool }) as T
+}
+
 /** The top of the file system `path` is on: `/`, a drive (`C:\\`) or a network share (`\\\\server\\share\\`). */
 export function pathRoot(path: string): string {
   const drive = /^([A-Za-z]:)[\\/]/.exec(path)
@@ -145,6 +155,7 @@ export function filesAskOf<T extends BotAskRequest>(request: T): T {
 
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
@@ -206,9 +217,11 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
     budget: { ...manifest.budget }
   }
   if ('tool' in permission) {
-    if (isNeutralTool(permission.tool)) {
-      if (!next.tools.includes(permission.tool)) next.tools.push(permission.tool)
-    } else if (!next.appTools.includes(permission.tool)) next.appTools.push(permission.tool)
+    // Any browser tool is the browser as a whole.
+    const tool = botGrantTool(permission.tool)
+    if (isNeutralTool(tool)) {
+      if (!next.tools.includes(tool)) next.tools.push(tool)
+    } else if (!next.appTools.includes(tool)) next.appTools.push(tool)
   } else if ('path' in permission) {
     // File access is one permission: whatever folder was asked about, every folder is allowed.
     next.workspace = { roots: [pathRoot(permission.path)], access: 'write' }

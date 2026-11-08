@@ -73,6 +73,7 @@ import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
 import GitPullRequestClosedIcon from '@hugeicons/core-free-icons/GitPullRequestClosedIcon'
 import Globe02Icon from '@hugeicons/core-free-icons/Globe02Icon'
+import ArrowExpandDiagonal01Icon from '@hugeicons/core-free-icons/ArrowExpandDiagonal01Icon'
 import GridViewIcon from '@hugeicons/core-free-icons/GridViewIcon'
 import HammerIcon from '@hugeicons/core-free-icons/HammerIcon'
 import HashtagIcon from '@hugeicons/core-free-icons/HashtagIcon'
@@ -234,6 +235,7 @@ export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
 export const GitPullRequestClosed = /* @__PURE__ */ createIcon('GitPullRequestClosed', GitPullRequestClosedIcon)
 export const Globe = /* @__PURE__ */ createIcon('Globe', Globe02Icon)
+export const Maximize = /* @__PURE__ */ createIcon('Maximize', ArrowExpandDiagonal01Icon)
 export const GripVertical = /* @__PURE__ */ createIcon('GripVertical', DragDropVerticalIcon)
 export const Hammer = /* @__PURE__ */ createIcon('Hammer', HammerIcon)
 export const Hash = /* @__PURE__ */ createIcon('Hash', HashtagIcon)

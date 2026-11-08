@@ -197,6 +197,17 @@ A bot on the owner's Claude Code searched the web, then stopped to ask to "read 
 
 - **A runtime's own storage never asks**, with or without file access. Claude Code keeps the sessions of a working folder in `<Claude home>/projects/<folder as a name>/` and saves large tool output in `<session>/tool-results/`, then reads it back. The bot's working folder is its files folder (a locked entry's is the activation's scratch), so that project folder holds only this bot's sessions. Its gate recognises a file call whose every path is in it, named as Claude Code names it (`claudeOwnStorage`, `claudeProjectName`; a name over 200 characters is cut and given a hash, matched by its cut part), and the authority allows it (`NormalisedCall.own`). The sandbox can read it too. Codex keeps its sessions itself, outside any tool call, and Pi's bot turns keep no session (`--no-session`), so neither has storage a bot call reaches.
 
+### 3.8 Changed in revision 6: "use the browser"
+
+The owner's decisions after a bot asked for `browser_act` and the card ended in "A bot can't be given the Mousse tool browser_act":
+
+- **"Use the browser" is one grantable permission** (`browser` in the grant), asked for once and remembered, covering every browser tool but `browser_request_human`. Any browser tool's ask is this ask; its card reads "use the browser". Other Mousse tools stay refused, and `escalate` refuses one no bot can hold before any card is shown.
+- **The bot's own browser:** one managed Chromium session per bot, without a window, on a persistent Chromium profile of its own (`botbrowser_<botId>`), owned by the bot's home thread so both lanes share it and nothing else reaches it; a tab per activation; tabs close when the activation ends and the browser after two idle minutes. Managed Chromium was chosen over a per-bot in-app tab because a run must work with no app open, and the managed backend already has persistent workspaces and a viewer.
+- **The owner's view:** a live preview in the reply, Expand to a split view beside the chat, Take over and Give back (`bots.browser.*`, `src/mms/bots/browser/`).
+- **The agent cursor** for every agent acting in a Mousse browser tab, drawn above the page and never in it (`src/shared/browser/agentCursor.ts`).
+
+Details as built: `docs/bots.md`, Use the browser.
+
 ### 3.6 Changed in revision 5: "run commands"
 
 The owner's decisions after the first bots ran on their own entries:

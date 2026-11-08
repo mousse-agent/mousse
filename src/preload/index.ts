@@ -121,7 +121,7 @@ import type {
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
-import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
 import type {
   GitHubApi,
@@ -607,6 +607,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: InAppBrowserState) => listener(state)
       ipcRenderer.on('browser:automation-state', handler)
       return () => { ipcRenderer.removeListener('browser:automation-state', handler) }
+    },
+    onCursor: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, cursor: InAppBrowserCursor) => listener(cursor)
+      ipcRenderer.on('browser:agent-cursor', handler)
+      return () => { ipcRenderer.removeListener('browser:agent-cursor', handler) }
     }
   } satisfies InAppBrowserApi,
   browser: {

@@ -129,6 +129,40 @@ export interface BrowserResolvedArtifact {
   displayName: string
   mediaType?: string
 }
+/**
+ * Input a person sends to a managed tab while they hold its control (a bot's browser view), at
+ * viewport CSS pixels. Sent as trusted input; never a model's.
+ */
+export type BrowserHumanInput =
+  | { kind: 'click'; x: number; y: number }
+  | { kind: 'scroll'; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: 'type'; text: string }
+  | { kind: 'key'; key: string }
+  | { kind: 'navigate'; url: string }
+  | { kind: 'back' }
+  | { kind: 'forward' }
+  | { kind: 'reload' }
+
+/**
+ * A live picture of a managed tab for a person watching (a bot's browser preview): not an
+ * observation, never sent to a model, never stored. `data` is a JPEG in base64.
+ */
+export interface BrowserViewerFrame {
+  tabId: string
+  url: string
+  title: string
+  data: string
+  mimeType: 'image/jpeg'
+  /** The image's pixels. */
+  width: number
+  height: number
+  /** The page's viewport in CSS pixels, which the image shows whole. */
+  viewport: { width: number; height: number }
+  capturedAt: string
+  /** Where the agent last acted in this tab, while it is recent. */
+  cursor?: import('./agentCursor').BrowserAgentCursor
+}
+
 export type BrowserErrorCode = 'setup_required' | 'profile_mismatch' | 'session_closed' | 'stale_generation' | 'stale_observation' | 'stale_ref' | 'invalid_geometry' | 'not_actionable' | 'policy_denied' | 'approval_required' | 'human_controlled' | 'timeout' | 'cancelled' | 'worker_disconnected' | 'unsupported' | 'invalid_action' | 'no_progress' | 'download_failed' | 'artifact_denied'
 
 /** Private broker envelope: validated by MMS; never exposed to page or model JS. */
@@ -136,7 +170,7 @@ export interface BrowserWorkerRequest {
   version: 1
   id: string
   profileId: string
-  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release'
+  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'human.input'
   params: Record<string, unknown>
 }
 export interface BrowserWorkerResponse {
