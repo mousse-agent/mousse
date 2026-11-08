@@ -24,7 +24,7 @@ import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest
 import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
-import { defaultMay, groupAutomations, matchesSearch, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { defaultMay, groupAutomations, matchesSearch, missedText, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
@@ -560,6 +560,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
                     <span className="automation-run-name">{item.name}</span>
                     <span className="automation-run-text">{runText(run, now, item.computer, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
                     <span className="automation-run-when">{ownedWhenText(run.at, now, item.computer, viewerZone)}</span>
+                    {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
                     {run.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => goThread(run.threadId!)}>Open thread</button> : null}
                   </li>
                 ))}

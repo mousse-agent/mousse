@@ -29,7 +29,7 @@ import {
 } from '../scheduled/jobDraft'
 import { describeScheduleLong, errorText, nameFromPrompt, scheduleCode, WEEKDAY_OPTIONS } from '../scheduled/scheduledLabels'
 import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTime'
-import { runText } from './automationList'
+import { missedText, runText } from './automationList'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
@@ -549,6 +549,7 @@ export function AutomationDetail({
                 <span className="automation-run-when">{ownedWhenText(run.at, now, owner, viewerZone)}</span>
                 <span className="automation-run-text">{runText(run, now, owner, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
                 {run.ranBy ? <span className="automation-run-who" data-testid="automation-run-who" title="Who ran it">{run.ranBy}</span> : null}
+                {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
                 {run.agentChanged ? <span className="automation-run-changed" data-testid="automation-run-changed" title="The saved agent was published again since the run before">agent changed since last run</span> : null}
                 {run.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenThread(run.threadId!)}>Open thread</button> : null}
               </li>

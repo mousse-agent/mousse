@@ -1012,3 +1012,4 @@ html[data-theme='high-contrast'] .automations-page {
 
 .automation-run-who { flex: none; color: var(--text-tertiary, var(--text-secondary)); }
 .automation-run-changed { flex: none; color: var(--warning); }
+.automation-run-missed { flex: none; color: var(--text-secondary); }

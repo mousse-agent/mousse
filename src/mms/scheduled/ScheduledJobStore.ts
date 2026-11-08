@@ -19,6 +19,7 @@ import type {
   ScheduledJobRunClaim,
   ScheduledJobRunRecord,
   ScheduledJobWebhookTrigger,
+  ScheduledMissedRuns,
   ScheduledOccurrenceResult,
   ScheduledWebhookDelivery,
   ScheduledWebhookDeliveryOutcome
@@ -37,7 +38,7 @@ import {
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { agentJobExpiredReason, isExpired } from './agentJobLimits'
-import { computeNextRun, nextOccurrenceAfter } from './computeNextRun'
+import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from './computeNextRun'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
@@ -318,9 +319,24 @@ function claimRecordFields(claim: ScheduledJobRunClaim | undefined): Partial<Sch
   if (!claim) return {}
   return {
     ...(claim.occurrenceKey ? { occurrenceKey: claim.occurrenceKey } : {}),
+    ...(claim.missed ? { missed: claim.missed } : {}),
     ...(claim.threadId ? { threadId: claim.threadId } : {}),
     ...(claim.runId ? { runId: claim.runId } : {})
   }
+}
+
+/** A timed occurrence that is this late was not missed by a busy tick: the computer (or Mousse) was off or asleep. */
+const MISSED_GRACE_MS = 5 * 60_000
+
+/**
+ * The repeats a job missed while its computer was off, when the occurrence it is about to run is one of them: due
+ * more than a few minutes ago. They collapse into this one run, which runs once and says so ("Missed while offline").
+ */
+export function missedWhileOffline(job: Pick<ScheduledJob, 'schedule'>, dueAt: string, now: Date): ScheduledMissedRuns | undefined {
+  if (job.schedule.kind === 'manual') return undefined
+  const due = Date.parse(dueAt)
+  if (!Number.isFinite(due) || now.getTime() - due <= MISSED_GRACE_MS) return undefined
+  return { count: occurrencesSince(job.schedule, dueAt, now), since: new Date(due).toISOString() }
 }
 
 /** A clock-free job stays scheduled with no next run; every other kind without a next run has ended. */
@@ -907,8 +923,9 @@ export class ScheduledJobStore {
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
         const resumedWaiting = job.lastStatus === 'waiting'
+        const missed = resumedWaiting || job.waitingBehind ? undefined : missedWhileOffline(job, job.nextRunAt, now)
         job.state = 'running'
-        job.runClaim = { ...newRunClaim(job.nextRunAt), ...(resumedWaiting ? { resumedWaiting: true } : {}) }
+        job.runClaim = { ...newRunClaim(job.nextRunAt), ...(resumedWaiting ? { resumedWaiting: true } : {}), ...(missed ? { missed } : {}) }
         due.push({ ...job, runClaim: { ...job.runClaim } })
         dirty = true
       }
@@ -1005,6 +1022,7 @@ export class ScheduledJobStore {
       silent: result.silent,
       ...(waiting && result.retryAt ? { usageLimitUntil: result.retryAt } : {}),
       ...(occurrenceKey ? { occurrenceKey } : {}),
+      ...(job.runClaim?.missed ? { missed: job.runClaim.missed } : {}),
       ...details
     }
     const history = [...(job.runHistory ?? [])]
@@ -1206,7 +1224,7 @@ export class ScheduledJobStore {
       const now = new Date().toISOString()
       job.runHistory = [
         ...(job.runHistory ?? []),
-        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
+        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
       ].slice(-20)
       job.pendingOccurrence = {
         occurrenceKey: claim.occurrenceKey,
@@ -1283,7 +1301,7 @@ export class ScheduledJobStore {
       const occurrenceKey = job.runClaim.occurrenceKey
 
       if (resultStatus === 'waiting') {
-        const record: ScheduledJobRunRecord = { runAt: now, status: 'waiting', output, silent }
+        const record: ScheduledJobRunRecord = { runAt: now, status: 'waiting', output, silent, ...(job.runClaim.missed ? { missed: job.runClaim.missed } : {}) }
         job.lastRunAt = now
         job.lastStatus = 'waiting'
         job.lastError = undefined

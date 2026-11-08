@@ -49,6 +49,8 @@ export interface AutomationRun {
   ranBy?: string
   /** The saved agent was published again since the run before this one. */
   agentChanged?: true
+  /** Repeats missed while the owning computer was off collapsed into this run, which ran once ("Missed while offline"). */
+  missed?: { count: number; since: string }
 }
 
 /** How an occurrence that ended maps onto the contract; null while it waits (a usage limit, a waiting workflow). */
@@ -75,7 +77,8 @@ export function jobRecordRun(record: ScheduledJobRunRecord): AutomationRun {
     at: record.runAt,
     ...(record.threadId ? { threadId: record.threadId } : {}),
     ...(ranBy ? { ranBy } : {}),
-    ...(record.agent?.changed ? { agentChanged: true as const } : {})
+    ...(record.agent?.changed ? { agentChanged: true as const } : {}),
+    ...(record.missed ? { missed: record.missed } : {})
   }
   const ended = occurrenceOutcome(record.status, record.silent)
   if (ended) return { ...base, state: ended, ...(record.error ? { detail: record.error } : {}) }

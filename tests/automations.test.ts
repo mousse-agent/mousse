@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
-import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
+import { missedWhileOffline, ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { askText, botRun, buildAutomationIndex, jobEffectiveMay, type AutomationIndexSources } from '../src/mms/automations/AutomationIndex'
 import { AgentJobAskStore } from '../src/mms/automations/AgentJobAsks'
@@ -277,6 +277,45 @@ describe('the scheduler', () => {
     expect(after.repeat).toMatchObject({ completed: 1 })
     expect(after.waitingBehind).toBeUndefined()
     service.stop()
+  })
+
+  it('collapses the repeats missed while the computer was off into one run, marked, that runs once', async () => {
+    const store = new ScheduledJobStore(MousseConfigStore.load(home))
+    const prompts: string[] = []
+    const service = new ScheduledJobService({ runIsolated: async (prompt) => { prompts.push(prompt); return { text: 'Bumped.', silent: false } } }, store)
+    start(service)
+    const daily = store.createJob({ name: 'Deps bump', prompt: 'bump', schedule: { kind: 'cron', expr: '0 3 * * *' } })
+    const onTime = store.createJob({ name: 'On time', prompt: 'look', schedule: { kind: 'interval', minutes: 60 } })
+    // Off for three days and a bit: the 03:00 four days ago was the one due when it stopped.
+    const now = new Date()
+    const firstMissed = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 4, 3, 0)
+    store.updateJob(daily.id, { nextRunAt: firstMissed.toISOString(), state: 'scheduled' })
+    store.updateJob(onTime.id, { nextRunAt: new Date(now.getTime() - 60_000).toISOString(), state: 'scheduled' })
+    await tick(service)
+    await settle(service)
+    expect(prompts.filter((prompt) => prompt.includes('bump'))).toHaveLength(1)
+    const after = store.getJob(daily.id)!
+    expect(after.runHistory).toHaveLength(1)
+    const missed = after.runHistory![0]!.missed!
+    expect(missed.since).toBe(firstMissed.toISOString())
+    expect(missed.count).toBeGreaterThanOrEqual(4)
+    expect(missed.count).toBeLessThanOrEqual(5)
+    expect(jobRecordRun(after.runHistory![0]!)).toMatchObject({ state: 'done', missed: { count: missed.count } })
+    // The next run is the first after now: nothing of the backlog is left to run.
+    expect(Date.parse(after.nextRunAt!)).toBeGreaterThan(Date.now())
+    // A run a minute late was not missed.
+    expect(store.getJob(onTime.id)!.runHistory![0]!.missed).toBeUndefined()
+    service.stop()
+  })
+
+  it('counts the missed repeats of an interval and a cron, and never a job that runs on demand', () => {
+    const now = new Date('2026-11-09T12:00:00.000Z')
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T09:00:00.000Z', now)).toEqual({ count: 4, since: '2026-11-09T09:00:00.000Z' })
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T11:58:00.000Z', now)).toBeUndefined()
+    expect(missedWhileOffline({ schedule: { kind: 'manual' } }, '2026-11-01T00:00:00.000Z', now)).toBeUndefined()
+    expect(missedWhileOffline({ schedule: { kind: 'once', runAt: '2026-11-08T00:00:00.000Z' } }, '2026-11-08T00:00:00.000Z', now)).toMatchObject({ count: 1 })
+    // An every-minute repeat after a long time off stops counting at 1000.
+    expect(missedWhileOffline({ schedule: { kind: 'cron', expr: '* * * * *' } }, '2026-11-01T00:00:00.000Z', now)?.count).toBe(1000)
   })
 
   it('announces how each run ended once, with whether its Tell me lets it notify', async () => {

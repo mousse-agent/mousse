@@ -92,6 +92,16 @@ export function unreachableReason(item: Pick<AutomationItem, 'computer'>): strin
   return item.computer.offline ? offlineText(item.computer) : undefined
 }
 
+/** The mark on a run that stands for repeats missed while its computer was off, with its tooltip. */
+export function missedText(run: AutomationRun): { text: string; title: string } | undefined {
+  if (!run.missed) return undefined
+  const count = run.missed.count
+  return {
+    text: 'Missed while offline',
+    title: count > 1 ? `${count >= 1000 ? '1000+' : count} runs fell while the computer was off. They ran once, late.` : 'It fell while the computer was off. It ran once, late.'
+  }
+}
+
 /** What one run says on a row: "failed · npm install exited 1", "waiting · usage limit until 14:00". */
 export function runText(run: AutomationRun, now: Date, owner: { name: string; timeZone: string }, viewerZone: string): string {
   const when = (iso: string) => ownedWhenText(iso, now, owner, viewerZone)

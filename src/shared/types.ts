@@ -68,6 +68,16 @@ export interface ScheduledJobRunRecord {
   agentCreated?: true
   /** The saved agent that ran this occurrence, at the published revision it ran. */
   agent?: ScheduledRunAgent
+  /** This run stands for repeats missed while the computer was off: they collapsed into it, and it ran once. */
+  missed?: ScheduledMissedRuns
+}
+
+/** Repeats of a job that fell while its computer was off or asleep ("Missed while offline"). */
+export interface ScheduledMissedRuns {
+  /** How many occurrences fell from `since` until the run (at most 1000). */
+  count: number
+  /** The first of them: the occurrence that was due when the computer stopped running. */
+  since: string
 }
 
 /** A saved agent (an agent definition) as one run used it. */
@@ -122,6 +132,8 @@ export interface ScheduledJobRunClaim {
   settledResult?: ScheduledOccurrenceResult
   /** Set when a webhook delivery started this claim (`occurrenceKey` is `webhook:<id>`). */
   webhookOccurrenceId?: string
+  /** The claim runs late, for the repeats missed while the computer was off; its run record says so. */
+  missed?: ScheduledMissedRuns
 }
 
 /**

@@ -424,6 +424,19 @@ describe('the Automations page', () => {
     expect($('[data-testid="automation-why-panel"]')?.textContent).toContain(ZONE)
   })
 
+  it('marks the one run that stands for the repeats missed while the computer was off, in Runs and Recent', async () => {
+    const stored = job({ id: 'j1', name: 'Deps bump' })
+    const ran = new Date(Date.now() - 3_600_000).toISOString()
+    const run = { at: ran, state: 'done' as const, missed: { count: 4, since: new Date(Date.now() - 4 * 86_400_000).toISOString() } }
+    await mount([item({ key: 'job:j1', name: 'Deps bump', runs: [run], last: run })], [stored])
+    await click($('[data-testid="automation-recent"]'))
+    expect($('[data-testid="automation-recent-runs"] [data-testid="automation-run-missed"]')?.textContent).toBe('Missed while offline')
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    const mark = $('[data-testid="automation-detail"] [data-testid="automation-run-missed"]')!
+    expect(mark.textContent).toBe('Missed while offline')
+    expect(mark.title).toMatch(/^4 runs fell while the computer was off/)
+  })
+
   it('opens a bot\'s automation as a normal editable row: Who stays the bot, May is its grant, When and Tell me save', async () => {
     const stored = job({ id: 'b--s', name: 'Weather', prompt: 'Tell me if it rains', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'bot' } })
     const pip = { kind: 'bot' as const, name: 'Pip', look: { colour: 'teal', accessory: 'none' } as const }

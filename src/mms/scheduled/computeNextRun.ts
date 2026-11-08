@@ -186,6 +186,27 @@ export function nextOccurrenceAfter(schedule: JobSchedule, occurrenceAt: string,
   return computeNextRun(schedule, null, now)
 }
 
+/**
+ * How many occurrences of a schedule fell from the one due at `from` (itself one) until `now`, at most `cap`: the
+ * repeats a computer that was off missed, which collapse into one run.
+ */
+export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = 1000): number {
+  if (schedule.kind !== 'interval' && schedule.kind !== 'cron') return 1
+  if (schedule.kind === 'interval') {
+    const every = (schedule.minutes ?? 1) * 60_000
+    return Math.max(1, Math.min(cap, Math.floor((now.getTime() - Date.parse(from)) / every) + 1))
+  }
+  let count = 1
+  let cursor = from
+  while (count < cap) {
+    const next = computeNextRun(schedule, cursor, now)
+    if (!next || Date.parse(next) > now.getTime() || Date.parse(next) <= Date.parse(cursor)) break
+    count += 1
+    cursor = next
+  }
+  return count
+}
+
 export function isSilentOutput(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
