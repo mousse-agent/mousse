@@ -1,5 +1,5 @@
-import type { BotAuthority, BotCheck, BotCheckDenied, WallReason } from './authority'
-import { neutralToolsOf, type NativeToolTable } from '../../harness/tools'
+import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason } from './authority'
+import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
 
@@ -11,6 +11,8 @@ export function wallMessage(wall: WallReason): string {
     case 'path': return wall.access === 'write'
       ? `This bot is not allowed to change ${wall.path}.`
       : `This bot is not allowed to read ${wall.path}.`
+    case 'closed': return `${wall.path} is Mousse's own data, which no bot may use. Use another folder.`
+    case 'path_form': return `Give ${wall.path} as a full path, without ~ or variables.`
     case 'skill': return `This bot is not allowed to use the skill ${wall.skill}.`
     case 'mcp': return `This bot is not allowed to use the ${wall.server} tool ${wall.tool}.`
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`
@@ -29,14 +31,16 @@ export function checkMessage(denied: BotCheckDenied): string {
 /**
  * A runtime's built-in call (`nativeName` in `table`) under a bot's authority: allowed when any
  * neutral tool the name stands for passes `check`. A name with no neutral tool is never granted.
+ * `own`: the runtime's gate found every path of the call in its own storage for this bot.
  */
-export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>): BotCheck {
+export function checkBuiltinCall(bot: Pick<BotAuthority, 'check' | 'checkAny'>, table: NativeToolTable, nativeName: string, args: Record<string, unknown>, own?: boolean): BotCheck {
   const neutrals = neutralToolsOf(table, nativeName)
   if (!neutrals.length) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
-  if (bot.checkAny) return bot.checkAny(neutrals.map((tool) => ({ kind: 'builtin' as const, tool, nativeName, args })))
+  const call = (tool: NeutralTool): NormalisedCall => ({ kind: 'builtin', tool, nativeName, args, ...(own ? { own: true as const } : {}) })
+  if (bot.checkAny) return bot.checkAny(neutrals.map(call))
   let refused: BotCheckDenied | undefined
   for (const tool of neutrals) {
-    const decided = bot.check({ kind: 'builtin', tool, nativeName, args })
+    const decided = bot.check(call(tool))
     if (decided.ok) return decided
     refused ??= decided
   }

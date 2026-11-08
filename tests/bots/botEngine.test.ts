@@ -144,8 +144,9 @@ describe('approval', () => {
     await expect(bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })).rejects.toMatchObject({ code: 'bot_approval_required' })
     expect(() => bots.approve('site-editor', '0'.repeat(64))).toThrow(expect.objectContaining({ code: 'bot_grant_changed' }))
     expect(bots.approval('site-editor').added.map((line) => line.text)).toEqual([
-      `Read files in ${root}`,
-      `Search files in ${root}`,
+      'Use files on this computer',
+      'Read files',
+      'Search files',
       'Up to 10 minutes of work per run',
       'Up to 30 model requests (retries included) per run'
     ])
@@ -173,7 +174,7 @@ describe('approval', () => {
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
       code: 'bot_approval_required',
-      details: { added: [{ kind: 'tool', text: 'Edit files (no folder allows it)' }] }
+      details: { added: [{ kind: 'tool', text: 'Edit files' }] }
     })
   })
 
@@ -309,13 +310,13 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
   })
 
-  it('a narrower published revision is what runs: tools, folders, access, limits and work time', async () => {
+  it('a narrower published revision is what runs: tools, file access, limits and work time', async () => {
     const wide = manifest({ tools: ['read', 'search'], workspace: { roots: [root, join(base, 'docs')], access: 'read' }, budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 } })
     mkdirSync(join(base, 'docs'))
     bots.save({ ...definition(), permissions: wide }, bots.get('site-editor').draftHash)
     bots.publish('site-editor', bots.get('site-editor').draftHash)
     approve()
-    publish({ tools: ['read'], workspace: { roots: [root], access: 'read' }, budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
+    publish({ tools: ['read'], workspace: null, budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'narrow' })
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
@@ -326,7 +327,8 @@ describe('activation and dispatch', () => {
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: true })
+    // The revision has no file access although the grant has: only its own files folder is open.
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(bots.filesFolder('site-editor'), 'a.md') } })).toEqual({ ok: true })
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 

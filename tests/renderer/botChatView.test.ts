@@ -78,7 +78,7 @@ describe('the transcript', () => {
     fake.chats.inbox = [
       message(1, { author: 'owner', text: 'Send the one to the Lisbon host.' }),
       message(2, { text: 'Sent.', chips: [{ icon: 'web', text: 'read 2 pages', highlight: 'example.com' }, { icon: 'memory', text: 'remembered', highlight: 'vegetarian' }] }),
-      message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'read files in ~/Invoices', note: 'Only this folder.', status: 'open' } }),
+      message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open' } }),
       message(4, { kind: 'error', text: 'I couldn’t do this morning’s check.', error: { text: 'Set up a provider so I can work.', action: { kind: 'open_providers', label: 'Set up' } } })
     ]
     await open()
@@ -92,7 +92,7 @@ describe('the transcript', () => {
     expect(chips!.querySelector('time')?.getAttribute('dateTime')).toBe('2026-11-07T09:00:00.000Z')
     expect([...chips!.querySelectorAll('.bot-chip')].map((chip) => chip.textContent)).toEqual(['read 2 pages example.com', 'remembered vegetarian'])
     expect(chips!.querySelector('.bot-chip b')?.textContent).toBe('example.com')
-    expect(ask!.querySelector('.bot-ask-title')?.textContent).toBe('Inbox helper wants to read files in ~/Invoices')
+    expect(ask!.querySelector('.bot-ask-title')?.textContent).toBe('Inbox helper wants to use files on this computer')
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)

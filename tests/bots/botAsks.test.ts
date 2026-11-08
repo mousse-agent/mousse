@@ -8,9 +8,10 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
+import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -19,7 +20,7 @@ let invoices: string
 let notes: string
 
 const DAY = 24 * 60 * 60_000
-/** A read of a folder: a gate refusal asks for exactly the path the call named. */
+/** A read of a folder: a gate refusal asks for file access as a whole (`filesAsk`), once. */
 const readIn = (folder: string): NormalisedCall => ({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: folder } })
 
 beforeEach(async () => {
@@ -48,7 +49,7 @@ async function chat(text: string, id: string) {
 
 describe('asks in a run', () => {
   it('a refusal is a tool error; one ask per permission across three runs, and every run ends done', async () => {
-    const fingerprint = askFingerprintOf({ path: invoices, access: 'read' })
+    const fingerprint = askFingerprintOf(filesAsk())
     for (const id of ['r1', 'r2', 'r3']) {
       const { activation, payload, prepared } = await run(id)
       const decided = prepared.authority.check(readIn(invoices))
@@ -59,11 +60,11 @@ describe('asks in a run', () => {
       expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })
     }
     const asks = f.store.openAsks(botId)
-    expect(asks).toMatchObject([{ mode: 'ask', fingerprint, title: `read files in ${invoices}`, expiresAt: null }])
+    expect(asks).toMatchObject([{ mode: 'ask', fingerprint, permission: filesAsk(), title: 'use files on this computer', expiresAt: null }])
     const cards = chatOf(f, botId).filter((message) => message.ask)
-    expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: `Penny wants to read files in ${invoices}.`, ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
+    expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to use files on this computer.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
     expect(chatOf(f, botId).filter((message) => message.kind === 'run_report')).toHaveLength(3)
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: `Wants to read files in ${invoices}` })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
   })
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
@@ -110,18 +111,49 @@ describe('asks in a run', () => {
     await flush()
     expect(f.store.openAsks(botId)).toMatchObject([{ status: 'open', expiresAt: null }])
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    expect(f.store.activeGrant(botId)!.manifest.workspace).toMatchObject({ roots: [invoices], access: 'read' })
+    expect(f.store.activeGrant(botId)!.manifest.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
+  })
+
+  it('one ask for file access, whichever folders the runs needed, read or write; once allowed, no file call asks again', async () => {
+    const first = await run('r1')
+    expect(first.prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    expect(first.prepared.authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(notes, 'a.md') } })).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })
+    expect(first.prepared.authority.escalate!({ permission: { path: join(f.base, 'Elsewhere'), access: 'write' }, reason: 'More.' })).toMatch(/^Asked the owner/)
+    await finish(f, first.payload, 'completed', { text: 'Skipped the files.' })
+    expect(f.store.openAsks(botId)).toHaveLength(1)
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    const second = await run('r2')
+    for (const path of [join(invoices, 'a.pdf'), join(notes, 'b.md'), join(f.base, 'Elsewhere', 'c.txt'), f.base])
+      for (const tool of ['read', 'list', 'search', 'edit', 'write'] as const)
+        expect(second.prepared.authority.check({ kind: 'builtin', tool, nativeName: tool, args: { path } }), `${tool} ${path}`).toEqual({ ok: true })
+    // Asking for a folder now only says it is allowed already.
+    expect(second.prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'Notes.' })).toBe(BOT_FILES_HELD_TEXT)
+    await finish(f, second.payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toEqual([])
+    expect(f.store.escalations({ botId }).filter((row) => 'path' in row.permission)).toHaveLength(1)
+  })
+
+  it('Mousse\'s own data stays closed after the file ask is allowed, and never asks', async () => {
+    const first = await run('r1')
+    first.prepared.authority.check(readIn(invoices))
+    await finish(f, first.payload, 'completed', { text: 'Skipped.' })
+    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+    const second = await run('r2')
+    expect(second.prepared.authority.check(readIn(join(f.profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(second.prepared.authority.check(readIn(join(f.bots.filesFolder(botId), 'a.md')))).toEqual({ ok: true })
+    await finish(f, second.payload, 'completed', { text: 'Done.' })
+    expect(f.store.openAsks(botId)).toEqual([])
   })
 })
 
 describe('asks in the chat', () => {
   it('a refusal is a wall: the card is on the reply, and the answer continues the turn', async () => {
     const { activation, payload, prepared } = await chat('Sort my invoices', 'm1')
-    expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: `read files in ${invoices}` } })
+    expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     await finish(f, payload, 'interrupted', { text: 'I need to read your invoices first.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'I need to read your invoices first.', ask: { status: 'open', title: `read files in ${invoices}` } })
+    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'I need to read your invoices first.', ask: { status: 'open', title: 'use files on this computer' } })
     // Days pass: the wall waits, it never expires.
     f.clock.now += 3 * DAY
     for (const timer of [...f.timers]) timer.fn()
@@ -132,17 +164,18 @@ describe('asks in the chat', () => {
     expect(message).toMatchObject({ id: reply.id, ask: { status: 'allowed' } })
     const after = f.store.activeGrant(botId)!
     expect(after.digest).not.toBe(before.digest)
-    // Only the folder is added: the rest of the grant is what it was.
+    // Only file access is added: the rest of the grant is what it was.
     expect({ ...after.manifest, workspace: null }).toEqual({ ...before.manifest, workspace: null })
-    expect(after.manifest.workspace).toMatchObject({ roots: [invoices], access: 'read' })
-    expect(f.host.definitions.get(botId)!.published!.permissions.workspace).toMatchObject({ roots: [invoices] })
+    expect(after.manifest.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
+    expect(f.host.definitions.get(botId)!.published!.permissions.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
     // The waiting activation moved to the wider grant, and continues on its own history.
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', grantDigest: after.digest })
     const next = f.store.dispatch(activation.id, 2)!
-    expect(next).toMatchObject({ kind: 'continue', prompt: { text: `[Mousse] The owner allowed: read files in ${invoices}. Continue.` } })
+    expect(next).toMatchObject({ kind: 'continue', prompt: { text: '[Mousse] The owner allowed: use files on this computer. Continue.' } })
     const continued = await start(f, activation.id, 2)
     expect(continued.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
     expect(continued.prepared.authority.check(readIn(invoices))).toEqual({ ok: true })
+    expect(continued.prepared.authority.check(readIn(notes))).toEqual({ ok: true })
   })
 
   it('Remove in About narrows the grant again', async () => {
@@ -151,7 +184,7 @@ describe('asks in the chat', () => {
     await finish(f, payload, 'interrupted', { text: 'May I?', outcome: { interruptedBy: 'bot_wall' } })
     await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'allow')
     const detail = f.bots.service.get(botId)
-    expect(detail.permissions).toMatchObject([{ id: askFingerprintOf({ path: invoices, access: 'read' }), title: `read files in ${invoices}`, note: 'Only this folder. It can\'t change anything.' }])
+    expect(detail.permissions).toMatchObject([{ id: askFingerprintOf(filesAsk()), title: 'use files on this computer', note: 'Read and change any file or folder, except Mousse\'s own data.' }])
     const narrowed = f.bots.service.revokePermission(botId, detail.permissions[0]!.id)
     expect(narrowed.permissions).toEqual([])
     expect(f.store.activeGrant(botId)!.manifest.workspace).toBeNull()
@@ -163,6 +196,8 @@ describe('asks in the chat', () => {
     expect(prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'Invoices.' })).toBe(BOT_ASK_DEFERRED_TEXT)
     // Asks are ordered by when they were made (two in the same millisecond order by id).
     f.clock.now += 1
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    // Another folder is the same ask: it adds no card.
     expect(prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'Notes.' })).toBe(BOT_ASK_DEFERRED_TEXT)
     // The turn keeps running until its text is complete.
     expect(f.store.activation(activation.id)!.status).toBe('running')
@@ -171,16 +206,16 @@ describe('asks in the chat', () => {
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     const rows = chatOf(f, botId).filter((row) => row.activationId === activation.id && row.author === 'bot')
     expect(rows).toMatchObject([
-      { kind: 'text', text: 'I need two things.', ask: { title: `read files in ${invoices}`, status: 'open' } },
-      { kind: 'notice', text: `Penny wants to change files in ${notes}.`, ask: { title: `change files in ${notes}`, status: 'open' } }
+      { kind: 'text', text: 'I need two things.', ask: { title: 'use files on this computer', status: 'open' } },
+      { kind: 'notice', text: 'Penny wants to run commands.', ask: { title: 'run commands', status: 'open' } }
     ])
     await f.bots.service.answer(botId, rows[0]!.ask!.askId, 'allow')
     expect(f.store.dispatch(activation.id, 2)).toBeUndefined()
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     await f.bots.service.answer(botId, rows[1]!.ask!.askId, 'not_now')
     const next = f.store.dispatch(activation.id, 2)!
-    expect(next.prompt.text).toContain(`The owner allowed: read files in ${invoices}.`)
-    expect(next.prompt.text).toContain(`The owner said not now: change files in ${notes}.`)
+    expect(next.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(next.prompt.text).toContain('The owner said not now: run commands.')
     expect(f.store.dispatch(activation.id, 3)).toBeUndefined()
   })
 
@@ -215,7 +250,7 @@ describe('asks across lanes and timing (review)', () => {
     await expect(f.bots.service.answer(botId, ask.id, 'allow')).rejects.toMatchObject({ code: 'ask_not_ready' })
     await finish(f, payload, 'completed', { text: 'May I read your invoices?' })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: `Wants to read files in ${invoices}` })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
   })
 
   it('a limit has one open ask whichever way it was raised', async () => {
@@ -262,13 +297,14 @@ describe('asks across lanes and timing (review)', () => {
 })
 
 describe('asks: caps, limits and grant moves (review round 2)', () => {
-  const folder = (n: number) => join(f.base, `folder-${n}`)
+  // Different asks: one skill each (folders are all the one file ask).
+  const skill = (n: number) => ({ skill: `skill-${n}` })
 
   it('a run writes at most 5 new asks; later ones are refused without asking', async () => {
     const { prepared, payload } = await run('r-many')
     for (let n = 1; n <= 5; n += 1)
-      expect(prepared.authority.escalate!({ permission: { path: folder(n), access: 'read' }, reason: `Folder ${n}.` })).toMatch(/^Asked the owner/)
-    expect(prepared.authority.escalate!({ permission: { path: folder(6), access: 'read' }, reason: 'One more.' })).toBe(BOT_ASK_ENOUGH_TEXT)
+      expect(prepared.authority.escalate!({ permission: skill(n), reason: `Skill ${n}.` })).toMatch(/^Asked the owner/)
+    expect(prepared.authority.escalate!({ permission: skill(6), reason: 'One more.' })).toBe(BOT_ASK_ENOUGH_TEXT)
     expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_ENOUGH_TEXT, askId: '' } })
     await finish(f, payload, 'completed', { text: 'Done.' })
     expect(f.store.openAsks(botId)).toHaveLength(5)
@@ -278,17 +314,17 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
   it('a bot\'s runs write at most 10 new asks a day', async () => {
     for (const [id, from] of [['r-a', 1], ['r-b', 6]] as const) {
       const { prepared, payload } = await run(id)
-      for (let n = from; n < from + 5; n += 1) prepared.authority.escalate!({ permission: { path: folder(n), access: 'read' }, reason: 'Folder.' })
+      for (let n = from; n < from + 5; n += 1) prepared.authority.escalate!({ permission: skill(n), reason: 'Skill.' })
       await finish(f, payload, 'completed', { text: 'Done.' })
     }
     const third = await run('r-c')
-    expect(third.prepared.authority.escalate!({ permission: { path: folder(11), access: 'read' }, reason: 'Folder.' })).toBe(BOT_ASK_ENOUGH_TEXT)
+    expect(third.prepared.authority.escalate!({ permission: skill(11), reason: 'Skill.' })).toBe(BOT_ASK_ENOUGH_TEXT)
     await finish(f, third.payload, 'completed', { text: 'Done.' })
     expect(f.store.openAsks(botId)).toHaveLength(10)
     // A day later the run may ask again.
     f.clock.now += DAY + 60_000
     const fourth = await run('r-d')
-    expect(fourth.prepared.authority.escalate!({ permission: { path: folder(11), access: 'read' }, reason: 'Folder.' })).toMatch(/^Asked the owner/)
+    expect(fourth.prepared.authority.escalate!({ permission: skill(11), reason: 'Skill.' })).toMatch(/^Asked the owner/)
   })
 
   it('a run never asks for a skill or MCP tool that is not here', async () => {

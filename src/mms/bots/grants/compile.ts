@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
@@ -37,10 +37,12 @@ export interface BotPermissions {
   mcp: Array<`${string}::${string}`>
   skills: string[]
   /**
-   * `writeRoots`: the roots the bot may change (per-folder access). `files`: the bot's files folder,
-   * writable beside the roots like scratch; never one of `roots`, so it is never listed as a permission.
+   * `writeRoots`: the roots the bot may change. `files`: the bot's files folder, writable beside the
+   * roots like scratch; never one of `roots`, so it is never listed as a permission. `computer`: file
+   * access (bot-architecture.md §3.7), with the tops of the file system as the roots, read and
+   * write, and Mousse's own data folder (`closed`) shut but for the files folder and scratch.
    */
-  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string } | null
+  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string; computer?: { closed: string } } | null
   /** "Use the browser": `appTools` holds the browser tools, on the bot's own browser. */
   browser?: true
 }
@@ -62,8 +64,8 @@ export interface CompileInput {
   nativeNames(tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
   /** What is left of the activation's counts and spend, and the dispatch's active-time deadline. */
   remaining: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; deadlineMs: number }
-  /** System temporary folders (default: `systemTempDirs()`). */
-  temps?: readonly string[]
+  /** The tops of the file system file access opens (default: `computerRoots()`). */
+  computer?: readonly string[]
   /**
    * The bot's files folder (`botFilesFolder`): an implicit writable root, like scratch, allowed
    * although it sits inside the profile home. Absent: none (bots made before Bot Phase 1's files folder).
@@ -100,6 +102,52 @@ function real(path: string): string {
   }
 }
 
+/** The tops of this computer's file system: `/`, or every drive on Windows. */
+export function computerRoots(platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'win32') return ['/']
+  const drives = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map((letter) => `${letter}:\\`).filter((drive) => existsSync(drive))
+  return drives.length ? drives : [parse(resolve('/')).root]
+}
+
+/**
+ * Mousse's own data, closed to every bot whatever it may use: the Mousse home holding the profile
+ * (`<home>/profiles/<id>`: the sign-ins, keys and data of every profile), or the profile alone
+ * when it is not laid out so.
+ */
+export function mousseDataFolder(profileHome: string): string {
+  const profiles = dirname(profileHome)
+  return basename(profiles) === 'profiles' ? dirname(profiles) : profileHome
+}
+
+/**
+ * Every entry inside `folder` that is not one of `keep` and does not lead to one: at each folder on
+ * the way down to them, every other entry; `folder` itself when none of `keep` is inside it. With
+ * file access, a sandbox closes these (Claude Code's `denyWrite` over Mousse's data) or opens them
+ * (Codex's writable roots beside it). Read when the turn starts: an entry made later in a folder
+ * on the way is not among them.
+ */
+export function entriesBeside(folder: string, keep: readonly string[]): string[] {
+  const within = (path: string, parent: string) => path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`)
+  if (!keep.some((path) => within(path, folder))) return [folder]
+  const beside: string[] = []
+  const walk = (at: string): void => {
+    let names: string[]
+    try {
+      names = readdirSync(at)
+    } catch {
+      return
+    }
+    for (const name of names) {
+      const entry = join(at, name)
+      if (keep.includes(entry)) continue
+      if (keep.some((path) => within(path, entry))) walk(entry)
+      else beside.push(entry)
+    }
+  }
+  walk(folder)
+  return beside
+}
+
 /** The real paths of the system temporary folders, deduplicated. */
 export function systemTempDirs(): string[] {
   const candidates = [tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp', '/private/tmp', '/var/tmp'])]
@@ -116,7 +164,6 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
   // from the bot's files folder, in its own sandbox where it has one (bot-architecture.md §3.5).
   const scratch = real(input.scratch)
-  const profile = real(input.profileHome)
   const files = input.filesFolder !== undefined ? real(input.filesFolder) : undefined
   if (files !== undefined) {
     // Only Mousse's own place for it: a files folder anywhere else would be a root nobody approved.
@@ -124,20 +171,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
     if (files === home || !inside(home, files)) return unenforceable("The bot's files folder is not where Mousse keeps bots' files.")
     if (inside(files, scratch) || inside(scratch, files)) return unenforceable("The bot's files folder overlaps its private scratch folder.")
   }
-  if (manifest.workspace) {
-    const temps = (input.temps ?? systemTempDirs()).map(real)
-    const writable = new Set(foldersOf(manifest.workspace).filter(([, access]) => access === 'write').map(([root]) => real(root)))
-    for (const root of manifest.workspace.roots.map(real)) {
-      if (inside(root, scratch) || inside(scratch, root))
-        return unenforceable(`The folder ${root} overlaps the bot's private scratch folder.`)
-      // The files folder itself, by exact path, is the one folder inside Mousse's data a bot may name.
-      if (root === files) continue
-      if (inside(root, profile)) return unenforceable(`The folder ${root} contains Mousse's own data. Choose a folder inside it instead.`)
-      if (inside(profile, root)) return unenforceable(`The folder ${root} is inside Mousse's own data.`)
-      if (writable.has(root) && temps.some((temp) => inside(temp, root)))
-        return unenforceable(`The folder ${root} is inside a temporary folder. Move the folder out of the temporary folder.`)
-    }
-  }
+  // File access is one permission (§3.7): any workspace opens every folder, read and write. The
+  // folders an older build's grant names are not checked or kept: they no longer narrow anything.
+  const computer = manifest.workspace ? (input.computer ?? computerRoots()).map(real) : undefined
   const native = input.nativeNames(manifest.tools)
   if (!native.ok) return native
   const { deadlineMs, ...counts } = input.remaining
@@ -171,13 +207,14 @@ export function compileBotThread(input: CompileInput): CompileResult {
       mcp,
       skills: [...new Set(manifest.skills)].sort(),
       ...(browser ? { browser: true as const } : {}),
-      workspace: manifest.workspace || files !== undefined
+      workspace: computer || files !== undefined
         ? {
-            roots: manifest.workspace ? manifest.workspace.roots.filter((root) => real(root) !== files) : [],
-            access: manifest.workspace?.access ?? 'read',
-            writeRoots: foldersOf(manifest.workspace).filter(([root, access]) => access === 'write' && real(root) !== files).map(([root]) => root),
+            roots: computer ?? [],
+            access: computer ? 'write' : 'read',
+            writeRoots: computer ?? [],
             scratch,
-            ...(files !== undefined ? { files } : {})
+            ...(files !== undefined ? { files } : {}),
+            ...(computer ? { computer: { closed: real(mousseDataFolder(input.profileHome)) } } : {})
           }
         : null
     }
