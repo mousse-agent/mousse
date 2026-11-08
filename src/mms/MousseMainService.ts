@@ -2,7 +2,8 @@ import { registerChatMethods } from './chats/registerMethods'
 import { registerChatNetworkMethods } from './chats/network/registerMethods'
 import { registerChatResourceMethods } from './chats/resources/registerMethods'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsProfileServices } from './MmsProfileServices'
 import type { MmsOptions } from './MmsOptions'
@@ -38,6 +39,7 @@ import { BrowserAutomationError } from './browser/automation/BrowserSessionManag
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
 import { createBrowserSetupService, type BrowserSetupService } from './browser/BrowserSetupService'
 import { createManagedBrowserInstaller } from './browser/install'
+import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
 
@@ -273,6 +275,8 @@ export class MousseMainService extends MmsProfileServices {
     services.botBrowsers.setSetup({ status: () => this.browserSetup.status(), install: () => this.browserSetup.install() })
     services.platform.configureBrowser({
       installationBrowserRoot: join(this.getHomeDir(), 'browser'),
+      // The worker that drives managed Chromium ships in this build (`out/browser-worker`).
+      workerModulePath: bundledBrowserWorkerModule(dirname(fileURLToPath(import.meta.url))),
       admitManagedLaunch: async () => {
         const admission = this.browserSetup.admitManagedLaunch()
         try {
