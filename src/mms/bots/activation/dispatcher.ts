@@ -1,6 +1,8 @@
 import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import type { BotLane } from '../../../shared/bots/personal/definition'
+import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BindPolicy, ProviderSelection } from '../../../shared/harness/types'
+import type { BrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import type { BotTurnPayload } from '../../run/types'
 
 /**
@@ -50,6 +52,24 @@ export interface PreparedBotTurn {
   lane?: BotLane
   /** The context pack (bot-context.md §5), frozen for the activation: placed in the turn's preamble. */
   preamble?: string
+  /** The bot's own browser, when its grant holds "use the browser": the turn's browser tools run on it. */
+  browser?: BotTurnBrowser
+}
+
+/** A bot turn's browser: its trusted binding, and the runtime that holds it to the bot's own browser. */
+export interface BotTurnBrowser {
+  binding: BrowserExecutionBinding
+  runtime: BrowserRuntimePort
+}
+
+/** The engine's view of the bots' browsers (`BotBrowsers`). */
+export interface BotBrowserHost {
+  /** The browser of one dispatch; undefined when the bot's browser can't be offered here. */
+  turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined
+  /** The activation ended (done, failed or stopped): its tabs close, and an idle browser after them. */
+  activationEnded(input: { botId: string; activationId: string }): void
+  /** The bot was deleted: its browser closes; `purge` also erases its sign-ins and site data. */
+  removeBot?(botId: string, purge: boolean): Promise<void> | void
 }
 
 /** The abort reason of a bot dispatch that ended at a wall (PR 6 §5): its run ends `bot_wall`. */

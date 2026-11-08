@@ -27,6 +27,7 @@ import { registerBotMethods } from './bots/space/registerMethods'
 import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
+import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -235,6 +236,11 @@ export class MousseMainService extends MmsProfileServices {
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     // The Bot UI's methods (`bots.personal.v2`): the profile's bot engine answers them.
     registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots?.service)
+    // Each bot's own browser, as its owner sees it (`bots.browser.*`).
+    registerBotBrowserMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return services.personalBots ? services.botBrowsers : null
+    })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

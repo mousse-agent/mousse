@@ -1,5 +1,6 @@
 import type { BotBudget } from './definition'
 import { isSpecialAsk, type BotAskRequest } from './escalation'
+import { botGrantTool } from './manifest'
 
 /**
  * An ask in plain words for its card and for About → Can use (Bot Phase 1 §5.4): the card reads
@@ -32,7 +33,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   write: { title: 'create files', note: 'Only in folders you allow for changes.' },
   shell: { title: 'run commands', note: 'Any command, started in its files folder. Commands can reach files outside the folders you allow.' },
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
-  web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' }
+  web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
+  browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' }
 }
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
@@ -75,6 +77,10 @@ export function askText(request: BotAskRequest, options: { home?: string; budget
   }
   if ('skill' in request) return { title: `use the ${request.skill} skill`, note: '' }
   if ('mcp' in request) return { title: `use ${request.mcp.tool} from ${request.mcp.serverId}`, note: '' }
-  if ('tool' in request) return TOOL_TEXT[request.tool] ?? { title: `use the ${request.tool.replace(/_/g, ' ')} tool`, note: '' }
+  if ('tool' in request) {
+    // Every browser tool is one permission: "use the browser", never "the browser act tool".
+    const tool = botGrantTool(request.tool)
+    return TOOL_TEXT[tool] ?? { title: `use the ${tool.replace(/_/g, ' ')} tool`, note: '' }
+  }
   return budgetText(request.budget.key, request.budget.amount, options.budget)
 }

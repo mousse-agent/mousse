@@ -17,9 +17,10 @@ import {
   type BotEscalationAnswer,
   type BotEscalationSummary,
   type BotPermissionRequest,
-  type BotWallKind
+  type BotWallKind,
+  grantRequestOf
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -60,7 +61,7 @@ import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispat
 import type { BotActivationRow, BotDispatchRow, BotEscalationRow, BotMessageRow, BotStore, BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { firstOccurrence, nextOccurrence, scheduleProblem, scheduleSpec } from '../triggers/scheduler'
-import { BotReloadAbort, BotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
+import { BotReloadAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
 
 /**
  * The personal bot engine (PR 6 §4, unit 6c-1): one-time approval with the subset rule, manual
@@ -154,6 +155,11 @@ export interface BotEngineHost {
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
    */
   knownAsk?(permission: { skill: string } | { mcp: { serverId: string; tool: string } }): boolean
+  /**
+   * The bot's own browser (`BotBrowsers`): a turn whose grant holds "use the browser" gets its
+   * browser tools on it, and an ended activation's tabs close. Absent: no bot gets the browser.
+   */
+  browser?: BotBrowserHost
 }
 
 export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
@@ -379,6 +385,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
     if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
     for (const row of live) this.packs.delete(row.id)
+    // Its browser closes now; its sign-ins go with the purge.
+    try {
+      await this.host.browser?.removeBot?.(botId, false)
+    } catch (error) {
+      console.warn('a deleted bot\'s browser could not be closed', { botId, error: error instanceof Error ? error.message : String(error) })
+    }
     await this.archiveThreads(botId)
     this.changed({ botId })
     try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
@@ -445,6 +457,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     }
     await this.host.memory?.purge(botId)
+    await this.host.browser?.removeBot?.(botId, true)
     // Its definition and files first: a failure leaves the purge unfinished, and the next sweep tries again.
     this.host.definitions.remove(botId)
     rmSync(this.filesFolder(botId), { recursive: true, force: true })
@@ -1340,6 +1353,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dispatchId: dispatch.clientRequestId
     })
     const pack = this.packs.get(row.id)
+    const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     return {
       activationId: row.id,
       dispatchN: dispatch.n,
@@ -1353,7 +1367,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
       lane: row.lane,
-      ...(pack ? { preamble: pack } : {})
+      ...(pack ? { preamble: pack } : {}),
+      ...(browser ? { browser } : {})
+    }
+  }
+
+  /** The bot's own browser for one dispatch; none when it can't be offered (never a failed turn). */
+  private browserTurn(row: BotActivationRow, runId: string, signal: AbortSignal): PreparedBotTurn['browser'] {
+    const homeThreadId = this.store.registry(row.botId)?.homeThreadId
+    if (!homeThreadId || !this.host.browser) return undefined
+    try {
+      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal })
+    } catch (error) {
+      console.warn('the bot browser could not be offered to a turn', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      return undefined
     }
   }
 
@@ -1527,7 +1554,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if ('refused' in decided || !ESCALATABLE.has(decided.wall.kind)) return decided
       // Only app tools a bot can be granted are worth asking for; any other is just refused.
-      if (call.kind === 'app' && !BOT_APP_TOOLS.has(call.tool)) return decided
+      if (call.kind === 'app' && !BOT_APP_TOOLS.has(botGrantTool(call.tool))) return decided
       const permission = permissionOfWall(call, decided.wall)
       if (!permission) return decided
       if (row.lane === 'run') return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
@@ -1554,7 +1581,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (problem) return `${problem} Ask for a tool, a folder, a skill, an MCP tool, a limit, or to export your memory.`
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
-        const asked = request.permission as BotAskRequest
+        // An ask for any browser tool is the one "use the browser" ask.
+        const asked = grantRequestOf(request.permission as BotAskRequest)
+        // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
+        if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
+          return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
         const reason = request.reason.trim() || 'The bot did not say why.'
         if (row.lane === 'run') {
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
@@ -2870,7 +2901,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
-    if (!ENDED_ACTIVATION_STATUSES.has(row.status) || !row.scratch) return
+    if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    // Its browser tabs close too, and the bot's browser once nothing else uses it.
+    try {
+      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
+    } catch (error) {
+      console.warn('the bot browser could not let go of an activation', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (!row.scratch) return
     try {
       rmSync(row.scratch, { recursive: true, force: true })
     } catch (error) {
@@ -3690,7 +3728,8 @@ function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermission
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':
       if (call.kind === 'builtin') return { tool: call.tool }
-      return isNeutralTool(wall.tool) || BOT_APP_TOOLS.has(wall.tool) ? { tool: wall.tool } : undefined
+      // A browser tool asks for the browser as a whole.
+      return isNeutralTool(wall.tool) || BOT_APP_TOOLS.has(botGrantTool(wall.tool)) ? { tool: botGrantTool(wall.tool) } : undefined
     default: return undefined
   }
 }

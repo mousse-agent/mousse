@@ -8,7 +8,9 @@ import type {
   BrowserActionResult,
   BrowserObservation,
   BrowserSessionRecord,
+  BrowserHumanInput,
   BrowserTab,
+  BrowserViewerFrame,
   BrowserWaitCondition,
   BrowserWorkerResponse
 } from '../../../shared/browser/types'
@@ -269,6 +271,30 @@ export class BrowserSessionManager {
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
     return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
+  }
+
+  /**
+   * A live picture of a managed tab for a person watching (`BrowserViewerFrame`), with the agent
+   * cursor. Host-side only: it is no tool, takes no refs and is never shown to a model.
+   */
+  async frame(context: BrowserToolContext, input: { sessionId: string; tabId?: string; maxWidth?: number }): Promise<BrowserViewerFrame> {
+    this.authorize(context, undefined, 'browser.observe', 'read', input)
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser session has viewer frames' })
+    const result = await this.call(context.execution.profileId, 'frame', {
+      sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.maxWidth ? { maxWidth: input.maxWidth } : {})
+    }, this.signal(context))
+    return result as BrowserViewerFrame
+  }
+
+  /** A person's input while they hold a managed session (`control` as human). */
+  async humanInput(context: BrowserToolContext, input: { sessionId: string; tabId?: string; input: BrowserHumanInput }): Promise<void> {
+    this.authorize(context, undefined, 'browser.action', 'external', input)
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
+    await this.call(context.execution.profileId, 'human.input', {
+      sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, input: input.input, ...(input.tabId ? { tabId: input.tabId } : {})
+    }, this.signal(context))
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {

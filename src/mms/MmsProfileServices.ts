@@ -48,6 +48,7 @@ import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
+import { BotBrowsers } from './bots/browser/BotBrowsers'
 import { botFilesFolder } from './bots/grants/compile'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
@@ -272,6 +273,8 @@ export class MmsProfileServices {
   readonly personalBots: BotEngine | null
   /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
   readonly botModels: BotModelChooser
+  /** Each bot's own browser (`bots.browser.*`, the browser tools of a bot with "use the browser"). */
+  readonly botBrowsers: BotBrowsers
   private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
@@ -589,6 +592,19 @@ export class MmsProfileServices {
       chipContext: (ctx) => ({ filesFolder: botFilesFolder(homeDir, ctx.botId), home: homedir() })
     })
     let botMemory: BotMemoryStore | undefined
+    // Each bot's own browser: a managed Chromium session on a profile of its own, apart from the owner's tabs.
+    const botBrowsers = new BotBrowsers({
+      profileId: this.profileId,
+      browser: () => {
+        try { return this.platform.browser } catch { return undefined }
+      },
+      homeThread: (botId) => {
+        const entry = this.botStore?.registry(botId)
+        return entry && !entry.deletedAt ? entry.homeThreadId ?? undefined : undefined
+      }
+    })
+    this.botBrowsers = botBrowsers
+    this.platform.onDispose(() => botBrowsers.dispose())
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
@@ -639,7 +655,8 @@ export class MmsProfileServices {
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
-      knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true)
+      knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
+      browser: botBrowsers
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
       const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })

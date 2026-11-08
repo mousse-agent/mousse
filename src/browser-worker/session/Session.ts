@@ -12,11 +12,13 @@ import type {
   BrowserObservation,
   BrowserSessionRecord,
   BrowserTab,
+  BrowserViewerFrame,
   BrowserWaitCondition,
   BrowserWorkerRequest
 } from '../../shared/browser/types'
+import { AGENT_CURSOR_GLIDE_MS, agentCursorFor, agentCursorLive, type BrowserAgentCursor } from '../../shared/browser/agentCursor'
 import { imagePointToViewport } from '../../shared/browser/geometry'
-import { validateBrowserActionRequest, validateBrowserWait } from '../../shared/browser/validation'
+import { validateBrowserActionRequest, validateBrowserHumanInput, validateBrowserWait } from '../../shared/browser/validation'
 import { ScopedArtifactWriter } from '../artifacts'
 import { launchManagedChrome, type LaunchedChrome } from '../cdp/launch'
 import { fail } from '../errors'
@@ -27,7 +29,7 @@ import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/Re
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
+import { dispatchAction, dispatchHumanInput, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../util'
@@ -99,6 +101,8 @@ export class ManagedSession {
   private downloadDir = ''
   private downloadNames = new Map<string, string>()
   private downloadStates = new Map<string, 'inProgress' | 'completed' | 'canceled' | 'interrupted'>()
+  /** Where the agent last acted (`agentCursor.ts`): held here, drawn by viewers over `frame()`, never in the page. */
+  private cursor: BrowserAgentCursor | undefined
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -581,6 +585,7 @@ export class ManagedSession {
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       const target = await this.resolveActionTarget(request, tab)
       if (abort.signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
+      await this.glideCursor(request, tab, target, abort.signal)
       this.inFlight.dispatched = true
       dispatched = true
       this.journal.append({
@@ -598,7 +603,11 @@ export class ManagedSession {
         await waitForLoad(this.requireChrome().cdp, tab.cdpSessionId, request.timeoutMs, abort.signal)
         this.refs.invalidateTab(tab.publicId)
       }
-      if (request.action.type === 'drag') await new Promise((resolve) => setTimeout(resolve, 100))
+      if (request.action.type === 'drag') {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        // The cursor ends where the drag dropped.
+        if (this.cursor && target && 'from' in target) this.cursor = { ...this.cursor, x: target.to.point.x, y: target.to.point.y, at: this.clock().getTime() }
+      }
       if (request.action.type === 'fill' && target && !('from' in target) && !target.secret) {
         const value = await readControlValue(this.requireChrome().cdp, target.cdpSessionId, target.objectId, abort.signal)
         if (value.value !== request.action.text) fail('not_actionable', 'Fill did not stick')
@@ -650,6 +659,69 @@ export class ManagedSession {
     }
   }
 
+  /**
+   * The agent cursor moves to the resolved target and glides there for a moment before the input is
+   * sent, so a person watching sees where the agent acts. Cancelling meanwhile sends nothing.
+   */
+  private async glideCursor(request: BrowserActionRequest, tab: TabState, target: ActionableTarget | { from: ActionableTarget; to: ActionableTarget } | undefined, signal: AbortSignal): Promise<void> {
+    const point = target ? ('from' in target ? target.from.point : target.point) : undefined
+    const viewport = this.observations.get(request.observationId)?.viewport
+    const cursor = agentCursorFor(request.action, point, { width: viewport?.cssWidth ?? 1280, height: viewport?.cssHeight ?? 720 }, this.clock().getTime(), tab.publicId)
+    if (!cursor) return
+    this.cursor = cursor
+    try {
+      await sleep(AGENT_CURSOR_GLIDE_MS, signal)
+    } catch {
+      fail('cancelled', 'Action cancelled before dispatch')
+    }
+  }
+
+  /**
+   * A live picture of a tab for a person watching (a bot's browser view): a JPEG of the visible
+   * viewport, and the agent cursor while it is recent. Not an observation: no refs, no artifact, and
+   * nothing a model reads.
+   */
+  async frame(params: Record<string, unknown>): Promise<BrowserViewerFrame> {
+    const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
+    const cdp = this.requireChrome().cdp
+    const metrics = await cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+    const visual = metrics.cssVisualViewport ?? {}
+    const width = visual.clientWidth && visual.clientWidth > 0 ? visual.clientWidth : 1280
+    const height = visual.clientHeight && visual.clientHeight > 0 ? visual.clientHeight : 720
+    const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, 1920) : 960
+    const scale = Math.min(1, maxWidth / width)
+    // The clip is in page coordinates: the visible viewport starts at the scroll offset.
+    const shot = await cdp.send<{ data: string }>('Page.captureScreenshot', {
+      format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
+      clip: { x: visual.pageX ?? 0, y: visual.pageY ?? 0, width, height, scale }
+    }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
+    const now = this.clock()
+    const cursor = this.cursor?.tabId === tab.publicId && agentCursorLive(this.cursor, now.getTime()) ? this.cursor : undefined
+    return {
+      tabId: tab.publicId, url: tab.url, title: boundText(tab.title, 512), data: shot.data, mimeType: 'image/jpeg',
+      width: Math.round(width * scale), height: Math.round(height * scale), viewport: { width, height },
+      capturedAt: nowIso(this.clock), ...(cursor ? { cursor } : {})
+    }
+  }
+
+  /** A person's input while they hold the session (`control.take` as human): trusted input on the tab. */
+  async humanInput(params: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: true }> {
+    if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
+    if (params.controlLeaseId !== this.controlLeaseId) fail('human_controlled', 'Control lease was replaced')
+    const input = validateBrowserHumanInput(params.input)
+    const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
+    const cdp = this.requireChrome().cdp
+    if (input.kind === 'navigate') await navigateAndWaitForLoad(cdp, tab.cdpSessionId, input.url, 15_000, signal)
+    else if (input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload') {
+      await dispatchAction(cdp, tab.cdpSessionId, { type: input.kind }, undefined, signal)
+      await waitForLoad(cdp, tab.cdpSessionId, 15_000, signal)
+    } else await dispatchHumanInput(cdp, tab.cdpSessionId, input, signal)
+    // What the person did may change the page under any ref the agent holds.
+    this.refs.invalidateTab(tab.publicId)
+    this.touch()
+    return { ok: true }
+  }
+
   handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | unknown {
     switch (method) {
       case 'session.close': return this.close()
@@ -665,6 +737,8 @@ export class ManagedSession {
       case 'human.act':
         if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
         return this.trackOp(signal, (opSignal) => this.act(params, opSignal, true))
+      case 'frame': return this.trackOp(signal, () => this.frame(params))
+      case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
       case 'control.take': return this.takeControl(params.owner === 'human' ? 'human' : 'agent')
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))

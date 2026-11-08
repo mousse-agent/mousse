@@ -157,7 +157,7 @@ export class BrowserBroker {
       profileId: validated.profileId,
       method: validated.method,
       sessionId: typeof validated.params.sessionId === 'string' ? validated.params.sessionId : undefined,
-      url: typeof validated.params.url === 'string' ? validated.params.url : undefined,
+      url: typeof validated.params.url === 'string' ? validated.params.url : humanNavigation(validated),
       action: validated.method === 'act' ? (validated.params.action as never) : undefined
     })
     if (!decision.allowed) {
@@ -529,4 +529,11 @@ async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: numbe
       }
     }
   }
+}
+
+/** The page a person's input goes to (`human.input` navigate): the policy checks it like an agent's. */
+function humanNavigation(request: BrowserWorkerRequest): string | undefined {
+  if (request.method !== 'human.input') return undefined
+  const input = request.params.input as { kind?: unknown; url?: unknown } | undefined
+  return input?.kind === 'navigate' && typeof input.url === 'string' ? input.url : undefined
 }

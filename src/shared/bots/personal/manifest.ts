@@ -1,3 +1,4 @@
+import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { DEFAULT_BOT_ACTIVE_MS, folderAccess, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_MEMORY_TOOLS } from './memory'
@@ -25,14 +26,37 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
 /**
- * The Mousse app tools a bot may be granted: ones that read the web, and the bot's own tools.
- * Every other app tool starts, wakes, writes or reads other threads (delegation, forks, queues,
- * merge-backs), acts in the owner's name, or asks a person, so it would run work outside the grant.
- * Consults (6c-2) are the way a bot uses other threads. The skill tools come with granted skills.
+ * "Use the browser": one permission for every browser tool, asked for once and remembered. The
+ * grant names it alone; `compileBotThread` turns it into the browser tools, which drive the bot's
+ * own browser (`src/mms/bots/browser/`), never the owner's tabs or another thread's.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set(BOT_DEFAULT_APP_TOOLS)
+export const BOT_BROWSER_PERMISSION = 'browser'
+
+/**
+ * The browser tools a bot with the browser gets. `browser_request_human` is not one: a bot asks its
+ * owner in its reply, and the owner takes over from the bot's browser view.
+ */
+export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOMATION_TOOLS.filter((tool) => tool !== 'browser_request_human')
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web, its own browser, and the
+ * bot's own tools. Every other app tool starts, wakes, writes or reads other threads (delegation,
+ * forks, queues, merge-backs), acts in the owner's name, or asks a person, so it would run work
+ * outside the grant. Consults (6c-2) are the way a bot uses other threads. The skill tools come
+ * with granted skills.
+ */
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION])
 
 const OWN_APP_TOOLS: ReadonlySet<string> = new Set(BOT_OWN_APP_TOOLS)
+const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
+
+/**
+ * The permission an app tool falls under: every browser tool is "use the browser" (`browser`), so
+ * an ask for `browser_act` is the same one ask; any other tool is its own.
+ */
+export function botGrantTool(tool: string): string {
+  return BROWSER_TOOLS.has(tool) ? BOT_BROWSER_PERMISSION : tool
+}
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
 export function isOwnBotAppTool(tool: string): boolean {
@@ -161,7 +185,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   const tools = new Set(granted.tools)
   for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool, wanted.workspace))
   const appTools = new Set(granted.appTools)
-  for (const tool of wanted.appTools) if (!appTools.has(tool)) lines.push({ kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` })
+  for (const tool of wanted.appTools) if (!appTools.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   const skills = new Set(granted.skills)
@@ -187,7 +211,7 @@ export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   const lines: BotPermissionLine[] = []
   for (const [root, access] of foldersOf(manifest.workspace)) lines.push(workspaceLine(root, access))
   for (const tool of manifest.tools) lines.push(toolLine(tool, manifest.workspace))
-  for (const tool of manifest.appTools) lines.push({ kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` })
+  for (const tool of manifest.appTools) lines.push(appToolLine(tool))
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
   for (const skill of manifest.skills) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
   for (const key of BUDGET_KEYS) if (manifest.budget[key] !== undefined) lines.push(budgetLine(key, manifest.budget[key]))
@@ -221,6 +245,11 @@ function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPe
   const folders = foldersOf(workspace).filter(([, access]) => !WRITING_TOOLS.has(tool) || access === 'write').map(([root]) => root)
   if (!folders.length) return { kind: 'tool', text: `${TOOL_WORDS[tool]} (no folder allows it)` }
   return { kind: 'tool', text: `${TOOL_WORDS[tool]} in ${folders.join(', ')}` }
+}
+
+/** An app tool in plain words: the browser by what it is, any other tool by its name. */
+function appToolLine(tool: string): BotPermissionLine {
+  return { kind: 'app_tool', text: tool === BOT_BROWSER_PERMISSION ? 'Use the browser' : `Use the Mousse tool \`${tool}\`` }
 }
 
 function workspaceLine(root: string, access: 'read' | 'write'): BotPermissionLine {

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -41,6 +41,8 @@ export interface BotPermissions {
    * writable beside the roots like scratch; never one of `roots`, so it is never listed as a permission.
    */
   workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string } | null
+  /** "Use the browser": `appTools` holds the browser tools, on the bot's own browser. */
+  browser?: true
 }
 
 export interface CompileInput {
@@ -142,9 +144,11 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const budget: NonNullable<BindPolicy['budget']> = { maxWallMs: deadlineMs }
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
-  // Granted skills come with the skill tools that list and load them.
+  // Granted skills come with the skill tools that list and load them; the browser is its tools.
+  const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
   const appTools = [...new Set([
-    ...manifest.appTools,
+    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION),
+    ...(browser ? BOT_BROWSER_TOOLS : []),
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(input.botTools?.escalate ? ['escalate'] : []),
     ...(input.botTools?.consult ? ['consult'] : []),
@@ -166,6 +170,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
       appTools,
       mcp,
       skills: [...new Set(manifest.skills)].sort(),
+      ...(browser ? { browser: true as const } : {}),
       workspace: manifest.workspace || files !== undefined
         ? {
             roots: manifest.workspace ? manifest.workspace.roots.filter((root) => real(root) !== files) : [],
