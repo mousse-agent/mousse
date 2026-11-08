@@ -14,6 +14,14 @@ export interface ComposerWorkspace {
   node?: NodeId
   /** With `node`: the project this draft had on this computer, restored when it is picked again. */
   localProjectId?: string
+  /** A private thread (`Thread.localOnly`): it runs on this computer only, so `node` is never set with it. */
+  localOnly?: boolean
+  /** The new chat deletes itself this long after it is created (`Thread.expiresAt`); absent: never. */
+  expiryMs?: number
+  /** With `expiryMs`: a run still going at expiry is stopped (`Thread.expiryStopsRun`). */
+  expiryStopsRun?: boolean
+  /** `expiryMs` came from the private-chat default in Settings, so turning Private off drops it. */
+  expiryFromPrivateDefault?: boolean
 }
 
 /**
@@ -31,18 +39,19 @@ export function isNewEmptyThread(
 
 /**
  * The workspace draft for the new chat, falling back to what the thread already has. A thread that never
- * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new chats in a worktree" setting.
+ * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new threads in a worktree" setting.
  */
 export function composerWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined,
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined,
   worktreeByDefault: boolean
 ): ComposerWorkspace {
   return draft ?? {
     projectId: thread?.projectId,
     worktreeEnabled: thread?.worktreeEnabled ?? worktreeByDefault,
     // An empty thread that was created on another computer is a chat for it.
-    ...(thread?.node ? { node: thread.node as NodeId } : {})
+    ...(thread?.node ? { node: thread.node as NodeId } : {}),
+    ...(thread?.localOnly ? { localOnly: true } : {})
   }
 }
 
@@ -52,7 +61,7 @@ export function composerWorkspaceFor(
  */
 export function localWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined,
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string; localOnly?: boolean } | undefined,
   worktreeByDefault: boolean
 ): ComposerWorkspace {
   const workspace = composerWorkspaceFor(draft, thread, worktreeByDefault)
@@ -74,7 +83,7 @@ export function workspaceOnThisComputer(
 ): ComposerWorkspace {
   const id = localProjectIdOf(workspace)
   const projectId = localProjects.some((project) => project.id === id) ? id : undefined
-  return { projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+  return { projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled), ...(workspace.localOnly ? { localOnly: true } : {}) }
 }
 
 /**
@@ -94,6 +103,52 @@ export function workspaceOnOtherComputer(
     node,
     ...(local ? { localProjectId: local } : {})
   }
+}
+
+/**
+ * The draft with Private turned on or off. A private thread runs on this computer only, so turning it on
+ * brings a draft that named another computer back here.
+ */
+export function workspaceWithPrivate(
+  workspace: ComposerWorkspace,
+  localOnly: boolean,
+  localProjects: readonly Pick<Project, 'id'>[],
+  /** Settings → Runs: when a new private chat deletes itself. Applied only when no expiry was picked. */
+  privateDefaultMs?: number
+): ComposerWorkspace {
+  if (!localOnly) {
+    const { localOnly: _off, expiryFromPrivateDefault, ...shared } = workspace
+    if (!expiryFromPrivateDefault) return shared
+    const { expiryMs: _ms, expiryStopsRun: _stop, ...kept } = shared
+    return kept
+  }
+  const here = workspace.node ? { ...workspaceOnThisComputer(workspace, localProjects), ...withExpiryOf(workspace) } : workspace
+  const withDefault = here.expiryMs === undefined && privateDefaultMs !== undefined ? { expiryMs: privateDefaultMs, expiryFromPrivateDefault: true } : {}
+  return { ...here, ...withDefault, localOnly: true }
+}
+
+/** The draft's expiry fields alone. */
+function withExpiryOf(workspace: ComposerWorkspace): Pick<ComposerWorkspace, 'expiryMs' | 'expiryStopsRun' | 'expiryFromPrivateDefault'> {
+  return {
+    ...(workspace.expiryMs !== undefined ? { expiryMs: workspace.expiryMs } : {}),
+    ...(workspace.expiryStopsRun ? { expiryStopsRun: true } : {}),
+    ...(workspace.expiryFromPrivateDefault ? { expiryFromPrivateDefault: true } : {})
+  }
+}
+
+/**
+ * The draft after picking a project in the toolbar: the worktree choice only counts with a project, and the
+ * computer, Private and the expiry stay. A project of this computer replaces the one remembered for another.
+ */
+export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined): ComposerWorkspace {
+  const { localProjectId: _remembered, ...rest } = workspace
+  return { ...rest, projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
+}
+
+/** The draft with an expiry picked by hand (`ms` from creation, or null for never). */
+export function workspaceWithExpiry(workspace: ComposerWorkspace, ms: number | null, stopsRun: boolean): ComposerWorkspace {
+  const { expiryMs: _ms, expiryStopsRun: _stop, expiryFromPrivateDefault: _default, ...rest } = workspace
+  return ms === null ? rest : { ...rest, expiryMs: ms, ...(stopsRun ? { expiryStopsRun: true } : {}) }
 }
 
 /**

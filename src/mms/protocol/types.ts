@@ -237,6 +237,7 @@ export const PROTOCOL_METHODS = [
   'threads.setModel',
   'threads.setWorktreeEnabled',
   'threads.setPermissionMode',
+  'threads.setExpiry',
   'threads.approvalRules',
   'threads.clearApprovalRules',
   'threads.approvalRequests',
@@ -295,10 +296,6 @@ export const PROTOCOL_METHODS = [
   'publish.start',
   'publish.status',
   'threads.inventory',
-  'threads.trash',
-  'threads.restore',
-  'threads.purge',
-  'threads.configureTrash',
   'tasks.list',
   'tasks.create',
   'tasks.update',
@@ -395,10 +392,6 @@ export const PROTOCOL_METHODS = [
   'publish.status',
   'publish.start',
   'threads.inventory',
-  'threads.trash',
-  'threads.restore',
-  'threads.purge',
-  'threads.configureTrash',
   'storage.policy',
   'storage.configure',
   'storage.reviewDismiss',
@@ -413,6 +406,7 @@ export const PROTOCOL_METHODS = [
   'files.write',
   'files.stat',
   'files.root',
+  'files.drives',
   'files.readAsset',
   'files.writeDirect',
   'files.search',
@@ -494,7 +488,8 @@ export const PROTOCOL_CAPABILITIES = [
 export type ProtocolEventType =
   | 'net.updated'
   | 'bots.changed'
-  | 'bots.escalation'
+  | 'bots.message'
+  | 'bots.activity'
   | 'run.event'
   | 'run.stop-requested'
   | 'run.steer-accepted'

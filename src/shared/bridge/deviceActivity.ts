@@ -133,9 +133,8 @@ const TASKS: Phrase = phrase('Changed a task', 'changed a task', 'changed {n} ta
 const APPLET: Phrase = phrase('Saved an applet', 'saved an applet', 'saved {n} applets')
 const WORKFLOW: Phrase = phrase('Worked on a workflow run', 'worked on a workflow run', 'worked on workflow runs {n} times')
 const RENAME: Phrase = phrase('Renamed a thread', 'renamed a thread', 'renamed {n} threads')
-const ORGANIZE: Phrase = phrase('Pinned or settled a thread', 'pinned or settled a thread', 'pinned or settled {n} threads')
-const DELETE: Phrase = phrase('Moved a thread to Recently deleted', 'moved a thread to Recently deleted', 'moved {n} threads to Recently deleted')
-const RESTORE: Phrase = phrase('Restored a thread', 'restored a thread', 'restored {n} threads')
+const ORGANIZE: Phrase = phrase('Pinned or archived a thread', 'pinned or archived a thread', 'pinned or archived {n} threads')
+const DELETE: Phrase = phrase('Deleted a thread', 'deleted a thread', 'deleted {n} threads')
 const THREAD_SETTING: Phrase = phrase('Changed a thread setting', 'changed a thread setting', 'changed thread settings {n} times')
 const FORK: Phrase = phrase('Forked a thread', 'forked a thread', 'forked {n} threads')
 const MERGE_BACK: Phrase = phrase('Merged a thread back', 'merged a thread back', 'merged {n} threads back')
@@ -224,12 +223,11 @@ const PHRASES: Record<string, Phrase> = {
   'threads.pin': ORGANIZE,
   'threads.settle': ORGANIZE,
   'threads.delete': DELETE,
-  'threads.trash': DELETE,
-  'threads.restore': RESTORE,
   'threads.regenerateTitle': RENAME,
   'threads.clearContext': CONTEXT,
   'threads.compact': CONTEXT,
   'threads.setWorktreeEnabled': THREAD_SETTING,
+  'threads.setExpiry': THREAD_SETTING,
   'thread.fork': FORK,
   'thread.mergeBack': MERGE_BACK,
   'actions.undoLatest': UNDO,

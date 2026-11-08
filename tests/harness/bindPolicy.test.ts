@@ -35,7 +35,7 @@ const BOT_POLICY: BindPolicy = {
 /** A bot authority as the bot engine registers it with a turn's app context. */
 const APP_BOT = { activationId: 'act-1', check: () => ({ ok: true }) } as unknown as BotAuthority
 
-function setup(options: { botAuthority?: boolean; gaps?: readonly string[]; startTurn?: ProviderAdapter['startTurn'] } = {}) {
+function setup(options: { botAuthority?: boolean; gaps?: readonly string[]; defaultGaps?: boolean; startTurn?: ProviderAdapter['startTurn'] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-bind-policy-'))
   homes.push(home)
   const hosts: AdapterHost[] = []
@@ -53,8 +53,8 @@ function setup(options: { botAuthority?: boolean; gaps?: readonly string[]; star
   const base = adapterDriver(adapter, { toolControl: 'exact' })
   const driver = options.botAuthority ? { ...base, botAuthority: () => true } : base
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: undefined }), write: () => {} } })
-  // Bot runtimes are refused while they lack a piece (`BOT_RUNTIME_GAPS`); these tests remove the switch unless they test it.
-  const harness = testHarness({ drivers: [driver], instances, profileHome: home, botRuntimeGaps: options.gaps ?? [] })
+  // Bot runtimes are refused while they lack a piece (`BOT_RUNTIME_GAPS`, empty since Bot Phase 1); a test may pass its own list.
+  const harness = testHarness({ drivers: [driver], instances, profileHome: home, ...(options.defaultGaps ? {} : { botRuntimeGaps: options.gaps ?? [] }) })
   const bearers: BearerTurn[] = []
   const mcp: McpAttachmentProvider = {
     bearerForTurn: (input) => {
@@ -175,11 +175,33 @@ describe('approvals answered by a bot authority (PR 6 6c-1)', () => {
   })
 
   it('fail closed: with bot runtimes still lacking a piece, a bot turn is refused at admission', async () => {
-    const s = setup({ botAuthority: true, gaps: BOT_RUNTIME_GAPS })
+    const gaps = ['a piece bots rely on']
+    const s = setup({ botAuthority: true, gaps })
     const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
-    await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['containment'], reason: botRuntimeGapReason(BOT_RUNTIME_GAPS) } })
+    await expect(s.harness.startTurn(s.spec(binding)).result).rejects.toMatchObject({ code: 'policy_unenforceable', details: { missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     expect(s.hosts).toHaveLength(0)
     expect(s.harness.checkPolicy('claude', { mode: 'default', origin: 'bot', ...BOT_POLICY, approve: 'host' })).toMatchObject({ ok: false, error: { missing: ['containment'] } })
+  })
+
+  it('no piece is missing any more (Bot Phase 1 §5.9): by default a runtime that holds bots admits a bot turn', async () => {
+    expect(BOT_RUNTIME_GAPS).toEqual([])
+    const s = setup({ botAuthority: true, defaultGaps: true })
+    const binding = await s.harness.bind(s.resolved(), { mode: 'agent', origin: 'bot', policy: { ...BOT_POLICY, approve: 'host' } })
+    await expect(s.harness.startTurn(s.spec(binding)).result).resolves.toMatchObject({ text: 'ok' })
+    expect(s.hosts).toHaveLength(1)
+  })
+
+  it('canHoldBot: a bot policy on a runtime that holds a bot authority, and nothing else', () => {
+    const policy = { mode: 'default' as const, origin: 'bot' as const, ...BOT_POLICY, approve: 'host' as const }
+    expect(setup({ botAuthority: true }).harness.canHoldBot('claude', policy)).toEqual({ ok: true })
+    // A runtime without a bot gate (Codex, an interactive Claude Code entry).
+    expect(setup().harness.canHoldBot('claude', policy)).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'], instanceId: 'claude' } })
+    // Not a bot policy, and an instance that does not exist.
+    const { authority: _authority, ...notBot } = policy
+    expect(setup({ botAuthority: true }).harness.canHoldBot('claude', notBot)).toMatchObject({ ok: false })
+    expect(setup({ botAuthority: true }).harness.canHoldBot('missing', policy)).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
+    // The rest of `checkPolicy` still applies (a gap, here).
+    expect(setup({ botAuthority: true, gaps: ['a piece'] }).harness.canHoldBot('claude', policy)).toMatchObject({ ok: false, error: { missing: ['containment'] } })
   })
 
   it('a wall-clock budget stops the attempt when it runs out', async () => {

@@ -36,18 +36,18 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
 
     // A profile that was already in use keeps its own rules and sees a notice; nothing new is on until it says so.
     const review = report.review
-    expect(review.legacy).toMatchObject({ inactive: 'off', captures: 'off', merged: 'false', deleted: 'true', configureCalls: 0 })
+    expect(review.legacy).toMatchObject({ inactive: 'off', captures: 'off', merged: 'false', configureCalls: 0 })
     expect(review.legacy.notice).toContain('Recommended cleanup rules are available')
     expect(review.legacy.notice).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
     // The notice comes first; then disk usage and cleanup, before the rules.
-    expect(review.legacy.order).toEqual(['storage-review-notice', 'storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'])
+    expect(review.legacy.order).toEqual(['storage-review-notice', 'storage-usage', 'storage-cleanup', 'storage-worktrees', 'storage-browser'])
     for (const text of ['Remove worktrees inactive for 30 days', 'Remove worktrees whose work is merged into the default branch', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
     expect(review.notNow).toEqual({ configureCalls: 0, notice: true })
     expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
     expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })
 
     // The saved values reach the controls, and every rule is a title and one short line.
-    expect(report.initial).toMatchObject({ trash: 'never', inactive: '30', captures: '30', deleted: 'true', merged: 'true', groups: [true, true, true, true, true], machineSelect: true, measuredAt: 'Measured 5m ago', order: ['storage-usage', 'storage-cleanup', 'storage-trash', 'storage-worktrees', 'storage-browser'] })
+    expect(report.initial).toMatchObject({ inactive: '30', captures: '30', merged: 'true', groups: [true, true, true, true], noTrashRules: true, machineSelect: true, measuredAt: 'Measured 5m ago', order: ['storage-usage', 'storage-cleanup', 'storage-worktrees', 'storage-browser'] })
     for (const row of report.initial.ruleRows) {
       expect(row.text, row.id).not.toContain('Never deletes')
     }
@@ -79,11 +79,8 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(policy.inactiveOff).toBeNull()
     expect(policy.inactive7).toBe(7)
     expect(policy.mergedOff).toBe(false)
-    expect(policy.deletedOff).toBe(false)
     expect(policy.captures90).toBe(90)
-    expect(policy.trash7).toMatchObject({ graceDays: 7, automaticPurge: true })
-    expect(policy.trash12.saved).toMatchObject({ graceDays: 12, automaticPurge: true })
-    expect(policy.otherRulesKept).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: 7, removeMerged: false }, browser: { captureDays: 90 } })
+    expect(policy.otherRulesKept).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 7, removeMerged: false }, browser: { captureDays: 90 } })
 
     // Preview cleanup: the plan first, nothing removed until it is confirmed, then the report.
     const cleanup = report.cleanup
@@ -162,16 +159,10 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.links.kind).toEqual({ scrolledTo: 'storage-worktrees', logsIsLabel: true })
     expect(report.links.remoteThread).toEqual({ select: 'nod_laptop:r1', dialog: false })
 
-    // Trash is reviewed from the sidebar: the row says so, and Settings has no trash dialog or other-threads list.
-    expect(report.trash.row).toContain('1 thread in trash, listed under Recently deleted.')
-    expect(report.trash.reviewButton).toBe(false)
-    expect(report.trash.otherThreads).toBe(false)
-
     // With every rule off, Preview cleanup says why it is disabled and asks for nothing.
     expect(report.noRule.disabled).toBe(true)
     expect(report.noRule.text).toContain('Turn on a cleanup rule to use this.')
-    expect(report.noRule.policy).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: false, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } })
-    expect(report.noRule.trash.automaticPurge).toBe(false)
+    expect(report.noRule.policy).toEqual({ schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: null, removeMerged: false }, browser: { captureDays: null } })
     expect(report.noRule.planCallsAdded).toBe(0)
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited?.catch(() => undefined) }

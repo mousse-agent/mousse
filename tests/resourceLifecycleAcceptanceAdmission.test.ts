@@ -8,6 +8,7 @@ import {
   withQueueMutationLock, withThreadDataMutationLock, type ThreadLeaseHandle
 } from '../src/mms/queue/ThreadExecutionLease'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
+import { archived } from './support/archived'
 
 describe('stale producer acceptance', () => {
   it.each([false, true])('rejects an already queued lease across trash (restore=%s) without recreating the old path', async (restore) => {
@@ -27,9 +28,9 @@ describe('stale producer acceptance', () => {
         .then((handle) => { queuedLease = handle; return { acquired: true, error: '' } },
           (error: Error) => ({ acquired: false, error: error.message }))
       releaseExecutionLeaseHandle(lease); lease = undefined
-      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
       expect(existsSync(path)).toBe(false)
-      if (restore) await f.rpc.request('threads.restore', { threadId: thread.id })
+      if (restore) await f.services.restoreThread(thread.id)
       await vi.advanceTimersByTimeAsync(250)
       const result = await pending
       expect(result.acquired, result.error || 'stale queued producer acquired ownership').toBe(false)
@@ -52,7 +53,7 @@ describe('stale producer acceptance', () => {
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'stale callbacks' })
       const path = f.services.threads.getThreadDir(thread.id)
-      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
       let called = false
       const staleWrite = () => { called = true; writeFileSync(join(path, 'late-output.txt'), 'late effect') }
       expect(() => withThreadDataMutationLock(path, staleWrite)).toThrow()
@@ -60,7 +61,7 @@ describe('stale producer acceptance', () => {
       expect(() => atomicWriteJsonSync(join(path, 'messages.json'), [])).toThrow()
       expect(called).toBe(false)
       expect(existsSync(path)).toBe(false)
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.restoreThread(thread.id)
       expect(existsSync(join(path, 'late-output.txt'))).toBe(false)
     } finally { await f.close() }
   })

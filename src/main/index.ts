@@ -24,6 +24,7 @@ import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { startupAppearanceArgument } from '../shared/startupAppearance'
+import { homeFolderArgument } from '../shared/homeFolderArgument'
 import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
 import { MAC_VIBRANCY } from './windowMaterial'
@@ -230,7 +231,7 @@ function startGuiApp(): void {
         // SharedArrayBuffer for this window and its workers only: webview guests and other
         // windows do not inherit it, unlike the app-wide `enable-features` switch.
         enableBlinkFeatures: 'SharedArrayBuffer',
-        additionalArguments: [startupAppearanceArgument(appearance)]
+        additionalArguments: [startupAppearanceArgument(appearance), homeFolderArgument(homedir())]
       }
     })
 
@@ -313,20 +314,27 @@ function startGuiApp(): void {
       // Local settings for window chrome only — not MMS ownership. Never
       // persist: this conf is loaded once and its scheduled section goes
       // stale; a whole-file write from here would stomp daemon-owned changes.
-      const config = MousseConfigStore.load(homeDir, { persist: false })
-      settings = new SettingsStore(config)
-      settings.set({ appearance: readStartupAppearance(homeDir, settings.get().appearance) })
+      // A retry after a failed first window reuses these: IPC is registered once
+      // with them, so new ones would leave IPC on a controller nothing starts.
+      if (!settings) {
+        const config = MousseConfigStore.load(homeDir, { persist: false })
+        settings = new SettingsStore(config)
+        settings.set({ appearance: readStartupAppearance(homeDir, settings.get().appearance) })
+      }
 
-      guiMms = new GuiMmsController({ homeDir })
+      if (!guiMms || !attachedBrowserHost) {
+        const controller = new GuiMmsController({ homeDir })
+        controller.on('error', (error: Error) => {
+          console.error('MMS connection failed:', error.message)
+        })
+        attachedBrowserHost = new AttachedBrowserHost({
+          binding: (senderId) => controller.getWindowBindingForSender(senderId),
+          request: (sender, method, params) => controller.requestAttachedBrowser(sender, method, params)
+        })
+        controller.setAttachedBrowserHost(attachedBrowserHost)
+        guiMms = controller
+      }
       const browserMms = guiMms
-      browserMms.on('error', (error: Error) => {
-        console.error('MMS connection failed:', error.message)
-      })
-      attachedBrowserHost = new AttachedBrowserHost({
-        binding: (senderId) => browserMms.getWindowBindingForSender(senderId),
-        request: (sender, method, params) => browserMms.requestAttachedBrowser(sender, method, params)
-      })
-      browserMms.setAttachedBrowserHost(attachedBrowserHost)
 
       if (!ipcRegistered) {
         registerFontIpc()

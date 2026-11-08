@@ -1036,6 +1036,10 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   color: var(--text-secondary);
 }
 
+.frosted-composer-value {
+  min-width: 4ch;
+}
+
 .acrylic-intensity-dial {
   -webkit-appearance: none;
   appearance: none;
@@ -1533,4 +1537,106 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   border-radius: 50%;
   background: var(--accent);
   flex-shrink: 0;
+}
+
+/* Notifications: per event, three icon toggles (In app, System, Sound) under one row of column
+   labels. On is selected the app's way, a filled background with the icon at full brightness;
+   off is the bare icon, faint. */
+.notification-row-controls {
+  display: inline-flex;
+  align-items: center;
+}
+
+.notification-channels {
+  display: grid;
+  grid-template-columns: repeat(3, var(--settings-control-h));
+  justify-items: center;
+  column-gap: 22px;
+}
+
+.notification-channel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--settings-control-h);
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  color: var(--text-primary);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.notification-channel svg {
+  opacity: 0.4;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.notification-channel:hover {
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.notification-channel:hover svg {
+  opacity: 0.75;
+}
+
+
+
+/* Selected exactly like a Segmented option (.settings-seg button.on). */
+.notification-channel.on {
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular);
+}
+
+/* A hovered row is lighter than the group surface; keep the selected tile above it, never sunken. */
+.settings-item:hover .notification-channel.on {
+  background: color-mix(in srgb, var(--ui-raised), var(--text-primary) 8%);
+}
+
+html[data-theme='high-contrast'] .notification-channel.on {
+  background: var(--ui-selected);
+  box-shadow: none;
+}
+
+.notification-channel.on svg {
+  opacity: 1;
+}
+
+.notification-channel:focus-visible {
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 2px;
+}
+
+/* The column labels, on the heading line, over their columns (the rows' inset is --space-16). */
+.notification-channel-labels {
+  margin-right: var(--space-16);
+  align-self: flex-end;
+}
+
+.notification-channel-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Send a test: an icon button by the event's name, shown once the row is hovered or focused. */
+.notification-try.notification-try {
+  width: var(--settings-control-h);
+  height: var(--settings-control-h);
+  margin: -4px 0 -4px 6px;
+  color: var(--ui-faint, var(--text-secondary));
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.notification-try:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.settings-item:hover .notification-try {
+  opacity: 1;
+}
+
+.notification-try:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--settings-focus);
+  outline-offset: 0;
 }

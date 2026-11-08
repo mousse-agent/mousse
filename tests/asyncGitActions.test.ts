@@ -141,9 +141,9 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
   }, 40_000)
 
   /**
-   * A `git` first on PATH that answers `seconds` late, once, to the status read retirement makes in `folder` before it
-   * snapshots the checkout (`status --porcelain=v1 --untracked-files=all`, which nothing else runs there). The command is
-   * written to the returned file when it starts, so the test can tell it ran.
+   * A `git` first on PATH that answers `seconds` late, once, to the status read a delete's purge preview makes in `folder`
+   * before it snapshots the checkout (`status --porcelain=v1 --untracked-files=all`, which nothing else runs there). The
+   * command is written to the returned file when it starts, so the test can tell it ran.
    */
   function slowRetirementStatus(folder: string, seconds: number): string {
     const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
@@ -166,23 +166,24 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     return started
   }
 
-  it('cleanup of a trashed thread holds only that thread: other requests answer while its retirement waits on Git', async () => {
+  it('deleting a thread holds only that thread: other requests answer while its purge waits on Git', async () => {
     const { ctx, thread, worktree, project } = await threadWithTurn()
     const other = mms.threads.createThread('Another thread', project.id)
+    mms.threads.setThreadSettled(thread.id, true)
     const started = slowRetirementStatus(worktree, 3)
     const begun = Date.now()
-    // Trash retires the thread's checkout in the same request; retirement's status read of it takes 3 seconds.
-    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: thread.id })
+    // The trash is a step of the delete; the purge preview after it reads the checkout's status, and that read takes 3 seconds.
+    const deleting = mms.deleteThreadForGood(thread.id, { human: true, discard: true })
     await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
     expect(readFileSync(started, 'utf8')).toMatch(/ status --porcelain=v1 --untracked-files=all$/m)
-    expect(await pending(trashing)).toBe(true)
+    expect(await pending(deleting)).toBe(true)
     await expect(dispatchMethod(ctx, 'threads.get', { threadId: other.id })).resolves.toBeDefined()
     await expect(dispatchMethod(ctx, 'git.status', { projectId: project.id })).resolves.toMatchObject({ status: { isRepo: true } })
     await expect(dispatchMethod(ctx, 'settings.get', {})).resolves.toBeDefined()
     expect(Date.now() - begun).toBeLessThan(2500)
-    expect(await pending(trashing)).toBe(true)
-    // Once Git answers, the trash finishes as usual, and the checkout went to the trash.
-    await expect(trashing).resolves.toMatchObject({ ok: true })
+    expect(await pending(deleting)).toBe(true)
+    // Once Git answers, the delete finishes as usual, and the checkout is gone with the thread.
+    await expect(deleting).resolves.toMatchObject({ state: 'purged' })
     expect(existsSync(worktree)).toBe(false)
   }, 40_000)
 

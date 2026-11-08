@@ -59,6 +59,8 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
   const [resolved, setResolved] = useState<ResolvedState>({ status: 'idle' })
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  // Bumped to read the pull request again, as after a start that found another thread already on it.
+  const [readAgain, setReadAgain] = useState(0)
   // The highlighted result, moved by the arrows from the field or within the list.
   const [active, setActive] = useState(0)
   const listId = useId()
@@ -102,7 +104,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
       current = false
       clearTimeout(timer)
     }
-  }, [projectId, reference])
+  }, [projectId, reference, readAgain])
 
   const visible = useMemo(() => (list.status === 'ready' ? filterPullRequests(list.items, query) : []), [list, query])
   const summary = resolved.status === 'ready' ? resolved.resolved.pullRequest : null
@@ -129,8 +131,8 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
       await openThreadFromPullRequest({ projectId, reference, allowClosed: button.allowClosed, allowDuplicate: button.allowDuplicate, ...(allowWorktreeConfig ? { allowWorktreeConfig } : {}) })
       onClose()
     } catch (error) {
-      // Another thread appeared since the pull request was read: the dialog shows it on the next read.
-      if (startErrorCode(error) === 'pull_request_thread_exists') setResolved({ status: 'idle' })
+      // Another thread appeared since the pull request was read: read it again, so the dialog lists that thread.
+      if (startErrorCode(error) === 'pull_request_thread_exists') setReadAgain((count) => count + 1)
       setStartError(startErrorMessage(error))
     } finally {
       setStarting(false)

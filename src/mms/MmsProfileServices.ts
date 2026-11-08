@@ -47,8 +47,18 @@ import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
+import { createBotActivitySink } from './bots/activity/BotActivitySink'
+import { botFilesFolder } from './bots/grants/compile'
+import { botInstructions } from './bots/instructions'
+import { createBotMemoryAdmin } from './bots/memory/admin'
+import { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
+import { createBotContextProvider } from './bots/memory/contextPack'
+import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
+import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduler } from './bots/triggers/scheduler'
 import type { BotStore } from './bots/store/BotStore'
+import { botScheduleLabel } from '../shared/scheduleLabel'
 import { RunStore } from './run/RunStore'
 import { jobPermissionRequest } from './scheduled/jobPermission'
 import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
@@ -84,6 +94,9 @@ import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingSer
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
+import { ThreadExpiryService } from './lifecycle/ThreadExpiryService'
+import { threadFolderExpired, threadFolderRoot } from './data/expiredThreads'
+import { isThreadExpired } from '../shared/threadExpiry'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
@@ -94,6 +107,8 @@ import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
+import { returnTrashedThreadsToArchive } from './lifecycle/trashToArchive'
+import { ThreadDeleter, type DeleteOptions } from './lifecycle/threadDelete'
 import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
@@ -112,10 +127,7 @@ import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
-  'threads.delete',
-  'threads.trash',
-  'threads.restore',
-  'threads.purge'
+  'threads.delete'
 ])
 
 /**
@@ -129,9 +141,12 @@ const LIFECYCLE_EXEMPT_METHODS = new Set([
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.usage',
-  // Deleting a bot trashes its home thread once its runs stopped; its own request is not other work.
-  'bots.definitions.delete'
+  // Deleting a bot archives its threads once its runs stopped; its own request is not other work.
+  'bots.delete'
 ])
+
+/** How often deleted bots past their 30 days are purged. */
+const BOT_SWEEP_EVERY_MS = 24 * 60 * 60_000
 
 /** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
 const IDLE_WAIT_METHODS = new Set(['speech.host.wait'])
@@ -170,6 +185,7 @@ export class MmsProfileServices {
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
+  private readonly threadDeletes: ThreadDeleter
   readonly undoRetention: UndoRetentionSweeper
   /** Watches the pull requests of threads that opted in and tells them about checks and reviews. */
   readonly pullRequestWatch: PullRequestWatchService
@@ -178,6 +194,8 @@ export class MmsProfileServices {
   readonly storageCleanup: StorageCleanupService
   /** Disk usage for Settings > Storage, measured in the background and cached. */
   readonly storageUsage: StorageUsageService
+  /** Deletes threads whose expiry passed (`Thread.expiresAt`). */
+  readonly threadExpiry: ThreadExpiryService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly agents: AgentRegistry
@@ -240,6 +258,8 @@ export class MmsProfileServices {
   readonly mcpRegistry: McpRegistry
   readonly mcpManager: McpManager
   readonly skillsRegistry: SkillsRegistry
+  /** Skill ids a bot's ask may name; refreshed when bots open. Unknown until the first discovery. */
+  private botKnownSkills: Set<string> | undefined
   readonly fileService: FileService
   readonly gitService: GitService
   readonly lineEditStats: LineEditStatsStore
@@ -250,8 +270,12 @@ export class MmsProfileServices {
   /** Personal bots (PR 6 §4). */
   /** Null when `bots.db` could not be opened: bots are unavailable, every other thread works. */
   readonly personalBots: BotEngine | null
+  /** The bots' hidden model choice; also lists the Settings bot model choices (`holdable`). */
+  readonly botModels: BotModelChooser
   private readonly botScheduler: BotScheduler | null
   private readonly botStore: BotStore | null
+  /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
+  private botSweepTimer: ReturnType<typeof setInterval> | null = null
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -329,6 +353,15 @@ export class MmsProfileServices {
     // The built-in instances' launch settings and sign-out live in their instance config (the
     // gateway's); the vendor services read them from there and save through `configure`.
     const launchOf = (instanceId: string) => () => this.harnessImpl?.launchFor(instanceId) ?? {}
+    // Bot processes (Bot Phase 1 §5.9): the runtimes report each one by pid and thread, and the
+    // profile's registry supervises it outside the daemon's loop. The drivers are built before
+    // `bots.db` opens, so the registry is bound later; a report before then (or without bots) is
+    // refused, and the runtime ends that process.
+    let botProcesses: BotProcessRegistry | undefined
+    const superviseBotProcess = (pid: number, threadId: string): void => {
+      if (!botProcesses) throw new Error(BOT_SUPERVISOR_MISSING)
+      botProcesses.attachThread(threadId, pid)
+    }
     const signedOutOf = (instanceId: string) => () => this.harnessImpl?.signedOutInMousse(instanceId) ?? false
     const saveLaunchOf = (instanceId: string) => async (patch: CliProviderConfigPatch) => {
       if (!this.harnessImpl) throw new Error('Providers are not ready yet')
@@ -476,7 +509,8 @@ export class MmsProfileServices {
             customModels: (instanceId) => decodeModelPrefs(config.getProvidersSection().modelPrefs?.[instanceId]).custom,
             registry: () => this.orchestrator.mcpToolRegistry(),
             // Mousse stays the only refresher of an OAuth sign-in; Pi gets the access token only.
-            oauth: piOAuthBroker(this.providerAuth)
+            oauth: piOAuthBroker(this.providerAuth),
+            onBotProcess: superviseBotProcess
           })
         }),
         claudeCodeDriver({
@@ -490,7 +524,8 @@ export class MmsProfileServices {
             secrets: this.integrationContext.secrets,
             pluginRoot: join(homeDir, 'providers', 'claude-subscription', 'skill-plugins'),
             env
-          })
+          }),
+          onLockedProcess: superviseBotProcess
         }),
         codexDriver({ builtIn: () => this.codex }),
         antigravityDriver({ builtIn: () => this.antigravity }),
@@ -532,10 +567,33 @@ export class MmsProfileServices {
     // A `bots.db` that cannot be opened (corrupt, newer schema) fails closed for bots only: the
     // profile opens, its other threads work, and bot methods report bots unavailable.
     const harness = this.harnessImpl
+    // Bots run on the owner's own entries: the separate entry an earlier build added for them goes.
+    void harness.removeRetiredBotRunner().catch((error) => console.warn('[bots] could not remove the old bot runner entry', { error: error instanceof Error ? error.message : String(error) }))
+    // The bots' hidden model (§5.6): the ready providers in this device's scope that can hold the bot.
+    const botModels = createBotModelResolver({
+      snapshots: () => harness.instances.snapshots({ kind: 'device' }),
+      models: (instanceId) => harness.catalog.models(instanceId, { kind: 'device' }),
+      hold: { canHoldBot: (instanceId, policy, model) => harness.canHoldBot(instanceId, policy, model) },
+      refresh: (instanceId) => harness.refreshPolicyFacts(instanceId),
+      // Settings → Models → Bots: blank is Automatic. A choice saved before instances names its provider.
+      defaultModel: () => {
+        const chosen = this.settings.get().botModel
+        const instanceId = chosen?.instanceId || chosen?.llmProvider
+        return instanceId && chosen?.model ? { instanceId, model: chosen.model } : undefined
+      }
+    })
+    this.botModels = botModels
+    // Activity chips (§5.8): live as `bots.activity` through the engine, rolled up into each message.
+    const botActivity = createBotActivitySink({
+      emit: (event) => this.personalBots?.publishActivity(event),
+      chipContext: (ctx) => ({ filesFolder: botFilesFolder(homeDir, ctx.botId), home: homedir() })
+    })
+    let botMemory: BotMemoryStore | undefined
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
-        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership),
+        // Every thread the bot engine makes is the bot's: no thread list or search shows it.
+        ensureExecutionThread: (key, name, projectId, ownership) => this.threads.ensureExecutionThread(key, name, projectId, ownership, { botOwned: true }),
         threadState: (threadId) => {
           const record = this.threads.lifecycleStore.get(threadId)
           if (record && record.state !== 'active') return 'trashed'
@@ -549,7 +607,8 @@ export class MmsProfileServices {
         for (let attempt = 0; ; attempt += 1) {
           await this.requests.waitForIdle(2_000, include).catch(() => {})
           try {
-            return await this.trashThread(threadId)
+            // Through the one delete: it is archived, then deleted for good; with unpublished work it stays in Archived.
+            return await this.deleteThreadForGood(threadId, { human: false, discard: false, internal: true })
           } catch (error) {
             const busy = error instanceof Error && 'code' in error && (error as { code?: unknown }).code === 'busy'
             if (!busy || attempt >= 2) throw error
@@ -562,12 +621,80 @@ export class MmsProfileServices {
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A published schedule is read at once; before the scheduler started this does nothing.
-      schedulesChanged: () => { void this.botScheduler?.wake() }
+      schedulesChanged: () => { void this.botScheduler?.wake() },
+      models: botModels,
+      activity: botActivity,
+      clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
+      archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
+      // Naming a new bot: one short call on the model its activations would use.
+      oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({
+        selection: { instanceId: selection.instanceId, llmProvider: selection.instanceId.split(':')[0] ?? '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) },
+        signal,
+        purpose: 'title',
+        system: 'Name a helper in 2–3 words.',
+        prompt,
+        maxChars: 60
+      })).text,
+      instructions: (bot) => botInstructions(bot),
+      scheduleLabel: (when) => botScheduleLabel(when),
+      providerLabel: (instanceId) => this.botProviderLabel(instanceId),
+      // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
+      knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true)
+    }, ({ store }) => {
+      // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
+      const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
+      botMemory = memory
+      const journal = createBotJournal({
+        store: memory,
+        readThread: (threadId) => this.threads.loadThreadData(threadId),
+        listThreads: () => botThreadsForCatchUp(store.captureThreads())
+      })
+      const context = createBotContextProvider({
+        store: memory,
+        journal,
+        situation: (botId) => this.botSituation(botId),
+        scheduleCreatedAt: (botId, scheduleId) => store.schedules(botId).find((schedule) => schedule.id === scheduleId)?.createdAt
+      })
+      const admin = createBotMemoryAdmin({
+        store: memory,
+        definition: (botId) => {
+          try { return this.personalBots?.definitionOf(botId) } catch { return undefined }
+        }
+      })
+      // Process control (WP1) over this `bots.db`: the engine arms each dispatch, the runtimes attach to it.
+      botProcesses = createBotProcessRegistry({ store })
+      return { journal, context, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
+    // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
+    if (opened) {
+      try {
+        this.threads.markBotOwned(opened.store.allThreads().map((thread) => thread.threadId))
+      } catch (error) {
+        console.warn('bot threads could not be marked', error instanceof Error ? error.message : String(error))
+      }
+    }
     this.personalBots = opened?.engine ?? null
+    if (this.personalBots) {
+      void this.skillsRegistry.discover()
+        .then((snapshot) => { this.botKnownSkills = new Set(snapshot.skills.map((skill) => skill.id)) })
+        .catch(() => undefined)
+    }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
+    if (personalBots && botMemory) {
+      const memory = botMemory
+      this.orchestrator.setBotAppTools({
+        bots: { host: personalBots.tools, activity: botActivity, models: botModels },
+        memory: {
+          activationOf: (threadId) => personalBots.tools.activationOf(threadId),
+          memory,
+          // A save's or forget's chip, on the caller's current dispatch.
+          onAppResult: (at, tool, result) => botActivity.onAppResult({ botId: at.botId, activationId: at.activationId, dispatchId: personalBots.activationOf(at.threadId)?.dispatchId ?? '' }, tool, result)
+        }
+      })
+    }
     // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
     if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
       if (event.type !== 'run.status') return
@@ -713,6 +840,15 @@ export class MmsProfileServices {
         this.bridge.currentIdentity.preparePrivateAudience(...args)
     })
     this.platform.onDispose(() => this.chatNetwork.close())
+    this.threadDeletes = new ThreadDeleter({
+      store: this.threads.lifecycleStore,
+      purge: { preview: (taskId) => this.lifecycle.cleanup.preview(taskId), purge: (input) => this.lifecycle.cleanup.purge(input) },
+      getThread: (threadId) => this.threads.getThread(threadId),
+      listThreads: () => this.threads.listAllThreads(),
+      trash: (threadId, operationId, expectedGeneration) => this.trashThread(threadId, operationId, expectedGeneration),
+      restore: (threadId) => this.restoreThread(threadId),
+      archive: (threadId) => this.archiveIfStartedByPerson(threadId)
+    })
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
@@ -801,9 +937,36 @@ export class MmsProfileServices {
       },
       configurationChanged: () => {
         this.config.reloadFromDisk()
-      }
+      },
+      expired: (record) => this.lifecycleRecordExpired(record)
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    this.threadExpiry = new ThreadExpiryService({
+      listThreads: () => this.threads.listAllThreads(),
+      // The ledger says an expiry purge began even once the thread's folder (with its expiry) is gone.
+      unfinished: (now) => this.threads.lifecycleStore.list()
+        .filter((record) => !record.parentTaskId && (record.state === 'trashed' || record.state === 'purge-started') &&
+          (record.purge?.expired === true || threadFolderExpired(record.location, now)))
+        .map((record) => record.taskId),
+      runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
+      stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
+      quiesce: (threadId) => {
+        // A question waiting for an answer and an open terminal are not a run: they end at expiry.
+        for (const task of this.lifecycleOwnedTasks(threadId)) {
+          this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
+          this.ptyManager.killByThreadId(task.taskId)
+        }
+      },
+      deleteForGood: (threadId) => this.deleteExpiredThread(threadId),
+      onRunEnd: (listener) => {
+        const handler = (event: ThreadEvent): void => {
+          if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) listener(event.threadId)
+        }
+        this.orchestrator.on('run-event', handler)
+        return () => { this.orchestrator.off('run-event', handler) }
+      },
+      log: (message, details) => console.warn(message, details)
+    })
     this.pullRequestWatch = new PullRequestWatchService({
       threads: this.threads,
       codeHost: this.gitService.codeHost,
@@ -829,7 +992,7 @@ export class MmsProfileServices {
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
-    )
+    , { deletedThreadsRuleRetired: true })
     this.storageCleanup = new StorageCleanupService({
       store: this.threads.lifecycleStore,
       threads: this.threads,
@@ -923,11 +1086,6 @@ export class MmsProfileServices {
     )
   }
 
-  /** The "Remove worktrees of deleted threads" rule; an unreadable policy keeps today's behaviour. */
-  private removesWorktreesWithDeletedThreads(): boolean {
-    try { return this.storagePolicy.policy().worktrees.removeWithDeletedThreads } catch { return true }
-  }
-
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
     const records = this.threads.lifecycleStore.list()
     const ids = new Set([taskId])
@@ -945,8 +1103,8 @@ export class MmsProfileServices {
       if (!ids.has(record.taskId)) return false
       let child = record
       while (child.taskId !== taskId) {
-        // Independently trashed children retain their own fence and restore choice.
-        if (child.state === 'trashed') return false
+        // Independently trashed children retain their own fence and restore choice; one deleted for good holds nothing.
+        if (child.state === 'trashed' || child.state === 'purged') return false
         if (child.state !== 'active')
           throw new Error(
             'Owned child lifecycle operation requires recovery before moving its parent'
@@ -971,6 +1129,39 @@ export class MmsProfileServices {
       : randomUUID()
   }
 
+  /**
+   * Deletes a thread whose expiry passed, for good, with its subagent threads (`ThreadDeleter`, with the expiry's
+   * intent: no archive first, and the purge has the expiry's authority). A delete a crash or a refusal cut short is
+   * finished the same way, also by the next start.
+   */
+  private async deleteExpiredThread(taskId: string): Promise<void> {
+    const record = await this.deleteThreadForGood(taskId, { human: false, discard: false, expiry: true })
+    if (record.state !== 'purged') throw new Error(record.blockedReason ?? `The delete stopped with the thread ${record.state}`)
+    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+  }
+
+  /**
+   * The expiry that lets a purge stand in for a person's Discard has passed for this thread: its own, or for a
+   * subagent its owner's (a subagent has no expiry of its own; see `Thread.expiresAt`).
+   */
+  private lifecycleRecordExpired(record: TaskLifecycleRecord): boolean {
+    const seen = new Set<string>()
+    const expired = (current: TaskLifecycleRecord | undefined): boolean => {
+      if (!current || seen.has(current.taskId)) return false
+      seen.add(current.taskId)
+      if (threadFolderExpired(current.location)) return true
+      // A subagent thread that is not owned by its root follows the root's expiry all the same.
+      const root = threadFolderRoot(current.location)
+      if (root) {
+        const listed = this.threads.getThread(root)
+        if (listed) return isThreadExpired(listed)
+        if (expired(this.threads.lifecycleStore.get(root))) return true
+      }
+      return expired(current.parentTaskId ? this.threads.lifecycleStore.get(current.parentTaskId) : undefined)
+    }
+    return expired(record)
+  }
+
   async trashThread(
     taskId: string,
     operationId?: string,
@@ -981,30 +1172,22 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
-    // Read while the thread is listed: its checkout's repository is in this folder.
-    const projectPath = resolveThreadProjectPath(this.projects, this.threads, taskId)
-    const record = await this.lifecycle.trash({
+    // The trash is a step of a delete: the purge that follows removes the checkout, so it is not retired first.
+    await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
-    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
-    // checkout to the hourly cleanup.
-    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
-        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
-          .catch(() => 'aborted' as const) === 'ready') {
-      try {
-        // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
-        const item = await this.storageCleanup.retireDeletedWorktree(taskId)
-        if (item?.outcome === 'removed') this.storageUsage.rescanSoon()
-      } catch (error) {
-        this.threads.lifecycleStore.update(taskId, (current) => {
-          current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
-        })
-      }
-    }
     return this.threads.lifecycleStore.require(taskId)
+  }
+
+  /**
+   * Deletes a thread and its subagent threads for good (`ThreadDeleter`): it must be archived, or be Mousse's own
+   * delete (`internal`), and only a person in the app may discard unpublished work.
+   */
+  deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
+    return this.threadDeletes.delete(taskId, options)
   }
 
   async restoreThread(
@@ -1013,11 +1196,14 @@ export class MmsProfileServices {
     expectedGeneration?: number
   ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
-    return this.lifecycle.restore({
+    const record = await this.lifecycle.restore({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId),
       expectedGeneration
     })
+    // Its delete is over: the consent recorded for it can never be used again.
+    if (record.state === 'active') this.threadDeletes.forgetIntent(taskId)
+    return record
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
@@ -1110,6 +1296,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.threadExpiry.stop()
     void this.pullRequestWatch.stop()
     void this.storageCleanup.stop()
     void this.storageUsage.stop()
@@ -1125,6 +1312,8 @@ export class MmsProfileServices {
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
     this.botScheduler?.stop()
+    if (this.botSweepTimer) clearInterval(this.botSweepTimer)
+    this.botSweepTimer = null
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -1137,10 +1326,72 @@ export class MmsProfileServices {
     return null
   }
 
+  /** The one-time move of the old trash to Archived (see `returnTrashedThreadsToArchive`). */
+  returnTrashToArchive(): ReturnType<typeof returnTrashedThreadsToArchive> {
+    return returnTrashedThreadsToArchive({
+      store: this.threads.lifecycleStore,
+      restore: (taskId) => this.restoreThread(taskId),
+      archive: (taskId) => this.archiveIfStartedByPerson(taskId)
+    })
+  }
+
+  /** Finishes the deletes a crash or a lock cut short (see `ThreadDeleter.finishCutShort`); run at start, after the move above is done. */
+  finishCutShortDeletes(skip?: ReadonlySet<string>): ReturnType<ThreadDeleter['finishCutShort']> {
+    return this.threadDeletes.finishCutShort(skip)
+  }
+
+  /** What a bot's context pack says about the present (bot-context.md §5.1): the owner's name, open asks and schedules. */
+  private botSituation(botId: string): { ownerName?: string; openAsks?: string[]; schedules?: Array<{ label: string; nextAt?: string }> } {
+    const engine = this.personalBots
+    const store = this.botStore
+    if (!engine || !store) return {}
+    const ownerName = this.settings.get().profile.username.trim()
+    const openAsks = store.openAsks(botId).filter((ask) => ask.messageId !== null).map((ask) => engine.chat.card(ask).title)
+    const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
+    return { ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}) }
+  }
+
+  /** A provider family in plain words for a bot's usage-limit pause ("your Claude usage limit"); never a model. */
+  private botProviderLabel(instanceId: string): string {
+    const driver = this.providerInstances.get(instanceId)?.driver
+    if (driver === 'claude') return 'Claude'
+    if (driver === 'codex') return 'ChatGPT'
+    const provider = driver === 'pi' ? instanceId.split(':')[1] : undefined
+    return provider ? this.providerAuth.getProviderDisplayName(provider) : ''
+  }
+
+  /**
+   * Archives a thread a person started, or a subagent thread whose parent chain is gone (it is then listed on its
+   * own). A subagent thread under its parent, or a thread another owns (a bot's), is left as it is.
+   */
+  private archiveIfStartedByPerson(taskId: string): void {
+    const thread = this.threads.getThread(taskId)
+    const root = thread?.lineage?.rootThreadId
+    if (!thread || thread.settledAt || (root && root !== taskId && this.threads.getThread(root)) || this.threads.lifecycleStore.get(taskId)?.parentTaskId) return
+    this.threads.setThreadSettled(taskId, true)
+  }
+
   async initialize(): Promise<void> {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
     await refreshWorktreeFolders()
     await this.lifecycle.recoverAll()
+    // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
+    // Only then is a thread still in the trash a delete that was cut short, and it is finished.
+    try {
+      const returned = await this.returnTrashToArchive()
+      if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
+      // While the move is still bringing threads back, those are left to it; everything else is finished now.
+      const finished = await this.finishCutShortDeletes(new Set(returned.waiting))
+      const kept = finished.filter((entry) => entry.outcome === 'kept')
+      if (kept.length) console.warn('some threads in the trash could not be finished or put back; trying again at the next start', { kept })
+    } catch (error) {
+      console.warn('threads in the trash could not be moved to Archived or finished', { error: error instanceof Error ? error.message : String(error) })
+    }
+    // Threads no longer wait in a trash, so its automatic emptying has nothing to do; a value saved before is turned off.
+    try {
+      const trash = this.lifecycle.cleanup.policy()
+      if (trash.automaticPurge) this.lifecycle.cleanup.configure({ ...trash, automaticPurge: false }, true)
+    } catch { /* An unreadable policy keeps the sweep off: it reads the same file and stops. */ }
     for (const thread of this.threads.listAllThreads()) {
       const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
       if (existsSync(episodes.path)) episodes.interruptOrphans()
@@ -1287,8 +1538,17 @@ export class MmsProfileServices {
 
   async start(): Promise<void> {
     await this.requests.run('profile-start', () => this.startOwned())
-    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended.
+    // Threads that expired, also while the daemon was not running, are deleted once the start's own request
+    // ended (a delete waits for the profile to be idle). Until then no turn starts in them: the orchestrator refuses.
+    this.threadExpiry.start()
+    // Bot deletions a crash or a refused trash left unfinished, once the start's own request ended,
+    // then every day: a deleted bot is purged 30 days after its delete, also while schedules are off.
     void this.personalBots?.finishDeletions().catch(() => {})
+    if (this.personalBots && !this.botSweepTimer) {
+      const bots = this.personalBots
+      this.botSweepTimer = setInterval(() => { void bots.sweepDeleted().catch(() => []) }, BOT_SWEEP_EVERY_MS)
+      this.botSweepTimer.unref?.()
+    }
   }
 
   private async startOwned(): Promise<void> {
@@ -1591,6 +1851,7 @@ export class MmsProfileServices {
       this.orchestrator.setRunEngine(null)
       this.orchestrator.setBotDispatcher(null)
       this.orchestrator.setBotThreads(null)
+      this.orchestrator.setBotAppTools(null)
       this.personalBots?.close()
       this.botStore?.close()
       this.runEngine.store.db.close()

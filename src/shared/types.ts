@@ -926,6 +926,9 @@ export interface AgentOrigin {
   hops?: number
 }
 
+/** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
+export const CONTEXT_DRAFT_CATEGORY = 'Draft message'
+
 export interface ContextUsageCategory {
   label: string
   color: string
@@ -941,6 +944,11 @@ export interface ContextUsageSnapshot {
   modelName: string | null
   source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
+  /**
+   * The agent runtime compacts this context itself, near its window (Pi), so the Compact context
+   * size does not apply. Absent: Mousse compacts it at that size.
+   */
+  compactedByRuntime?: boolean
 }
 
 export interface PtyCreateRequest {
@@ -1062,6 +1070,25 @@ export interface Thread {
   /** Set on a remote subagent: the computer and thread that run it. No turn runs on this computer. */
   runsOn?: ThreadRunsOn
   /**
+   * Set on a private thread: it stays on this computer. It is never listed, searched, opened or run from
+   * another of the user's computers or a phone, and everything it starts (subagents, threads its agents
+   * create, workflow agents) is private too. Fixed when the thread is created; absent means shared.
+   */
+  localOnly?: true
+  /**
+   * Set on a personal bot's home, run and context threads: the bot's chat in the Agents tab is how the
+   * owner sees them, so no client lists or searches them as threads.
+   */
+  botOwned?: true
+  /**
+   * When the thread deletes itself (ISO time): it, its subagents, worktree, checkpoints and attachments are
+   * deleted for good, not archived and not moved to Recently deleted. A subagent follows its root thread's.
+   * Absent: the thread never expires. Set when the thread is created or later, extended or removed before then.
+   */
+  expiresAt?: string
+  /** At expiry a run in progress is stopped; without it the thread waits for the run to end. */
+  expiryStopsRun?: true
+  /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
    * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own
@@ -1081,7 +1108,7 @@ export interface Thread {
   permissionMode?: PermissionMode
   /**
    * Whether this thread works in its own git worktree. `false` runs it on the project's
-   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * folder. Unset means no choice was recorded: the composer shows the "Start new threads in a
    * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
    * Toggleable from the new-chat input bar before the first message; locked once a
    * workspace is provisioned or the thread has started.

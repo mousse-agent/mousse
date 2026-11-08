@@ -26,6 +26,7 @@ import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWork
 import { newId } from '../../../../src/shared/net'
 import { cleanup, resources } from '../hub/fixture'
 import { repo, routedOwner } from './routedFixture'
+import { archived } from '../../../support/archived'
 
 afterEach(cleanup)
 
@@ -290,7 +291,8 @@ describe('the folder an editor opens for a thread', () => {
     const project = o.f.mms.projects.openProject(primary)
     const t = o.thread('Trashed', project.id, primary)
     expect(await o.ok('editor.folder', { threadId: t.id })).toMatchObject({ path: primary })
-    await o.ok('threads.trash', { threadId: t.id })
+    // The trash is not offered to another computer; the owner's own delete puts the thread there.
+    await o.f.mms.trashThread(archived(o.f.mms.threads, t.id))
     const refused = await o.call('editor.folder', { threadId: t.id })
     expect(refused).toMatchObject({ ok: false, error: { code: 'thread_not_found' } })
     expect(JSON.stringify(refused)).not.toContain(primary)

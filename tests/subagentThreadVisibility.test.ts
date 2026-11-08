@@ -90,6 +90,40 @@ describe('subagent threads in protocol thread lists', () => {
     }
   })
 
+  it('lists and searches no personal bot thread, also one made before bot threads were marked', async () => {
+    seed()
+    mms.threads.ensureExecutionThread('bot:b1', 'Alpha bot')
+    const legacy = mms.threads.ensureExecutionThread('bot:b1', 'Alpha bot', undefined, undefined, { botOwned: true })
+    expect(legacy.botOwned).toBe(true)
+    mms.threads.ensureExecutionThread('bot:b1:act:a1', 'Alpha bot run', undefined, { parentTaskId: legacy.id }, { botOwned: true })
+    for (const clientType of ['gui', 'cli'] as const) {
+      const client = await connect(clientType, false)
+      const { threads } = await client.request<{ threads: Thread[] }>('threads.list')
+      expect(names(threads), clientType).toEqual(clientType === 'gui' ? all : shown)
+      const { results } = await client.request<{ results: Array<{ threadName: string }> }>('threads.search', { query: 'alpha bot', limit: 10 })
+      expect(results.map((result) => result.threadName), clientType).toEqual([])
+    }
+    expect(mms.threads.getThread(legacy.id)?.botOwned).toBe(true)
+  })
+
+  it('pushes no activity for a personal bot\'s thread, so no window toasts or counts it', async () => {
+    const { parent } = seed()
+    const home = mms.threads.ensureExecutionThread('bot:b2', 'Bot home', undefined, undefined, { botOwned: true })
+    const gui = await connect('gui')
+    const seen: Array<{ type: string; threadId?: string; data: unknown }> = []
+    gui.onEvent((event) => {
+      if (event.type === 'activity' || event.type === 'activity.snapshot') seen.push({ type: event.type, threadId: event.threadId, data: event.data })
+    })
+    mms.threadRuntimes.setActivity(home.id, 'working')
+    mms.threadRuntimes.setActivity(parent.id, 'working')
+    await vi.waitFor(() => expect(seen.some((event) => event.type === 'activity' && event.threadId === parent.id)).toBe(true))
+    expect(seen.filter((event) => event.type === 'activity').map((event) => event.threadId)).toEqual([parent.id])
+    for (const event of seen.filter((entry) => entry.type === 'activity.snapshot')) expect(Object.keys((event.data as { activity: object }).activity)).not.toContain(home.id)
+    const snapshot = Object.keys((await gui.request<{ activity: object }>('activity.snapshot')).activity)
+    expect(snapshot).toContain(parent.id)
+    expect(snapshot).not.toContain(home.id)
+  })
+
   it('answers every thread mutation with the list the caller is allowed to see', async () => {
     const { parent } = seed()
     const gui = await connect('gui', false)
@@ -104,7 +138,10 @@ describe('subagent threads in protocol thread lists', () => {
     const reordered = await cli.request<{ threads: Thread[]; all: Thread[] }>('threads.reorder', { threadIds: mms.threads.listThreads().map((thread) => thread.id) })
     expect(names(reordered.threads)).toEqual([...shown, 'Beta'].sort())
     expect(names(reordered.all)).toEqual([...shown, 'Beta'].sort())
-    const deleted = await gui.request<{ threads: Thread[] }>('threads.delete', { threadId: created.threads.find((thread) => thread.name === 'Beta')!.id })
+    // A thread is archived before it is deleted.
+    const beta = created.threads.find((thread) => thread.name === 'Beta')!.id
+    await gui.request('threads.settle', { threadId: beta, settled: true })
+    const deleted = await gui.request<{ threads: Thread[] }>('threads.delete', { threadId: beta })
     expect(names(deleted.threads)).toEqual(all)
   })
 
@@ -190,5 +227,15 @@ describe('thread visibility helpers', () => {
     expect(projectEventFor('cli', other)).toBe(other)
     const bare: ProtocolEvent = { ...event, data: inventory }
     expect((projectEventFor('cli', bare).data as Thread[]).map((entry) => entry.id)).toEqual(['parent', 'orphan'])
+  })
+
+  it('never lists a personal bot\'s threads, for any client, in lists and pushed events', () => {
+    const withBot = [...inventory, thread('bot-home', { botOwned: true })]
+    expect(visibleThreadsFor({ clientType: 'gui' }, withBot).map((entry) => entry.id)).toEqual(['parent', 'child', 'orphan'])
+    expect(visibleThreadsFor({ clientType: 'cli' }, withBot).map((entry) => entry.id)).toEqual(['parent', 'orphan'])
+    const event: ProtocolEvent = { kind: 'event', sequence: 9, type: 'threads.updated', ts: at, data: { threads: withBot } }
+    expect((projectEventFor('gui', event).data as { threads: Thread[] }).threads.map((entry) => entry.id)).toEqual(['parent', 'child', 'orphan'])
+    expect((projectEventFor('cli', { ...event, data: withBot }).data as Thread[]).map((entry) => entry.id)).toEqual(['parent', 'orphan'])
+    expect((event.data as { threads: Thread[] }).threads).toHaveLength(4)
   })
 })

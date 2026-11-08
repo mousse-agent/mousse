@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pause } from '../../lib/icons'
 import { describePausedRun, pausedActionError, type PausedAction, type PausedRunText } from '../../lib/pausedRun'
 import { createPausedRunClient, type PausedRunClient } from '../../services/pausedRunClient'
@@ -88,21 +88,24 @@ export function PausedRunNotice({ threadId, client }: { threadId?: string | null
   }, [runId])
   // A different run (or none) starts clean: an old press or error is not about it.
   useEffect(() => { setBusy(null); setError(null) }, [runId])
+  // The run on screen now: a press made for an earlier run reports nothing when it settles.
+  const runIdRef = useRef(runId)
+  runIdRef.current = runId
 
-  const run = async (action: PausedAction, call: () => Promise<void>) => {
+  const run = async (action: PausedAction, pressedFor: string, call: () => Promise<void>) => {
     setBusy(action)
     setError(null)
     try { await call() }
-    catch (failure) { setError(pausedActionError(failure, action)) }
-    finally { setBusy(null) }
+    catch (failure) { if (runIdRef.current === pressedFor) setError(pausedActionError(failure, action)) }
+    finally { if (runIdRef.current === pressedFor) setBusy(null) }
   }
   useComposerNotice(pause ? pausedRunNotice({
     pause,
     now,
     busy,
     error,
-    onResume: () => void run('resume', () => actions.resumeNow(pause.runId, threadId ?? undefined)),
-    onEndPause: () => void run('cancel', () => actions.cancel(pause.runId, threadId ?? undefined)),
+    onResume: () => void run('resume', pause.runId, () => actions.resumeNow(pause.runId, threadId ?? undefined)),
+    onEndPause: () => void run('cancel', pause.runId, () => actions.cancel(pause.runId, threadId ?? undefined)),
     onDismissError: () => setError(null)
   }) : null)
   return null

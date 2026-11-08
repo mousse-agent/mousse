@@ -71,7 +71,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLim
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { codexTurnPolicy } from './childPolicy'
+import { codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from './childPolicy'
 import { STOP_GRACE_MS, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -88,6 +88,8 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import type { BotAuthority } from '../../../../shared/bots/personal/authority'
+import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
 
@@ -357,10 +359,22 @@ export type CodexChatInput = {
    */
   developerInstructions?: string
   /**
+   * Codex compacts its thread once it holds this many tokens (`model_auto_compact_token_limit`): the
+   * user's compaction threshold. Absent keeps Codex's own limit.
+   */
+  autoCompactTokens?: number
+  /**
    * `never`: every command and file change that needs approval is declined, and every question to
    * the user refused, without asking (`RunPolicy.approvals`).
    */
   approvals?: 'never'
+  /**
+   * A bot's turn: it runs in Codex's asking mode (`codexTurnPolicy` for Ask, whatever
+   * `permissionMode` says), with the user's own MCP servers switched off, and every approval Codex
+   * raises is answered by this authority (`botApprovals.ts`). Questions to the user are refused.
+   * Its `tools` and `workspace` set the sandbox: a bot with "run commands" writes in its own folders.
+   */
+  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace'>>
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -585,9 +599,14 @@ class TurnRun {
     return this.input.approvals === 'never'
   }
 
-  /** The thread's permission mode this turn runs in. */
+  /** The thread's permission mode this turn runs in; a bot's turn always asks. */
   get permissionMode(): PermissionMode {
-    return normalizePermissionMode(this.input.permissionMode)
+    return this.input.bot ? 'ask' : normalizePermissionMode(this.input.permissionMode)
+  }
+
+  /** A bot's turn: its approvals are answered by the bot's authority (`CodexChatInput.bot`). */
+  get bot(): CodexChatInput['bot'] {
+    return this.input.bot
   }
 
   get text(): string {
@@ -864,7 +883,7 @@ class TurnRun {
     const finished = notificationParams(notification, 'item/completed')
     const item = (started ?? finished)?.item
     if (!item) return
-    // Item ids are unique per thread only. A helper's own helpers are not tracked, so their spawns stay out.
+    // Item ids are unique per thread only. A helper's own helpers show no rows, so their spawns stay out.
     const event = item.type === 'collabAgentToolCall' || item.type === 'subAgentActivity' ? undefined : codexToolEvent(item, started ? 'start' : 'complete')
     if (!event) return
     const callId = `${threadId}:${item.id}`
@@ -1849,7 +1868,8 @@ export class CodexProviderService {
     const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
     if (tracker) {
       tracker.handle(notification)
-      owner?.helperNotification(threadId, notification)
+      // A helper's own helpers keep the run open and are stopped with it, but get no rows of their own.
+      if (!tracker.isNested(threadId)) owner?.helperNotification(threadId, notification)
       // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
       if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
@@ -1865,6 +1885,12 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
+        // A bot's turn: its authority answers, never a person.
+        if (run.bot) {
+          const asked = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
+          const answer = codexBotCommand(run.bot, { command: typeof asked === 'string' ? asked : undefined, cwd: approval.cwd ? resolve(run.cwd, approval.cwd) : run.cwd, reason: approval.reason ?? null })
+          return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/commandExecution/requestApproval'>
+        }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         // Full access never asks (Codex's own profile does not either; this is the backstop).
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
@@ -1893,6 +1919,15 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.bot) {
+          const listed = (run.item(approval.itemId) as { changes?: Array<{ path: string; kind?: { type?: string; move_path?: string | null } }> } | undefined)?.changes ?? []
+          const answer = codexBotFileChange(run.bot, {
+            changes: listed.map((change) => ({ path: change.path, kind: change.kind?.type ?? 'update', ...(change.kind?.move_path ? { movePath: change.kind.move_path } : {}) })),
+            cwd: run.cwd,
+            grantRoot: approval.grantRoot ?? null
+          })
+          return { decision: run.questionSignal.aborted ? 'cancel' : answer.decision } satisfies Result<'item/fileChange/requestApproval'>
+        }
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
@@ -1917,8 +1952,8 @@ export class CodexProviderService {
       case 'item/tool/requestUserInput': {
         const input = request.params as CodexServerRequestMap['item/tool/requestUserInput']['params']
         if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
-        // Nobody answers a run whose approvals are `never`.
-        if (run.refusesApprovals) throw new Error(QUESTIONS_REFUSED_MESSAGE)
+        // Nobody answers a run whose approvals are `never`, or a bot's turn.
+        if (run.refusesApprovals || run.bot) throw new Error(QUESTIONS_REFUSED_MESSAGE)
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,
@@ -2368,13 +2403,29 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
-    const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
+    const compactLimit = input.autoCompactTokens !== undefined && Number.isFinite(input.autoCompactTokens) && input.autoCompactTokens > 0
+      ? Math.round(input.autoCompactTokens) : undefined
+    // A bot's turn gets none of the user's own MCP servers: Codex would run their tools without asking.
+    let botOverrides: Record<string, boolean> | undefined
+    if (input.bot) {
+      botOverrides = codexBotMcpOverrides((await readCodexUserSetup(conn, cwd)).mcpServers)
+      signal.throwIfAborted()
+      if (!botOverrides) throw new AppError({ code: 'policy_unenforceable', message: CODEX_BOT_USER_MCP_UNREADABLE, errorInfo: { category: 'unavailable', retryable: false } })
+    }
+    const botSandbox = input.bot ? codexBotSandbox(input.bot) : undefined
+    const overrides = {
+      ...botOverrides,
+      ...(botSandbox ? codexBotSandboxConfig(botSandbox) : {}),
+      ...codexMcpConfigOverrides(input.mcp),
+      ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
+    } as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
-    const permissionMode = normalizePermissionMode(input.permissionMode)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.child, permissionMode)
-    // The policy a loaded thread was opened with: a change of child policy or permission mode reopens it
-    // (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}`
+    const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
+    // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
+    // and ignores them on a loaded one).
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
@@ -2485,7 +2536,7 @@ export class CodexProviderService {
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.child, current.permissionMode)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, current.permissionMode, input.bot ? codexBotSandbox(input.bot) : undefined)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
@@ -2603,7 +2654,7 @@ export class CodexProviderService {
         if (!undelivered.length) {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle: the thread's whole helper tree when the
-          // process lists it, the direct helpers seen in the thread's items otherwise. Stop interrupts
+          // process lists it, the helpers seen in the items of the thread and its helpers otherwise. Stop interrupts
           // them and ends the wait; a steer that arrives meanwhile starts a turn; helpers silent for
           // too long are abandoned.
           const treeMode = this.app?.conn === conn && this.app.tree === 'on'
@@ -2669,8 +2720,8 @@ export class CodexProviderService {
   }
 
   /**
-   * The wait for helpers: the helper tree the server lists when the process does that, else the direct
-   * helpers seen in the thread's items (master's tracking, also the fallback when the tree turns out
+   * The wait for helpers: the helper tree the server lists when the process does that, else the
+   * helpers seen in the items of the thread and its helpers (master's tracking, also the fallback when the tree turns out
    * unusable). Returns when they have settled or a steer wants a turn (nothing returned), or the note
    * of a cap.
    */

@@ -48,6 +48,7 @@ file; every other test uses made-up models, so adding a real model never touches
 | `family` | Optional | For example `opus`. Two models can share a release date, so a family tells them apart. |
 | `older` | Optional | `true` folds the model behind "Show more" on API routes. Agent routes ignore it: there, "older" means the agent does not list the model itself. |
 | `efforts` | Optional | Reasoning levels, with the same values as `LlmModelOption.efforts`. Used only when the route reports none for the model; in practice, older Claude Code models. |
+| `tier` | Optional | `frontier`, `standard` or `small`. Bots pick their hidden model by it: Fable and Opus are `frontier`, Sonnet `standard`, Haiku `small`. An unknown value is ignored. |
 
 ### Routes
 

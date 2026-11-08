@@ -13,7 +13,7 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
   try {
     await build({ entryPoints: [resolve('tests/fixtures/profile-footer/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.woff2': 'file' }, define: { 'process.env.NODE_ENV': '"development"' } })
     await build({ entryPoints: [resolve('tests/fixtures/profile-footer/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
-    writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>:root{--text-primary:#eee;--text-secondary:#aaa;--accent:#a99;--border:#333;--bg-secondary:#222;--titlebar-height:40px}body{margin:0;background:#111}#root{width:260px}.app{height:600px}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
+    writeFileSync(join(directory, 'index.html'), '<!doctype html><meta charset="utf-8"><style>:root{--text-primary:#eee;--text-secondary:#aaa;--accent:#a99;--border:#333;--bg-secondary:#222;--titlebar-height:40px}body{margin:0;background:#111}#root{width:260px}.app{width:260px;height:600px}</style><link rel="stylesheet" href="entry.css"><div id="root"></div><script src="entry.js"></script>')
     const env = { ...process.env, MOUSSE_PROFILE_FOOTER_DIRECTORY: directory }; delete env.ELECTRON_RUN_AS_NODE
     child = spawn(electron as unknown as string, [join(directory, 'main.mjs')], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
@@ -32,11 +32,12 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.defaultActions).toEqual(['Rename', 'Colour'])
     expect(report.renameDialog).toMatchObject({ title: 'Edit profile', value: 'Adithya', maxLength: 64, submit: 'Save profile name', submitDisabled: true, archive: false, focus: 'Profile name' })
     expect(report.updates).toEqual([{ id: 'prf_alpha', displayName: 'Adithya local' }])
-    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Roster', 'Groups', 'Recent'])
+    // The fixture has no chats and no bots, so Recent stays hidden.
+    expect(report.headings.map((heading: any) => heading.text)).toEqual(['Bots', 'Groups'])
     for (const heading of report.headings) expect(heading).toMatchObject({ transform: 'none', spacing: 'normal' })
     expect(report.fonts.ui).toMatch(/^Geist,/)
     expect(report.fonts.code).toMatch(/^"Geist Mono",/)
-    expect(report.fonts.terminal).toMatch(/^"Geist Mono",/)
+    expect(report.fonts.terminal).toMatch(/^['"]Geist Mono['"],/)
     expect(report.fonts.faces).toHaveLength(4)
     for (const face of report.fonts.faces) expect(face).toMatchObject({ status: 'loaded', weight: '100 900' })
 
@@ -44,18 +45,20 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.noAccountRequests).toEqual([])
     expect(report.single.requests).toEqual([])
     expect(report.single.menu).toMatchObject({ role: 'menu', label: 'Profiles', wide: false, heading: 'Profiles', identity: null, rows: ['New profile'], kebabs: ['Adithya profile actions'] })
-    expect(report.single.menu.box.width).toBe(330)
+    // The menu is as wide as the trigger, so it stays inside the sidebar.
+    expect(report.single.menu.box.width).toBe(report.single.menu.trigger.width)
+    expect(report.single.menu.box.left).toBe(report.single.menu.trigger.left)
     expect(report.single.menu.columns.map((column: any) => column.label)).toEqual(['Profiles'])
     expect(report.single.menu.profiles).toEqual([expect.objectContaining({ name: 'Adithya', checked: 'true', check: true, dotSize: 12 })])
     expect(report.single.actions).toEqual(['Rename', 'Colour'])
 
-    // Signed in: account on the left, profiles on the right, device count from the sign-in status.
+    // Signed in: account above profiles in this 260px sidebar, device count from the sign-in status.
     const { menu } = report.signedIn
     expect(menu).toMatchObject({ role: 'menu', label: 'Account and profiles', wide: true, heading: 'Profiles', rows: ['Account settings', 'Sign out', 'New profile'] })
-    expect(menu.box.width).toBe(460)
+    expect(menu.box.width).toBe(menu.trigger.width)
     expect(menu.columns.map((column: any) => column.label)).toEqual(['Account', 'Profiles'])
-    expect(menu.columns[0].box.left).toBeLessThan(menu.columns[1].box.left)
-    expect(menu.columns[0].box.top).toBe(menu.columns[1].box.top)
+    expect(menu.columns[0].box.left).toBe(menu.columns[1].box.left)
+    expect(menu.columns[0].box.top).toBeLessThan(menu.columns[1].box.top)
     expect(menu.identity).toEqual({ name: 'ada.lovelace', email: 'ada.lovelace@example.com', devices: '3 of 5 devices', avatar: 52, emptyAvatar: false })
     expect(menu.profiles.map((row: any) => [row.name, row.checked, row.check])).toEqual([['Adithya', 'true', true], ['Studio', 'false', false], ['Design', 'false', false]])
     expect(menu.kebabs).toEqual(['Adithya profile actions', 'Studio profile actions', 'Design profile actions'])
@@ -89,10 +92,10 @@ it('renders the bound profile footer and its two-column popover: stale replies, 
     expect(report.signedOut.menu.identity).toEqual({ avatar: 52, emptyAvatar: true })
     expect(report.signedOut.trigger).toBe('Sign in, Mousse profile: Adithya')
 
-    // Under 560px the columns stack, account first, at the single-column width.
+    // A narrow window keeps the menu at the trigger's width with the columns stacked, account first.
     const narrow = report.narrow
     expect(narrow.viewport).toBe(500)
-    expect(narrow.menu.box.width).toBe(330)
+    expect(narrow.menu.box.width).toBe(narrow.menu.trigger.width)
     expect(narrow.menu.columns[0].box.left).toBe(narrow.menu.columns[1].box.left)
     expect(narrow.menu.columns[0].box.top).toBeLessThan(narrow.menu.columns[1].box.top)
     expect(narrow.menu.columns.map((column: any) => column.label)).toEqual(['Account', 'Profiles'])

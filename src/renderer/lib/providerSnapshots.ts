@@ -45,6 +45,9 @@ interface ProviderSnapshotsState {
 export const useProviderSnapshotsStore = create<ProviderSnapshotsState>(() => ({ profileId: null, scopes: {}, operations: {}, prompts: {} }))
 
 const scopesByKey = new Map<string, ProviderScope>()
+/** The newest load of each scope: an older reply never replaces a newer one. */
+const latestLoads = new Map<string, number>()
+let loadCount = 0
 let listening = false
 
 function setScope(key: string, patch: Partial<ScopeState>): void {
@@ -56,13 +59,23 @@ function setScope(key: string, patch: Partial<ScopeState>): void {
 /** Fetches the snapshots of `scope`; a failure keeps the last snapshots and records the error. */
 export async function loadProviderSnapshots(scope: ProviderScope): Promise<void> {
   const key = scopeKey(scope)
+  const load = ++loadCount
+  const binding = currentProfileBinding()
+  latestLoads.set(key, load)
   scopesByKey.set(key, scope)
   setScope(key, { loading: true })
+  // A reply from before a profile switch, or one a newer load replaced, is dropped. The newest
+  // load still ends the loading state of the profile it was made in.
+  const settle = (patch: Partial<ScopeState>) => {
+    if (latestLoads.get(key) !== load) return
+    if (isCurrentProfileBinding(binding)) setScope(key, { ...patch, loading: false })
+    else if (useProviderSnapshotsStore.getState().profileId === binding.profileId) setScope(key, { loading: false })
+  }
   try {
     const snapshots = await window.mousse.providers.snapshots(scope)
-    setScope(key, { snapshots, error: undefined, loading: false })
+    settle({ snapshots, error: undefined })
   } catch (error) {
-    setScope(key, { error: ipcErrorLine(error) || String(error), loading: false })
+    settle({ error: ipcErrorLine(error) || String(error) })
   }
 }
 
@@ -262,6 +275,7 @@ function ensureProfile(profileId: string): void {
   // Operations of the other profile are not reported here any more: whoever waits on one stops.
   failRunningOperations('The profile changed before the sign-in finished.')
   scopesByKey.clear()
+  latestLoads.clear()
   useProviderSnapshotsStore.setState({ profileId, scopes: {}, operations: {}, prompts: {} })
 }
 
@@ -388,7 +402,8 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
   if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id }))
   const providers: PickerProvider[] = []
   for (const snapshot of sortInstances(snapshots)) {
-    if (!snapshot.enabled.effective) continue
+    // A locked entry runs bot turns only.
+    if (!snapshot.enabled.effective || snapshot.config?.profile === 'locked') continue
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
     const models = snapshot.models.entries
       .filter((model) => !model.hidden)
@@ -460,6 +475,21 @@ export function composerAutoModel(input: {
 }): PickerSelection | undefined {
   if (input.remote || input.threadModel || !input.profileDefault) return undefined
   return pickerOffers(input.profileDefault, input.providers) ? undefined : fallbackModel(input.providers)
+}
+
+/**
+ * The model the composer on this computer shows once settings are read: the thread's own, else the
+ * one it starts on by itself, else the profile default. Undefined when there is none yet (no default,
+ * providers still loading): the composer keeps the model it shows rather than reading "Select model".
+ */
+export function composerSelection<T extends PickerSelection>(input: {
+  threadModel: T | undefined
+  profileDefault: T
+  providers: readonly PickerProvider[]
+}): T | PickerSelection | undefined {
+  if (input.threadModel?.model) return input.threadModel
+  const auto = composerAutoModel({ remote: false, threadModel: undefined, profileDefault: input.profileDefault, providers: input.providers })
+  return auto ?? (input.profileDefault.model ? input.profileDefault : undefined)
 }
 
 /** Model ids hidden or starred per instance, from device snapshots (prefs are not per project). */

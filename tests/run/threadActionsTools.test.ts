@@ -92,6 +92,26 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     ['thread_interrupt', { threadId: 'target', runId: 'any' }]
   ]
 
+  describe('private threads (issue #672)', () => {
+    it('a shared thread\'s agent never reaches a private thread, and a private thread\'s agent never acts on a shared one', async () => {
+      const { call, denied, threads, host } = await world()
+      threads.set('target', thread('target', { localOnly: true }))
+      for (const [name, args] of ACTING) {
+        const error = await denied(call('manage', name, { ...args }))
+        expect(error!.code, name).toBe('mousse_scope_denied')
+        expect(error!.message, name).toMatch(/is not available to this credential/)
+      }
+      threads.set('target', thread('target'))
+      threads.set('caller', thread('caller', { localOnly: true }))
+      for (const [name, args] of ACTING) expect((await denied(call('manage', name, { ...args })))!.message, name).toMatch(/This is a private thread/)
+      expect(host.sendToThread).not.toHaveBeenCalled()
+      // Between two private threads nothing changes.
+      threads.set('target', thread('target', { localOnly: true }))
+      expect((await call('manage', 'thread_send', { threadId: 'target', content: 'hi' })).isError).toBeUndefined()
+      expect(host.sendToThread).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('the access level', () => {
     it.each(['lineage', 'read'] as const)('a credential granted %s is refused every tool that changes another thread, with no ledger row and no host call', async (level) => {
       const { call, denied, ledger, host } = await world({ level: 'manage' })
@@ -469,6 +489,29 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.sendToThread).not.toHaveBeenCalled()
       expect(host.steerRun).not.toHaveBeenCalled()
       expect(host.stopRun).not.toHaveBeenCalled()
+    })
+
+    it('another thread\'s agent never lists, searches or reads a bot\'s thread, marked or only registered', async () => {
+      const { call, denied, result, threads, runs } = await world({}, {
+        botRole: (id: string) => (id === 'target' ? 'activation' : undefined),
+        listThreads: () => [...threads.values()],
+        listProjects: () => [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }] as never,
+        searchThreads: (_query, _limit, options) =>
+          [...threads.values()].filter((found) => options?.allow?.(found) !== false).map((found) => ({ threadId: found.id, threadName: found.name, projectId: found.projectId, matchType: 'title' })) as never
+      })
+      threads.set('home', thread('home', { botOwned: true }))
+      const listed = (await result(call('manage', 'thread_list'))).threads.map((row: { id: string }) => row.id)
+      expect(listed.sort()).toEqual(['caller', 'elsewhere', 'loose'])
+      const found = (await result(call('manage', 'thread_search', { query: 'Thread' }))).results.map((hit: { threadId: string }) => hit.threadId)
+      expect(found.sort()).toEqual(['caller', 'elsewhere', 'loose'])
+      for (const threadId of ['target', 'home'])
+        for (const view of ['events', 'messages']) {
+          const error = await denied(call('manage', 'thread_read', { threadId, view }))
+          expect(error, `${threadId} ${view}`).toMatchObject({ code: 'mousse_scope_denied' })
+          expect(error!.message).toMatch(/belongs to a bot/)
+        }
+      // A bot's own turn still reads its own thread.
+      expect((await call('manage', 'thread_read', {}, { threadId: 'target', runId: runs.target })).isError).toBeUndefined()
     })
 
     it('a bot\'s own turn is held to its walls: a send, steer or Stop is refused although its grant says manage, and a bot is never granted above lineage in the first place', async () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { runRowAction, runSync } from '../src/renderer/components/git/gitPanelActions'
+import { runRowAction, runSync, whileFolder } from '../src/renderer/components/git/gitPanelActions'
 import { refreshGitStatus, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
 import type { SyncActivity } from '../src/renderer/components/git/gitPanelLogic'
 import type { GitFileChange, GitScope, GitStatusSnapshot } from '../src/shared/types'
@@ -281,5 +281,24 @@ describe('sync actions', () => {
     const { git } = install()
     await run({ action: 'fetch' }, thread)
     expect(git.fetch).toHaveBeenCalledWith(thread, { operationId: expect.any(String) })
+  })
+})
+
+describe('results of an earlier folder', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('drops a fetch result that arrives after the panel moved to another folder', async () => {
+    let release!: () => void
+    install({ fetch: vi.fn(() => new Promise((resolve) => { release = () => resolve({ status: repoStatus(), behindBefore: 0, behindAfter: 2 }) })) })
+    const folder = { current: PATH as string | null }
+    const seen: SyncActivity[] = []
+    const fetching = runSync(PATH, project, { action: 'fetch' }, whileFolder(folder, PATH, (activity: SyncActivity) => seen.push(activity)))
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    folder.current = '/repo/b'
+    release()
+    await fetching
+    expect(seen).toEqual([{ phase: 'running', action: 'fetch' }])
   })
 })

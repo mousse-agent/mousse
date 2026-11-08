@@ -2,6 +2,20 @@ import type { Thread, ThreadActivitySnapshot, ThreadActivityState } from './type
 
 type LineageThread = Pick<Thread, 'id' | 'lineage'>
 
+/**
+ * True for a private thread (`Thread.localOnly`) and for any subagent below one. The flag is written on
+ * every thread a private thread starts; the lineage root in `inventory` is a second check for a child
+ * written before it had the flag.
+ */
+export function isLocalOnlyThread(
+  thread: Pick<Thread, 'localOnly' | 'lineage'>,
+  inventory?: readonly Pick<Thread, 'id' | 'localOnly'>[]
+): boolean {
+  if (thread.localOnly === true) return true
+  const rootId = thread.lineage?.rootThreadId
+  return Boolean(rootId && inventory?.some((candidate) => candidate.id === rootId && candidate.localOnly === true))
+}
+
 /** True for a thread a parent thread started as a subagent. */
 export function isSubagentThread(thread: Pick<Thread, 'lineage'>): boolean {
   return thread.lineage?.relationship === 'subagent'

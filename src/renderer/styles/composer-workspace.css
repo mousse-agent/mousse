@@ -1,21 +1,22 @@
 .composer-workspace-toolbar {
+  /* The row is the composer card's top row, not a box of its own. The Segmented control
+     reads the settings control tokens, which live on .settings-page. */
+  --space-12: 12px;
+  --settings-control-h: 28px;
+  --settings-fs-small: 12.5px;
   display: flex;
   align-items: center;
-  gap: 18px;
-  margin: 0 10px -1px;
-  padding: 8px 14px 9px;
-  border: 1px solid color-mix(in srgb, var(--border) 60%, var(--text-secondary));
-  border-bottom: 0;
-  border-radius: 18px 18px 0 0;
-  background: rgba(var(--surface-strong-rgb), 0.72);
-  color: var(--text-primary);
-  font-size: 13px;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid var(--ui-line);
+  color: var(--text-secondary);
+  font-size: 12.5px;
   min-width: 0;
 }
 
 .composer-workspace-project,
-.composer-workspace-device,
-.composer-workspace-device-btn {
+.composer-workspace-device-btn,
+.composer-workspace-device-static {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -25,8 +26,8 @@
 .composer-workspace-project,
 .composer-workspace-device-btn {
   flex: 0 1 auto;
-  padding: 6px 8px;
-  margin-left: -8px;
+  height: 28px;
+  padding: 0 8px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -35,24 +36,22 @@
   cursor: pointer;
   max-width: 240px;
 }
+/* With only this computer the item is a muted label, not a button. */
+.composer-workspace-device-static { flex: 0 1 auto; height: 28px; padding: 0 8px; color: var(--text-secondary); }
 .composer-workspace-project span,
-.composer-workspace-device-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-workspace-device-btn span,
+.composer-workspace-device-static span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-workspace-project svg,
-.composer-workspace-device-btn svg { flex-shrink: 0; }
+.composer-workspace-device-btn svg,
+.composer-workspace-device-static svg { flex-shrink: 0; }
+.composer-workspace-project { color: var(--text-primary); }
 .composer-workspace-project:hover:not(:disabled),
 .composer-workspace-project.open,
 .composer-workspace-device-btn:hover:not(:disabled),
-.composer-workspace-device-btn.open { background: rgba(var(--surface-soft-rgb), 0.9); }
+.composer-workspace-device-btn.open { background: var(--ui-hover); }
 .composer-workspace-project:disabled,
 .composer-workspace-device-btn:disabled { opacity: 0.5; cursor: default; }
-.composer-workspace-device-btn { margin-left: 0; }
-.composer-workspace-device { white-space: nowrap; }
-.composer-workspace-device svg { flex-shrink: 0; }
-.composer-icon-btn.composer-workspace-worktree { margin-left: auto; flex-shrink: 0; }
-.composer-icon-btn.composer-workspace-worktree.active {
-  color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.16);
-}
+.composer-workspace-worktree { display: flex; margin-left: auto; flex-shrink: 0; }
 .composer-workspace-toolbar :focus-visible,
 .composer-workspace-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -89,6 +88,8 @@
 .composer-workspace-menu-item:disabled { opacity: 0.5; cursor: default; background: transparent; }
 .composer-workspace-menu-item[aria-checked='true'] { color: var(--accent); }
 .composer-workspace-menu-check { margin-left: auto; }
+.composer-workspace-menu-hint { color: var(--text-secondary); font-size: 12px; }
+.composer-workspace-menu-hint + .composer-workspace-menu-check { margin-left: 8px; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }
 .composer-workspace-menu-label { padding: 6px 10px 3px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
 

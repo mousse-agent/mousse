@@ -25,6 +25,7 @@ import {
   normalizeRunSettings,
   resolveContextCompactionTokens,
   resolveModelForMode,
+  settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
@@ -75,7 +76,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { createHash, randomUUID } from 'node:crypto'
@@ -97,6 +98,7 @@ import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnP
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
+import { botTurnOffers } from '../../shared/bots/personal/walls'
 import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
@@ -112,7 +114,7 @@ import { isRunningSubagent, type SubagentNoticeItem, type SubagentSummary } from
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { TranscriptAssembler } from '../run/transcript/TranscriptAssembler'
+import { TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -296,7 +298,7 @@ import {
 import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
+import { AppError, errorCauseText, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   clearNativeContext,
   compactMessagesAtSafeBoundary,
@@ -304,16 +306,19 @@ import {
   compactNativeContext,
   createNativeContext,
   appendNativeMessage,
-  DEFAULT_COMPACTION_RESERVE_TOKENS,
   estimateActiveContextTokens,
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
   normalizeNativeContext,
-  shouldCompactNativeContext,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
+import { isThreadExpired } from '../../shared/threadExpiry'
+
+/** What an agent in a private thread is told when it asks for work on another computer. */
+const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
 interface SnapshotFolder {
@@ -780,12 +785,14 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
 /**
- * A bot turn's preamble: the bot's role and instructions first, then Mousse's own. Bots that never
- * ask anyone run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
+ * A bot turn's preamble: the bot's role and instructions first, then its context pack (memory and
+ * history, built by Mousse and frozen for the activation, Bot Phase 1 §5.3.2), then Mousse's own.
+ * Bots that never ask anyone run their app tools with `approvals: 'never'`, so a tool that would
+ * ask is refused.
  */
-function withBotInstructions(instructions: string | undefined, preamble: string): string {
-  if (!instructions?.trim()) return preamble
-  return [`Your role and instructions:\n${instructions.trim()}`, preamble].filter(Boolean).join('\n\n')
+function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
+  const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
+  return parts.filter(Boolean).join('\n\n')
 }
 
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
@@ -1408,6 +1415,17 @@ export class OrchestratorService extends EventEmitter {
 
   setBotDispatcher(dispatcher: BotTurnDispatcher | null): void {
     this.botDispatcher = dispatcher
+  }
+
+  /**
+   * What the bots' own app tools reach (Bot Phase 1 §5.5, §5.6, §5.10): the engine's tool host, the
+   * activity chips, the model resolver, and the memory tools' host. Read at each call: `bots.db`
+   * opens after the app-tool registry is built. Null: the tools refuse.
+   */
+  private botAppTools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null = null
+
+  setBotAppTools(tools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null): void {
+    this.botAppTools = tools
   }
 
   /** Wakes the effect worker: a `turn.start` was written outside the orchestrator (a bot dispatch). */
@@ -3046,7 +3064,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; grants?: EffectiveAgentGrants }
+    input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     try {
@@ -3080,7 +3098,9 @@ export class OrchestratorService extends EventEmitter {
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
-    const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
+    // A bot's turn runs on its own instructions (`botInstructions`, in the preamble): Mousse's
+    // orchestration and applet guidance would point it at tools its grant never holds.
+    const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     return {
@@ -3093,13 +3113,13 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        sessionInstructions: turn.bot ? '' : sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
           usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
-        }))
+        }), input.botPreamble)
       })
     }
   }
@@ -3125,6 +3145,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A bot turn may use only its granted app tools; every other one is refused if called.
+      .filter((tool) => botTurnOffers(turn.bot, tool.name))
       // A run nobody answers does not offer the tools that wait for the user (they are refused if called).
       .filter((tool) => !unattendedRefusal(tool, turn))
       // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
@@ -3141,6 +3163,8 @@ export class OrchestratorService extends EventEmitter {
       host: this.mcpToolHost(),
       engine: this.requireRunEngine(),
       turns: this.appToolTurns,
+      bots: () => this.botAppTools?.bots,
+      botMemory: () => this.botAppTools?.memory,
       // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
       ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
     }).registry
@@ -3555,6 +3579,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: narrowPermissionMode(profileMode, callerMode),
       accessCeiling: narrowAgentAccess(this.effectiveAccess(options.accessLevel), LAUNCHED_THREAD_ACCESS_CEILING) ?? 'lineage',
       createdByThreadId: options.actor.threadId,
+      // An agent in a private thread only ever starts private threads.
+      ...(this.isLocalOnly(options.actor.threadId) ? { localOnly: true as const } : {}),
       actor: options.actor,
       request: input,
       firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' }
@@ -3615,7 +3641,8 @@ export class OrchestratorService extends EventEmitter {
       permissionMode: intent.permissionMode,
       // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
       createdByThreadId: intent.createdByThreadId,
-      accessCeiling: intent.accessCeiling
+      accessCeiling: intent.accessCeiling,
+      localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
     engine.store.appendEvent({
@@ -3944,6 +3971,19 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
+    // A thread whose expiry passed is being deleted: nothing queued or recovered starts in it.
+    if (this.isExpired(effect.threadId)) {
+      const { runId } = (effect.payload ?? {}) as { runId?: unknown }
+      if (typeof runId === 'string') {
+        this.markRun(runId, (engine, id) => {
+          if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'cancelled', { error: 'thread_expired' })
+        })
+        const entry = this.turnResults.get(runId)
+        const run = this.runEngine?.getRun(runId)
+        if (entry && run) this.skipUnstartableTurn(entry.payload, entry, run)
+      }
+      return
+    }
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     // Work started on the thread's behalf, or a scheduled occurrence, never runs beside a pause.
     if (this.cancelStartOnPausedThread(effect)) return
@@ -4021,8 +4061,10 @@ export class OrchestratorService extends EventEmitter {
    * A bot dispatch's `turn.start` (PR 6 §4): the bot engine rebuilds the turn from `bots.db` and
    * checks that its grant still holds; only then does the turn start, bound to the compiled policy,
    * with the activation's authority, counts and spend. A refusal cancels the queued run, and
-   * nothing is sent. The activation thread is new, so the turn starts with no history; anything
-   * else fails it with `bot_state_invalid` before a request.
+   * nothing is sent. A run's thread is new, so its first turn starts with no history; a chat
+   * activation's first turn runs on the home thread right after the engine cleared its context
+   * (`history: 'cleared'`: the transcript stays, nothing of it is sent). Anything else fails it with
+   * `bot_state_invalid` before a request.
    */
   private async executeBotEffect(payload: BotTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
@@ -4051,10 +4093,12 @@ export class OrchestratorService extends EventEmitter {
       return cancel('bot_prepare_failed')
     }
     if ('refused' in prepared) return cancel(prepared.code)
-    // History 'none': a fresh activation thread has no transcript, native context or summary. A
+    // History 'none': a fresh activation thread has no transcript, native context or summary.
+    // 'cleared': the home thread's context was just cleared, so none of its transcript is sent. A
     // continuation or a consult runs on the thread's own history ('thread').
-    const fresh = session.messages.length === 0 && getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
-    if (busy() || (prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
+    const cleared = getActiveMessages(session.nativeContext).length === 0 && !getCompactionSummary(session.nativeContext)
+    const fresh = session.messages.length === 0 && cleared
+    if (busy() || (prepared.history === 'cleared' ? !cleared : prepared.history !== 'thread' && !fresh)) return cancel('bot_state_invalid')
     let text: string | undefined
     try {
       const response = await this.runTurnOnSession(
@@ -4928,6 +4972,20 @@ export class OrchestratorService extends EventEmitter {
     return path ? { path, parentThreadId } : null
   }
 
+  /** Whether the expiry of `threadId` (its own, or its root thread's) has passed (`Thread.expiresAt`). */
+  isExpired(threadId: string): boolean {
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    return Boolean(thread && isThreadExpired(thread, thread.lineage ? store!.listAllThreads() : undefined))
+  }
+
+  /** Whether `threadId` is a private thread or below one (`Thread.localOnly`). */
+  isLocalOnly(threadId: string): boolean {
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    return Boolean(thread && isLocalOnlyThread(thread, store!.listAllThreads()))
+  }
+
   /**
    * Engine host callback (before the delegation transaction; synchronous): the child thread gets the
    * parent's project and model selection, or the requested provider/model.
@@ -4941,6 +4999,8 @@ export class OrchestratorService extends EventEmitter {
     if (request.remote) {
       // A remote subagent's thread here is a stand-in: its agent, model and workspace are the other
       // computer's, so it gets none of its own, and nothing ever runs here (`sendOwned` refuses).
+      // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
+      if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
@@ -4977,7 +5037,9 @@ export class OrchestratorService extends EventEmitter {
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
       // delegated it, and it keeps that mode for its later turns and its own subagents.
       permissionMode: narrowPermissionMode(this.requestedPermissionMode(request.parentThreadId), this.runPermissionMode(request.parentRunId)),
-      ...(model ? { modelOverride: model } : {})
+      ...(model ? { modelOverride: model } : {}),
+      // A subagent of a private thread is private too.
+      localOnly: this.isLocalOnly(parentThread.id)
     })
     const session = this.getOrCreateSession(child.id)
     session.modelOverride = model ? structuredClone(model) : undefined
@@ -5106,7 +5168,9 @@ export class OrchestratorService extends EventEmitter {
     const accessCeiling = narrowAgentAccess(sourceCeiling ?? 'manage', creation.accessLevel === undefined ? undefined : this.effectiveAccess(creation.accessLevel)) ?? 'lineage'
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
       ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
-      accessCeiling
+      accessCeiling,
+      // A fork carries the conversation, so a private thread's fork is private too.
+      localOnly: this.isLocalOnly(sourceThread.id)
     })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
@@ -5580,6 +5644,8 @@ export class OrchestratorService extends EventEmitter {
   ) {
     const engine = this.requireRunEngine()
     const refuse = (code: string, message: string, extra: Record<string, unknown> = {}) => ({ started: false as const, code, message, ...extra })
+    if (this.isLocalOnly(parentThreadId))
+      return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     // A retry of an accepted call returns that task before anything else is checked.
     const requestKey = delegationRequestKey(parentThreadId, parentRunId, call.toolCallId)
     const prior = engine.store.getReceipt(requestKey)
@@ -5717,6 +5783,7 @@ export class OrchestratorService extends EventEmitter {
    * there now. The repository match is asked of each online computer that is allowed, in parallel.
    */
   private async listComputers(parentThreadId: string) {
+    if (this.isLocalOnly(parentThreadId)) return { computers: [], note: PRIVATE_THREAD_REMOTE_REFUSAL }
     if (!this.remoteSubagents || !this.remoteComputers)
       return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
     const access = this.agentAccessSettings()
@@ -5902,6 +5969,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     const remote = this.remoteSubagents
     const refuse = (code: string, message: string) => ({ started: false as const, code, message, subagent: target.title, childThreadId: target.childThreadId })
+    if (this.isLocalOnly(parentThreadId)) return refuse('private_thread', PRIVATE_THREAD_REMOTE_REFUSAL)
     const bindings = engine.remoteSubagents.listForChildThread(target.childThreadId)
     const first = bindings.find((binding) => binding.remoteThreadId)
     const replay = engine.store.getReceipt(target.requestId)
@@ -7932,8 +8000,11 @@ export class OrchestratorService extends EventEmitter {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
+      let compactsNearWindow = false
       try {
-        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true }).caps
+        const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
+        caps = resolved.caps
+        compactsNearWindow = resolved.compactsNearWindow === true
       } catch {
         caps = undefined
       }
@@ -7961,7 +8032,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      return {
+        ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
+        // A runtime that compacts its own session near the window gets only the on/off; the other
+        // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
+        ...(compactsNearWindow ? { compactedByRuntime: true } : {})
+      }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
@@ -8905,6 +8981,8 @@ export class OrchestratorService extends EventEmitter {
     const runsOn = this.threadStore?.getThread(threadId)?.runsOn
     if (runsOn)
       throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
+    if (this.isExpired(threadId))
+      throw new DomainRpcError('thread_expired', 'This thread has expired and is being deleted.', { threadId })
 
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {
@@ -10194,7 +10272,7 @@ export class OrchestratorService extends EventEmitter {
       const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
         // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
         userContent: opts?.agent ? '' : userContent,
-        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}) }) : undefined
+        instanceId: instance.instanceId, model: selectedModel.model, approvals: opts?.bot ? 'never' : binding.policy.approvals, ...(opts?.bot?.instructions ? { botInstructions: opts.bot.instructions } : {}), ...(opts?.bot?.preamble ? { botPreamble: opts.bot.preamble } : {}) }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -10216,20 +10294,20 @@ export class OrchestratorService extends EventEmitter {
           prepareNativeContext: (provider, model) => {
             const capacity = this.nativeContext.nativeProviderModel
             const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
-            const threshold = typeof contextSettings.compactionTokens === 'number'
-              ? contextSettings.compactionTokens : knownLimit
             const previous = session.lastMeasuredContextSignature === `${provider}:${model}`
               ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
               : 0
             const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
             // When the runtime has not reported capacity yet, a numeric Mousse threshold
             // still applies; model-max waits for an actual provider window.
-            if (!contextSettings.compactionEnabled || threshold === undefined ||
-                !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
+            const compactsAt = settingCompactionPoint(contextSettings, knownLimit)
+            if (compactsAt === undefined || !Number.isFinite(activeTokens) || activeTokens < compactsAt) return null
             onCompaction('start')
             const recovered = compactTranscript() ? compactedContext() : null
             return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
           },
+          ...(contextSettings.compactionEnabled && typeof contextSettings.compactionTokens === 'number'
+            ? { compactionTokens: contextSettings.compactionTokens } : {}),
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
             return nativeAgentHistory(this.nativeContext)
@@ -10269,7 +10347,12 @@ export class OrchestratorService extends EventEmitter {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
       handoffs?.settle('failed', err instanceof Error ? err.message : String(err))
-      if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
+      if (!isAbort) {
+        failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
+        // A bot's failure reaches its owner only as a fixed line: the daemon log keeps what the provider said (redacted).
+        const cause = opts?.bot ? errorCauseText(normalized) : undefined
+        if (cause) failureDiagnostic = { ...failureDiagnostic, cause }
+      }
       if (isAbort) {
         aborted = true
         assistantText = ''
@@ -10288,7 +10371,8 @@ export class OrchestratorService extends EventEmitter {
         else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
         // A scheduled occurrence is never paused (its run would outlive the occurrence). It fails, and the run
         // records when the limit resets so the scheduler waits for it instead of taking slots inside the window.
-        const scheduled = opts?.schedule ? usageLimitOf(err) : undefined
+        // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
+        const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
         assistantText = `[${providerError.code}] ${providerError.message}`
       }
@@ -10382,8 +10466,15 @@ export class OrchestratorService extends EventEmitter {
         stripActionBlocks(assistantText).trim() ||
         this.transcript.openAssistantContent()?.trim() ||
         ''
-      if (!this.transcript.abandonAssistant(partial, true) && partial) {
-        const stopped = this.addMessage('assistant', partial)
+      // Notes before the turn's tool calls keep their rows; the row that ends the turn (the open
+      // one, else the last closed one) holds the rest and is marked incomplete.
+      const replies = this.transcript.closedReplies()
+      const last = this.transcript.openAssistantContent() === undefined ? replies.at(-1) : undefined
+      const unshown = unshownReplyText(partial, (last ? replies.slice(0, -1) : replies).map((reply) => stripActionBlocks(reply.content)))
+      if (last && (!unshown || stripActionBlocks(last.content).trim() === unshown.trim())) {
+        this.updateStreamingAssistantMessage(last.id, last.content, false, undefined, true)
+      } else if (!this.transcript.abandonAssistant(unshown, true) && unshown) {
+        const stopped = this.addMessage('assistant', unshown)
         const index = this.messages.findIndex((message) => message.id === stopped.id)
         if (index !== -1) {
           const updated = { ...this.messages[index], incomplete: true }
@@ -10417,6 +10508,8 @@ export class OrchestratorService extends EventEmitter {
         this.activeAssistantMessageId = null
         this.removeMessage(streamingId)
       }
+      // The plan card holds the turn's whole text, its notes before tool calls too.
+      for (const reply of this.transcript.closedReplies()) this.removeMessage(reply.id)
       const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
       if (this.appletStore && !executionFailed) {
         planMsg.turnId = turnId
@@ -10447,18 +10540,25 @@ export class OrchestratorService extends EventEmitter {
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
+    // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
+    const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
+    const finalText = unshownReplyText(
+      displayText,
+      this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
+    )
 
     if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
-        displayText || 'Done.',
+        finalText || 'Done.',
         false,
         responseMetadata
       )
       this.activeAssistantMessageId = null
     } else if (
       this.lastCompletedAssistantMessageId &&
-      stripActionBlocks(this.lastCompletedAssistantContent) === displayText
+      stripActionBlocks(this.lastCompletedAssistantContent) === finalText
     ) {
       // Compare stripped-to-stripped: the streamed snapshot is raw (often
       // trailing whitespace / action fences) while displayText is stripped.
@@ -10466,16 +10566,16 @@ export class OrchestratorService extends EventEmitter {
       // a visually identical twin message.
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
-        displayText,
+        finalText,
         false,
         responseMetadata
       )
     } else {
-      this.addMessage('assistant', displayText || 'Done.', undefined, responseMetadata)
+      this.addMessage('assistant', finalText || 'Done.', undefined, responseMetadata)
     }
 
     if (this.appletStore && !executionFailed) {
-      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (displayText || 'Done.'))
+      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (finalText || 'Done.'))
       if (finalMessage) {
         finalMessage.turnId = turnId
         this.persist(true)
@@ -11198,6 +11298,8 @@ export class OrchestratorService extends EventEmitter {
       : this.boundSession
     this.assertNotBotThread(session.threadId)
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
+    // An expired thread is being deleted: Retry starts nothing in it.
+    if (session.threadId && this.isExpired(session.threadId)) return false
     const request = session.failedConnectionRequest
     // A request sent under a device's limit is retried under it, whoever presses Retry.
     const limit = session.failedConnectionLimit ?? undefined
@@ -11890,6 +11992,7 @@ export class OrchestratorService extends EventEmitter {
       // A bot's thread is never written into from outside: only the bot's own dispatches run there (PR 6 §6).
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
+      if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being deleted.' }
       // A turn sent from outside this computer: agents in it reach no other thread through the profile's
       // setting, now or in any later turn, and what they delegate inherits the limit (SPEC §15.1).
       try {

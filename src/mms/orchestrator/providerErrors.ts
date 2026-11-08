@@ -116,7 +116,10 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   if (error instanceof AppError) return error
   const shape = error && typeof error === 'object' ? error as { name?: unknown; code?: unknown; status?: unknown; statusCode?: unknown; message?: unknown; headers?: { get?: (key: string) => string | null } } : undefined
   const text = typeof shape?.message === 'string' ? shape.message : typeof error === 'string' ? error : ''
-  const formattedStatus = /^\s*(?:HTTP\s+)?([45]\d{2})(?:\s*:|\s+)/.exec(text)
+  // A status at the start (`429: …`, `HTTP 503 …`), or after pi-ai's label on its Responses and Azure
+  // APIs (`xai API error (400): …`, `Azure OpenAI API error (503): …`): without it a provider's
+  // refusal would read as an unknown failure.
+  const formattedStatus = /^\s*(?:HTTP\s+)?([45]\d{2})(?:\s*:|\s+)/.exec(text) ?? /^[^\n():]{0,64}\berror \(([45]\d{2})\):/i.exec(text)
   const status = typeof shape?.status === 'number' ? shape.status : typeof shape?.statusCode === 'number' ? shape.statusCode : response && response.status >= 400 ? response.status : formattedStatus ? Number(formattedStatus[1]) : undefined
   const code = typeof shape?.code === 'string' ? shape.code.toLowerCase() : ''
   const details = { ...(provider ? { provider } : {}), ...(status !== undefined ? { status } : {}) }

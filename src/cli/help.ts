@@ -79,6 +79,7 @@ One-shot (-p / piped / non-TTY):
   /<workflow> [arguments]     Run via the same resolver used by the app
   --request-id <uuid>         Reuse after a lost reply: the same send is answered, never run twice
   --no-wait                  Return after workflow admission (otherwise wait)
+  --private                   Start a private thread: it stays on this computer, hidden from your other devices
 
 Quote a complete slash invocation so the shell passes its named arguments as text.
 For a busy thread, chat reports queued acceptance; inspect workflow history to follow it.

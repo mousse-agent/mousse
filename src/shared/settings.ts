@@ -1,4 +1,5 @@
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
+import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import type { ModelOverride } from './providerInstances'
@@ -60,6 +61,14 @@ export interface AppearanceSettings {
   animationSpeed: AnimationSpeed
   /** What a turn that changed files shows at its end. */
   turnChangedFiles: TurnChangedFilesMode
+  /** The chat shows blurred through a translucent composer. Off by default: the blur costs graphics memory. */
+  frostedComposer: boolean
+  /** Frosted composer opacity, in percent. */
+  frostedComposerOpacity: number
+  /** Frosted composer blur radius, in pixels. */
+  frostedComposerBlur: number
+  /** Frosted composer saturation multiplier (shown as "Color boost"). */
+  frostedComposerSaturation: number
 }
 
 export type AnimationSpeed = 'off' | 'fast' | 'normal' | 'slow'
@@ -87,14 +96,60 @@ export function normalizeTurnChangedFiles(value: unknown): TurnChangedFilesMode 
   return TURN_CHANGED_FILES_MODES.includes(value as TurnChangedFilesMode) ? value as TurnChangedFilesMode : 'summary'
 }
 
+/**
+ * A moment a thread tells the person about: its agent finished, it needs them (a question or an
+ * approval), or it stopped without finishing (interrupted, failed, or paused by a usage limit).
+ */
+export type ThreadNotificationEvent = 'completed' | 'question' | 'idle'
+
+export const THREAD_NOTIFICATION_EVENTS: readonly ThreadNotificationEvent[] = ['completed', 'question', 'idle']
+
+/** How Mousse tells the person: a toast in its window, the operating system's notification, a sound. */
+export interface NotificationChannels {
+  toast: boolean
+  system: boolean
+  sound: boolean
+}
+
 export interface NotificationSettings {
-  /** Use the operating system notification sound when a thread's agent finishes. */
+  /**
+   * The sound for every event, from before sounds were chosen per event. Still read for an event
+   * whose `sound` has not been chosen.
+   */
   threadCompletionSound: boolean
   /**
    * Notify for every thread on the user's other computers. Off: only a thread this computer started or
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /** The channels chosen for each event. A channel not chosen yet is on. */
+  events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
+}
+
+/** The channels an event uses: what the person chose, and on for anything not chosen yet. */
+export function threadNotificationChannels(
+  settings: Partial<NotificationSettings> | undefined,
+  event: ThreadNotificationEvent
+): NotificationChannels {
+  const chosen = settings?.events?.[event]
+  return {
+    toast: chosen?.toast ?? true,
+    system: chosen?.system ?? true,
+    sound: chosen?.sound ?? settings?.threadCompletionSound ?? true
+  }
+}
+
+/**
+ * A settings patch that sets only one channel of one event. The store merges it, so two quick
+ * changes never overwrite each other with a stale copy.
+ */
+export function threadNotificationChannelPatch(
+  event: ThreadNotificationEvent,
+  channel: keyof NotificationChannels,
+  on: boolean
+): MousseSettingsUpdate {
+  // DeepPartial stops at interfaces, so the nested patch is typed by hand; the store deep-merges it.
+  return { notifications: { events: { [event]: { [channel]: on } } } } as unknown as MousseSettingsUpdate
 }
 
 export interface PermissionSettings {
@@ -196,6 +251,23 @@ export function contextCompactionPoint(
 }
 
 /**
+ * Where a thread compacts under the Compact context setting. A size compacts at `contextCompactionPoint`
+ * of the model's window when it is known, else of the size itself; Auto (`model-max`) waits for a known
+ * window. Undefined when compaction is off or the point is not known yet. The daemon compacts here and
+ * the context popover shows it.
+ */
+export function settingCompactionPoint(
+  context: Pick<ContextSettings, 'compactionEnabled' | 'compactionTokens'>,
+  knownWindow?: number
+): number | undefined {
+  if (!context.compactionEnabled) return undefined
+  const size = typeof context.compactionTokens === 'number' ? context.compactionTokens : knownWindow
+  if (size === undefined) return undefined
+  const point = contextCompactionPoint(knownWindow ?? size, size)
+  return Number.isFinite(point) ? point : undefined
+}
+
+/**
  * What an agent calling the Mousse MCP server may do on threads other than its own and its
  * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
  * read other threads, `manage` also change them.
@@ -277,6 +349,8 @@ export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
   worktreeByDefault: boolean
+  /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
+  privateThreadExpiry: ExpiryPreset | 'never'
 }
 
 export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
@@ -290,7 +364,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
-    worktreeByDefault: raw?.worktreeByDefault !== false
+    worktreeByDefault: raw?.worktreeByDefault !== false,
+    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
   }
 }
 
@@ -384,6 +459,15 @@ export interface MousseSettings {
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
   }
+  /**
+   * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
+   * Automatic: each bot picks by its depth. The bot's depth sets the reasoning level, so none is kept.
+   */
+  botModel: {
+    llmProvider: LlmProviderId
+    model: string
+    instanceId?: string
+  }
   agents: {
     enabled: Record<AgentTypeId, boolean>
     /** Default provider for in-app Mousse subagents; blank inherits the main model. */
@@ -474,11 +558,52 @@ export interface SettingsOptions {
   accentColors: AccentColorOption[]
   llmProviders: LlmProviderOption[]
   agentTypes: AgentTypeOption[]
+  /**
+   * The bot model choices (`botModel`): the listing narrowed to the ready instances and models that
+   * can hold a bot. Absent from a daemon without bots.
+   */
+  botProviders?: LlmProviderOption[]
+}
+
+/**
+ * The bot model choices: `providers` narrowed to the models `holds` names (instance and model, as the
+ * bot candidates list them), without instances left with none. The reasoning level is the bot's
+ * depth, so no level is offered.
+ */
+export function botProviderOptions(providers: readonly LlmProviderOption[], holds: ReadonlyArray<{ instanceId: string; model: string }>): LlmProviderOption[] {
+  const held = new Set(holds.map((entry) => `${entry.instanceId}\u0000${entry.model}`))
+  return providers
+    .filter((provider) => provider.instanceId !== undefined)
+    .map((provider) => ({
+      ...provider,
+      models: provider.models
+        .filter((model) => held.has(`${provider.instanceId}\u0000${model.id}`))
+        .map(({ efforts: _efforts, defaultEffort: _defaultEffort, effortDescriptions: _descriptions, ...model }) => model)
+    }))
+    .filter((provider) => provider.models.length > 0)
 }
 
 export const ACRYLIC_INTENSITY_MIN = 0
 export const ACRYLIC_INTENSITY_MAX = 100
 export const ACRYLIC_INTENSITY_DEFAULT = 55
+
+export type FrostedComposerSlider = 'frostedComposerOpacity' | 'frostedComposerBlur' | 'frostedComposerSaturation'
+
+/** Slider bounds and defaults for the frosted composer. */
+export const FROSTED_COMPOSER_RANGES: Readonly<Record<FrostedComposerSlider, { min: number; max: number; step: number; default: number }>> = {
+  frostedComposerOpacity: { min: 20, max: 95, step: 1, default: 60 },
+  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 16 },
+  frostedComposerSaturation: { min: 1, max: 1.6, step: 0.02, default: 1.12 }
+}
+
+/** Clamps a frosted composer slider value to its range and step; anything unreadable is the default. */
+export function clampFrostedComposer(key: FrostedComposerSlider, value: unknown): number {
+  const range = FROSTED_COMPOSER_RANGES[key]
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN
+  if (!Number.isFinite(n)) return range.default
+  const stepped = range.min + Math.round((n - range.min) / range.step) * range.step
+  return Math.round(Math.max(range.min, Math.min(range.max, stepped)) * 100) / 100
+}
 
 export const ACCENT_COLORS: AccentColorOption[] = [
   { id: 'purple', label: 'Purple', value: '#a785c7' },
@@ -671,7 +796,11 @@ export function getDefaultSettings(): MousseSettings {
       codeFont: { ...DEFAULT_FONT_CHOICE },
       threadProjectColors: true,
       animationSpeed: 'normal',
-      turnChangedFiles: 'summary'
+      turnChangedFiles: 'summary',
+      frostedComposer: false,
+      frostedComposerOpacity: FROSTED_COMPOSER_RANGES.frostedComposerOpacity.default,
+      frostedComposerBlur: FROSTED_COMPOSER_RANGES.frostedComposerBlur.default,
+      frostedComposerSaturation: FROSTED_COMPOSER_RANGES.frostedComposerSaturation.default
     },
     notifications: {
       threadCompletionSound: true,
@@ -689,6 +818,10 @@ export function getDefaultSettings(): MousseSettings {
       model: ''
     },
     title: {
+      llmProvider: '',
+      model: ''
+    },
+    botModel: {
       llmProvider: '',
       model: ''
     },
@@ -793,7 +926,11 @@ export function normalizeAppearance(
     threadProjectColors:
       typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,
-    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles)
+    turnChangedFiles: normalizeTurnChangedFiles(raw.turnChangedFiles),
+    frostedComposer: typeof raw.frostedComposer === 'boolean' ? raw.frostedComposer : defaults.frostedComposer,
+    frostedComposerOpacity: clampFrostedComposer('frostedComposerOpacity', raw.frostedComposerOpacity),
+    frostedComposerBlur: clampFrostedComposer('frostedComposerBlur', raw.frostedComposerBlur),
+    frostedComposerSaturation: clampFrostedComposer('frostedComposerSaturation', raw.frostedComposerSaturation)
   }
 }
 

@@ -131,6 +131,8 @@ export class MmsProtocolServer {
   private endpointPath: string | null = null
   private stopping = false
   private stopped = false
+  /** The start in progress; `stop()` waits for it so a late listen cannot outlive the stop. */
+  private startTask: Promise<string> | null = null
   private readonly instanceId = PROCESS_INSTANCE_ID
 
   constructor(private readonly opts: ProtocolServerOptions) {}
@@ -158,16 +160,25 @@ export class MmsProtocolServer {
       if (!this.endpointPath) throw new Error('Server started without endpoint')
       return this.endpointPath
     }
+    if (this.startTask) return this.startTask
+    const task = this.startListening().finally(() => {
+      if (this.startTask === task) this.startTask = null
+    })
+    this.startTask = task
+    return task
+  }
 
+  private async startListening(): Promise<string> {
     const home = this.opts.mms.getHomeDir()
     const { path, platform } = resolveLocalEndpoint(home)
+    // Cleared before the first await so a stop from here on is seen below.
+    this.stopped = false
     if (platform === 'unix') {
       // Only remove sockets proven stale; never unlink a live peer's active socket.
       await cleanupStaleUnixSocket(home, this.opts.ownerToken)
     }
+    if (this.stopping) throw new Error('Protocol server stopped while starting')
 
-    this.stopped = false
-    this.stopping = false
     this.wireOrchestratorEvents(this.opts.mms)
     const host = this.opts.mms.getInstallationHost()
     if (host) {
@@ -194,6 +205,11 @@ export class MmsProtocolServer {
         server.once('error', onError)
         server.listen(path, () => {
           server.off('error', onError)
+          if (this.stopping || this.stopped) {
+            server.close()
+            reject(new Error('Protocol server stopped while starting'))
+            return
+          }
           // Keep error handler for post-listen failures.
           server.on('error', (err) => {
             // Unexpected post-listen errors: stop accepting new clients.
@@ -233,6 +249,8 @@ export class MmsProtocolServer {
     if (this.stopped || this.stopping) return
     this.stopping = true
     this.accepting = false
+    // Let a start in progress finish (or give up) first, so its listener is closed below.
+    await this.startTask?.catch(() => undefined)
 
     // Best-effort shutdown notice — never await drain.
     try {
@@ -621,6 +639,8 @@ export class MmsProtocolServer {
 
     // Activity + agent/task registry fan-out from multi-tenant runtimes
     const runtimes = services.threadRuntimes
+    // A personal bot's threads are its chat (`Thread.botOwned`): their work is told by `bots.*`
+    // events, so no window counts them, toasts them or notifies about them as threads.
     onEmitter(
       runtimes,
       'activity',
@@ -629,10 +649,12 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
+        const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
         if (payload.activity) {
+          const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
-            this.ring.push('activity.snapshot', { activity: payload.activity }, undefined)
+            this.ring.push('activity.snapshot', { activity }, undefined)
           )
         }
       }
@@ -701,9 +723,12 @@ export class MmsProtocolServer {
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
     })
-    // A wall asks the owner: the Bots tab's inbox and a desktop notification.
-    if (services.personalBots) onEmitter(services.personalBots.events, 'escalation', (escalation: unknown) => {
-      emitToSubscribers(this.ring.push('bots.escalation', escalation, undefined))
+    // A new or changed chat row (run reports, asks and errors notify), and a working bot's live chip.
+    if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.message', event, undefined))
+    })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.activity', event, undefined))
     })
   }
 

@@ -149,7 +149,9 @@ export class CodexAdapter implements ProviderAdapter {
     const startedAt = Date.now()
     let providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
-    const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
+    const bot = host.bot
+    // A bot's turn works in its files folder: what Codex runs there without asking stays the bot's own.
+    const cwd = (bot ? bot.workspace?.files ?? bot.workspace?.scratch : undefined) ?? input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
@@ -165,8 +167,9 @@ export class CodexAdapter implements ProviderAdapter {
     const mousseCalls = new Map<string, boolean>()
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
-      permissionMode: input.permissionMode,
-      child: input.child,
+      // A bot's turn runs in Codex's asking mode, and its authority answers every approval.
+      permissionMode: bot ? 'ask' : input.permissionMode,
+      ...(bot ? { bot } : { child: input.child }),
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,
@@ -180,6 +183,7 @@ export class CodexAdapter implements ProviderAdapter {
       // developer instructions.
       mcp: host.bridge?.mcp ?? null,
       developerInstructions: host.bridge?.sessionInstructions || undefined,
+      autoCompactTokens: host.context.compactionTokens,
       ...(host.bridge?.permission?.approvals === 'never' ? { approvals: 'never' as const } : {}),
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {
@@ -196,8 +200,11 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
-        // A thought that came before this call keeps its own row, above it; the next one starts below.
-        if (event.phase === 'start' && !event.parentCallId) streams.thinking.break()
+        // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) {
+          streams.thinking.break()
+          streams.text.break()
+        }
         sink.tool(runtimeToolEvent(event))
       },
       onToolNotification: (event) => {

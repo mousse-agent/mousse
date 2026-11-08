@@ -1,12 +1,14 @@
 import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
+import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
 import { Activity, ArrowLeft, Bot, Keyboard, Laptop, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { landOnSettingsAnchor, searchIndex, searchSettings, type SettingsSearchResult, type SettingsSectionId } from '../lib/settingsSearch'
 import type {
+  FrostedComposerSlider,
   MousseSettings,
   MousseSettingsUpdate,
   SettingsOptions
@@ -44,7 +46,7 @@ const SETTINGS_SECTIONS = [
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
-  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
 ] as const satisfies ReadonlyArray<{ id: SettingsSectionId; label: string; icon: unknown; hue: number; group: string; keywords: readonly string[] }>
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
@@ -247,6 +249,32 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         })
     }, 120)
   }, [settings])
+
+  /** Frosted composer sliders: the same live preview and debounced save as glass intensity. */
+  // Created in an effect so a StrictMode remount gets a fresh one. Closing Settings mid-drag still saves the last value.
+  const frostedSaver = useRef<ReturnType<typeof createFrostedComposerSaver<MousseSettings>> | null>(null)
+  useEffect(() => {
+    // Only the changed fields: the daemon merges them, so a slow save cannot undo another change.
+    const saver = createFrostedComposerSaver((patch) => window.mousse.settings.set({ appearance: patch } as MousseSettingsUpdate), setSettings)
+    frostedSaver.current = saver
+    return () => {
+      saver.dispose()
+      if (frostedSaver.current === saver) frostedSaver.current = null
+    }
+  }, [])
+
+  const previewFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const appearance = { ...prev.appearance, [key]: value }
+      applyFrostedComposer(appearance)
+      return { ...prev, appearance }
+    })
+  }, [])
+
+  const commitFrostedComposer = useCallback((key: FrostedComposerSlider, value: number) => {
+    frostedSaver.current?.queue(key, value)
+  }, [])
 
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
@@ -458,6 +486,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               onRestart={handleRestart}
               onPreviewAcrylicIntensity={previewAcrylicIntensity}
               onCommitAcrylicIntensity={commitAcrylicIntensity}
+              onPreviewFrostedComposer={previewFrostedComposer}
+              onCommitFrostedComposer={commitFrostedComposer}
             />
           )}
           {activeSection === 'integrations' && (

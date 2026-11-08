@@ -211,3 +211,40 @@ describe('blank composer thread on another computer', () => {
     expect(deps.select).not.toHaveBeenCalled()
   })
 })
+
+describe('a private new chat (issue #672)', () => {
+  const base = (thread?: Thread) => ({
+    thread,
+    setWorktreeEnabled: vi.fn(),
+    update: vi.fn(),
+    stillVisible: () => true,
+    activate: vi.fn(),
+    select: vi.fn(async () => {})
+  })
+
+  it('creates the thread private, on this computer, and never reuses an empty draft of the other mode', async () => {
+    const create = vi.fn(async () => ({ id: 'private-1', localOnly: true }) as Thread)
+    const shared = { id: 'draft', projectId: 'p1', worktreeEnabled: false } as Thread
+    await prepareComposerThread({ ...base(shared), create, workspace: { projectId: 'p1', worktreeEnabled: false, localOnly: true } })
+    expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: false, localOnly: true })
+
+    create.mockClear()
+    const privateDraft = { id: 'draft-2', projectId: 'p1', worktreeEnabled: false, localOnly: true } as Thread
+    expect(await prepareComposerThread({ ...base(privateDraft), create, workspace: { projectId: 'p1', worktreeEnabled: false, localOnly: true } })).toBe('draft-2')
+    await prepareComposerThread({ ...base(privateDraft), create, workspace: { projectId: 'p1', worktreeEnabled: false } })
+    expect(create).toHaveBeenCalledWith('p1', { worktreeEnabled: false })
+  })
+})
+
+describe('a new chat that deletes itself (issue #672)', () => {
+  it('creates it with an expiry counted from now, and gives a reused draft the same', async () => {
+    const create = vi.fn(async () => ({ id: 'timed' }) as Thread)
+    const setExpiry = vi.fn(async () => ({ id: 'draft' }) as Thread)
+    const now = () => Date.parse('2026-11-06T12:00:00.000Z')
+    const deps = { setWorktreeEnabled: vi.fn(), update: vi.fn(), stillVisible: () => true, activate: vi.fn(), select: vi.fn(async () => {}), create, setExpiry, now }
+    await prepareComposerThread({ ...deps, workspace: { worktreeEnabled: false, expiryMs: 3_600_000, expiryStopsRun: true } })
+    expect(create).toHaveBeenCalledWith(undefined, { worktreeEnabled: false, expiresAt: '2026-11-06T13:00:00.000Z', expiryStopsRun: true })
+    await prepareComposerThread({ ...deps, thread: { id: 'draft', worktreeEnabled: false } as Thread, workspace: { worktreeEnabled: false, expiryMs: 3_600_000 } })
+    expect(setExpiry).toHaveBeenCalledWith('draft', '2026-11-06T13:00:00.000Z', false)
+  })
+})

@@ -23,6 +23,14 @@
   pointer-events: none;
 }
 
+/* A tooltip that must not wrap, such as a project's "name · path"; its text is already shortened to fit. */
+.app-tooltip--one-line {
+  max-width: min(480px, calc(100vw - 16px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
 /* ---------- Tokens ---------- */
 :root {
   /* One gutter and one row inset: every sidebar label, row and heading starts
@@ -251,23 +259,20 @@ html[data-theme='high-contrast'] {
   --threads-sidebar-row-height: var(--ui-row-height);
 }
 
-.app .threads-sidebar-toolbar {
-  padding: 6px var(--ui-gutter) 2px;
-  gap: 2px;
-}
-
 .app .threads-sidebar-toolbar-button {
   border-radius: var(--ui-row-radius);
 }
 
-.app .threads-sidebar-toolbar-button:hover,
-.app .threads-sidebar-open-project:hover {
+.app .threads-sidebar-toolbar-button:hover {
   background: var(--ui-hover);
+}
+
+.app .threads-sidebar-tabs-row {
+  margin: 8px var(--ui-gutter);
 }
 
 .app .threads-sidebar-tabs {
   gap: 2px;
-  margin: 2px var(--ui-gutter) 8px;
   padding: 2px;
   border: 1px solid var(--ui-line);
   border-radius: 10px;
@@ -275,10 +280,8 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tab {
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
-  padding: 0;
+  height: 28px;
+  min-height: 28px;
   border-radius: var(--ui-row-radius);
   transition: background 0.15s, color 0.15s;
 }
@@ -288,13 +291,6 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tab.active {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: auto;
-  padding: 0 10px;
-  white-space: nowrap;
   background: var(--ui-raised);
   box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
@@ -478,15 +474,6 @@ html[data-theme='high-contrast'] {
   background: var(--ui-hover);
 }
 
-.app .threads-sidebar-open-project {
-  min-height: var(--ui-row-height);
-  gap: 8px;
-  margin: 2px var(--ui-gutter);
-  padding: 0 var(--ui-row-x);
-  border-radius: var(--ui-row-radius);
-  font-size: 13px;
-}
-
 .app .threads-sidebar-recent,
 .app .chat-recent-section {
   margin-top: 8px;
@@ -497,16 +484,6 @@ html[data-theme='high-contrast'] {
 .app .threads-sidebar-section-settled {
   margin-top: 8px;
   border-top: 1px solid var(--ui-line);
-}
-
-/* Recently deleted sits right under Settled; keep the pair tight. */
-.app .threads-sidebar-section-settled.collapsed:has(+ .threads-sidebar-section-trash:not([hidden])) {
-  margin-bottom: 0;
-}
-
-.app .threads-sidebar-section-settled + .threads-sidebar-section-trash {
-  margin-top: 4px;
-  padding-top: 0;
 }
 
 /* ---------- Chats: roster, groups, recent ---------- */
@@ -614,18 +591,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   font-size: 12px;
   line-height: 1.5;
   color: var(--ui-faint);
-}
-
-.app .chats-sidebar-content .chat-network-open {
-  width: 100%;
-  min-height: var(--ui-row-height);
-  padding: 0 var(--ui-row-x);
-  border-radius: var(--ui-row-radius);
-  font-size: 12.5px;
-}
-
-.app .chats-sidebar-content .chat-network-open:hover {
-  background: rgba(var(--accent-rgb), 0.1);
 }
 
 /* ---------- Main pane chrome ---------- */
@@ -750,18 +715,10 @@ html[data-theme='high-contrast'] .app .chat-input-area .composer {
   --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
 }
 
-.app .chat--empty .chat-input-area .composer-workspace-toolbar {
-  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.16);
-}
-
 html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer {
   --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.6) 75%, rgba(255, 255, 255, 0.14)), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
   --ui-glint: color-mix(in srgb, rgba(var(--accent-rgb), 0.95) 75%, rgba(255, 255, 255, 0.36));
   --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(var(--accent-rgb), 0.16) 0%, rgba(var(--accent-rgb), 0.04) 36%, transparent 66%);
-}
-
-html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
-  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.2);
 }
 
 /* Light and high contrast keep their usual composer on the start page. */
@@ -770,19 +727,10 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
   --ui-raised-shadow: inherit;
 }
 
-html[data-theme='light'] .app .chat--empty .chat-input-area .composer-workspace-toolbar,
-html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
-  box-shadow: none;
-}
-
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] .app .chat--empty .chat-input-area .composer {
     --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
     --ui-raised-shadow: inherit;
-  }
-
-  html[data-theme='system'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
-    box-shadow: none;
   }
 }
 
@@ -861,28 +809,6 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
   box-shadow: var(--ui-specular-accent), 0 2px 10px rgba(var(--accent-rgb), 0.3), var(--ui-focus-ring);
 }
 
-/* The workspace strip is a tab that meets the composer card. It overlaps only
-   the card's top border: a deeper overlap shows through the translucent,
-   blurred card as a dark band. */
-.app .chat-input-area .composer-workspace-toolbar {
-  margin: 0 12px -1px;
-  padding: 5px 10px 6px;
-  border-color: var(--ui-line);
-  border-radius: 12px 12px 0 0;
-  background: color-mix(in srgb, var(--ui-raised) 55%, transparent);
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-
-.app .chat-input-area .composer-workspace-project {
-  color: var(--text-primary);
-}
-
-.app .chat-input-area .composer-workspace-project:hover:not(:disabled),
-.app .chat-input-area .composer-workspace-project.open {
-  background: var(--ui-hover);
-}
-
 /* ---------- Agent chat workspace ---------- */
 /* Same canvas as the thread pane, so Chats never falls through to the window. */
 .app .chat-workspace {
@@ -946,6 +872,7 @@ html .composer-workspace-menu .composer-workspace-menu-item {
 }
 
 html .threads-context-menu-item:hover,
+html .threads-context-menu-item:focus-visible,
 html .composer-workspace-menu-item:hover,
 html .composer-workspace-menu-item:focus {
   background: var(--ui-hover);
@@ -955,14 +882,10 @@ html .threads-context-menu-item-danger {
   color: var(--danger);
 }
 
-html .threads-context-menu-item-danger:hover {
+html .threads-context-menu-item-danger:hover,
+html .threads-context-menu-item-danger:focus-visible {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
-}
-
-html .thread-hover-card {
-  border-color: var(--ui-line-strong);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
 }
 
 /* ---------- Settings and overlay pages ---------- */
@@ -1036,8 +959,7 @@ textarea:focus {
 }
 
 html .chat-dialog,
-html .chat-network-dialog,
-html .thread-hover-card {
+html .chat-network-dialog {
   background-image: var(--ui-sheen);
   background-repeat: no-repeat;
 }
@@ -1233,8 +1155,13 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   pointer-events: auto;
 }
 
+.chat:not(.chat--empty) {
+  /* Space between the composer and the bottom of the window. */
+  --chat-composer-gap: 22px;
+}
+
 .chat:not(.chat--empty) .chat-input-area {
-  padding-bottom: 22px;
+  padding-bottom: var(--chat-composer-gap);
 }
 
 /* The last line ends above the composer and the strip Go to latest sits in. */
@@ -1276,6 +1203,39 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 
 .chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump {
   display: none;
+}
+
+/*
+ * Frosted composer (Settings → Appearance, off by default). The transcript runs on under a
+ * translucent, blurred composer instead of fading out above it. The backdrop blur makes the GPU
+ * keep a copy of the window, which is why it is opt-in. Vars are set in lib/frostedComposer.ts.
+ */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list > div {
+  padding-bottom: calc(var(--chat-composer-stack, 160px) + 12px);
+}
+
+/* Full strength up to the composer; gone by its bottom edge, so nothing shows in the gap below it. */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list {
+  --transcript-mask: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 28px,
+    #000 max(28px, calc(100% - var(--chat-composer-gap) - 16px)),
+    transparent max(28px, calc(100% - var(--chat-composer-gap))),
+    transparent 100%
+  );
+}
+
+html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer,
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
+  background-color: rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6));
+  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+  backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+}
+
+/* Go to latest sits on the content now, so it takes the composer's glass, just above it. */
+html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
+  bottom: calc(var(--chat-composer-stack, 32px) + 8px);
 }
 
 .chat-jump-live {

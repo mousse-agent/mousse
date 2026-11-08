@@ -30,9 +30,12 @@ function bot(root: string, scratch: string, tools: NeutralTool[], access: 'read'
 
 const refused = (event: { summary?: unknown }) => event.summary === 'The tool returned an error.'
 
+/** Bot turns run only with process supervision (Bot Phase 1 §5.9); these tests record the pids. */
+const supervised = { onBotProcess: () => {} }
+
 describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real child)', () => {
   it('a built-in whose ledger row cannot be written never runs', async () => {
-    const { engine, recorder, project } = await setup(cleanups)
+    const { engine, recorder, project } = await setup(cleanups, supervised)
     const root = realpathSync(project)
     const scratch = join(root, '..', 'scratch')
     mkdirSync(scratch, { recursive: true })
@@ -44,7 +47,7 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
   }, 120_000)
 
   it('reads inside the root, writes only to scratch, and is walled outside', async () => {
-    const { engine, recorder, project } = await setup(cleanups)
+    const { engine, recorder, project } = await setup(cleanups, supervised)
     const root = realpathSync(project)
     const scratch = join(root, '..', 'scratch')
     mkdirSync(scratch, { recursive: true })
@@ -80,8 +83,8 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
     for (const event of results) expect(String(event.response)).not.toContain('outside-secret')
     expect(String(results[1].response)).toContain('This bot is not allowed to read')
     expect(String(results[2].response)).toContain('This bot is not allowed to change')
-    // `edit` was never granted.
-    expect(String(results[4].response)).toContain('This bot is not allowed to use edit')
+    // `edit` was never granted, so the turn never offered it: it does not exist for the model.
+    expect(String(results[4].response)).toBe('Tool edit not found')
     expect(existsSync(join(root, 'blocked.txt'))).toBe(false)
     expect(readFileSync(join(scratch, 'notes.md'), 'utf8')).toBe('draft')
     expect(readFileSync(join(root, 'inside.txt'), 'utf8')).toBe('inside-content')
@@ -98,7 +101,7 @@ describe('a bot’s authority over Pi’s built-in tools (Pi RPC engine, real ch
 
 describe('paths Pi rewrites before it opens them (PR 6 review: `~` and `@`)', () => {
   it('a home-folder, `@` or padded path is walled, whatever it would become', async () => {
-    const { engine, recorder, project } = await setup(cleanups)
+    const { engine, recorder, project } = await setup(cleanups, supervised)
     const root = realpathSync(project)
     const scratch = join(root, '..', 'scratch')
     mkdirSync(scratch, { recursive: true })
@@ -122,5 +125,98 @@ describe('paths Pi rewrites before it opens them (PR 6 review: `~` and `@`)', ()
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
     expect(results.map(refused)).toEqual([true, true, true, true, true, true, true, true])
     for (const event of results) expect(String(event.response)).not.toContain('outside-secret')
+  }, 120_000)
+})
+
+describe('the built-ins a bot\'s turn offers', () => {
+  const ledger = () => ({ start: () => 'row', commit: () => {}, failed: () => {} })
+
+  it('are its granted ones only: an ungranted call (bash without "run commands") reaches no gate and asks nobody', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    const base = bot(root, scratch, ['read'])
+    const checked: string[] = []
+    const watching: BotAuthority = { ...base, check: (call) => { if (call.kind === 'builtin') checked.push(call.tool); return base.check(call) }, checkAny: undefined }
+    recorder.respond(script([
+      { tool: { name: 'bash', args: { command: 'echo hi' } } },
+      { tool: { name: 'write', args: { path: join(scratch, 'x.md'), content: 'x' } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: watching, tools: { toolLedger: ledger() } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map((event) => String(event.response))).toEqual(['Tool bash not found', 'Tool write not found'])
+    expect(checked).toEqual([])
+    expect(existsSync(join(scratch, 'x.md'))).toBe(false)
+  }, 120_000)
+
+  it('offer bash with "run commands": any command runs, from the bot\'s files folder, with no ask', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    const files = join(root, '..', 'files')
+    for (const dir of [scratch, files]) mkdirSync(dir, { recursive: true })
+    const base = createBotAuthority({
+      activationId: 'act-1',
+      role: 'activation',
+      permissions: { tools: ['read', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch, files } },
+      waiting: () => false,
+      counters: new RunCounters(),
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
+      spend: null
+    })
+    const checked: string[] = []
+    const watching: BotAuthority = { ...base, check: (call) => { if (call.kind === 'builtin') checked.push(call.tool); return base.check(call) }, checkAny: undefined }
+    recorder.respond(script([
+      { tool: { name: 'bash', args: { command: 'pwd && echo made > made.txt' } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: watching, tools: { toolLedger: ledger() } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([false])
+    expect(String(results[0].response)).toContain(realpathSync(files))
+    expect(readFileSync(join(files, 'made.txt'), 'utf8')).toBe('made\n')
+    expect(checked).toEqual(['shell'])
+  }, 120_000)
+})
+
+describe('a refused call (an unattended run\'s missing permission, Bot Phase 1 §5.1.1)', () => {
+  it('reaches the model as the tool\'s error, and the turn carries on', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    writeFileSync(join(root, 'inside.txt'), 'inside-content')
+    const base = bot(root, scratch, ['read', 'write'])
+    // `write` is outside what this run may do: the run's authority refuses it with an ask instead of a wall.
+    const asking: BotAuthority = {
+      ...base,
+      check: (call) => (call.kind === 'builtin' && call.tool === 'write' ? { ok: false, refused: { text: 'Asked the owner; carry on without it.', askId: 'ask-1' } } : base.check(call)),
+      checkAny: undefined
+    }
+    recorder.respond(script([
+      { tool: { name: 'write', args: { path: join(scratch, 'x.md'), content: 'x' } } },
+      { tool: { name: 'read', args: { path: 'inside.txt' } } },
+      { text: 'done' }
+    ]))
+    // A bot's built-in runs only once its row is in the run's tool ledger.
+    let rows = 0
+    const toolLedger = { start: () => `row-${++rows}`, commit: () => {}, failed: () => {} }
+    const turn = harness(root, {}, { bot: asking, tools: { toolLedger } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    expect(result.aborted).toBe(false)
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([true, false])
+    expect(String(results[0].response)).toContain('Asked the owner; carry on without it.')
+    expect(String(results[1].response)).toContain('inside-content')
+    expect(existsSync(join(scratch, 'x.md'))).toBe(false)
+    // Only the read was recorded: the refused call never ran.
+    expect(rows).toBe(1)
   }, 120_000)
 })

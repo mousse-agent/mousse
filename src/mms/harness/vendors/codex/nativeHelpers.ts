@@ -6,7 +6,8 @@ export interface StrayThread {
   completed: boolean
 }
 
-type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string }
+/** `nested`: named by another helper, not by the parent; the run waits for it and stops it, but shows none of its work. */
+type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string; nested?: boolean }
 
 /**
  * The native helpers (Codex's own subagents, separate Codex threads) one Codex turn started.
@@ -16,16 +17,14 @@ type HelperState = { turnId?: string; running: boolean; seenActive: boolean; int
  * keep the child's run open until they settle and to stop them with the child.
  *
  * A helper is named by a `subAgentActivity` item (`kind: 'started'`) or a `collabAgentToolCall`
- * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, while the run is live.
+ * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, while the run is live. The same items
+ * on a tracked helper's own thread name its helpers, which are tracked the same way, at any depth.
  *
  * This is the tracking the service falls back to when the app-server cannot list a thread's descendants
  * (an older Codex, or no state database), and the floor under the listed tree (`helperTree.ts`) when it
  * can. The tree reads every helper at any depth from the server, so a nested helper, or one whose spawn
- * is reported late, is covered there. On its own this tracker has two gaps:
- * - Only direct helpers are tracked. A helper that starts a helper of its own is not noticed, so the
- *   run does not wait for it and Stop does not interrupt it.
- * - A helper whose spawn is reported after Stop, or after the run was released, is never registered,
- *   so it is not interrupted.
+ * is reported late, is covered there. On its own this tracker has one gap: a helper whose spawn is
+ * reported after Stop, or after the run was released, is never registered, so it is not interrupted.
  */
 export class NativeHelpers {
   private readonly helpers = new Map<string, HelperState>()
@@ -46,22 +45,27 @@ export class NativeHelpers {
     return [...this.helpers].filter(([, helper]) => helper.running).map(([threadId]) => threadId)
   }
 
-  /** An item of the parent's thread; registers a helper it names and follows its state. */
-  noteItem(item: { type: string } & Record<string, unknown>): void {
+  /** Whether a helper was named by another helper rather than by the parent. */
+  isNested(threadId: string): boolean {
+    return Boolean(this.helpers.get(threadId)?.nested)
+  }
+
+  /** An item of the parent's thread (or, `nested`, of a helper's); registers a helper it names and follows its state. */
+  noteItem(item: { type: string } & Record<string, unknown>, nested = false): void {
     if (item.type === 'subAgentActivity') {
       const threadId = typeof item.agentThreadId === 'string' ? item.agentThreadId : undefined
       if (!threadId) return
       const helper = this.helpers.get(threadId)
       if (item.kind === 'completed' || item.kind === 'interrupted') {
         if (helper) this.set(threadId, helper, false)
-      } else if (!helper) this.register(threadId)
+      } else if (!helper) this.register(threadId, nested)
       // The parent sent a known helper more work; a repeat of `started` never reopens a settled one.
       else if (item.kind === 'interacted') this.set(threadId, helper, true)
       return
     }
     if (item.type !== 'collabAgentToolCall') return
     if (item.tool === 'spawnAgent')
-      for (const threadId of Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []) if (typeof threadId === 'string') this.register(threadId)
+      for (const threadId of Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []) if (typeof threadId === 'string') this.register(threadId, nested)
     const states = item.agentsStates && typeof item.agentsStates === 'object' ? (item.agentsStates as Record<string, { status?: string }>) : {}
     for (const [threadId, state] of Object.entries(states)) {
       const helper = this.helpers.get(threadId)
@@ -71,7 +75,7 @@ export class NativeHelpers {
 
   /** A notification of a helper's own thread. */
   handle(notification: CodexNotification): void {
-    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string } } | undefined
+    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string }; item?: { type?: unknown } & Record<string, unknown> } | undefined
     const threadId = params?.threadId
     const helper = threadId ? this.helpers.get(threadId) : undefined
     if (!threadId || !helper) return
@@ -79,6 +83,9 @@ export class NativeHelpers {
     // Stop landed. Later turns (work a later run sends the helper) are not its own.
     if (this.stopWith && notification.method === 'turn/started' && helper.turnId && helper.turnId !== params?.turn?.id) return
     this.lastActivityAt = Date.now()
+    // The helper started a helper of its own, or reports on one: tracked like the helpers the parent names.
+    const item = notification.method === 'item/started' || notification.method === 'item/completed' ? params?.item : undefined
+    if (item?.type === 'subAgentActivity' || item?.type === 'collabAgentToolCall') this.noteItem(item as { type: string } & Record<string, unknown>, true)
     if (notification.method === 'turn/started' && params?.turn?.id) {
       helper.turnId = params.turn.id
       helper.seenActive = true
@@ -122,11 +129,11 @@ export class NativeHelpers {
     for (const waiter of this.waiters.splice(0)) waiter.reject(reason)
   }
 
-  private register(threadId: string): void {
+  private register(threadId: string, nested: boolean): void {
     if (this.helpers.has(threadId)) return
     this.lastActivityAt = Date.now()
     const seen = this.stray(threadId)
-    const helper: HelperState = { running: !seen?.completed, seenActive: Boolean(seen), ...(seen?.turnId ? { turnId: seen.turnId } : {}) }
+    const helper: HelperState = { running: !seen?.completed, seenActive: Boolean(seen), ...(seen?.turnId ? { turnId: seen.turnId } : {}), ...(nested ? { nested } : {}) }
     this.helpers.set(threadId, helper)
     this.interrupt(threadId, helper)
   }

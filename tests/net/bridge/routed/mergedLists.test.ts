@@ -741,9 +741,33 @@ describe('a computer that is out of reach', () => {
     await vi.waitFor(() => expect(h.lists.threads().map((row) => row.id)).toEqual([h.q('old1')]))
     expect(h.lists.state()[0]).toMatchObject({ mode: 'read', live: true })
   })
+
+  it('streams its lists again once it reconnects after an upgrade', async () => {
+    const h = harness()
+    h.hub.attach.mockRejectedValueOnce(new DomainRpcError('computer_outdated', 'Update Mousse'))
+    await h.lists.reconcile()
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+    // It goes away, is upgraded, and comes back: the stream opens now.
+    h.online.delete(h.node)
+    h.lists.nodeOffline(h.node)
+    h.online.add(h.node)
+    h.lists.nodeOnline(h.node)
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'stream' }))
+    expect(h.hub.attach).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays on reads when it reconnects still outdated', async () => {
+    const h = harness()
+    h.hub.attach.mockRejectedValue(new DomainRpcError('computer_outdated', 'Update Mousse'))
+    await h.lists.reconcile()
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+    h.lists.nodeOnline(h.node)
+    await vi.waitFor(() => expect(h.hub.attach).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(h.lists.state()[0]).toMatchObject({ mode: 'read' }))
+  })
 })
 
-describe('search and Recently deleted across computers', () => {
+describe('search across computers', () => {
   const second = (): { node: NodeId; name: string } => ({ node: newId('node'), name: 'Desktop' })
 
   it('name a computer that was not searched, and keep the matches of the others', async () => {
@@ -805,37 +829,6 @@ describe('search and Recently deleted across computers', () => {
     expect(newer.results.map((row) => row.threadName)).toEqual(['Second'])
     // Another window's search is its own.
     expect(h.client.call).toHaveBeenCalledTimes(2)
-  })
-
-  it('list what is in the trash of the other computers by qualified id, without their folders', async () => {
-    const h = harness()
-    h.client.call.mockResolvedValue({
-      lifecycles: [
-        {
-          taskId: 'gone1',
-          state: 'trashed',
-          location: '/home/o/.mousse/trash/gone1',
-          originalLocation: '/home/o/app',
-          locations: ['/home/o/app'],
-          cleanupOwner: { pid: 1, processInstanceId: 'x', token: 'y' },
-          operations: []
-        }
-      ],
-      taskNames: { gone1: 'Deleted thread' }
-    })
-    await h.lists.reconcile()
-    const inventory = await h.lists.inventory('window-1')
-    expect(inventory.lifecycles).toHaveLength(1)
-    expect(inventory.lifecycles[0]).toMatchObject({
-      taskId: h.q('gone1'),
-      node: h.node,
-      computerName: 'Laptop',
-      location: '',
-      locations: []
-    })
-    expect(inventory.lifecycles[0]).not.toHaveProperty('cleanupOwner')
-    expect(inventory.taskNames).toEqual({ [h.q('gone1')]: 'Deleted thread' })
-    expect(JSON.stringify(inventory)).not.toContain('/home/o')
   })
 })
 
@@ -1002,53 +995,8 @@ describe('projects that are the same repository', () => {
   }, 30_000)
 })
 
-describe('a search and Recently deleted on one window', () => {
-  it('do not cancel each other: each kind of call has its own slot, and overlapping reads share one', async () => {
-    const h = harness()
-    const aborted: string[] = []
-    h.client.call.mockImplementation(
-      (_node: NodeId, method: string, _params: unknown, options?: { signal?: AbortSignal }) =>
-        new Promise((resolve, reject) => {
-          options?.signal?.addEventListener('abort', () => {
-            aborted.push(method)
-            reject(new DomainRpcError('cancelled', 'cancelled'))
-          })
-          if (method === 'threads.inventory')
-            setTimeout(
-              () =>
-                resolve({
-                  lifecycles: [{ taskId: 'gone', state: 'trashed', operations: [] }],
-                  taskNames: { gone: 'Gone' }
-                }),
-              60
-            )
-          else
-            setTimeout(
-              () =>
-                resolve({ results: [{ threadId: 'r', threadName: 'Found', matchType: 'thread' }] }),
-              120
-            )
-        })
-    )
-    await h.lists.reconcile()
-    const search = h.lists.search('window-1', 'x', 10)
-    // Recently deleted refreshes while the search is running, twice, on the same connection.
-    const first = h.lists.inventory('window-1')
-    const second = h.lists.inventory('window-1')
-    const [found, trash, again] = await Promise.all([search, first, second])
-    expect(aborted).toEqual([])
-    expect(found.results.map((row) => row.threadName)).toEqual(['Found'])
-    expect(found.skipped).toEqual([])
-    expect(trash.lifecycles).toHaveLength(1)
-    expect(again).toBe(trash)
-    // One read of the trash for the two refreshes, one of the search.
-    expect(h.client.call.mock.calls.filter((call) => call[1] === 'threads.inventory')).toHaveLength(
-      1
-    )
-    expect(h.client.call.mock.calls.filter((call) => call[1] === 'threads.search')).toHaveLength(1)
-  })
-
-  it('name the computers a replaced search did not cover, and the one a list could not read', async () => {
+describe('a replaced search on one window', () => {
+  it('names the computers a replaced search did not cover', async () => {
     const quiet = { node: newId('node'), name: 'Desktop' }
     const h = harness({ computers: [{ node: newId('node'), name: 'Laptop' }, quiet] })
     h.online.delete(quiet.node)
@@ -1068,9 +1016,6 @@ describe('a search and Recently deleted on one window', () => {
       ['Desktop', 'replaced'],
       ['Laptop', 'replaced']
     ])
-    h.client.call.mockResolvedValue({ lifecycles: [], taskNames: {} })
-    const trash = await h.lists.inventory('w')
-    expect(trash.skipped).toEqual([{ node: quiet.node, name: 'Desktop', reason: 'offline' }])
   })
 })
 

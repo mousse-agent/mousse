@@ -41,7 +41,8 @@
 .app .profile-sidebar-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .app .profile-sidebar-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
 .app .profile-sidebar-text > span { color: var(--ui-faint); font-size: 11px; }
-.profile-switcher.profile-sidebar-loading { padding: 14px 9px; color: var(--text-secondary); font-size: 12px; }
+/* Holds the trigger's height while the profile loads; no text. */
+.profile-switcher.profile-sidebar-loading { min-height: 44px; }
 .profile-switcher-sidebar > button:not(.profile-sidebar-trigger) { padding: 8px; font-size: 12px; }
 
 /* Avatars: the profile's own, and the account's (palette colour from profilePalette.ts). */
@@ -63,9 +64,11 @@
 .profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .mousse-id-avatar-empty { background: color-mix(in srgb, var(--text-secondary) 18%, transparent) !important; color: var(--text-secondary); }
 
-/* The popover: one lit surface, two columns split by a hairline. Without a Mousse ID service
-   there is only the profiles column and the surface is 330px wide. */
+/* The popover: one lit surface, as wide as the trigger (set by useFloatingPosition), so it never
+   spills over the conversation. Two columns split by a hairline when there is room; without a
+   Mousse ID service there is only the profiles column. */
 .profile-menu {
+  container-type: inline-size;
   box-sizing: border-box;
   width: 330px;
   max-width: calc(100vw - 16px);
@@ -79,7 +82,6 @@
   color: var(--text-primary);
   font-size: 13px;
 }
-.profile-menu.profile-menu-wide { width: 460px; }
 .profile-menu-columns { display: flex; }
 .profile-menu-col { display: flex; flex: 1 1 0; flex-direction: column; gap: 2px; min-width: 0; }
 .profile-menu-col + .profile-menu-col { margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--border); }
@@ -180,9 +182,8 @@
 
 .profile-switcher-error { padding: 8px var(--ui-menu-row-x) 4px; color: var(--danger); font-size: 12px; }
 
-/* Narrow windows: account on top, profiles below, still 330px wide. */
-@media (max-width: 559px) {
-  .profile-menu.profile-menu-wide { width: 330px; }
+/* A narrow sidebar: account on top, profiles below. */
+@container (max-width: 419px) {
   .profile-menu-columns { flex-direction: column; }
   .profile-menu-col + .profile-menu-col { margin-left: 0; margin-top: 6px; padding-left: 0; padding-top: 6px; border-left: 0; border-top: 1px solid var(--border); }
 }

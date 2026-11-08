@@ -69,6 +69,13 @@ interface ThreadMeta {
   sentFrom?: ThreadSentFrom
   /** See `Thread.runsOn`. */
   runsOn?: ThreadRunsOn
+  /** See `Thread.localOnly`. Written only with the first `meta.json`. */
+  localOnly?: true
+  /** See `Thread.botOwned`. */
+  botOwned?: true
+  /** See `Thread.expiresAt`. */
+  expiresAt?: string
+  expiryStopsRun?: true
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
@@ -318,6 +325,11 @@ export class ThreadDataStore extends EventEmitter {
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
+      /** See `Thread.localOnly`. */
+      localOnly?: boolean
+      /** See `Thread.expiresAt`; checked by the caller. */
+      expiresAt?: string
+      expiryStopsRun?: boolean
     }
   ): Thread {
     const id = opts?.id ?? uuidv4()
@@ -343,6 +355,9 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
     if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
+    if (opts?.localOnly === true) meta.localOnly = true
+    if (opts?.expiresAt) meta.expiresAt = opts.expiresAt
+    if (opts?.expiresAt && opts.expiryStopsRun === true) meta.expiryStopsRun = true
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's
@@ -452,8 +467,11 @@ export class ThreadDataStore extends EventEmitter {
     return discarded
   }
 
-  /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
-  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }): Thread {
+  /**
+   * Daemon-owned execution admission: retry/crash recovery keeps one thread and its data.
+   * `botOwned` marks a personal bot's thread (`Thread.botOwned`), also one made before the mark existed.
+   */
+  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }, opts?: { localOnly?: boolean; botOwned?: boolean }): Thread {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
     if (projectId && !project) throw new Error('Execution project is unavailable')
     const id = executionThreadId(executionKey)
@@ -462,13 +480,21 @@ export class ThreadDataStore extends EventEmitter {
     }
     const now = new Date().toISOString()
     const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
+    if (opts?.localOnly === true) initial.localOnly = true
+    if (opts?.botOwned === true) initial.botOwned = true
     const threadDir = this.resolveThreadDir(initial, project?.path)
     this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: ownership?.parentTaskId, creating: true })
     this.ensureThreadDir(threadDir)
     return withThreadLifecyclePath(threadDir, 'write', () => withFileLock(join(threadDir, '.execution-init.lock'), () => {
       const metaPath = join(threadDir, 'meta.json')
-      const meta = existsSync(metaPath) ? readThreadMeta<ThreadMeta>(metaPath) : initial
+      let meta = existsSync(metaPath) ? readThreadMeta<ThreadMeta>(metaPath) : initial
       if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
+      if (opts?.botOwned === true && !meta.botOwned && meta !== initial) {
+        meta = { ...meta, botOwned: true }
+        this.writeJsonAtomic(metaPath, meta)
+        const entry = projectId ? undefined : this.readStandaloneIndexRaw().find((thread) => thread.id === id)
+        if (entry) this.updateStandaloneIndexEntry({ ...entry, botOwned: true })
+      }
       // A previous process may have died between these writes. Preserve every
       // file already present, including messages produced after admission.
       for (const file of ['messages.json', 'agents.json', 'tasks.json']) {
@@ -482,6 +508,26 @@ export class ThreadDataStore extends EventEmitter {
       if (meta === initial || (!projectId && !indexed)) this.emit('created', meta)
       return meta
     }))
+  }
+
+  /**
+   * Marks each of `threadIds` that is still listed as a personal bot's (`Thread.botOwned`), without
+   * touching it: a bot's thread made by an earlier build, or by a bot that never runs again, leaves the
+   * lists once its bots.db opens. Returns how many it marked.
+   */
+  markBotOwned(threadIds: Iterable<string>): number {
+    let marked = 0
+    for (const id of new Set(threadIds)) {
+      const thread = this.getThread(id)
+      if (!thread || thread.botOwned) continue
+      const updated: Thread = { ...thread, botOwned: true }
+      this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+      if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+      this.patchListCache(updated)
+      this.emit('updated', updated)
+      marked += 1
+    }
+    return marked
   }
 
   /** Projects owning grouped threads, in the same order as the desktop sidebar. */
@@ -609,7 +655,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)

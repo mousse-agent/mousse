@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { isLocalOnlyThread } from '../../../shared/threadLineage'
+import { threadFolderIsLocalOnly } from '../../data/localOnlyThreads'
 import { isAbsolute, win32 } from 'node:path'
 import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../../../shared/net'
 import type { NodeCapability } from '../../../shared/net'
@@ -463,7 +465,7 @@ export class OwnerRoutes {
       }
       need('threadId', request.kind === 'thread' || request.kind === 'terminal')
       need('ptyId', request.kind === 'terminal')
-      if (request.threadId && !services.threads.getThread(request.threadId))
+      if (request.threadId && !this.sharedThread(request.threadId))
         throw new DomainRpcError('thread_not_found', 'Thread not found', {
           threadId: request.threadId
         })
@@ -832,6 +834,16 @@ export class OwnerRoutes {
     }
   }
 
+  /**
+   * A listed thread another of the user's computers may reach: never a private one (`Thread.localOnly`)
+   * or a personal bot's (`Thread.botOwned`), which answer as if they did not exist.
+   */
+  private sharedThread(threadId: string): boolean {
+    const { threads } = this.options.services
+    const thread = threads.getThread(threadId)
+    return Boolean(thread) && !thread!.botOwned && !isLocalOnlyThread(thread!, threads.listAllThreads())
+  }
+
   /** The thread, project and secondary ids the call names are this profile's, and the thread's. */
   private async assertOwned(
     method: string,
@@ -841,13 +853,21 @@ export class OwnerRoutes {
     const { services } = this.options
     const threadKey = row.threadIds?.[0] ?? 'threadId'
     const threadId = params[threadKey]
-    const known = (id: string): boolean =>
-      Boolean(services.threads.getThread(id)) ||
-      // A trashed thread is not listed but can be restored, and its inventory read.
-      ((method === 'threads.restore' || method === 'threads.inventory') &&
-        Boolean(services.threads.lifecycleStore?.get(id)))
+    const known = (id: string): boolean => {
+      if (this.sharedThread(id)) return true
+      // A trashed thread is not listed, but its inventory can be read; a private one stays unknown.
+      if (method !== 'threads.inventory') return false
+      const record = services.threads.lifecycleStore?.get(id)
+      return Boolean(record) && !threadFolderIsLocalOnly(record!.location, true)
+    }
     if (typeof threadId === 'string' && !known(threadId))
       throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+    // Every other thread the call names must be one another computer may see as well.
+    for (const key of row.threadIds?.slice(1) ?? []) {
+      const other = params[key]
+      if (typeof other === 'string' && services.threads.getThread(other) && !this.sharedThread(other))
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: other })
+    }
     const projectId = params.projectId
     if (typeof projectId === 'string' && !services.projects.getProject(projectId))
       throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
@@ -865,7 +885,7 @@ export class OwnerRoutes {
       )
     if (
       typeof params.originThreadId === 'string' &&
-      !services.threads.getThread(params.originThreadId)
+      !this.sharedThread(params.originThreadId)
     )
       throw new DomainRpcError('thread_not_found', 'Thread not found', {
         threadId: params.originThreadId

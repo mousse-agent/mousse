@@ -101,7 +101,8 @@ function splitSettings(full: MousseSettings): {
       experimental: full.experimental,
       storage: full.storage,
       integrations: full.integrations,
-      title: full.title
+      title: full.title,
+      botModel: full.botModel
     },
     providers: { ...full.provider },
     agents: { ...full.agents }
@@ -573,7 +574,8 @@ export class MousseConfigStore {
       partial.experimental ||
       partial.storage ||
       partial.integrations ||
-      partial.title
+      partial.title ||
+      partial.botModel
     ) {
       this.updateSettingsSection({
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
@@ -594,7 +596,8 @@ export class MousseConfigStore {
         ...(partial.integrations
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }
           : {}),
-        ...(partial.title ? { title: partial.title as MousseSettingsSection['title'] } : {})
+        ...(partial.title ? { title: partial.title as MousseSettingsSection['title'] } : {}),
+        ...(partial.botModel ? { botModel: partial.botModel as MousseSettingsSection['botModel'] } : {})
       })
     }
     if (partial.provider) {

@@ -134,7 +134,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
   'source',
   'projectPath',
   'profileId',
-  'expectedProfileId'
+  'expectedProfileId',
+  // The folder the Files panel of a window on the computer itself browses (any folder of that computer).
+  'root'
 ] as const
 
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
@@ -401,10 +403,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.pin': write('thread', ['threadId', 'pinned']),
   'threads.settle': write('thread', ['threadId', 'settled']),
   'threads.delete': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.trash': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
-  'threads.restore': write('thread', ['threadId', 'operationId', 'expectedGeneration']),
   'threads.regenerateTitle': write('thread', ['threadId']),
   'threads.setWorktreeEnabled': write('thread', ['threadId', 'enabled']),
+  // When the thread deletes itself for good, or null to keep it; the owner's daemon runs the delete.
+  'threads.setExpiry': write('thread', ['threadId', 'expiresAt', 'stopsRun']),
   'thread.fork': write(
     'thread',
     ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'],
@@ -802,11 +804,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
   },
   {
-    methods: ['threads.purge'],
-    reason:
-      'Permanent delete cannot be undone, so it stays on the computer that runs the thread; Restore is routed.'
-  },
-  {
     methods: ['threads.focus'],
     reason:
       'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'
@@ -814,10 +811,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['threads.reorder', 'projects.reorder'],
     reason: 'Sidebar order is an overlay each computer keeps for itself.'
-  },
-  {
-    methods: ['threads.configureTrash'],
-    reason: 'The trash policy is a setting of the computer it is set on.'
   },
   {
     methods: ['projects.identity', 'projects.trustGitSettings'],
@@ -828,6 +821,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
+  },
+  {
+    methods: ['files.drives'],
+    reason: 'The drives of a computer are browsed from a window on that computer only; another computer sees the thread’s folder.'
   },
   {
     methods: [

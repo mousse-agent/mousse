@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import type { ExpiryPreset } from '../../shared/threadExpiry'
+import type { RunSettings } from '../../shared/settings'
 import type { ComposerWorkspace } from '../lib/newThread'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
@@ -22,6 +24,7 @@ import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
+import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
 import type { ShortcutOverrides } from '../../shared/commands'
 
 /** What the command palette leads with when it opens. */
@@ -192,9 +195,13 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** The profile's "Start new chats in a worktree" setting: the worktree choice of a draft that has not made one. */
+  /** The profile's "Start new threads in a worktree" setting: the worktree choice of a draft that has not made one. */
   worktreeByDefault: boolean
   setWorktreeByDefault: (worktreeByDefault: boolean) => void
+  /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
+  privateThreadExpiry: ExpiryPreset | 'never'
+  /** The new-chat defaults from Settings → Runs. */
+  setRunDefaults: (runs: Pick<RunSettings, 'worktreeByDefault' | 'privateThreadExpiry'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -221,6 +228,10 @@ interface AppState {
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
   setScheduledOpen: (open: boolean) => void
+  /** The Automations section to show next; a new object per request so asking twice switches twice. */
+  automationsSectionRequest: { section: AutomationsSection } | null
+  /** Opens Automations at one section (Agents, Workflows, Scheduled or Bots). */
+  openAutomations: (section: AutomationsSection) => void
   setLoading: (loading: boolean) => void
   setAppInfo: (info: AppState['appInfo']) => void
   setThreadsSidebarOpen: (open: boolean) => void
@@ -393,6 +404,9 @@ function savePersonalWorkspace(state: AppState): void {
   } catch { /* quota/private mode */ }
 }
 
+/** The sections of the Automations page. */
+export type AutomationsSection = 'agents' | 'workflows' | 'scheduled'
+
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
   profileReady: false,
@@ -402,8 +416,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
-  sidebarWidth: 30,
-  threadsSidebarWidth: 260,
+  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+  threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
   usageOpen: false,
   setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false } : { usageOpen }),
   settingsOpen: false,
@@ -465,6 +479,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   composerWorkspaceDrafts: {},
   worktreeByDefault: true,
   setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
+  privateThreadExpiry: 'never',
+  setRunDefaults: ({ worktreeByDefault, privateThreadExpiry }) => set({ worktreeByDefault, privateThreadExpiry }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)
@@ -529,6 +545,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, usageOpen: false } : { settingsOpen }),
   setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, usageOpen: false } : { scheduledOpen }),
+  automationsSectionRequest: null,
+  openAutomations: (section) => set({ scheduledOpen: true, settingsOpen: false, usageOpen: false, automationsSectionRequest: { section } }),
   setLoading: (loading) => set({ loading }),
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
@@ -603,19 +621,17 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
     const key = ownerThreadId ?? '__standalone__'
-    set((s) => {
-      const title = `Terminal ${s.projectTerminalTabs.length + 1}`
-      return {
-        projectTerminalTabs: [
-          ...s.projectTerminalTabs,
-          { id, ownerThreadId, ptyId: null, title, exited: false }
-        ],
-        activeProjectTerminalTabByThread: {
-          ...s.activeProjectTerminalTabByThread,
-          [key]: id
-        }
+    // The tab strip numbers plain terminals by position (`surfaceTabItems`).
+    set((s) => ({
+      projectTerminalTabs: [
+        ...s.projectTerminalTabs,
+        { id, ownerThreadId, ptyId: null, title: 'Terminal', exited: false }
+      ],
+      activeProjectTerminalTabByThread: {
+        ...s.activeProjectTerminalTabByThread,
+        [key]: id
       }
-    })
+    }))
     return id
   },
   closeProjectTerminalTab: (tabId) =>
@@ -695,8 +711,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],
-      sidebarWidth: 30,
-      threadsSidebarWidth: 260,
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
       threadsSidebarOpen: true,
       mainAreaOpen: false,
       sideCardCollapsed: {} as Record<string, boolean>,

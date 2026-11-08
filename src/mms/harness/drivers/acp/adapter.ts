@@ -125,6 +125,8 @@ export class AcpAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
+        // A note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) streams.text.break()
         if (event.phase === 'start') toolCalls.set(event.callId, 'running')
         else toolCalls.set(event.callId, event.status === 'completed' ? 'completed' : 'failed')
         sink.tool(runtimeToolEvent(withClosure(event, input.signal.aborted)))

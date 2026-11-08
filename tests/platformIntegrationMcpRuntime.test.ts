@@ -17,7 +17,9 @@ import {
 import { defaultIntegrationActor } from '../src/shared/integrations/actor'
 import { getManagedMcpConfigPath, getManagedMcpOAuthDir } from '../src/mms/integrations/nativePaths'
 import { existsSync } from 'fs'
-import { FileMcpOAuthProvider, hasMcpOAuthTokens } from '../src/mms/integrations/mcp/McpOAuthProvider'
+import { FileMcpOAuthProvider, ensureMcpOAuthAuthorized, hasMcpOAuthTokens } from '../src/mms/integrations/mcp/McpOAuthProvider'
+import { createServer, type Server } from 'http'
+import type { AddressInfo } from 'net'
 import { supportsOwnedMcpTree } from '../src/mms/integrations/mcp/ownedProcessTree'
 
 function managerFor(
@@ -431,6 +433,132 @@ describe('I03 managed MCP lifecycle', () => {
         installationId: local.installationId
       })
     } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('only accepts the OAuth callback that carries its own sign-in state', async () => {
+    const { root, context } = await makeTempProfile()
+    const servers: Server[] = []
+    const listen = async (handler: Parameters<typeof createServer>[1]) => {
+      const server = createServer(handler)
+      servers.push(server)
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+      return (server.address() as AddressInfo).port
+    }
+    try {
+      const tokenBodies: string[] = []
+      const authPort = await listen((req, res) => {
+        const path = req.url ?? ''
+        if (path.includes('oauth-authorization-server')) {
+          const issuer = `http://127.0.0.1:${authPort}/`
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            issuer,
+            authorization_endpoint: `${issuer}authorize`,
+            token_endpoint: `${issuer}token`,
+            response_types_supported: ['code'],
+            code_challenge_methods_supported: ['S256'],
+            grant_types_supported: ['authorization_code', 'refresh_token']
+          }))
+          return
+        }
+        if (path.startsWith('/token')) {
+          let body = ''
+          req.on('data', (chunk) => { body += chunk })
+          req.on('end', () => {
+            tokenBodies.push(body)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ access_token: 'fixture-access', token_type: 'bearer' }))
+          })
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      })
+      // A free port for the callback, so the test does not depend on the product port being free.
+      const probe = createServer()
+      await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()))
+      const callbackPort = (probe.address() as AddressInfo).port
+      await new Promise<void>((resolve) => probe.close(() => resolve()))
+
+      let authorizationUrl: URL | undefined
+      let redirected!: () => void
+      const redirectedOnce = new Promise<void>((resolve) => { redirected = resolve })
+      let settled = false
+      const pending = ensureMcpOAuthAuthorized(
+        'state-check',
+        `http://127.0.0.1:${authPort}/mcp`,
+        { clientId: 'fixture-client' },
+        async (url) => { authorizationUrl = new URL(url); redirected() },
+        { oauthDir: getManagedMcpOAuthDir(root), profileId: context.profileId, callbackPort }
+      )
+      void pending.then(() => { settled = true }, () => { settled = true })
+      await redirectedOnce
+      const state = authorizationUrl!.searchParams.get('state')
+      expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/)
+
+      const callback = (query: string) => fetch(`http://127.0.0.1:${callbackPort}/callback?${query}`)
+      for (const query of ['code=foreign&state=stale', 'code=foreign', `code=foreign&state=${state}x`]) {
+        const res = await callback(query)
+        expect(res.status, query).toBe(400)
+        expect(await res.text()).toMatch(/out of date/)
+      }
+      expect((await fetch(`http://127.0.0.1:${callbackPort}/callbackx?code=foreign&state=${state}`)).status).toBe(404)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(settled).toBe(false)
+      expect(tokenBodies).toEqual([])
+
+      const accepted = await callback(`code=right&state=${encodeURIComponent(state!)}`)
+      expect(accepted.status).toBe(200)
+      const provider = await pending
+      expect(provider.tokens()?.access_token).toBe('fixture-access')
+      expect(tokenBodies).toHaveLength(1)
+      expect(new URLSearchParams(tokenBodies[0]).get('code')).toBe('right')
+    } finally {
+      for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()))
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails the sign-in when its own callback carries an error', async () => {
+    const { root, context } = await makeTempProfile()
+    const authServer = createServer((req, res) => {
+      if ((req.url ?? '').includes('oauth-authorization-server')) {
+        const issuer = `http://127.0.0.1:${(authServer.address() as AddressInfo).port}/`
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          issuer, authorization_endpoint: `${issuer}authorize`, token_endpoint: `${issuer}token`,
+          response_types_supported: ['code'], code_challenge_methods_supported: ['S256']
+        }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    await new Promise<void>((resolve) => authServer.listen(0, '127.0.0.1', () => resolve()))
+    try {
+      const probe = createServer()
+      await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()))
+      const callbackPort = (probe.address() as AddressInfo).port
+      await new Promise<void>((resolve) => probe.close(() => resolve()))
+      let state = ''
+      let redirected!: () => void
+      const redirectedOnce = new Promise<void>((resolve) => { redirected = resolve })
+      const pending = ensureMcpOAuthAuthorized(
+        'state-error',
+        `http://127.0.0.1:${(authServer.address() as AddressInfo).port}/mcp`,
+        { clientId: 'fixture-client' },
+        async (url) => { state = new URL(url).searchParams.get('state') ?? ''; redirected() },
+        { oauthDir: getManagedMcpOAuthDir(root), profileId: context.profileId, callbackPort }
+      )
+      void pending.catch(() => undefined)
+      await redirectedOnce
+      const res = await fetch(`http://127.0.0.1:${callbackPort}/callback?error=access_denied&state=${encodeURIComponent(state)}`)
+      expect(res.status).toBe(200)
+      await expect(pending).rejects.toThrow(/access_denied/)
+    } finally {
+      await new Promise<void>((resolve) => authServer.close(() => resolve()))
       await rm(root, { recursive: true, force: true })
     }
   })

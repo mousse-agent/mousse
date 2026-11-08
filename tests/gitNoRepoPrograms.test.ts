@@ -274,7 +274,7 @@ describe('a filter the repository had when the user added it runs; one added or 
     projects().openProject(f.repo)
     withCrypt(f.repo)
     writeFileSync(join(f.repo, 'secrets.env'), 'TOKEN=two\n')
-    expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/Trust Git settings again/)
+    expect(() => mousseGit(f.repo, ['add', '-A'])).toThrow(/Trust this repository's Git settings/)
     expect(ran()).toEqual([])
   })
 

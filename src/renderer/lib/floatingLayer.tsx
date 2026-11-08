@@ -1,5 +1,6 @@
 import {
   useLayoutEffect,
+  useMemo,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -34,6 +35,8 @@ export interface FloatingPositionOptions {
   padding?: number
   /** Recompute when these values change (menu content size, etc.). */
   deps?: unknown[]
+  /** Give the layer the anchor's width, so a menu never spills past the control that opened it. */
+  matchAnchorWidth?: boolean
 }
 
 /**
@@ -47,7 +50,8 @@ export function useFloatingPosition({
   placement = 'above-start',
   gap = 8,
   padding = 8,
-  deps = []
+  deps = [],
+  matchAnchorWidth = false
 }: FloatingPositionOptions): CSSProperties {
   const [style, setStyle] = useState<CSSProperties>({
     position: 'fixed',
@@ -75,6 +79,9 @@ export function useFloatingPosition({
       if (!anchor || !content) return
 
       const anchorRect = anchor.getBoundingClientRect()
+      // Set before measuring: the height depends on the width (wrapping, stacked columns).
+      const width = matchAnchorWidth ? anchorRect.width : undefined
+      if (width !== undefined) content.style.width = `${width}px`
       const contentRect = content.getBoundingClientRect()
       const preferAbove = placement.startsWith('above')
       const preferBelow = placement.startsWith('below')
@@ -124,9 +131,12 @@ export function useFloatingPosition({
         position: 'fixed',
         top,
         left,
+        ...(width !== undefined ? { width } : {}),
         zIndex: FLOATING_LAYER_Z_INDEX,
-        visibility: 'visible'
-      })
+        visibility: 'visible',
+        // A layer that should be no wider than its anchor reads this in its CSS.
+        '--floating-anchor-width': `${anchorRect.width}px`
+      } as CSSProperties)
     }
 
     update()
@@ -138,7 +148,20 @@ export function useFloatingPosition({
       window.removeEventListener('resize', update)
       window.removeEventListener('scroll', update, true)
     }
-  }, [open, placement, gap, padding, anchorRef, contentRef, ...deps])
+  }, [open, placement, gap, padding, anchorRef, contentRef, matchAnchorWidth, ...deps])
 
   return style
+}
+
+/**
+ * A ref to the closest element around `ref`'s that matches `selector`, or `ref`'s own element when
+ * none does; read when used. A composer's menus anchor to the whole composer so they open above it,
+ * off the draft, however deep their button sits.
+ */
+export function useClosestAnchor(ref: RefObject<HTMLElement | null>, selector: string): RefObject<HTMLElement | null> {
+  return useMemo(() => ({
+    get current() {
+      return ref.current?.closest<HTMLElement>(selector) ?? ref.current
+    }
+  }), [ref, selector])
 }

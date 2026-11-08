@@ -423,6 +423,11 @@ export interface HarnessDriver {
    */
   readonly mirrorsVendorFile?: boolean
   /**
+   * The runtime compacts its own session near the model's window and takes only Mousse's compaction
+   * on/off, not the Compact context size. Absent: a thread on it compacts at the Compact context size.
+   */
+  readonly compactsNearWindow?: boolean
+  /**
    * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
    * for the processes that take launch arguments. Set last, over the entry's own launch settings, on
    * every process Mousse starts for an entry whose telemetry is `off` (Settings → Providers). Absent:
@@ -492,6 +497,13 @@ export interface HarnessDriver {
    * (`approve: 'host'`) and never reach a person. Absent: such a policy is refused.
    */
   botAuthority?(config: InstanceConfig, instanceId?: string): boolean
+  /**
+   * The runtime holds a bot turn through its approvals (`toolControl: 'approval_only'`): the turn
+   * runs in its asking mode, and every approval it raises is answered by the bot's authority, never
+   * a person (Claude Code's grant gate, Codex's approval requests). What it runs without asking is
+   * not checked. Absent or false: a bot policy there needs `exact` tool control.
+   */
+  botApprovals?(config: InstanceConfig): boolean
   /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:

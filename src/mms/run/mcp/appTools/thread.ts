@@ -1,6 +1,6 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { visibleThreads } from '../../../../shared/threadLineage'
-import type { QueuedMessage, UserQuestionAnswers } from '../../../../shared/types'
+import { isLocalOnlyThread, visibleThreads } from '../../../../shared/threadLineage'
+import type { QueuedMessage, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
 import { readRunResultText } from '../../delegation/hold'
@@ -297,14 +297,18 @@ function assertOwnSubagentsOnly(engine: RunEngine, caller: McpCaller, threadId: 
  * A personal bot's thread is driven by its owner and its bot engine: its walls, consent and escalation decide what it
  * does, and its runs end by the engine's own rules. No agent sends to it, steers it or stops it from another thread.
  */
-function assertNotBotThread(host: AppToolHost, threadId: string, tool: string): void {
-  let role: string | undefined
+/** Whether `threadId` is a personal bot's: marked so (`Thread.botOwned`), or registered as one of its threads. */
+function isBotThread(host: AppToolHost, threadId: string, meta: Pick<Thread, 'botOwned'> | undefined = host.threadMeta?.(threadId)): boolean {
+  if (meta?.botOwned) return true
   try {
-    role = host.botRole?.(threadId)
+    return Boolean(host.botRole?.(threadId))
   } catch {
-    role = undefined
+    return false
   }
-  if (role) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} belongs to a bot; ${tool} cannot reach it. Its owner continues it from the Bots tab.`)
+}
+
+function assertNotBotThread(host: AppToolHost, threadId: string, tool: string): void {
+  if (isBotThread(host, threadId)) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} belongs to a bot; ${tool} cannot reach it. Its owner continues it from the Bots tab.`)
 }
 
 /** What an accepted Stop or steer returns; every other result is a refusal the caller can act on. */
@@ -462,6 +466,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         const scope = ctx.scope ?? 'own'
         const view = args.view === undefined ? 'events' : args.view
         if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
+        // A bot's threads are its chat: only the bot's own turn reads them.
+        if (threadId !== ctx.caller.threadId) assertNotBotThread(host, threadId, 'thread_read')
         // The whole record is the caller's own, or a manager's; every other reach is the filtered lineage view.
         const full = scope === 'own' || scope === 'manage'
         if (view === 'messages') {
@@ -524,12 +530,17 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           throw new McpToolError('mousse_scope_denied', 'includeSubagents needs the "manage" agent access level.')
         const all = host.listThreads()
         const projectIds = allowedProjectIds()
+        // Private threads are listed only to an agent in a private thread.
+        const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
         const candidates = (args.includeSubagents === true ? all : visibleThreads(all)).filter((thread) => {
+          if (!callerPrivate && isLocalOnlyThread(thread, all)) return false
           const launched = thread.createdByThreadId === ctx.caller.threadId
           if (!launched && !inProjects(projectIds, thread.projectId)) return false
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
-          return launched || args.includeSettled === true || !thread.settledAt
+          if (!launched && args.includeSettled !== true && thread.settledAt) return false
+          // A bot's threads are its chat: no other thread's agent lists them.
+          return !isBotThread(host, thread.id, thread)
         }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const rows = []
@@ -588,8 +599,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         // Message matches (and so their existence) are transcript content: a manager's.
         // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
         // or reads any transcript; transcripts are scanned for the most recent threads only.
+        const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
         const results = host.searchThreads(args.query, limit, {
-          allow: (found) => inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId,
+          allow: (found) => (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId) && !isBotThread(host, found.id, found),
           titlesOnly: !manage,
           maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
         })

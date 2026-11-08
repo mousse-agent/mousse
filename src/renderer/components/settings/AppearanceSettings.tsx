@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'react'
-import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
-import { Palette } from '../../lib/icons'
+import { ANIMATION_SPEEDS, FROSTED_COMPOSER_RANGES, type AnimationSpeed, type FrostedComposerSlider, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
@@ -52,6 +51,12 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
   )
 }
 
+const FROSTED_COMPOSER_SLIDERS: readonly { key: FrostedComposerSlider; title: string; id: string; format: (value: number) => string }[] = [
+  { key: 'frostedComposerOpacity', title: 'Opacity', id: 'frosted-composer-opacity', format: (value) => `${value}%` },
+  { key: 'frostedComposerBlur', title: 'Blur', id: 'frosted-composer-blur', format: (value) => `${value}px` },
+  { key: 'frostedComposerSaturation', title: 'Color boost', id: 'frosted-composer-color-boost', format: (value) => `${Math.round((value - 1) * 100)}%` }
+]
+
 /**
  * A patch that sets one font and nothing else. The daemon merges it into the current settings, so
  * a font that finishes downloading later cannot restore other appearance values from an older
@@ -72,6 +77,10 @@ export interface AppearanceSettingsProps {
   onPreviewAcrylicIntensity: (value: number) => void
   /** Saves a glass intensity (debounced by the caller). */
   onCommitAcrylicIntensity: (value: number) => void
+  /** Applies a frosted composer slider locally while it moves. */
+  onPreviewFrostedComposer: (key: FrostedComposerSlider, value: number) => void
+  /** Saves a frosted composer slider (debounced by the caller). */
+  onCommitFrostedComposer: (key: FrostedComposerSlider, value: number) => void
 }
 
 /** Settings → Appearance: theme, accent, fonts, glass, math, thread colors and animation speed. */
@@ -82,7 +91,9 @@ export function AppearanceSettings({
   restartRequired,
   onRestart,
   onPreviewAcrylicIntensity,
-  onCommitAcrylicIntensity
+  onCommitAcrylicIntensity,
+  onPreviewFrostedComposer,
+  onCommitFrostedComposer
 }: AppearanceSettingsProps) {
   const appearance = settings.appearance
   const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme) void onUpdate({ appearance: { ...appearance, theme } }) }
@@ -91,7 +102,7 @@ export function AppearanceSettings({
 
   return (
     <section id="appearance" className="settings-section">
-      <SettingsGroup title="Appearance" icon={Palette}>
+      <SettingsGroup>
         <SettingsRow title="Color theme" anchor="appearance-theme">
           <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
             {options.themes.map((theme, index) => {
@@ -220,6 +231,52 @@ export function AppearanceSettings({
             </>
           }
         />
+        <SettingsRow
+          title="Frosted composer"
+          anchor="appearance-frosted-composer"
+          description={<span title="Uses more graphics memory.">The chat shows blurred behind the composer.</span>}
+          control={
+            <Switch
+              label="Frosted composer"
+              checked={appearance.frostedComposer}
+              onChange={(frostedComposer) => void onUpdate({ appearance: { ...appearance, frostedComposer } })}
+            />
+          }
+        />
+        {appearance.frostedComposer && FROSTED_COMPOSER_SLIDERS.map(({ key, title, id, format }) => {
+          const range = FROSTED_COMPOSER_RANGES[key]
+          const value = appearance[key]
+          const fill = ((value - range.min) / (range.max - range.min)) * 100
+          return (
+            <SettingsRow
+              key={key}
+              title={title}
+              htmlFor={id}
+              indent
+              control={
+                <>
+                  <input
+                    id={id}
+                    type="range"
+                    className="acrylic-intensity-dial"
+                    min={range.min}
+                    max={range.max}
+                    step={range.step}
+                    value={value}
+                    style={{ '--fill': `${fill}%` } as CSSProperties}
+                    onInput={(e) => {
+                      // onInput only, as for glass intensity: one preview and one save per move.
+                      const next = Number(e.currentTarget.value)
+                      onPreviewFrostedComposer(key, next)
+                      onCommitFrostedComposer(key, next)
+                    }}
+                  />
+                  <span className="acrylic-intensity-value frosted-composer-value">{format(value)}</span>
+                </>
+              }
+            />
+          )
+        })}
         <SettingsRow
           title="Render math"
           anchor="appearance-render-math"

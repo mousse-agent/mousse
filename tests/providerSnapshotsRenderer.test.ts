@@ -11,6 +11,7 @@ import {
 import {
   beginProfileSwitch,
   composerAutoModel,
+  composerSelection,
   fallbackModel,
   instanceBadges,
   pickerIdFor,
@@ -70,6 +71,11 @@ describe('composer picker from snapshots', () => {
     expect(entry).toMatchObject({ id: 'claude:work', instanceId: 'claude:work', llmProvider: 'claude-subscription' })
     expect(pickerIdFor({ instanceId: 'claude:work', llmProvider: 'claude-subscription' }, [entry])).toBe('claude:work')
     expect(pickerIdFor({ llmProvider: 'claude-subscription' }, [entry])).toBe('claude-subscription')
+  })
+
+  it('never offers the locked "Claude for bots" entry, which runs bot turns only', () => {
+    const runner = snapshot({ instanceId: 'claude:bots', displayName: 'Claude for bots', builtIn: false, models: { entries: claudeModels, source: 'live' }, config: { home: 'private', args: [], env: {}, profile: 'locked' } })
+    expect(pickerProviders([snapshot({ models: { entries: claudeModels, source: 'live' } }), runner], []).map((entry) => entry.instanceId)).toEqual(['claude'])
   })
 
   it('orders providers as Settings does: Claude Code and its accounts, Codex, Antigravity, then APIs by name (D8)', () => {
@@ -133,6 +139,22 @@ describe('composer picker from snapshots', () => {
       // A provider set up later gives a profile still without a default a model.
       expect(composerAutoModel({ ...base, providers: [] })).toBeUndefined()
       expect(composerAutoModel({ ...base, providers: pickerProviders([codex()], []) })?.model).toBe('gpt-5')
+    })
+
+    it('shows the thread model, else the one it starts on, else the default, and never nothing in place of a model', () => {
+      const providers = pickerProviders([claude(), codex()], [])
+      const none = { llmProvider: '', model: '' }
+      const thread = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5', effort: 'high' }
+      // A thread with a model shows it, whatever the default and even before the providers load.
+      expect(composerSelection({ threadModel: thread, profileDefault: none, providers: [] })).toBe(thread)
+      // No thread model: the model the composer starts on by itself, else the default.
+      expect(composerSelection({ threadModel: undefined, profileDefault: none, providers })?.model).toBe('claude-opus-4')
+      const chosen = { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5-mini' }
+      expect(composerSelection({ threadModel: undefined, profileDefault: chosen, providers })).toBe(chosen)
+      // A default the providers have not listed yet still names a model.
+      expect(composerSelection({ threadModel: undefined, profileDefault: chosen, providers: [] })).toBe(chosen)
+      // Nothing to show yet: undefined, so the composer keeps the model it shows.
+      expect(composerSelection({ threadModel: undefined, profileDefault: none, providers: [] })).toBeUndefined()
     })
   })
 
@@ -533,5 +555,73 @@ describe('favorites', () => {
         expect(calls).toHaveLength(1)
       })
     })
+  })
+})
+
+describe('loading the snapshots of a scope', () => {
+  const deferred = () => {
+    let resolve!: (value: ReturnType<typeof snapshot>[]) => void
+    const promise = new Promise<ReturnType<typeof snapshot>[]>((done) => (resolve = done))
+    return { promise, resolve }
+  }
+  const setup = () => {
+    const replies: Array<ReturnType<typeof deferred>> = []
+    const snapshots = vi.fn(() => {
+      const reply = deferred()
+      replies.push(reply)
+      return reply.promise
+    })
+    vi.stubGlobal('window', { mousse: { providers: { snapshots } } })
+    useAppStore.setState({ profileId: 'p1' })
+    useProviderSnapshotsStore.setState({ profileId: 'p1', scopes: {} })
+    return { replies }
+  }
+  const load = async (scope: { kind: 'device' }) => (await import('../src/renderer/lib/providerSnapshots')).loadProviderSnapshots(scope)
+  const device = () => useProviderSnapshotsStore.getState().scopes.device
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useAppStore.setState({ profileId: 'default' })
+    useProviderSnapshotsStore.setState({ profileId: null, scopes: {} })
+  })
+
+  it('drops a reply that arrives after the window was bound to another profile', async () => {
+    const { replies } = setup()
+    const loading = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    useAppStore.setState({ profileId: 'p2' })
+    useProviderSnapshotsStore.setState({ profileId: 'p2', scopes: {} })
+    replies[0].resolve([snapshot({ instanceId: 'from-p1' })])
+    await loading
+    expect(device()?.snapshots).toBeUndefined()
+  })
+
+  it('keeps the newest of two overlapping loads, and stays loading until it arrives', async () => {
+    const { replies } = setup()
+    const first = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    const second = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(2))
+    replies[1].resolve([snapshot({ instanceId: 'newer' })])
+    await second
+    replies[0].resolve([snapshot({ instanceId: 'older' })])
+    await first
+    expect(device()?.snapshots?.map((entry) => entry.instanceId)).toEqual(['newer'])
+    expect(device()?.loading).toBe(false)
+  })
+
+  it('does not clear loading when an older load finishes before the newest', async () => {
+    const { replies } = setup()
+    const first = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(1))
+    const second = load({ kind: 'device' })
+    await vi.waitFor(() => expect(replies).toHaveLength(2))
+    replies[0].resolve([snapshot({ instanceId: 'older' })])
+    await first
+    expect(device()?.loading).toBe(true)
+    expect(device()?.snapshots).toBeUndefined()
+    replies[1].resolve([snapshot({ instanceId: 'newer' })])
+    await second
+    expect(device()).toMatchObject({ loading: false, snapshots: [expect.objectContaining({ instanceId: 'newer' })] })
   })
 })

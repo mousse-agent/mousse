@@ -55,6 +55,26 @@ export type WallReason =
   | { kind: 'paused' }
 
 /**
+ * What the authority decides for one call (Bot Phase 1 §5.1.1). `wall` ends the dispatch: a chat
+ * turn's missing permission, a budget, or the activation's state. `refused` is an unattended run's
+ * missing permission: the call fails with `text` as its tool error, an ask (`askId`) waits for the
+ * owner, and the dispatch carries on.
+ */
+export type BotCheck =
+  | { ok: true }
+  | { ok: false; wall: WallReason }
+  | { ok: false; refused: { text: string; askId: string } }
+
+/** A check that did not allow the call. */
+export type BotCheckDenied = Exclude<BotCheck, { ok: true }>
+
+/**
+ * Called at every check that allows a call, whatever the runtime (Bot Phase 1 §5.8): the source of
+ * live chips (`BotActivitySink.onAllowed`). Must not throw or block.
+ */
+export type BotAllowedObserver = (call: NormalisedCall) => void
+
+/**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
@@ -69,16 +89,27 @@ export interface BotAuthority {
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
   /** The roots the bot may touch and how, and the activation's private scratch folder; null without file access. */
-  workspace: { roots: readonly string[]; access: 'read' | 'write'; scratch: string; /** The roots it may change (per folder); absent: every root when `access` is `write`. */ writeRoots?: readonly string[] } | null
+  workspace: {
+    roots: readonly string[]
+    access: 'read' | 'write'
+    scratch: string
+    /** The roots it may change (per folder); absent: every root when `access` is `write`. */
+    writeRoots?: readonly string[]
+    /**
+     * The bot's files folder, also one of `roots` and `writeRoots`: the working directory of a turn
+     * on a runtime that asks before calls (Claude Code, Codex on the owner's entries).
+     */
+    files?: string
+  } | null
   /** True while the activation waits for the owner's answer to a wall (`waiting_grant`). */
   waiting(): boolean
   /** Allowlist, path containment across the roots (real paths), skill and MCP identity, and the wait. */
-  check(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason }
+  check(call: NormalisedCall): BotCheck
   /**
    * One native call that stands for several neutral tools (Claude's `Glob`): allowed when any of
-   * them passes. Decided without side effects, so a wall is raised once, only when all are refused.
+   * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.
    */
-  checkAny?(calls: readonly NormalisedCall[]): { ok: true } | { ok: false; wall: WallReason }
+  checkAny?(calls: readonly NormalisedCall[]): BotCheck
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope

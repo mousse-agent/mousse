@@ -33,7 +33,12 @@ export class StoragePolicyStore {
   constructor(
     private readonly store: ResourceLifecycleStore,
     private readonly clock: StorageSweepClock,
-    private readonly onConfigured?: () => void
+    private readonly onConfigured?: () => void,
+    /**
+     * Deleting a thread is permanent and its worktree goes with it, so "Remove worktrees of deleted threads"
+     * has nothing left to do: with this set it reads as off whatever was saved.
+     */
+    private readonly options: { deletedThreadsRuleRetired?: boolean } = {}
   ) {}
 
   private get path(): string { return join(this.store.root, 'storage-policy.json') }
@@ -67,11 +72,15 @@ export class StoragePolicyStore {
   }
 
   policy(): StoragePolicy {
-    if (!existsSync(this.path)) return structuredClone(STORAGE_POLICY_DEFAULTS)
+    if (!existsSync(this.path)) return this.effective(structuredClone(STORAGE_POLICY_DEFAULTS))
     assertLifecyclePath(this.store.root, this.path)
     const policy = parseStoragePolicy(JSON.parse(readFileSync(this.path, 'utf8')))
     if (!policy) throw new Error('Unknown storage policy')
-    return policy
+    return this.effective(policy)
+  }
+
+  private effective(policy: StoragePolicy): StoragePolicy {
+    return this.options.deletedThreadsRuleRetired ? { ...policy, worktrees: { ...policy.worktrees, removeWithDeletedThreads: false } } : policy
   }
 
   /**

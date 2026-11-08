@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
+import { archived } from './support/archived'
 
 describe('durable authority failure acceptance', () => {
   it('preserves queued input when inventory rejects trash, then cancels replay only on successful trash', async () => {
@@ -16,11 +17,11 @@ describe('durable authority failure acceptance', () => {
       f.services.threads.saveMessageQueue(thread.id, queued)
       corruptPath = join(path, 'workspace.json')
       writeFileSync(corruptPath, '{truncated-workspace-ownership')
-      await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toThrow()
+      await expect(f.services.trashThread(thread.id)).rejects.toThrow()
       expect(JSON.parse(readFileSync(join(path, 'queue.json'), 'utf8'))).toEqual(queued)
       unlinkSync(corruptPath); corruptPath = undefined
-      await f.rpc.request('threads.trash', { threadId: thread.id })
-      await f.rpc.request('threads.restore', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
+      await f.services.restoreThread(thread.id)
       expect(f.services.threads.loadMessageQueue(thread.id)).toEqual([])
       expect(f.services.threads.loadThreadData(thread.id).messages).toEqual([])
     } finally {
@@ -40,8 +41,9 @@ describe('durable authority failure acceptance', () => {
       beforeAgents = readFileSync(agentsPath)
       writeFileSync(agentsPath, '[{"id":"lost-child","worktreePath":')
       writeFileSync(join(path, 'sole-copy.txt'), 'unknown legacy owner payload')
-      for (const method of ['threads.delete', 'threads.trash', 'threads.purge']) {
-        await expect(f.rpc.request(method, { threadId: thread.id })).rejects.toThrow()
+      archived(f.services.threads, thread.id)
+      for (const attempt of [() => f.rpc.request('threads.delete', { threadId: thread.id }), () => f.services.trashThread(thread.id)]) {
+        await expect(attempt()).rejects.toThrow()
         expect(readFileSync(join(path, 'sole-copy.txt'), 'utf8')).toBe('unknown legacy owner payload')
         expect(readFileSync(agentsPath, 'utf8')).toBe('[{"id":"lost-child","worktreePath":')
       }
@@ -66,7 +68,7 @@ describe('durable authority failure acceptance', () => {
       original = readFileSync(damagedPath)
       writeFileSync(damagedPath, '{truncated')
       const beforeMeta = readFileSync(join(path, 'meta.json'))
-      for (const method of ['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.rename']) {
+      for (const method of ['threads.delete', 'threads.rename']) {
         await expect(f.rpc.request(method, { threadId: thread.id, name: 'must never be written' })).rejects.toThrow()
         expect(readFileSync(join(path, 'meta.json'))).toEqual(beforeMeta)
         expect(readFileSync(join(path, 'sole-copy.txt'), 'utf8')).toBe('never discard this')
@@ -83,11 +85,11 @@ describe('durable authority failure acceptance', () => {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'restore race' })
       const path = f.services.threads.getThreadDir(thread.id)
       writeFileSync(join(path, 'sole-copy.txt'), 'race payload')
-      await f.rpc.request('threads.trash', { threadId: thread.id })
+      await f.services.trashThread(thread.id)
       const peer = await f.connect()
       const [restore, purge] = await Promise.allSettled([
-        f.rpc.request<{ thread: Thread }>('threads.restore', { threadId: thread.id }),
-        peer.request('threads.purge', { threadId: thread.id })
+        f.services.restoreThread(thread.id),
+        f.services.lifecycle.purge({ taskId: thread.id })
       ])
       expect(restore.status).toBe('fulfilled')
       expect(purge.status).toBe('rejected')

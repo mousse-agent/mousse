@@ -40,13 +40,16 @@ export async function runChat(args: ParsedArgs): Promise<void> {
 
   if (wantInteractive) {
     const ctx = await openMms(globals)
-    const threadId = await resolveThreadId(ctx, globals)
+    // --private always starts a new private thread: it never continues one that other devices can see.
+    const privateChat = flagBool(args.flags, 'private')
+    const threadId = privateChat ? null : await resolveThreadId(ctx, globals)
     try {
       await runInteractiveChat({
         client: ctx.client,
         mode: globals.mode,
         initialThreadId: threadId,
-        initialMessage: message || undefined
+        initialMessage: message || undefined,
+        ...(privateChat ? { privateChat: true } : {})
       })
     } finally {
       await closeMmsContext(ctx)
@@ -126,10 +129,13 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     return
   }
 
-  let tid = threadId
+  // --private always starts a new private thread, never one named by --session or --continue.
+  let tid = flagBool(args.flags, 'private') ? undefined : threadId
   if (!tid) {
     const created = await client.request<{ thread: { id: string } }>('threads.create', {
-      name: 'CLI Chat'
+      name: 'CLI Chat',
+      // A private thread stays on this computer (`Thread.localOnly`).
+      ...(flagBool(args.flags, 'private') ? { localOnly: true } : {})
     })
     tid = created.thread.id
   }

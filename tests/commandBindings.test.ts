@@ -455,10 +455,15 @@ describe('the command table', () => {
   it('has unique ids and parseable default bindings on every platform, or none by design', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
-    expect(unbound).toEqual(['approval.deny'])
+    // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
-      if (command.defaultBinding === null) continue
-      for (const platform of ['win32', 'darwin']) expect(parseBinding(defaultBindingFor(command.id, platform)!)).not.toBeNull()
+      for (const platform of ['win32', 'darwin']) {
+        const binding = defaultBindingFor(command.id, platform)
+        // A command declared without a key ships unbound; every other default parses.
+        if (command.defaultBinding === null) expect(binding).toBeNull()
+        else expect(parseBinding(binding!)).not.toBeNull()
+      }
     }
   })
 

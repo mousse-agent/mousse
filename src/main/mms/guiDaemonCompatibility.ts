@@ -1,6 +1,6 @@
 import { isProtocolVersionMismatch, type LocalMmsClient } from '../../mms/protocol/client'
 import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/types'
-import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
 
 /** APIs used by the current task shell. Add required APIs when the shell adopts them. */
 export const GUI_REQUIRED_METHODS = [
@@ -10,7 +10,7 @@ export const GUI_REQUIRED_METHODS = [
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',
   'review.files', 'review.file',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
-  'threads.focus', 'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
+  'threads.focus',
   'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',
@@ -28,8 +28,8 @@ export const GUI_REQUIRED_METHODS = [
   // The Files and Git panels look a thread's or project's folder up in the daemon; main reads no folder itself.
   'files.root', 'files.list', 'files.read', 'files.readAsset', 'files.writeDirect',
   'git.status', 'git.log', 'git.branches', 'git.diffStats', 'git.lastCommitMessage',
-  // Automations → Bots: personal bots, profile-bound; an older service lacks them.
-  ...BOTS_PERSONAL_METHODS
+  // The Bots section (Bot UI): personal bots, profile-bound; an older service lacks them.
+  ...BOTS_PERSONAL_V2_METHODS
 ] as const
 
 function recoveryText(homeDir: string): string {

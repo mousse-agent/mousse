@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import type { HarnessCaps } from '../../shared/harness/types'
 import {
   describePermissionMode,
@@ -9,6 +8,7 @@ import {
   type PermissionLimits,
   type PermissionMode
 } from '../../shared/permissionMode'
+import { Check } from '../lib/icons'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
 
 /** The thread's permission mode and how to change it, as the composer's run menu gets it. */
@@ -84,11 +84,10 @@ export function permissionChoice(control: Omit<PermissionControl, 'onSelect'>): 
 }
 
 /**
- * The run menu's permission section: one icon button per mode in a row, the chosen one highlighted,
- * and one line under the row naming and describing the chosen mode, or the hovered or focused one.
- * Every mode's line is drawn in the same place and only the active one shows, so the block keeps the
- * size of the longest and never resizes on hover. A mode that cannot be picked stays in the row,
- * dimmed, and its line says why.
+ * The permission menu: one row per mode, strictest first, each with its icon, name and what it does
+ * on this agent in one line, so every choice reads without hovering. The chosen row is filled and
+ * checked; Full access has the warning tint on its icon. A mode that cannot be picked stays, dimmed,
+ * and its line says why.
  */
 export function PermissionModeSection({ control, choice, onPicked }: {
   control: PermissionControl
@@ -96,52 +95,42 @@ export function PermissionModeSection({ control, choice, onPicked }: {
   /** Called after a pick, so the menu can close. */
   onPicked: () => void
 }) {
-  const [preview, setPreview] = useState<PermissionMode | null>(null)
   const { agent, limits } = control
   const { offered, selected, shown, reason, approvesItself, blocked } = choice
-  const focus = preview ?? selected
   const lineFor = (mode: PermissionMode): string => {
     if (blocked[mode]) return blocked[mode]
     if (mode === selected && reason) return `Running as ${describePermissionMode(shown)}: ${reason}.`
     if (approvesItself) return `${agent} approves tools itself.`
     return modeDescription(mode, agent, limits?.sandboxOffInFull === true)
   }
-  const lines = [...new Set<PermissionMode>([...offered, selected])]
-  return <div className="composer-mode-menu-section composer-run-menu-permissions" role="group" aria-label="Permissions">
-    <div className="composer-mode-menu-heading">Permissions</div>
-    <div className="composer-run-menu-permission-row" onMouseLeave={() => setPreview(null)}>
-      {offered.map((entry) => {
-        const Icon = permissionModeIcon(entry)
-        const name = describePermissionMode(entry)
-        const why = blocked[entry]
-        const on = selected === entry
-        return <button
-          key={entry}
-          type="button"
-          role="menuitemradio"
-          aria-checked={on}
-          aria-disabled={why ? true : undefined}
-          aria-label={why ? `${name} (${why})` : name}
-          title={why ? `${name}: ${why}` : name}
-          className={`composer-run-menu-permission${on ? ' selected' : ''}${why ? ' is-disabled' : ''}`}
-          onMouseEnter={() => setPreview(entry)}
-          onFocus={() => setPreview(entry)}
-          onBlur={() => setPreview(null)}
-          onClick={() => {
-            if (why) return
-            onPicked()
-            if (entry !== selected) control.onSelect(entry)
-          }}
-        >
-          <Icon size={15} aria-hidden="true" />
-        </button>
-      })}
-    </div>
-    <div className="composer-run-menu-permission-line" aria-live="polite">
-      {lines.map((mode) => <div key={mode} className={`composer-run-menu-permission-line-item${mode === focus ? '' : ' is-hidden'}`} aria-hidden={mode === focus ? undefined : true}>
-        <span className="composer-run-menu-permission-name">{describePermissionMode(mode)}</span>
-        <span className="composer-run-menu-permission-desc">{lineFor(mode)}</span>
-      </div>)}
-    </div>
+  return <div className="composer-mode-menu-section composer-permission-modes" role="group" aria-label="Permissions">
+    {offered.map((entry) => {
+      const Icon = permissionModeIcon(entry)
+      const name = describePermissionMode(entry)
+      const why = blocked[entry]
+      const on = selected === entry
+      const line = lineFor(entry)
+      return <button
+        key={entry}
+        type="button"
+        role="menuitemradio"
+        aria-checked={on}
+        aria-disabled={why ? true : undefined}
+        aria-label={`${name}. ${line}`}
+        className={`composer-permission-mode${on ? ' selected' : ''}${why ? ' is-disabled' : ''}${entry === 'full' ? ' is-full' : ''}`}
+        onClick={() => {
+          if (why) return
+          onPicked()
+          if (entry !== selected) control.onSelect(entry)
+        }}
+      >
+        <Icon size={15} aria-hidden="true" className="composer-permission-mode-icon" />
+        <span className="composer-permission-mode-text">
+          <span className="composer-permission-mode-name">{name}</span>
+          <span className="composer-permission-mode-desc">{line}</span>
+        </span>
+        <span className="composer-permission-mode-check" aria-hidden="true">{on ? <Check size={14} /> : null}</span>
+      </button>
+    })}
   </div>
 }

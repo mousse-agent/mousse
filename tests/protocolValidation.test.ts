@@ -136,9 +136,13 @@ describe('protocol nested validators', () => {
     expect(asSettingsPartial({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5 } })).toEqual({
       runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5 }
     })
+    // Settings → General → Runs sends the whole section, the worktree default included.
+    expect(asSettingsPartial({ runs: { resumeAfterUsageLimit: false, usageLimitPauseCap: 3, worktreeByDefault: false } })).toEqual({
+      runs: { resumeAfterUsageLimit: false, usageLimitPauseCap: 3, worktreeByDefault: false }
+    })
     for (const bad of [{ defaultMode: 'root' }, { defaultMode: 1 }, { extra: 'ask' }])
       expect(() => asSettingsPartial({ permissions: bad }), JSON.stringify(bad)).toThrow(/permissions/)
-    for (const bad of [{ resumeAfterUsageLimit: 'yes' }, { usageLimitPauseCap: 0 }, { usageLimitPauseCap: 2.5 }, { usageLimitPauseCap: 99 }, { extra: 1 }])
+    for (const bad of [{ resumeAfterUsageLimit: 'yes' }, { usageLimitPauseCap: 0 }, { usageLimitPauseCap: 2.5 }, { usageLimitPauseCap: 99 }, { worktreeByDefault: 'no' }, { extra: 1 }])
       expect(() => asSettingsPartial({ runs: bad }), JSON.stringify(bad)).toThrow(/runs/)
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()

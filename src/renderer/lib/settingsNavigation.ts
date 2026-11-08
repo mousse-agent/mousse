@@ -37,3 +37,19 @@ export function takePendingDevice(): string | undefined {
   pendingDevice = undefined
   return node
 }
+
+let pendingProvider: string | undefined
+
+/** Opens Settings, Providers, with one entry's card open (an instance id): a bot's Sign in. */
+export function openProvider(instanceId: string): void {
+  pendingProvider = instanceId
+  openSettingsSection('providers')
+  window.dispatchEvent(new CustomEvent('mousse:settings-provider', { detail: instanceId }))
+}
+
+/** The entry requested before Providers was shown, consumed once. */
+export function takePendingProvider(): string | undefined {
+  const instanceId = pendingProvider
+  pendingProvider = undefined
+  return instanceId
+}

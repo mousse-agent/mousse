@@ -24,16 +24,19 @@ it('repeated multi-task trash and restore retains sole-copy workspace bytes with
     expect(baseline.materializedCheckouts).toBe(4)
     expect(baseline.materializedBytes).toBeGreaterThan(10 * 1024)
     for (let cycle = 0; cycle < 3; cycle++) {
-      for (const task of tasks) await f.rpc.request('threads.trash', { threadId: task.id })
-      // Uncommitted files no longer keep a checkout: trash moves each one into Mousse's trash in one step, with every byte.
+      for (const task of tasks) await f.services.trashThread(task.id)
+      // The trash is a step of a delete and leaves each checkout where it is, with every byte: the delete's purge removes it.
       const trashed = checkoutStorageSnapshot(repo)
-      for (const task of tasks) expect(existsSync(task.workspace)).toBe(false)
+      for (const task of tasks) {
+        expect(existsSync(task.workspace)).toBe(true)
+        expect(measureTree(task.workspace, new Set(['.git']))).toEqual(task.contents)
+      }
       expect(trashed.materializedCheckouts).toBe(4)
       expect(trashed.materializedBytes).toBe(baseline.materializedBytes)
       for (const task of tasks) {
-        await f.rpc.request('threads.restore', { threadId: task.id })
+        await f.services.restoreThread(task.id)
         expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId: task.id })).thread.id).toBe(task.id)
-        // The checkout comes back from the trash at the same path, with the same sole-copy bytes.
+        // The checkout is still the thread's, at the same path, with the same sole-copy bytes.
         const resolved = await new WorkspaceResolver(f.services.threads.getThreadDir(task.id), task.id, repo).resolve('agent')
         expect(resolved.workspacePath).toBe(task.workspace)
         expect(measureTree(task.workspace, new Set(['.git']))).toEqual(task.contents)

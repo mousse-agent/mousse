@@ -118,48 +118,22 @@ html.platform-darwin .titlebar-left {
   padding-left: var(--titlebar-traffic-light-inset);
 }
 
+/* The logo sits centred over the rail. At least rail-wide, so with the word
+   hidden the actions start where the sidebar does. */
 .titlebar-brand {
   display: flex;
   align-items: center;
   gap: calc(var(--titlebar-height) * 0.11);
+  min-width: var(--navigation-rail-width);
+  box-sizing: border-box;
   padding-block: calc(var(--titlebar-height) * 0.18);
   padding-left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   flex-shrink: 0;
-  position: relative;
 }
 
-/* Relative by default so the attention badge sits on the button in any title bar layout. */
+/* Relative so the attention badge sits on the toggle button in any title bar layout. */
 .titlebar-sidebar-toggle {
   position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(var(--titlebar-height) * 0.64);
-  height: calc(var(--titlebar-height) * 0.64);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
-/* In the brand block the toggle lies over the logo. */
-.titlebar-brand > .titlebar-sidebar-toggle {
-  position: absolute;
-  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
-  top: 50%;
-  z-index: 1;
-  transform: translateY(-50%);
-}
-
-/* A toggle that carries a count stays visible. */
-.titlebar-brand:hover .titlebar-sidebar-toggle,
-.titlebar-sidebar-toggle:focus-visible,
-.titlebar-sidebar-toggle--badged {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 /* While the sidebar is closed: how many threads need the person, inside the corner of its toggle,
@@ -183,24 +157,11 @@ html.platform-darwin .titlebar-left {
   pointer-events: none;
 }
 
-.titlebar-sidebar-toggle:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--text-primary);
-}
-
 .titlebar-logo-icon {
   flex-shrink: 0;
   width: calc(var(--titlebar-height) * 0.64);
   height: calc(var(--titlebar-height) * 0.64);
   object-fit: contain;
-  transition: opacity 0.15s;
-}
-
-.titlebar-brand:hover .titlebar-logo-icon,
-.titlebar-brand:has(.titlebar-sidebar-toggle:focus-visible) .titlebar-logo-icon,
-.titlebar-brand:has(.titlebar-sidebar-toggle--badged) .titlebar-logo-icon {
-  opacity: 0;
-  pointer-events: none;
 }
 
 .titlebar-title {
@@ -213,16 +174,50 @@ html.platform-darwin .titlebar-left {
   opacity: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin-left var(--ui-dur-slow) ease;
+  transition: max-width var(--ui-dur-slow) ease, opacity var(--ui-dur-slow) ease, margin var(--ui-dur-slow) ease;
   margin-left: 0;
 }
 
+/* Shown while the sidebar is open; the right margin keeps the actions clear of it. */
 .titlebar-title.titlebar-title-visible {
   max-width: 10ch;
   opacity: 1;
   margin-left: calc(var(--titlebar-height) * 0.04);
+  margin-right: 8px;
   flex-shrink: 0;
   overflow: visible;
+}
+
+/* Only far below the 900px window minimum (high zoom): the actions keep their room. */
+@media (max-width: 560px) {
+  .titlebar-title.titlebar-title-visible {
+    max-width: 0;
+    opacity: 0;
+    margin: 0;
+  }
+}
+
+.titlebar-start-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* The open thread and its project while the sidebar is closed: centred in the drag area. */
+.titlebar-thread-label {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 12px;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 /* Overlay pages cover the real title bar. This strip uses the same height,
@@ -425,6 +420,13 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-rgb), 0.35);
 }
 
+/* Keyboard focus: the divider itself lights up, one pixel either side. */
+.app .resizer:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.5);
+}
+
 .main-area {
   flex: 1 1 0;
   display: flex;
@@ -577,6 +579,12 @@ html.platform-darwin .titlebar-left {
   opacity: 0.55;
 }
 
+/* One close button in the strip: the selected tab's, plus the hovered or focused one. The others
+   keep their space so the strip does not move. */
+.main-view-tab:not(.active):not(:hover):not(:focus-within) .main-view-tab-close {
+  opacity: 0;
+}
+
 .main-view-tab-close:hover,
 .main-view-tab-add:hover {
   background: rgba(var(--accent-rgb), 0.12);
@@ -662,21 +670,24 @@ html.platform-darwin .titlebar-left {
   color: var(--accent);
 }
 
+/* The empty app panel: one muted line and the list, at the top. */
 .surface-picker {
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 24px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 16px 12px;
 }
 
 .surface-picker-title {
   margin: 0;
-  font-size: 15px;
-  font-weight: 500;
+  /* Lines up with the row labels: list padding plus row padding. */
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 400;
   color: var(--text-secondary);
 }
 
@@ -708,6 +719,17 @@ html.platform-darwin .titlebar-left {
 
 .surface-menu-row:hover {
   background: rgba(var(--accent-rgb), 0.1);
+}
+
+.surface-menu-row:focus-visible {
+  outline: none;
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: var(--ui-focus-ring);
+}
+
+.surface-menu-state {
+  color: var(--ui-faint, var(--text-secondary));
+  font-size: 12px;
 }
 
 .surface-menu-row-label {
@@ -1147,16 +1169,19 @@ html[data-theme='high-contrast'] .chat-input-area {
 
 /* In the flow under the composer, centred, so it never sits on the workspace toolbar. */
 /* A settings button outside .settings-page: it carries the spacing tokens of its anatomy (glyph gap, padding). */
-.chat-empty-add-project {
+.chat-empty-action {
   --space-4: 4px;
   --space-12: 12px;
-  --space-16: 16px;
   display: flex;
   height: 28px;
   width: fit-content;
-  margin: var(--space-16) auto 0;
   border-radius: var(--ui-control-radius);
   font-size: 12.5px;
+}
+
+/* Add project under an empty thread's composer; Create agent in the empty Chats tab (chats.css). */
+.chat-empty-add-project {
+  margin: 16px auto 0;
 }
 
 /* Queued messages stack — visually attached above the composer */
@@ -2742,6 +2767,28 @@ html[data-theme='high-contrast'] .chat-input-area {
   50% { opacity: 0.65; }
 }
 
+/* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */
+.context-usage-ring {
+  color: var(--accent-hover);
+}
+
+.context-usage-ring.is-warning {
+  color: var(--warning);
+}
+
+.context-usage-ring.is-danger {
+  color: var(--danger);
+}
+
+.context-usage-ring-track {
+  stroke: currentColor;
+  stroke-opacity: 0.2;
+}
+
+.context-usage-ring-arc {
+  stroke: currentColor;
+}
+
 /* Matches the composer's menus (model, mode, reasoning): raised surface, menu radius and drop. */
 .context-usage-popover {
   position: absolute;
@@ -2790,43 +2837,30 @@ html[data-theme='high-contrast'] .chat-input-area {
   color: var(--ui-faint);
 }
 
-.context-usage-settings {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: -3px -4px -3px 0;
-  border-radius: var(--ui-menu-row-radius);
-  color: var(--ui-faint);
-  transition: background 0.12s, color 0.12s;
-}
-
-.context-usage-settings:hover {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
+/* "62% · 124K of 200K": the ring's tooltip, for whoever opened the popover from the keyboard. */
 .context-usage-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  margin-bottom: -4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-faint);
 }
 
-.context-usage-percent {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
+/* Holds the bar and the compaction mark, which stands 2px proud of the clipped bar. */
+.context-usage-bar-track {
+  position: relative;
 }
 
-.context-usage-total {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+/* Where the context compacts, in the text colour so it never reads as usage (accent) or as a fill
+   warning (amber, red). */
+.context-usage-bar-compaction {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-primary);
+  opacity: 0.7;
 }
 
 /* Filled against the model's capacity; the empty track is the room left. */
@@ -2882,6 +2916,34 @@ html[data-theme='high-contrast'] .chat-input-area {
 .context-usage-item-value {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+/* "Compacts at 300K" and its Change action, on one line. */
+.context-usage-compaction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-compaction-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The shared small ghost button (btn btn-ghost btn-sm), a little tighter to fit the line. */
+.context-usage-compaction-change {
+  flex-shrink: 0;
+  margin: -3px 0;
+  padding: 3px 10px;
+  color: var(--text-primary);
+}
+
+.context-usage-compaction-change:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .context-usage-notes {
@@ -4346,7 +4408,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   min-width: 0;
 }
 
-/* The diff header: the open file, then the whitespace switch and Push, Commit and Create PR. */
+/* The diff header: the open file, then the diff options button and Push, Commit and Create PR. */
 .git-diff-toolbar {
   flex-wrap: wrap;
   row-gap: 6px;
@@ -4951,20 +5013,14 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   width: auto;
 }
 
-.review-toggle-row {
-  flex-shrink: 0;
-  padding: 6px 12px;
-  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+.diff-options-trigger.open {
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
-.review-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
+.diff-options-menu {
+  width: auto;
+  min-width: 240px;
 }
 
 .review-banner {
@@ -6363,3 +6419,9 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 
+/* Rename thread dialog (ThreadRenameDialog): one full-width field. */
+.thread-rename-input {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}

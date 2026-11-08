@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   CLAUDE_AUTH_STATUS_TTL_MS,
   ClaudeSubscriptionProviderService,
+  claudeAutoCompactEnv,
   claudeSubscriptionEnvironment
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
@@ -148,6 +149,30 @@ describe('Claude Code launch environment', () => {
       expect(env).toMatchObject(user)
       expect(env).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
     }
+  })
+})
+
+describe("Claude Code's auto-compact window", () => {
+  it('is the compaction threshold, within the 100K to 1M Claude Code accepts', () => {
+    expect(claudeAutoCompactEnv(256000)).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000' })
+    expect(claudeAutoCompactEnv(1024000)).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000' })
+    expect(claudeAutoCompactEnv(50000)).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' })
+    expect(claudeAutoCompactEnv(undefined)).toEqual({})
+  })
+
+  it('reaches the turn when a threshold is set, and is left to Claude Code otherwise', async () => {
+    vi.stubEnv('CLAUDE_CODE_AUTO_COMPACT_WINDOW', undefined)
+    const captured: Options[] = []
+    const result = { type: 'result', subtype: 'success', is_error: false, result: 'hi', session_id: 'vendor-session' }
+    const { service, home } = profile({
+      query: ({ options }) => {
+        captured.push(options)
+        return fakeQuery([result])
+      }
+    })
+    await service.chat({ threadId: 'a', cwd: home, model: 'sonnet', prompt: 'hi', autoCompactTokens: 256000, onText: () => {} })
+    await service.chat({ threadId: 'b', cwd: home, model: 'sonnet', prompt: 'hi', onText: () => {} })
+    expect(captured.map((options) => options.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW)).toEqual(['256000', undefined])
   })
 })
 

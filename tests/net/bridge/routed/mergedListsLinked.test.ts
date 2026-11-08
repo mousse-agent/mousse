@@ -243,7 +243,7 @@ describe('another computer’s lists over a real link', () => {
     )
   }, 90_000)
 
-  it('is searched together with this computer, and Recently deleted lists its trash', async () => {
+  it('is searched together with this computer', async () => {
     const thread = t.owner.threads.createThread('Findable elsewhere zebra')
     t.owner.threads.updateThreadMeta(thread.id, { startedAt: new Date().toISOString() } as never)
     t.caller.threads.createThread('Findable here zebra')
@@ -263,21 +263,25 @@ describe('another computer’s lists over a real link', () => {
     )
     expect(remote).toMatchObject({ threadId: t.qualified(thread.id), node: t.node })
     expect(found.skipped).toBeUndefined()
+  }, 90_000)
 
-    // Trash it on the other computer: its Recently deleted record is listed here, by qualified id and without its folders.
-    await t.dispatch('threads.delete', { threadId: t.qualified(thread.id) })
-    // Storage settings ask about this computer alone, and do not wait for the others.
-    const asked = vi.spyOn(t.client(), 'call')
-    const own = await t.dispatch('threads.inventory', {})
-    expect(own.lifecycles.some((entry: { node?: string }) => entry.node)).toBe(false)
-    expect(asked.mock.calls.filter((call) => call[1] === 'threads.inventory')).toHaveLength(0)
-    asked.mockRestore()
-    const trash = await t.dispatch('threads.inventory', { includeComputers: true })
-    const record = trash.lifecycles.find(
-      (entry: { taskId: string }) => entry.taskId === t.qualified(thread.id)
-    )
-    expect(record).toMatchObject({ node: t.node, state: 'trashed', location: '' })
-    expect(trash.taskNames[t.qualified(thread.id)]).toBe('Findable elsewhere zebra')
+  it('archives a thread of the other computer first, and leaves its permanent delete to that computer', async () => {
+    const thread = t.owner.threads.createThread('Archive me elsewhere')
+    const threadId = t.qualified(thread.id)
+    // Not archived: refused, with what to do first.
+    await expect(t.dispatch('threads.delete', { threadId })).rejects.toThrow('Archive the thread before deleting it.')
+    await t.dispatch('threads.settle', { threadId, settled: true })
+    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+    // Archived: deleting for good is done on the computer that runs it, never from another one.
+    await expect(t.dispatch('threads.delete', { threadId })).rejects.toThrow('Delete the thread on the computer that runs it.')
+    // The trash and restore steps of a delete are not methods anyone can call, here or there.
+    await expect(t.dispatch('threads.trash', { threadId })).rejects.toThrow()
+    await expect(t.dispatch('threads.restore', { threadId })).rejects.toThrow()
+    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+    expect(t.owner.threads.lifecycleStore.get(thread.id)?.state ?? 'active').toBe('active')
+    // Unarchive is routed too: the thread is back where it was.
+    await t.dispatch('threads.settle', { threadId, settled: false })
+    expect(t.owner.threads.getThread(thread.id)?.settledAt).toBeUndefined()
   }, 90_000)
 
   it('says which computer a search could not ask when it refuses this device', async () => {
