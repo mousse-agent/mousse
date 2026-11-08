@@ -43,8 +43,11 @@ export interface AttachedPageSessionConfig {
   clock?: () => Date
   interceptCommand?: DebuggerTransportOptions['interceptCommand']
   onControlStateChange?: (state: AttachedControlState) => void
-  /** Where the agent is about to act (`agentCursor.ts`): drawn over the tab by its window, never in the page. */
-  onAgentCursor?: (event: { uiTabId: AttachedUiTabId; cursor: BrowserAgentCursor }) => void
+  /**
+   * Where the agent is about to act (`agentCursor.ts`): drawn over the tab by its window, never in
+   * the page. True when a window shows it: only then does the cursor glide before the input.
+   */
+  onAgentCursor?: (event: { uiTabId: AttachedUiTabId; cursor: BrowserAgentCursor }) => boolean
 }
 
 interface TabState {
@@ -636,7 +639,9 @@ export class AttachedPageSession {
     if (!viewport) return
     const cursor = agentCursorFor(request.action, point, { width: viewport.cssWidth, height: viewport.cssHeight }, this.clock().getTime(), tab.publicId)
     if (!cursor) return
-    try { this.onAgentCursor({ uiTabId: this.uiTabId, cursor }) } catch { /* a view never fails an action */ }
+    let shown = false
+    try { shown = this.onAgentCursor({ uiTabId: this.uiTabId, cursor }) } catch { /* a view never fails an action */ }
+    if (!shown) return
     try {
       await sleep(AGENT_CURSOR_GLIDE_MS, signal)
     } catch {

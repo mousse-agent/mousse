@@ -305,10 +305,12 @@ export class ElectronAttachedBrowserBackend {
     return () => this.cursorListeners.delete(listener)
   }
 
-  private emitCursor(event: { uiTabId: string; cursor: BrowserAgentCursor }): void {
+  /** True when a window was told: the cursor then glides before the input is sent. */
+  private emitCursor(event: { uiTabId: string; cursor: BrowserAgentCursor }): boolean {
     for (const listener of this.cursorListeners) {
       try { listener(event) } catch { /* listener isolation */ }
     }
+    return this.cursorListeners.size > 0
   }
 
   private emitControl(state: AttachedControlState): void {
