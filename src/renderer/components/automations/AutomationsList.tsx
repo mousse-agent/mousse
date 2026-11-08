@@ -17,14 +17,14 @@ import { WebhookDialog, type WebhookApi } from '../scheduled/WebhookDialog'
 import { draftFromJob, EMPTY_CATALOG, isUnchanged, modelGroups, patchOf, type ScheduledCatalog } from '../scheduled/jobDraft'
 import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
-import { AutomationRow, glyphOf, PausePicker } from './AutomationRows'
+import { AutomationRow, glyphOf, MovePicker, PausePicker } from './AutomationRows'
 import { AskCard } from '../asks/AskCard'
 import { CreateRow, type CreatePrefill } from './CreateRow'
 import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest } from '../../stores/automationCreateStore'
 import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
-import { defaultMay, groupAutomations, matchesSearch, missedText, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { defaultMay, groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 import { computerChoicesOf } from './computerChoice'
 
@@ -94,6 +94,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [recentOpen, setRecentOpen] = useState(false)
   const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [moving, setMoving] = useState<string[] | null>(null)
   const [createRequest, setCreateRequest] = useState(0)
   const [prefill, setPrefill] = useState<CreatePrefill | null>(null)
   const automateRequest = useAutomationCreate((state) => state.request)
@@ -289,6 +290,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     const askThread = item.attention?.threadId
     if (item.link.kind === 'ask') return [...notNow, { label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
     if (item.link.kind === 'thread') return [{ label: 'Open thread', onSelect: () => goThread((item.link as { threadId: string }).threadId) }]
+    if (item.link.kind === 'moved') return []
     const jobId = item.link.jobId
     // A bot's automation: its runs report in the bot chat; When, Do and Tell me are edited here, Who stays the bot.
     if (item.link.botId) {
@@ -360,13 +362,28 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     await refresh()
   }
 
+  // Move to computer: made there first, removed here once that computer confirmed; what did not move says why.
+  const move = async (keys: string[], node: string) => {
+    setActionError(null)
+    const to = computers.find((computer) => computer.node === node)?.name ?? 'the other computer'
+    const result = await client.move(idsOf(keys), node)
+    setActionError(moveSummary(result, to))
+    setMoving(null)
+    setSelected([])
+    if (detail && result.moved.some((entry) => keys.includes(`job:${entry.id}`))) setDetail(null)
+    void refresh()
+  }
+  const selectedItems = selected.flatMap((key) => items.filter((item) => item.key === key))
+  const moveReason = moveBlocked(selectedItems)
+
   const webhookJob = webhookJobId ? jobs.find((job) => job.id === webhookJobId) : undefined
   const schedulerDown = status !== null && !status.running
-  const rowCount = items.length
+  const rowCount = items.filter((item) => item.kind !== 'moved').length
 
   const dialogs = (
     <>
       {webhookJob ? <WebhookDialog job={webhookJob} api={webhookApi} onClose={() => setWebhookJobId(null)} /> : null}
+      {moving ? <MovePicker count={moving.length} computers={computers.filter((computer) => computer.node !== '')} onCancel={() => setMoving(null)} onMove={(node) => move(moving, node)} /> : null}
       {pausing ? <PausePicker count={pausing.length} onCancel={() => setPausing(null)} onPause={(until) => pause(pausing, until)} /> : null}
       {deleting ? (
         <Modal
@@ -403,6 +420,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             profileId={profileId}
             viewerZone={viewerZone}
             computers={computers}
+            {...(detailItem.computer.local && !moveBlocked([detailItem]) ? { onMove: (node: string) => void move([detailItem.key], node).catch((cause) => setActionError(errorText(cause))) } : {})}
             save={async (draft) => {
               const change = patchOf(initial, draft, catalog)
               if (!isUnchanged(change)) await window.mousse.scheduled.update(detailJob.id, change)
@@ -492,6 +510,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
               <span>{`${selected.length} selected`}</span>
               <button type="button" className="settings-btn" onClick={() => setPausing(selected)}>Pause…</button>
               <button type="button" className="settings-btn" onClick={() => void resume(idsOf(selected)).then(() => setSelected([]))}>Resume</button>
+              {computers.length > 1 ? (
+                <button type="button" className="settings-btn" data-testid="automation-move" disabled={Boolean(moveReason)} title={moveReason ?? 'Move to another of your computers'} onClick={() => setMoving(selected)}>Move to computer…</button>
+              ) : null}
               <button type="button" className="settings-btn danger" onClick={() => setDeleting(selected)}>Delete</button>
               <button type="button" className="settings-icon-btn" aria-label="Clear selection" title="Clear selection" onClick={() => setSelected([])}><X size={12} /></button>
             </div>
@@ -528,8 +549,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             </section>
           ))}
 
-          {index && items.length === 0 ? <p className="scheduled-empty">Nothing runs on its own yet.</p> : null}
-          {index && items.length > 0 && shown.length === 0 ? <p className="scheduled-empty">No automation matches.</p> : null}
+          {index && rowCount === 0 ? <p className="scheduled-empty">Nothing runs on its own yet.</p> : null}
+          {index && rowCount > 0 && shown.length === 0 ? <p className="scheduled-empty">No automation matches.</p> : null}
 
           {pausedGroup || recent.length ? (
             <div className="automation-folds">
@@ -562,7 +583,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
                 {recent.map(({ item, run }, at) => (
                   <li key={`${item.key}-${run.at}-${at}`} className="automation-run" data-state={run.state}>
                     <span className={`automation-glyph ${glyphOf(item).kind}`} aria-hidden="true">{glyphOf(item).glyph}</span>
-                    <span className="automation-run-name">{item.name}</span>
+                    <span className="automation-run-name">{item.kind === 'moved' ? `${item.name} · ${item.whenText}` : item.name}</span>
                     <span className="automation-run-text">{runText(run, now, item.computer, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
                     <span className="automation-run-when">{ownedWhenText(run.at, now, item.computer, viewerZone)}</span>
                     {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}

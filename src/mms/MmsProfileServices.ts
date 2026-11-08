@@ -129,7 +129,9 @@ import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAut
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
-import type { AutomationIndex } from '../shared/automations'
+import type { AutomationIndex, AutomationMoveResult } from '../shared/automations'
+import { MovedAutomationStore } from './automations/MovedAutomations'
+import { moveAutomations } from './automations/moveAutomations'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
@@ -843,6 +845,7 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
+    this.movedAutomations = new MovedAutomationStore(homeDir)
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
       threadAllowed: (threadId) => config.agentJobsEnabled() || this.agentJobAsks.threadAllowed(threadId),
@@ -1341,7 +1344,29 @@ export class MmsProfileServices {
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
         return open ? { kind: 'workflow_approval', runId, approvalId: open.approvalId, nodeId: open.nodeId, instanceKey: open.instanceKey, attempt: open.attempt } : undefined
       },
-      watchStatus: (threadId) => this.pullRequestWatch.status(threadId)
+      watchStatus: (threadId) => this.pullRequestWatch.status(threadId),
+      moved: () => this.movedAutomations?.list() ?? []
+    })
+  }
+
+  /** Automations that moved to another computer, kept for their run history (`MovedAutomationStore`). */
+  movedAutomations!: MovedAutomationStore
+
+  /**
+   * Move to computer (`automations.move`): each automation is made on `node` and removed here once that computer
+   * confirmed it; its run history stays here. One that cannot move, or is refused there, stays as it was.
+   */
+  moveAutomations(jobIds: readonly string[], node: string, signal?: AbortSignal): Promise<AutomationMoveResult> {
+    return moveAutomations({
+      remote: this.remoteAutomations,
+      getJob: (id) => this.scheduled.getJob(id),
+      project: (id) => this.projects.getProject(id),
+      pause: (id, reason) => { this.scheduled.pauseJob(id, reason) },
+      resume: (id) => { this.scheduled.resumeJob(id) },
+      remove: (id) => this.scheduled.deleteJob(id),
+      keepHistory: (entry) => this.movedAutomations.add(entry)
+    }, jobIds, node, signal).finally(() => {
+      this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
     })
   }
 

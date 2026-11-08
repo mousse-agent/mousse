@@ -7,12 +7,15 @@ import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurre
  * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
  */
 
-export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep'] as const
+export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move'] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
-/** What an automation is, underneath: where its record lives and what opens it. A bot's schedule is a job whose Who is the bot. */
-export type AutomationKind = 'job' | 'watch' | 'ask'
+/**
+ * What an automation is, underneath: where its record lives and what opens it. A bot's schedule is a job whose Who is
+ * the bot. `moved` is one that moved to another computer: only its run history stays here, read-only (Recent).
+ */
+export type AutomationKind = 'job' | 'watch' | 'ask' | 'moved'
 
 /** What starts it: a time, a signed request (webhook), something on its thread (a pull request), or a person. */
 export type AutomationTrigger = 'time' | 'request' | 'thread_event' | 'on_demand'
@@ -159,6 +162,8 @@ export type AutomationLink =
   /** An agent's first-creation ask: Allow makes the automation (`automations.asks.answer`). */
   | { kind: 'ask'; askId: string; threadId: string }
   | { kind: 'thread'; threadId: string }
+  /** Moved to another computer (`jobId` qualified there); only its history is here. */
+  | { kind: 'moved'; node: string; jobId: string }
 
 /**
  * How Needs you answers an open ask in place, with the same daemon method its own surface uses: a thread's permission
@@ -256,6 +261,12 @@ export interface AutomationIndex {
   /** Sources that could not be read now; their rows are missing, not empty. */
   unavailable: Array<'bots' | 'watches'>
   generatedAt: string
+}
+
+/** What Move to computer answers: each automation that moved (its new qualified id), and each that did not, with why. */
+export interface AutomationMoveResult {
+  moved: Array<{ id: string; to: string; warning?: string }>
+  failed: Array<{ id: string; name?: string; error: string }>
 }
 
 /** The words for an action on an automation of a computer that cannot be reached now. */

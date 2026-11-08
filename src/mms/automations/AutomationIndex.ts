@@ -18,6 +18,8 @@ import type { BotAutomationFacts, BotAutomationRunStatus } from '../bots/chat/Bo
 import type { AgentJobAsk } from './AgentJobAsks'
 import { describeSchedule } from '../../shared/scheduleLabel'
 import type { RemoteAutomationsPart } from '../protocol/remoteAutomationsPort'
+import { qualifyId } from '../../shared/threadRef'
+import type { MovedAutomation } from './MovedAutomations'
 
 /** How many runs of each automation the list carries (the job keeps at most 20). */
 const RUNS_PER_ITEM = 10
@@ -42,6 +44,8 @@ export interface AutomationIndexSources {
   /** A saved agent's name, for a job whose Who is one; undefined when it is gone. */
   savedAgentName?(definitionId: string): string | undefined
   watchStatus?(threadId: string): { state: 'watching' | 'paused' | 'ended' | 'off'; nextCheckAt: string | null }
+  /** Automations that moved to another computer: their history stays here, read-only. */
+  moved?(): MovedAutomation[]
   computerName?: string
   timeZone?: string
   now?: () => Date
@@ -267,6 +271,24 @@ function watchItem(thread: Thread, status: { state: string; nextCheckAt: string 
   }
 }
 
+/** An automation that moved to another computer: no row of its own, only the runs it made here (Recent). */
+function movedItem(entry: MovedAutomation, computer: AutomationItem['computer']): AutomationItem {
+  return {
+    key: `moved:${entry.id}`,
+    kind: 'moved',
+    id: entry.id,
+    name: entry.name,
+    trigger: entry.schedule.kind === 'manual' ? 'on_demand' : 'time',
+    schedule: entry.schedule,
+    whenText: `moved to ${entry.movedTo.name}`,
+    who: { kind: 'none', name: '' },
+    paused: false,
+    runs: [...entry.runHistory].reverse().slice(0, RUNS_PER_ITEM).map(jobRecordRun),
+    link: { kind: 'moved', node: entry.movedTo.node, jobId: qualifyId(entry.movedTo.node, entry.movedTo.jobId) },
+    computer
+  }
+}
+
 /**
  * The automation index: scheduled jobs (a bot's schedules among them, as jobs whose Who is the bot) and pull request
  * watches, each in the Run contract, with Needs you worked out the same way for all. Sources that cannot be read are
@@ -294,6 +316,11 @@ export function buildAutomationIndex(sources: AutomationIndexSources): Automatio
       continue
     }
     if (facts) items.push(botJobItem(job as ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts, computer))
+  }
+  try {
+    for (const entry of sources.moved?.() ?? []) items.push(movedItem(entry, computer))
+  } catch {
+    // The record of moved automations could not be read: only their old runs are missing.
   }
   try {
     for (const ask of sources.asks?.() ?? []) items.push(askItem(ask, sources, computer))

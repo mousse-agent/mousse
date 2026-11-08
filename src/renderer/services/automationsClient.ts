@@ -1,4 +1,4 @@
-import type { AttentionAnswer, AutomationIndex } from '../../shared/automations'
+import type { AttentionAnswer, AutomationIndex, AutomationMoveResult } from '../../shared/automations'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { ScheduledJob, QuestionAnswerOutcome } from '../../shared/types'
 
@@ -9,6 +9,8 @@ export interface AutomationsClient {
   answerAsk(askId: string, answer: 'allow' | 'not_now'): Promise<void>
   /** Keep: an agent-added automation loses only its end (`automations.keep`). */
   keep(jobId: string): Promise<ScheduledJob>
+  /** Move to computer: this computer's automations to another of the person's computers (`automations.move`). */
+  move(jobIds: string[], node: string): Promise<AutomationMoveResult>
 }
 
 /** Uses the host's profile-bound bridge. */
@@ -16,7 +18,8 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
   return {
     list: () => transport.request<AutomationIndex>('automations.list', {}),
     answerAsk: async (askId, answer) => { await transport.request('automations.asks.answer', { askId, answer }) },
-    keep: async (jobId) => (await transport.request<{ job: ScheduledJob }>('automations.keep', { jobId })).job
+    keep: async (jobId) => (await transport.request<{ job: ScheduledJob }>('automations.keep', { jobId })).job,
+    move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node })
   }
 }
 

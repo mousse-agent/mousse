@@ -2,6 +2,8 @@ import { useState, type MouseEvent } from 'react'
 import type { AutomationItem } from '../../../shared/automations'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { Modal } from '../ui/Modal'
+import { Select } from '../ui/Select'
+import { computerOptions, type ComputerChoice } from './computerChoice'
 import { BotFaceStill } from '../bots/face/BotFace'
 import { metaParts, primaryOf, pauseUntil, type MetaContext, type PauseChoice } from './automationList'
 
@@ -82,6 +84,42 @@ export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, 
       </button>
       <RowMenu label={`More actions for ${item.name}`} items={unreachable ? menu.map((entry) => ({ ...entry, disabled: true, title: unreachable })) : menu} />
     </div>
+  )
+}
+
+/** Move to computer…: one of the person's other computers; an offline one is greyed. */
+export function MovePicker({ count, computers, onCancel, onMove }: { count: number; computers: ComputerChoice[]; onCancel: () => void; onMove: (node: string) => Promise<void> }) {
+  const [node, setNode] = useState(computers.find((computer) => !computer.offline)?.node ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const move = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await onMove(node)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String((cause as { message?: unknown })?.message ?? cause))
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal
+      open
+      title={count === 1 ? 'Move to computer' : `Move ${count} automations`}
+      onClose={onCancel}
+      closeDisabled={busy}
+      footer={
+        <>
+          <button type="button" className="settings-btn" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="button" className="settings-btn primary" data-testid="automation-move-confirm" disabled={busy || !node} title="Made there first; removed here once it confirms. Run history stays here." onClick={() => void move()}>Move</button>
+        </>
+      }
+    >
+      <div className="automation-pause-picker" data-testid="automation-move-picker">
+        <Select ariaLabel="Move to" size="small" value={node} options={computerOptions(computers)} onChange={setNode} />
+        {error ? <p className="scheduled-item-error" role="alert">{error}</p> : null}
+      </div>
+    </Modal>
   )
 }
 

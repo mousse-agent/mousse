@@ -429,6 +429,28 @@ describe('the Automations page', () => {
     expect(option('Studio')?.getAttribute('aria-disabled')).toBe('true')
   })
 
+  it('moves selected rows to another computer, and says which did not move and why', async () => {
+    const laptop = { name: 'Laptop', timeZone: ZONE, local: false, node: 'nod_laptop' }
+    const remoteRow = item({ key: 'job:nod_laptop:r1', name: 'Theirs', trigger: 'on_demand', computer: laptop, link: { kind: 'job', jobId: 'nod_laptop:r1' } })
+    const mousse = await mount([item({ key: 'job:a', name: 'Alpha', trigger: 'on_demand' }), item({ key: 'job:b', name: 'Beta', trigger: 'on_demand' }), remoteRow], [], vi.fn(), { computers: [laptop] })
+    mousse.platformRequest.request.mockImplementation(async (method: string) => {
+      if (method === 'automations.move') return { moved: [{ id: 'a', to: 'nod_laptop:n1' }], failed: [{ id: 'b', name: 'Beta', error: 'It runs in a thread of this computer.' }] }
+      if (method === 'automations.list') return { items: [], computer: { name: 'Desk', timeZone: ZONE }, computers: [laptop], unavailable: [], generatedAt: '' }
+      throw new Error(method)
+    })
+    await click($('[data-key="job:a"] .automation-row-main'), { metaKey: true })
+    await click($('[data-key="job:nod_laptop:r1"] .automation-row-main'), { metaKey: true })
+    // Another computer's automation moves from there.
+    expect($<HTMLButtonElement>('[data-testid="automation-move"]')!.disabled).toBe(true)
+    expect($('[data-testid="automation-move"]')!.title).toBe('Move it from Laptop.')
+    await click($('[data-key="job:nod_laptop:r1"] .automation-row-main'), { metaKey: true })
+    await click($('[data-key="job:b"] .automation-row-main'), { metaKey: true })
+    await click($('[data-testid="automation-move"]'))
+    await click($('[data-testid="automation-move-confirm"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.move', { jobIds: ['a', 'b'], node: 'nod_laptop' })
+    expect($('.scheduled-action-error')?.textContent).toBe('Moved 1 to Laptop. Not moved: Beta (It runs in a thread of this computer).')
+  })
+
   it('says Choose when and keeps Add off while When is unread; On demand only when picked', async () => {
     const mousse = await mount([])
     await click($('[data-testid="automation-create"]'))

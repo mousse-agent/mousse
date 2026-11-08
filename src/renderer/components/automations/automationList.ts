@@ -1,4 +1,4 @@
-import { offlineText, type AutomationItem, type AutomationRun } from '../../../shared/automations'
+import { offlineText, type AutomationItem, type AutomationMoveResult, type AutomationRun } from '../../../shared/automations'
 import { describePermissionMode, normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { agoText, ownedWhenText, zonedDayOffset } from './automationTime'
@@ -45,6 +45,8 @@ const byLastRun = (a: AutomationItem, b: AutomationItem) => Date.parse(b.last?.a
 export function groupAutomations(items: readonly AutomationItem[], now: Date = new Date()): AutomationGroup[] {
   const buckets = new Map<GroupKey, AutomationItem[]>()
   for (const item of items) {
+    // One that moved to another computer has no row here; its runs stay in Recent.
+    if (item.kind === 'moved') continue
     const key = groupOf(item, now)
     buckets.set(key, [...(buckets.get(key) ?? []), item])
   }
@@ -63,6 +65,26 @@ export function recentRuns(items: readonly AutomationItem[], limit = 50): Array<
     .flatMap((item) => item.runs.map((run) => ({ item, run })))
     .sort((a, b) => Date.parse(b.run.at) - Date.parse(a.run.at))
     .slice(0, limit)
+}
+
+/**
+ * Why the selected rows cannot move to another computer, or undefined when they can: only this computer's automations
+ * move from here, and a bot's computer changes in its About.
+ */
+export function moveBlocked(items: readonly AutomationItem[]): string | undefined {
+  const other = items.find((item) => !item.computer.local)
+  if (other) return `Move it from ${other.computer.name}.`
+  if (items.some((item) => item.who.kind === 'bot')) return 'A bot’s computer changes in its About.'
+  return undefined
+}
+
+/** What Move to computer says when it is done: how many moved, and each one that did not, with why. */
+export function moveSummary(result: AutomationMoveResult, to: string): string | null {
+  const parts: string[] = []
+  const warned = result.moved.filter((entry) => entry.warning)
+  if (result.failed.length) parts.push(`${result.moved.length ? `Moved ${result.moved.length} to ${to}. ` : ''}Not moved: ${result.failed.map((entry) => `${entry.name ?? 'an automation'} (${entry.error.replace(/\.$/, '')})`).join('; ')}.`)
+  for (const entry of warned) parts.push(entry.warning!)
+  return parts.length ? parts.join(' ') : null
 }
 
 /** Search appears once the list is this long. */
