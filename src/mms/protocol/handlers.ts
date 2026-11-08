@@ -5,6 +5,8 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
+import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
+import type { ProjectIconChoice } from '../../shared/projectIcon'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -1308,7 +1310,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
  */
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
-  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry',
   'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
@@ -1521,6 +1523,36 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const projectId = asString(p.projectId, 'projectId', 256)
       return ctx.mms.projects.trustGitSettings(projectId)
+    }
+    case 'projects.icon': {
+      // The icon of a project of this computer, as a checked image data URL; null shows the folder glyph. Only a
+      // window on this computer reads it: a chosen icon can be any image file the user can read.
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const project = connectionIsLocal(ctx.connection) ? ctx.mms.projects.getProject(projectId) : undefined
+      if (!project) return { icon: null }
+      return { icon: await projectIconFor(project, ctx.mms.projects) }
+    }
+    case 'projects.setIcon': {
+      const p = isObject(params) ? params : {}
+      const projectId = asString(p.projectId, 'projectId', 256)
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A project icon is set on its own computer')
+      const mode = asString(p.mode, 'mode', 16)
+      let choice: ProjectIconChoice
+      if (mode === 'auto' || mode === 'off') choice = { mode }
+      else if (mode === 'custom') {
+        const project = ctx.mms.projects.getProject(projectId)
+        if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
+        const path = asString(p.path, 'path', 4096)
+        if (!(await readIconFile(resolveStoredIconPath(project.path, path)))) {
+          throw new DomainRpcError('invalid_params', 'Choose an SVG, PNG, ICO, JPEG, WebP or GIF image up to 512 KB')
+        }
+        choice = { mode, path }
+      } else throw new DomainRpcError('invalid_params', 'mode must be auto, off or custom')
+      const project = ctx.mms.projects.setProjectIcon(projectId, choice)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}

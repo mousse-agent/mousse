@@ -31,6 +31,8 @@ export const GIT_ACCESS = {
   'projects.pin': 'none',
   'projects.reorder': 'none',
   'projects.trustGitSettings': 'read',
+  'projects.icon': 'none',
+  'projects.setIcon': 'none',
   'threads.list': 'none',
   'threads.get': 'none',
   'threads.create': 'owned',
