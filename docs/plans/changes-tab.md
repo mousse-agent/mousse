@@ -148,7 +148,7 @@ type ChangesResult = {
   - An entry that fails that test (an agent or terminal commit, Undo, Redo or pull touching the file, or an edit that undid a chosen hunk) is never applied as stored. The path is `indexDiverged` (whole-file only, listed even when the working tree equals HEAD). An excluded entry takes the current HEAD's version; a chosen-content entry makes a chosen commit fail with `stale` until the person chooses the file again.
   - The commit index is built fresh at commit time: `read-tree <current HEAD>`, then the working tree for changed paths outside the overlay (excluding `.mousse/**`, as commit-all does), then the valid overlay entries. A commit therefore never reverses a newer commit.
   - `token` = hash of (HEAD oid, overlay revision). It changes when HEAD moves or the overlay is written.
-- A `git.selectionChanged { threadId? | projectId? }` event tells other views to re-read. It is declared with the other daemon events and forwarded over Bridge like `actions.updated`.
+- A `git.selectionChanged { threadId? | projectId? }` event tells other views to re-read. It is declared with the other daemon events and forwarded over Bridge like `actions.updated`, which only carries thread events: a project folder's selection change reaches another computer only when it re-reads.
 
 ### Include and exclude: `git.include`
 
@@ -186,14 +186,14 @@ New field `selection?: { mode: 'all' } | { mode: 'chosen'; token: string }`.
   - The owner is chosen like `git.discard`: `recordedThreadTarget` (a thread's worktree, or a thread working in its project's folder) → the thread's folder, and the revert is a recorded thread action; otherwise `projectKeptFilesOwnerFor`.
   - Retention is the owner's window (`keptCopyWindowMs(owner)`), not a fixed 30 days.
   - Whole-file working-tree writes follow `git.discard`'s path and driver rules (LFS and filter files included). Where those rules can't write the file safely, the call is refused with `whole_file_only` and the tab offers Discard instead.
-  - In a thread, the reverted paths leave the overlay (they now equal HEAD).
+  - In a thread, a whole-file revert takes the path out of the overlay. A hunk revert keeps the overlay entry for the other hunks, so hunks the person left out stay left out.
 - The record `revertId → { kept ref, paths, post-revert digests and index entries, at }` is written to the owner's journal, so the list and restore work after a restart.
 - `git.restoreReverted({ threadId?, projectId?, revertId })` → `{ restored: true } | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }`.
   - Restores only if the paths still match what the revert left: the working tree, and in project folders also the index. (A thread's selection is not compared, so choosing another hunk of the same file doesn't block Undo.) Otherwise it returns blob ids for a comparison and writes nothing.
-  - Restored hunks come back as they were in project folders (the staged entry is restored). In threads they come back included, even if they were excluded before the revert, because reverted paths left the overlay. Chat Undo of a recorded revert behaves the same way.
+  - Restored hunks come back as they were in project folders (the staged entry is restored). In threads the overlay entries from before the revert come back too, if nobody changed them since, so restored hunks keep their earlier choice. Chat Undo of a recorded revert behaves the same way.
   - Idempotent: if the paths already equal the kept content (a retry, or chat Undo already put it back), returns `restored: true`.
   - `expired` when the kept ref is gone, whatever `keptUntil` said.
-  - Reuses `writeBackKeptFiles` and a staged restore from the kept ref; in the thread cases it is a recorded thread action.
+  - Uses the same re-checked write as revert (`writeBackKeptFiles` only creates missing files) and puts staged entries back from the kept ref; in the thread cases a restore that writes is a recorded thread action.
 - `git.revertedList({ threadId?, projectId? })` → `Array<{ revertId, path, oldPath?, at, keptUntil, summary }>`.
 
 ### Errors
