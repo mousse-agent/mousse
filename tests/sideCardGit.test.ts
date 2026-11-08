@@ -9,12 +9,10 @@ import {
   branchLabel,
   branchSearchAria,
   changedFileCount,
-  changesSummary,
   diffStatLabel,
   gitCollapsedLabel,
   gitErrorCode,
   gitErrorMessage,
-  commitMenuState,
   mergeAction,
   mergedNotice,
   pullRequestRow,
@@ -490,23 +488,7 @@ describe('git section formatting', () => {
       ]
     })
     expect(changedFileCount(status)).toBe(3)
-    expect(changesSummary(status)).toBe('3 files changed')
     expect(untrackedFileCount(status)).toBe(1)
-  })
-
-  it('summarizes changed files and ignores ignored ones', () => {
-    const status = repoStatus({
-      changes: [
-        { path: 'a.ts', status: 'modified', staged: false },
-        { path: 'b.ts', status: 'untracked', staged: false },
-        { path: 'dist/x', status: 'ignored', staged: false }
-      ]
-    })
-    expect(changedFileCount(status)).toBe(2)
-    expect(changesSummary(status)).toBe('2 files changed')
-    expect(changesSummary(repoStatus({ changes: [{ path: 'a.ts', status: 'added', staged: true }] }))).toBe('1 file changed')
-    expect(changesSummary(repoStatus())).toBe('No changes')
-    expect(changesSummary(null)).toBe('No changes')
   })
 
   it('formats relative time compactly', () => {
@@ -544,26 +526,6 @@ describe('git section formatting', () => {
     expect(gitErrorCode(new Error('plain'))).toBeNull()
     expect(gitErrorCode('text')).toBeNull()
     expect(gitErrorCode(null)).toBeNull()
-  })
-
-  it('disables amend with its reason in a thread worktree', () => {
-    const commits = [commit()]
-    expect(commitMenuState(commits, 2, false).amendDisabled).toBe(false)
-    const inThread = commitMenuState(commits, 2, true, true)
-    expect(inThread).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "Not available in this thread's worktree" })
-    // No changes and nothing else to commit: the trigger stays off instead of forcing an amend.
-    expect(commitMenuState(commits, 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
-  })
-
-  it('never turns amend on by itself with nothing to commit', () => {
-    // A clean repository whose last commit only this computer has: Commit opens with amend off.
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: true, amend: false, amendDisabled: false })
-    // Pushed HEAD, unborn repository, thread worktree: nothing to commit and nothing to amend.
-    expect(commitMenuState([commit({ pushed: true, onRemote: true })], 0, false)).toMatchObject({ triggerEnabled: false, amend: false })
-    expect(commitMenuState([], 0, false)).toMatchObject({ triggerEnabled: false, amend: false, amendTitle: 'No commits yet' })
-    expect(commitMenuState([commit()], 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
-    // Files coming or going never flip the choice: it is whatever the user set.
-    for (const files of [0, 1, 3, 0]) expect(commitMenuState([commit()], files, false).amend).toBe(false)
   })
 
   it('reduces a git failure to one readable line', () => {
@@ -704,7 +666,7 @@ describe('git section markup', () => {
     expect(html).toContain('side-card-git-quiet side-card-git-collapsed">Checking…<')
   })
 
-  it('renders the branch, its actions and the changes, and lists no commits', () => {
+  it('is a glance: the branch and how many files changed, which opens Changes, and no commits', () => {
     const html = render({
       git: view({
         status: repoStatus({ changes: [{ path: 'a.ts', status: 'modified', staged: false }] }),
@@ -716,31 +678,11 @@ describe('git section markup', () => {
     })
     expect(html).toContain('side-card-section-name">Git<')
     expect(html).toContain('>main<')
-    expect(html).toContain('1 file changed')
-    expect(html).toContain('+12')
-    expect(html).toContain('−3')
+    // One line: the branch, then the file count with the line totals in its tooltip.
+    expect(html).toMatch(/<div class="side-card-git-glance">[\s\S]*class="side-card-git-branch"[\s\S]*class="side-card-git-changes" title="\+12 −3[^"]*Open Changes"[\s\S]*>1 file</)
     expect(html).not.toContain('Fix the flaky retry test')
     expect(html).not.toContain('a1b2c3d')
-    // The branch has its own row; the actions share the row below it.
-    expect(html).toMatch(/class="side-card-git-branch"[\s\S]*<div class="side-card-git-row">[\s\S]*class="side-card-git-commit-button"/)
-    expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
-  })
-
-  it('counts a lone new file in the changes row and keeps the zero figures muted', () => {
-    const html = render({
-      git: view({
-        status: repoStatus({ changes: [{ path: 'new.ts', status: 'untracked', staged: false }] }),
-        commits: [commit()],
-        branches: { current: 'main', branches: ['main'] },
-        diffStats: { additions: 0, deletions: 0, filesChanged: 0 }
-      }),
-      collapsedLabel: null
-    })
-    expect(html).toContain('1 file changed')
-    expect(html).toContain('data-zero="true">+0')
-    expect(html).toContain('data-zero="true">−0')
-    expect(html).toContain('side-card-git-new">· 1 new<')
-    expect(html).toContain('+0 −0 · 1 new')
+    expect(html).not.toContain('side-card-git-commit-button')
   })
 
   it('shows no new-file count when nothing is untracked', () => {
@@ -752,23 +694,6 @@ describe('git section markup', () => {
       collapsedLabel: null
     })
     expect(html).not.toContain('side-card-git-new')
-  })
-
-  it('disables the commit button and mutes the stat when there are no changes', () => {
-    const html = render({
-      git: view({
-        status: repoStatus(),
-        commits: [commit({ pushed: true, onRemote: true })],
-        branches: { current: 'main', branches: ['main'] },
-        diffStats: { additions: 0, deletions: 0, filesChanged: 0 }
-      }),
-      collapsedLabel: null
-    })
-    expect(html).toContain('No changes')
-    expect(html).toMatch(/class="side-card-git-commit-button"[^>]*disabled/)
-    expect(html).toContain('title="No changes to commit"')
-    expect(html).toContain('data-zero="true">+0')
-    expect(html).toContain('data-zero="true">−0')
   })
 
   it('lists the pull request with its state, bold title, number and checks, and the hint, without the review or each check', () => {

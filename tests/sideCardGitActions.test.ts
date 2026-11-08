@@ -3,28 +3,16 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
 import {
-  EMPTY_COMMIT_DRAFT,
   canAmendCommit,
   canInitRepository,
   canPush,
-  chooseAmend,
   GIT_BUSY_REASON,
-  clearAmendPrefill,
-  commitButtonLabels,
-  commitFlowButtons,
-  commitFormFor,
-  commitHint,
-  commitMenuState,
   commitPhaseLabel,
-  commitTrigger,
-  commitScope,
-  emptyCommitForm,
   existingPullRequestNotice,
   openPullRequestFailedMessage,
   gitActionAvailability,
   gitCollapsedLabel,
   gitActionLock,
-  prefillAmendDraft,
   LINKED_WORKTREE_HINT,
   mergeConfirmation,
   pullRequestCheckRows,
@@ -492,141 +480,6 @@ describe('commit menu state', () => {
     expect(canAmendCommit([])).toBe(false)
   })
 
-  it('enables the trigger for changes or an amendable commit', () => {
-    expect(commitMenuState([commit()], 2, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: false })
-    expect(commitMenuState([commit({ onRemote: true })], 2, false).triggerEnabled).toBe(true)
-    expect(commitMenuState([], 1, false).triggerEnabled).toBe(true)
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: true })
-  })
-
-  it('disables the trigger when there is nothing to commit or amend', () => {
-    const state = commitMenuState([commit({ onRemote: true })], 0, false)
-    expect(state).toMatchObject({ triggerEnabled: false })
-    expect(commitMenuState([], 0, false).triggerEnabled).toBe(false)
-  })
-
-  it('lets the checkbox toggle amend while there are changes', () => {
-    expect(commitMenuState([commit()], 2, false)).toMatchObject({ amend: false, amendDisabled: false, amendTitle: null })
-    expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, amendDisabled: false })
-  })
-
-  it('never turns amend on by itself: without changes it stays off and can be switched on', () => {
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({
-      amend: false,
-      amendDisabled: false,
-      amendTitle: null,
-      submitReason: 'No changes to commit. Turn on Amend last commit to change a1b2c3d'
-    })
-    expect(commitMenuState([commit()], 0, true)).toMatchObject({ amend: true, amendDisabled: false, submitReason: null })
-  })
-
-  it('has no commit to offer without changes when amend is not possible', () => {
-    for (const state of [commitMenuState([commit({ onRemote: true })], 0, true), commitMenuState([], 0, true), commitMenuState([commit()], 0, true, true)]) {
-      expect(state).toMatchObject({ triggerEnabled: false, amend: false, amendDisabled: true })
-      expect(state.submitReason).not.toBeNull()
-    }
-  })
-
-  it('disables amend with the reason when it is not possible', () => {
-    expect(commitMenuState([commit({ onRemote: true })], 2, true)).toMatchObject({
-      canAmend: false,
-      amend: false,
-      amendDisabled: true,
-      amendTitle: 'The last commit is already pushed'
-    })
-    expect(commitMenuState([], 2, true)).toMatchObject({ amend: false, amendDisabled: true, amendTitle: 'No commits yet' })
-  })
-
-  it('lets a commit through with changes, amend or not', () => {
-    expect(commitMenuState([commit()], 1, false).submitReason).toBeNull()
-    expect(commitMenuState([commit()], 1, true).submitReason).toBeNull()
-    expect(commitMenuState([], 1, false).submitReason).toBeNull()
-  })
-
-  it('keeps the amend choice as files come and go: only the user sets it', () => {
-    expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, amendDisabled: false })
-    expect(commitMenuState([commit()], 0, true).amend).toBe(true)
-    expect(commitMenuState([commit()], 2, false).amend).toBe(false)
-    expect(commitMenuState([commit()], 0, false).amend).toBe(false)
-  })
-
-  it('names the commit it would amend', () => {
-    expect(commitMenuState([commit()], 1, false).shortHash).toBe('a1b2c3d')
-    expect(commitMenuState([], 1, false).shortHash).toBeNull()
-  })
-
-  it('words the footer hint and buttons for a plain commit and for an amend', () => {
-    expect(commitHint(false, 'a1b2c3d', 1)).toBe('Stages 1 file')
-    expect(commitHint(false, 'a1b2c3d', 3)).toBe('Stages 3 files')
-    expect(commitHint(false, 'a1b2c3d', 0)).toBe('No changes to commit')
-    expect(commitHint(true, 'a1b2c3d', 0)).toBe('Amends a1b2c3d')
-    expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
-    expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' })
-    expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push', commitPushAndOpenPr: 'Amend, push and open PR' })
-  })
-})
-
-describe('commit button label', () => {
-  const trigger = (changes: GitFileChange[], options: { commits?: GitCommit[]; scope?: { workspaceThreadId: string | null }; inProgress?: GitStatusSnapshot['inProgress'] } = {}) => {
-    const scope = options.scope ?? { workspaceThreadId: null }
-    const commits = options.commits ?? [commit()]
-    const snapshot = status({ changes, ...(options.inProgress ? { inProgress: options.inProgress } : {}) })
-    const fileCount = new Set(changes.map((change) => change.path)).size
-    return commitTrigger(commitMenuState(commits, fileCount, false, scope.workspaceThreadId !== null), gitActionAvailability(snapshot, null, commits.length, scope).commit)
-  }
-
-  it('says Commit all with every changed file counted, untracked ones included', () => {
-    expect(trigger([fileChange('a.ts'), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })])).toEqual({
-      label: 'Commit all (3)',
-      title: 'Stage and commit all 3 changed files, including 1 untracked file'
-    })
-    expect(trigger([fileChange('a.ts')])).toEqual({ label: 'Commit all (1)', title: 'Stage and commit all 1 changed file' })
-  })
-
-  it('says Commit staged with how many of the changed files go in when only staged files are committed', () => {
-    const changes = [fileChange('a.ts', { staged: true }), fileChange('new.ts', { status: 'added', staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })]
-    expect(trigger(changes)).toEqual({ label: 'Commit staged (2 of 4)', title: 'Commit only the 2 staged files; unstaged changes in 2 files stay out' })
-    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')]).title).toBe('Commit only the 1 staged file; unstaged changes in 1 file stay out')
-    expect(trigger([fileChange('a.ts', { staged: true })])).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file' })
-  })
-
-  it('says the unstaged part of a partly staged file stays out', () => {
-    // Staged, then edited again: one file on both sides.
-    const partly = [fileChange('mm.ts', { staged: true }), fileChange('mm.ts')]
-    expect(trigger(partly)).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file; the unstaged part of the partly staged file stays out' })
-    expect(trigger([...partly, fileChange('nn.ts', { staged: true }), fileChange('nn.ts')]).title).toBe('Commit only the 2 staged files; the unstaged part of the 2 partly staged files stays out')
-    expect(trigger([...partly, fileChange('b.ts')])).toEqual({
-      label: 'Commit staged (1 of 2)',
-      title: 'Commit only the 1 staged file; unstaged changes in 2 files stay out, including the unstaged part of 1 partly staged file'
-    })
-  })
-
-  it('says Commit all in a thread\'s worktree, whatever is staged', () => {
-    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')], { scope: { workspaceThreadId: 't1' } })).toEqual({
-      label: 'Commit all (2)',
-      title: "Commit all 2 changed files on this thread's branch"
-    })
-  })
-
-  it('says Commit with no changes, offering an amend the user turns on, or stays disabled', () => {
-    expect(trigger([])).toEqual({ label: 'Commit', title: 'No changes to commit. You can amend a1b2c3d to change its message' })
-    expect(trigger([], { commits: [commit({ onRemote: true })] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
-    expect(trigger([], { commits: [] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
-    expect(trigger([], { scope: { workspaceThreadId: 't1' } })).toEqual({ label: 'Commit', title: 'No changes to commit' })
-  })
-
-  it('names a merge it finishes, with what goes in, and conflicts it waits on', () => {
-    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')], { inProgress: 'merge' })).toEqual({
-      label: 'Commit merge (1 of 2 staged)',
-      title: 'Finish the merge with only the 1 staged file; unstaged changes in 1 file stay out'
-    })
-    // Nothing staged: the commit stages everything first, so the button says so.
-    expect(trigger([fileChange('a.ts'), fileChange('n.ts', { status: 'untracked' })], { inProgress: 'merge' })).toEqual({
-      label: 'Commit merge (all 2)',
-      title: 'Finish the merge, staging and committing all 2 changed files, including 1 untracked file'
-    })
-    expect(trigger([fileChange('a.ts', { status: 'conflicted' }), fileChange('b.ts', { staged: true })])).toEqual({ label: 'Commit', title: 'Resolve 1 conflicted file first' })
-  })
 })
 
 describe('merge confirmation', () => {
@@ -640,53 +493,6 @@ describe('merge confirmation', () => {
     expect(mergeConfirmation('#12', 'main', undefined)).toEqual({ text: 'Merge #12 into main?', action: 'Merge' })
     expect(mergeConfirmation('#12', 'main', null)).toEqual({ text: "Merge #12 into main? The merge method couldn't be read, so the repository's default is used, else squash.", action: 'Merge' })
     expect(mergeConfirmation('#12', '', 'squash').text).toBe('Squash #12 into one commit?')
-  })
-})
-
-describe('commit hint by what the commit includes', () => {
-  const availability = (patch: Partial<GitStatusSnapshot>, scope = { workspaceThreadId: null as string | null }) =>
-    gitActionAvailability(status(patch), null, 3, scope).commit
-
-  it('commits only the staged files when anything is staged', () => {
-    const commitState = availability({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })] })
-    expect(commitHint(false, 'a1b2c3d', 3, commitState)).toBe('Commits 1 staged file')
-    expect(commitHint(true, 'a1b2c3d', 3, commitState)).toBe('Amends a1b2c3d · adds 1 staged file')
-  })
-
-  it('stages everything when nothing is staged', () => {
-    const commitState = availability({ changes: [fileChange('a.ts'), fileChange('b.ts', { status: 'untracked' })] })
-    expect(commitHint(false, 'a1b2c3d', 2, commitState)).toBe('Stages 2 files')
-    expect(commitHint(true, 'a1b2c3d', 2, commitState)).toBe('Amends a1b2c3d · stages 2 files')
-  })
-
-  it('counts a file staged and edited again once', () => {
-    const commitState = availability({ changes: [fileChange('mm.ts', { staged: true }), fileChange('mm.ts')] })
-    expect(commitState).toMatchObject({ stagedCount: 1, unstagedCount: 1, changedCount: 1, mode: 'staged' })
-    expect(commitHint(false, null, 1, commitState)).toBe('Commits 1 staged file')
-  })
-
-  it("says a thread worktree's commit takes all changes, whatever is staged", () => {
-    const commitState = availability({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts')] }, { workspaceThreadId: 't1' })
-    expect(commitState.mode).toBe('thread')
-    expect(commitHint(false, 'a1b2c3d', 2, commitState)).toBe("Commits all changes on this thread's branch")
-  })
-
-  it('blocks the commit while files are conflicted', () => {
-    const commitState = availability({ changes: [fileChange('a.ts', { status: 'conflicted' }), fileChange('b.ts', { status: 'conflicted' }), fileChange('c.ts', { staged: true })] })
-    expect(commitState.blockedReason).toBe('Resolve 2 conflicted files first')
-    expect(commitHint(false, null, 3, commitState)).toBe('Resolve 2 conflicted files first')
-    expect(commitHint(true, 'a1b2c3d', 3, commitState)).toBe('Resolve 2 conflicted files first')
-    expect(availability({ changes: [fileChange('a.ts', { status: 'conflicted' })] }).blockedReason).toBe('Resolve 1 conflicted file first')
-  })
-
-  it('says a merge with nothing left to resolve is finished by the commit', () => {
-    const commitState = availability({ inProgress: 'merge', changes: [fileChange('a.ts', { staged: true })] })
-    expect(commitState).toMatchObject({ mode: 'finish-merge', blockedReason: null })
-    expect(commitHint(false, null, 1, commitState)).toBe('Finishes the merge')
-  })
-
-  it('keeps the old wording without availability', () => {
-    expect(commitHint(false, 'a1b2c3d', 2)).toBe('Stages 2 files')
   })
 })
 
@@ -781,60 +587,6 @@ describe('git action availability', () => {
   })
 })
 
-describe('commit form scope', () => {
-  const head = commit()
-  const other = commit({ hash: 'ffffffffffffffffffffffffffffffffffffffff', shortHash: 'fffffff' })
-  const scopeA = commitScope('a', [head])
-  const typed = (scope = scopeA) => ({ ...emptyCommitForm(scope), draft: { message: 'Only for a', prefilled: null } })
-
-  it('differs by branch and by HEAD commit', () => {
-    const key = commitScope('feature/login', [head])
-    expect(commitScope('feature/login', [head, other])).toEqual(key)
-    expect(commitScope('main', [head])).not.toEqual(key)
-    expect(commitScope('feature/login', [other, head])).not.toEqual(key)
-    expect(commitScope(null, [])).toEqual(commitScope(null, []))
-  })
-
-  it('keeps the text and amend choice while the scope is unchanged', () => {
-    const form = { ...typed(), amendChecked: true }
-    expect(commitFormFor(form, scopeA)).toBe(form)
-  })
-
-  it('drops text typed on one branch when the branch changes', () => {
-    const onB = commitFormFor({ ...typed(), amendChecked: true }, commitScope('b', [head]))
-    expect(onB.draft.message).toBe('')
-    expect(onB.amendChecked).toBe(false)
-  })
-
-  it('keeps typed text across a new HEAD on the same branch, but not the amend choice', () => {
-    const moved = commitFormFor({ ...typed(), amendChecked: true }, commitScope('a', [other]))
-    expect(moved).toEqual({ ...emptyCommitForm(commitScope('a', [other])), draft: { message: 'Only for a', prefilled: null } })
-  })
-
-  it('keeps an edited prefill as plain text across a new HEAD, and drops an unedited one', () => {
-    const edited = { ...emptyCommitForm(scopeA), draft: { message: 'Fix login, reworded', prefilled: 'Fix login' }, amendChecked: true }
-    const prefilled = { ...emptyCommitForm(scopeA), draft: { message: 'Fix login', prefilled: 'Fix login' }, amendChecked: true }
-    const moved = commitScope('a', [other])
-    expect(commitFormFor(edited, moved).draft).toEqual({ message: 'Fix login, reworded', prefilled: null })
-    expect(commitFormFor(prefilled, moved)).toEqual(emptyCommitForm(moved))
-  })
-
-  it('does not bring a draft back after a round trip through another branch', () => {
-    // The popover stores each result, closed or not, which is what makes A -> B -> A start empty.
-    let stored = typed()
-    stored = commitFormFor(stored, commitScope('b', [head]))
-    stored = commitFormFor(stored, scopeA)
-    expect(stored).toEqual(emptyCommitForm(scopeA))
-  })
-
-  it('starts with amend off, and only the user turns it on or off', () => {
-    expect(emptyCommitForm(scopeA).amendChecked).toBe(false)
-    const chosen = chooseAmend(emptyCommitForm(scopeA), true)
-    expect(chosen.amendChecked).toBe(true)
-    expect(chooseAmend(chosen, false).amendChecked).toBe(false)
-  })
-})
-
 describe('push availability', () => {
   it('needs a branch and either an upstream or a remote', () => {
     expect(canPush(status())).toBe(true)
@@ -894,24 +646,6 @@ describe('git action lock', () => {
 })
 
 describe('amend message', () => {
-  it('fills an empty message from the last commit', () => {
-    expect(prefillAmendDraft(EMPTY_COMMIT_DRAFT, 'Fix login\n\nBody')).toEqual({ message: 'Fix login\n\nBody', prefilled: 'Fix login\n\nBody' })
-    expect(prefillAmendDraft({ message: '  ', prefilled: null }, 'Fix login').message).toBe('Fix login')
-  })
-
-  it('keeps a message the user already typed', () => {
-    const draft = { message: 'My words', prefilled: null }
-    expect(prefillAmendDraft(draft, 'Fix login')).toBe(draft)
-    expect(prefillAmendDraft(EMPTY_COMMIT_DRAFT, null)).toBe(EMPTY_COMMIT_DRAFT)
-  })
-
-  it('clears the prefilled message when amend goes off, and only that', () => {
-    expect(clearAmendPrefill({ message: 'Fix login', prefilled: 'Fix login' })).toEqual(EMPTY_COMMIT_DRAFT)
-    expect(clearAmendPrefill({ message: 'Fix login now', prefilled: 'Fix login' })).toEqual({ message: 'Fix login now', prefilled: null })
-    const typed = { message: 'Mine', prefilled: null }
-    expect(clearAmendPrefill(typed)).toBe(typed)
-  })
-
   it('words a push that failed after the commit landed', () => {
     const error = new Error("Error invoking remote method 'git:push': Error: Git push failed.")
     expect(pushFailedMessage(error)).toBe('Committed, but the push failed: Git push failed.')
@@ -933,59 +667,6 @@ describe('amend message', () => {
     expect(commitPhaseLabel('committing')).toBe('Committing…')
     expect(commitPhaseLabel('pushing')).toBe('Pushing…')
     expect(commitPhaseLabel('opening-pr')).toBe('Opening PR…')
-  })
-})
-
-describe('commit popover buttons', () => {
-  const buttons = (input: { pushable: boolean; openPullRequest: boolean; amend?: boolean }) =>
-    commitFlowButtons({ amend: false, ...input }).map(({ flow, label }) => `${flow}: ${label}`)
-
-  it('lists the pull request button first, then push, then the plain commit last as the primary one', () => {
-    expect(buttons({ pushable: true, openPullRequest: true })).toEqual([
-      'push-pr: Commit, push and open PR',
-      'push: Commit and push',
-      'commit: Commit'
-    ])
-    expect(commitFlowButtons({ amend: false, pushable: true, openPullRequest: true }).map((button) => button.quiet)).toEqual([true, true, false])
-  })
-
-  it('words the same buttons for an amend', () => {
-    expect(buttons({ pushable: true, openPullRequest: true, amend: true })).toEqual([
-      'push-pr: Amend, push and open PR',
-      'push: Amend and push',
-      'commit: Amend'
-    ])
-  })
-
-  it('never shows a pull request button without somewhere to push', () => {
-    expect(buttons({ pushable: false, openPullRequest: true })).toEqual(['commit: Commit'])
-    expect(buttons({ pushable: true, openPullRequest: false })).toEqual(['push: Commit and push', 'commit: Commit'])
-  })
-
-  it('shows the pull request button exactly where the availability table offers it', () => {
-    const none: GitPullRequestLookup = { state: 'none', isDefaultBranch: false }
-    const dirty = [fileChange('a.ts')]
-    const shown = (patch: Partial<GitStatusSnapshot>, scope = { workspaceThreadId: null as string | null }, lookup: GitPullRequestLookup | null = none) => {
-      const availability = gitActionAvailability(status(patch), lookup, 3, scope)
-      return commitFlowButtons({ amend: false, pushable: availability.offerCommitAndPush, openPullRequest: availability.offerCommitPushAndOpenPr })
-        .some((button) => button.flow === 'push-pr')
-    }
-    expect(shown({ changes: dirty })).toBe(true)
-    expect(shown({ ahead: 1, changes: dirty })).toBe(true)
-    expect(shown({ tracking: 'none', upstream: null, changes: dirty })).toBe(true)
-    expect(shown({ changes: dirty }, { workspaceThreadId: 't1' })).toBe(true)
-    // Behind, diverged and conflicted hide it, in a thread worktree as well.
-    expect(shown({ behind: 1, changes: dirty })).toBe(false)
-    expect(shown({ ahead: 1, behind: 1, changes: dirty })).toBe(false)
-    expect(shown({ changes: [fileChange('a.ts', { status: 'conflicted' })] })).toBe(false)
-    expect(shown({ behind: 1, changes: dirty }, { workspaceThreadId: 't1' })).toBe(false)
-    expect(shown({ changes: [fileChange('a.ts', { status: 'conflicted' })] }, { workspaceThreadId: 't1' })).toBe(false)
-    // Nothing to commit, no remote, no branch, a pull request already there, the default branch.
-    expect(shown({})).toBe(false)
-    expect(shown({ tracking: 'none', upstream: null, hasRemote: false, changes: dirty })).toBe(false)
-    expect(shown({ branch: null, tracking: 'detached', upstream: null, changes: dirty })).toBe(false)
-    expect(shown({ changes: dirty }, undefined, found())).toBe(false)
-    expect(shown({ changes: dirty }, undefined, { state: 'none', isDefaultBranch: true })).toBe(false)
   })
 })
 
@@ -1034,17 +715,6 @@ describe('git section actions markup', () => {
     expect(render(view(), found({ state: 'closed' }))).toContain('side-card-git-pr-suffix">Closed<')
   })
 
-  it('renders an enabled Create PR for a pushed branch with no pull request', () => {
-    const html = render(view(), { state: 'none', isDefaultBranch: false })
-    expect(html).toMatch(/<div class="side-card-git-row">.*class="side-card-git-pr-create"[^>]*aria-disabled="false"[^>]*><svg[^>]*>.*?<\/svg><span>Create PR</)
-    expect(html).not.toContain('Push the branch first')
-  })
-
-  it('dims Create PR with its reason before the branch is pushed', () => {
-    const html = render(view({ status: status({ ahead: 1 }) }), { state: 'none', isDefaultBranch: false })
-    expect(html).toMatch(/class="side-card-git-pr-create"[^>]*title="Push the branch first"[^>]*aria-disabled="true"/)
-  })
-
   it('renders no pull request row on the default branch, when unavailable, or before the lookup', () => {
     const rows = [
       render(view(), { state: 'none', isDefaultBranch: true }),
@@ -1059,64 +729,12 @@ describe('git section actions markup', () => {
     }
   })
 
-  it('renders Push with the unpushed badge and its tooltip', () => {
-    const html = render(view({ status: status({ ahead: 3 }) }))
-    expect(html).toMatch(/<button[^>]*class="side-card-git-push"[^>]*><svg[^>]*>.*?<\/svg><span>Push<\/span><span class="side-card-git-push-count" aria-hidden="true">↑3<\/span>/)
-    expect(html).toContain('title="Push 3 commits to origin/feature/login"')
-    expect(html).toContain('aria-label="Push 3 commits to origin/feature/login"')
-    expect(html).not.toMatch(/class="side-card-git-push"[^>]*disabled/)
-  })
-
-  it('keeps Push when the branch is behind as well, disabled with the reason', () => {
-    const html = render(view({ status: status({ ahead: 1, behind: 2 }) }))
-    expect(html).toContain('side-card-git-push-count" aria-hidden="true">↑1<')
-    expect(html).toMatch(/class="side-card-git-push"[^>]*title="Branch has diverged; pull with merge or rebase first"[^>]*disabled=""/)
-  })
-
-  it('keeps Push enabled in a thread worktree', () => {
-    const html = renderToStaticMarkup(createElement(GitSectionView, {
-      threadId: 't1',
-      projectId: 'p1',
-      workspaceThreadId: 't1',
-      path: '/repo/a',
-      git: view({ status: status({ ahead: 1 }) }),
-      collapsedLabel: null
-    }))
-    expect(html).toMatch(/class="side-card-git-push"(?![^>]*disabled)/)
-  })
-
-  it('renders Publish for a branch with no upstream', () => {
-    const html = render(view({ status: status({ tracking: 'none', upstream: null }) }))
-    expect(html).toMatch(/class="side-card-git-push"[^>]*><svg[^>]*>.*?<\/svg><span>Publish</)
-    expect(html).toContain('title="Push this branch and track it on the remote"')
-    expect(html).not.toContain('side-card-git-push-count')
-  })
-
-  it('renders no Publish button when the repository has no remote', () => {
-    const local = status({ tracking: 'none', upstream: null, hasRemote: false })
-    const html = render(view({ status: local }))
-    expect(html).not.toContain('side-card-git-push')
-    expect(html).not.toContain('Publish')
-    expect(render(view({ status: { ...local, hasRemote: true } }))).toContain('>Publish<')
-  })
-
-  it('renders no push button for a pushed, detached or unborn branch', () => {
+  it('leaves Commit, Push and Create PR to the Changes tab, whatever the branch', () => {
+    const ahead = render(view({ status: status({ ahead: 3 }) }), { state: 'none', isDefaultBranch: false })
+    for (const name of ['side-card-git-push', 'side-card-git-commit-button', 'side-card-git-pr-create']) expect(ahead).not.toContain(name)
     expect(render(view())).not.toContain('side-card-git-push')
     expect(render(view({ status: status({ branch: null, tracking: 'detached' }) }))).not.toContain('side-card-git-push')
     expect(render(view({ status: status({ branch: null, tracking: 'unborn' }), commits: [] }))).not.toContain('side-card-git-push')
-  })
-
-  it('keeps the commit trigger enabled when only an amend is possible', () => {
-    const html = render(view({ commits: [commit()] }))
-    expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
-    // Labelled Commit: the popover offers the amend, and the user turns it on.
-    expect(html).toContain('title="No changes to commit. You can amend a1b2c3d to change its message"')
-    expect(html).toMatch(/class="side-card-git-commit-button"[\s\S]*?<span>Commit<\/span><\/button>/)
-  })
-
-  it('names what the Commit button commits on the button itself', () => {
-    const html = render(view({ commits: [commit()], status: status({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })] }) }))
-    expect(html).toMatch(/class="side-card-git-commit-button"[^>]*title="Commit only the 1 staged file; unstaged changes in 2 files stay out"[\s\S]*?<span>Commit staged \(1 of 3\)<\/span><\/button>/)
   })
 
   describe('not a repository, once expanded', () => {

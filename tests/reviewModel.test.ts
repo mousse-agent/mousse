@@ -4,16 +4,9 @@ import type { ThreadAction } from '../src/shared/threadActions'
 import { formatChatReferences } from '../src/shared/chatReferences'
 import { surfaceTabItems } from '../src/renderer/lib/surfaces'
 import {
-  buildFileTree,
   formatBytes,
   placeholderFor,
-  scopeFromOptionValue,
-  scopeLabel,
-  scopeOptionValue,
-  totalCounts,
-  turnChoices,
-  viewChangeLabel,
-  type TreeNode
+  turnChoices
 } from '../src/renderer/components/review/reviewModel'
 
 const entry = (path: string, extra: Partial<ReviewFileEntry> = {}): ReviewFileEntry => ({
@@ -26,48 +19,6 @@ const entry = (path: string, extra: Partial<ReviewFileEntry> = {}): ReviewFileEn
   ...extra
 })
 
-const names = (nodes: TreeNode[]): string[] => nodes.map((node) => node.name)
-
-describe('buildFileTree', () => {
-  it('nests files under folders, folders first, each sorted by name', () => {
-    const tree = buildFileTree([entry('z.ts'), entry('src/b.ts'), entry('src/a.ts'), entry('docs/guide.md'), entry('src/lib/x.ts')])
-    expect(names(tree)).toEqual(['docs', 'src', 'z.ts'])
-    const src = tree[1] as Extract<TreeNode, { kind: 'folder' }>
-    expect(names(src.children)).toEqual(['lib', 'a.ts', 'b.ts'])
-  })
-
-  it('folds a chain of single-child folders into one row', () => {
-    const tree = buildFileTree([entry('a/b/c/file.ts'), entry('a/b/c/other.ts')])
-    expect(tree).toHaveLength(1)
-    expect(tree[0]).toMatchObject({ kind: 'folder', name: 'a/b/c', path: 'a/b/c' })
-  })
-
-  it('does not fold a folder that also holds a file or a second folder', () => {
-    const tree = buildFileTree([entry('a/top.ts'), entry('a/b/c.ts'), entry('d/e/f.ts'), entry('d/g/h.ts')])
-    const a = tree[0] as Extract<TreeNode, { kind: 'folder' }>
-    expect(a.name).toBe('a')
-    expect(names(a.children)).toEqual(['b', 'top.ts'])
-    const d = tree[1] as Extract<TreeNode, { kind: 'folder' }>
-    expect(names(d.children)).toEqual(['e', 'g'])
-  })
-
-  it('keeps the entry on its file node so renames and counts reach the row', () => {
-    const renamed = entry('new/name.ts', { status: 'renamed', oldPath: 'old/name.ts' })
-    const tree = buildFileTree([renamed])
-    const folder = tree[0] as Extract<TreeNode, { kind: 'folder' }>
-    expect(folder.children[0]).toMatchObject({ kind: 'file', path: 'new/name.ts', entry: renamed })
-  })
-
-  it('builds a 2,000-file list in one pass', () => {
-    const files = Array.from({ length: 2000 }, (_, index) => entry(`pkg${index % 40}/mod${index % 7}/file${index}.ts`))
-    const started = performance.now()
-    const tree = buildFileTree(files)
-    expect(performance.now() - started).toBeLessThan(500)
-    const count = (nodes: TreeNode[]): number => nodes.reduce((sum, node) => sum + (node.kind === 'file' ? 1 : count(node.children)), 0)
-    expect(count(tree)).toBe(2000)
-    expect(tree).toHaveLength(40)
-  })
-})
 
 describe('placeholderFor', () => {
   it('explains binary, oversized and absent sides, and shows nothing for text', () => {
@@ -175,57 +126,12 @@ describe('turnChoices', () => {
   })
 })
 
-describe('scope helpers', () => {
-  it('round-trips the picker value, keeping colons inside a turn id', () => {
-    const turn = { kind: 'turn' as const, turnId: 'run:thread:abc%3Adef:ordinal:3' }
-    expect(scopeOptionValue(turn)).toBe('turn:run:thread:abc%3Adef:ordinal:3')
-    expect(scopeFromOptionValue(scopeOptionValue(turn))).toEqual(turn)
-    expect(scopeFromOptionValue('thread')).toEqual({ kind: 'thread' })
-    expect(scopeFromOptionValue('worktree')).toEqual({ kind: 'worktree' })
-  })
-
-  it('labels scopes', () => {
-    const choices = [{ turnId: 'run:1', label: 'Fix it · 10:00', undone: false, running: false }]
-    expect(scopeLabel({ kind: 'thread' }, choices)).toBe('Whole thread')
-    expect(scopeLabel({ kind: 'worktree' }, choices)).toBe('Working tree')
-    expect(scopeLabel({ kind: 'worktree', staged: true }, choices)).toBe('Staged changes')
-    expect(scopeLabel({ kind: 'turn', turnId: 'run:1' }, choices)).toBe('Fix it · 10:00')
-    expect(scopeLabel({ kind: 'turn', turnId: 'run:gone' }, choices)).toBe('Turn')
-  })
-
-  it('sums counts', () => {
-    expect(totalCounts([entry('a', { additions: 3, deletions: 1 }), entry('b', { additions: 2, deletions: 4 })])).toEqual({ additions: 5, deletions: 5 })
-  })
-})
-
-describe('viewChangeLabel', () => {
-  const change = (original: [number, number], modified: [number, number]) => ({
-    originalStartLineNumber: original[0],
-    originalEndLineNumber: original[1],
-    modifiedStartLineNumber: modified[0],
-    modifiedEndLineNumber: modified[1]
-  })
-
-  it('counts added, removed and changed line ranges', () => {
-    expect(viewChangeLabel([change([4, 0], [5, 7])])).toBe('3 changed lines in view')
-    expect(viewChangeLabel([change([10, 11], [10, 0])])).toBe('2 changed lines in view')
-    expect(viewChangeLabel([change([20, 21], [20, 22])])).toBe('3 changed lines in view')
-    expect(viewChangeLabel([change([4, 0], [5, 7]), change([10, 11], [12, 12])])).toBe('5 changed lines in view')
-  })
-
-  it('handles one line, none, and a diff Monaco has not computed yet', () => {
-    expect(viewChangeLabel([change([1, 1], [1, 1])])).toBe('1 changed line in view')
-    expect(viewChangeLabel([])).toBe('No changed lines in view')
-    expect(viewChangeLabel(null)).toBeNull()
-  })
-})
-
-describe('Review surface tab', () => {
-  it('shows a Review tab when the surface is open', () => {
-    const items = surfaceTabItems({ opened: ['git', 'review'], terminals: [], browsers: [], documents: [] })
+describe('Changes surface tab', () => {
+  it('shows one Changes tab for the git surface', () => {
+    const items = surfaceTabItems({ opened: ['files', 'git'], terminals: [], browsers: [], documents: [] })
     expect(items.map((item) => [item.key, item.view, item.label])).toEqual([
-      ['git', 'git', 'Diff'],
-      ['review', 'review', 'Review']
+      ['files', 'files', 'Files'],
+      ['git', 'git', 'Changes']
     ])
   })
 })
