@@ -2039,8 +2039,9 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ job: unknown }>('scheduled.get', { id })
     return res.job
   })
-  registerHandler('scheduled:create', async (_e, input: CreateScheduledJobInput) => {
-    const res = await guiMms.request<{ job: unknown }>('scheduled.create', { input })
+  // `node`: the other computer that owns the automation; the daemon sends it there (it never falls back to this one).
+  registerHandler('scheduled:create', async (_e, input: CreateScheduledJobInput, node?: unknown) => {
+    const res = await guiMms.request<{ job: unknown }>('scheduled.create', { input, ...(typeof node === 'string' && node ? { node } : {}) })
     return res.job
   })
   registerHandler(

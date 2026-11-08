@@ -6,6 +6,7 @@ import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../.
 import type { NodeCapability } from '../../../shared/net'
 import {
   ROUTED_FORBIDDEN_KEYS,
+  ROUTED_JOB_METHODS,
   ROUTED_LARGE_READS,
   ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_LEDGER_RESULT_MAX_BYTES,
@@ -56,6 +57,7 @@ import { MmsRemoteBackend, withImageBudget, withoutImageData } from '../remote/M
 import type { BridgeOrdinaryMethod } from '../remote/capabilities'
 import { mmsJson } from '../remote/jsonOutput'
 import { newestMessages } from '../../protocol/transcriptPaging'
+import { jobSharedWithComputers, privateThreadOf } from '../../automations/sharedAutomations'
 import { ReplyPages } from './pages'
 import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
@@ -896,6 +898,33 @@ export class OwnerRoutes {
       if (typeof threadId !== 'string') throw new NetError('bad_request')
       if (!(await this.belongs(kind, id, threadId))) throw notFoundFor(kind, id, threadId)
     }
+    if (method.startsWith('scheduled.')) this.assertAutomation(method, params)
+  }
+
+  /**
+   * An automation another computer adds, edits or acts on here: one it may see (no bot's, none of a private
+   * thread), in a thread it may see and a project of this profile. What only this computer picks stays here: a
+   * saved agent (its definitions are edited where they are kept) and a thread's own worktree (a folder of this disk).
+   */
+  private assertAutomation(method: string, params: Record<string, unknown>): void {
+    const { services } = this.options
+    const isPrivate = privateThreadOf(services.threads)
+    if (ROUTED_JOB_METHODS.includes(method)) {
+      const id = params.id
+      const job = typeof id === 'string' ? services.scheduled.getJob(id) : null
+      if (!job || !jobSharedWithComputers(job, isPrivate))
+        throw new DomainRpcError('job_not_found', 'This automation is gone.', { id })
+    }
+    const fields = method === 'scheduled.create' ? params.input : method === 'scheduled.update' ? params.patch : undefined
+    if (!isPlainObject(fields)) return
+    if (typeof fields.threadId === 'string' && (isPrivate(fields.threadId) || !this.sharedThread(fields.threadId)))
+      throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: fields.threadId })
+    if (typeof fields.projectId === 'string' && !services.projects.getProject(fields.projectId))
+      throw new DomainRpcError('project_not_found', 'Project not found', { projectId: fields.projectId })
+    if (fields.agent !== undefined && fields.agent !== null)
+      throw new DomainRpcError('job_refused', 'A saved agent is picked on the computer that keeps it.')
+    if (isPlainObject(fields.workspace) && fields.workspace.kind === 'worktree')
+      throw new DomainRpcError('job_refused', 'A thread’s worktree is picked on the computer that has it.')
   }
 
   private async belongs(

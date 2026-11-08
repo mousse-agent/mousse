@@ -1,5 +1,6 @@
 import {
   ROUTED_FORBIDDEN_KEYS,
+  ROUTED_JOB_METHODS,
   ROUTED_METHODS,
   type RoutedRow
 } from '../../../shared/bridge/routed'
@@ -229,7 +230,11 @@ export class ThreadRouter implements ThreadRouterPort {
     const row = ROUTED_METHODS[method]
     const split = unqualifyRoutedParams(params)
     const target = this.targetNode(row, params)
-    const nodes = [...new Set([...split.nodes, ...(target ? [target] : [])])]
+    // An automation of another computer is named `<node>:<jobId>`, like its threads; a plain id is one of this computer's.
+    const job = ROUTED_JOB_METHODS.includes(method) && typeof params.id === 'string' ? parseQualifiedId(params.id) : undefined
+    if (job) split.params.id = job.id
+    else if (ROUTED_JOB_METHODS.includes(method) && typeof params.id === 'string') split.hasLocal = true
+    const nodes = [...new Set([...split.nodes, ...(target ? [target] : []), ...(job ? [job.node] : [])])]
     if (!nodes.length) return undefined
     // Only a window routes. The CLI and the agents' shells reach the daemon as other kinds of connection.
     if (ctx.connection?.clientType !== 'gui')
@@ -289,6 +294,9 @@ export class ThreadRouter implements ThreadRouterPort {
     if (SENDS.has(method) && typeof params.threadId === 'string') this.lists?.noteSent(params.threadId)
     let result = qualifyRoutedResult(method, raw, context)
     if (isRecord(result)) result = this.withLocalLists(ctx, method, result)
+    // The automation a change answers with is named the way this computer names it.
+    if (method.startsWith('scheduled.') && isRecord(result) && isRecord(result.job) && typeof result.job.id === 'string')
+      result = { ...result, job: { ...result.job, id: qualifyId(node, result.job.id) } }
     return { result }
   }
 

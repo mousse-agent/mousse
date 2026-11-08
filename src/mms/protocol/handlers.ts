@@ -17,7 +17,7 @@ import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageClean
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
+import { isPermissionMode, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -99,7 +99,7 @@ import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './thread
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { threadFolderExpired } from '../data/expiredThreads'
 import { isLocalOnlyThread } from '../../shared/threadLineage'
-import { isQualifiedId } from '../../shared/threadRef'
+import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
@@ -1535,6 +1535,11 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
   }
 }
 
+/** An automation of another computer () that reached this one's store (routing is off): never acted on here. */
+function refuseOtherComputersJob(id: string): void {
+  if (parseQualifiedId(id)) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { id })
+}
+
 /** The profile services the scheduled-job checks read (model, mode and workspace of a job). */
 function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
   return scheduledJobOptionsDepsFrom({
@@ -2830,12 +2835,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'scheduled.create': {
       const p = isObject(params) ? params : {}
+      // A call for another computer that reached this one's store (routing is off) is refused: it never falls back here.
+      if (p.node !== undefined) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { node: p.node })
       const input = asCreateScheduledJobInput(p.input)
       // The selection is stored as the profile resolves it; a `worktree` workspace names the thread that owns it.
       const checked = checkJobOptions(ctx, input)
       // The job's ceiling is the mode its creator holds now (the target thread's, else the profile's). It comes
-      // from the daemon, never from the request, and the job's own mode may not exceed it.
-      const permissionCeiling = ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId)
+      // from the daemon, never from the request, and the job's own mode may not exceed it. A person on another
+      // computer holds no more than this computer lets that device run a turn in.
+      const permissionCeiling = narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? input.threadId), deviceLimit(ctx))
       const tooWide = permissionAboveCeiling(input.permissionMode, permissionCeiling)
       if (tooWide) throw jobRefused(tooWide)
       const job = withPermissionRefusals(() => ctx.mms.scheduled.createJob({
@@ -2849,6 +2857,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.update': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const patch = asScheduledJobPatch(p.patch)
       const existing = ctx.mms.scheduled.getJob(id)
       if (!existing) throw new Error(`Job not found: ${id}`)
@@ -2904,7 +2913,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }, {
         permissions: (current) => permissionsAfterEdit({
           stored: current,
-          editor: ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)),
+          editor: narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)), deviceLimit(ctx)),
           patchMode: patch.permissionMode,
           executable,
           canRaise: true
@@ -2915,12 +2924,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.delete': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const ok = ctx.mms.scheduled.deleteJob(id)
       return { ok, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.pause': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const reason = asOptionalString(p.reason, 512)
       // `until`: the pause ends by itself then (Pause… → Until tomorrow, Until Monday, Until a date).
       const untilText = asOptionalString(p.until, 64)
@@ -2937,12 +2948,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'scheduled.resume': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       const job = ctx.mms.scheduled.resumeJob(id)
       return { job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.run': {
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
+      refuseOtherComputersJob(id)
       // A job with a run in flight or waiting in a queue has one occurrence outstanding; say so instead of reporting a start.
       const current = ctx.mms.scheduled.getJob(id)
       const refusal = current ? runNowRefusal(current) : undefined

@@ -941,8 +941,9 @@ const api = {
   scheduled: {
     list: (): Promise<ScheduledJob[]> => ipcRenderer.invoke('scheduled:list'),
     get: (id: string): Promise<ScheduledJob | undefined> => ipcRenderer.invoke('scheduled:get', id),
-    create: (input: CreateScheduledJobInput): Promise<ScheduledJob> =>
-      ipcRenderer.invoke('scheduled:create', input),
+    /** `node`: the other computer that owns and runs it; absent, this one. */
+    create: (input: CreateScheduledJobInput, node?: string): Promise<ScheduledJob> =>
+      ipcRenderer.invoke('scheduled:create', input, node),
     update: (id: string, patch: ScheduledJobPatch): Promise<ScheduledJob | null> =>
       ipcRenderer.invoke('scheduled:update', id, patch),
     webhook: {
