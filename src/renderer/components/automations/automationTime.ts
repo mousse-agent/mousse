@@ -81,16 +81,71 @@ export function whenText(iso: string, now: Date, timeZone: string, locale?: stri
 
 /** "<when>", with "<Computer> time" after it when the owning computer's zone is not this one's. */
 export function ownedWhenText(iso: string, now: Date, owner: { name: string; timeZone: string }, viewerZone: string, locale?: string): string {
-  const text = whenText(iso, now, owner.timeZone, locale)
+  // A computer that has not said its zone yet is read on this clock, with its name.
+  const text = whenText(iso, now, owner.timeZone || viewerZone, locale)
   return owner.timeZone === viewerZone ? text : `${text} ${owner.name} time`
 }
 
 /** The Next line before Add, which always names the zone: "Tue 9:00 Desk time (IST)". */
 export function nextBeforeAdd(iso: string, now: Date, owner: { name: string; timeZone: string }, locale?: string): string {
-  const when = whenText(iso, now, owner.timeZone, locale).replace(/^(Tomorrow|Yesterday) /, (word) => word.toLowerCase())
-  return `${when} ${owner.name} time (${zoneName(owner.timeZone, new Date(iso), locale)})`
+  // A computer that has not said its zone yet: its name only, never a zone that may be wrong.
+  const zone = owner.timeZone || viewerTimeZone()
+  const when = whenText(iso, now, zone, locale).replace(/^(Tomorrow|Yesterday) /, (word) => word.toLowerCase())
+  return owner.timeZone ? `${when} ${owner.name} time (${zoneName(owner.timeZone, new Date(iso), locale)})` : `${when} ${owner.name} time`
 }
 
+/**
+ * The instant a wall-clock time on a zone's clock falls on; undefined for a time that clock skips (daylight saving).
+ * `month` is 1–12.
+ */
+export function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): Date | undefined {
+  const wanted = Date.UTC(year, month - 1, day, hour, minute)
+  let guess = wanted
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = zonedParts(new Date(guess), timeZone)
+    const diff = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) - wanted
+    if (diff === 0) return new Date(guess)
+    guess -= diff
+  }
+  return undefined
+}
+
+/**
+ * The first run of a schedule after `now` on the owning computer's clock (`timeZone`, which may not be this
+ * computer's): a cron's fields are read on that clock, as that computer's scheduler reads them. Null for on demand,
+ * and for a cron that never runs in the next two years.
+ */
+export function firstRunInZone(schedule: JobSchedule, now: Date, timeZone: string): Date | null {
+  if (schedule.kind === 'interval') return schedule.minutes ? new Date(now.getTime() + schedule.minutes * 60_000) : null
+  if (schedule.kind === 'once') return schedule.runAt ? new Date(schedule.runAt) : null
+  if (schedule.kind !== 'cron' || !schedule.expr) return null
+  const fields = schedule.expr.trim().split(/\s+/)
+  if (fields.length < 5) return null
+  const minutes = cronField(fields[0]!, 0, 59)
+  const hours = cronField(fields[1]!, 0, 23)
+  const doms = cronField(fields[2]!, 1, 31)
+  const months = cronField(fields[3]!, 1, 12)
+  const dows = cronField(fields[4]!, 0, 7)
+  if (!minutes || !hours || !doms || !months || !dows) return null
+  if (dows.has(7)) dows.add(0)
+  const sortedHours = [...hours].sort((a, b) => a - b)
+  const sortedMinutes = [...minutes].sort((a, b) => a - b)
+  const today = zonedParts(now, timeZone)
+  for (let offset = 0; offset < 2 * 366; offset += 1) {
+    // The calendar day `offset` days after today on that clock.
+    const day = new Date(Date.UTC(today.year, today.month - 1, today.day + offset))
+    const [year, month, date, weekday] = [day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), day.getUTCDay()]
+    if (!months.has(month) || !doms.has(date) || !dows.has(weekday)) continue
+    for (const hour of sortedHours)
+      for (const minute of sortedMinutes) {
+        const at = zonedInstant(year, month, date, hour, minute, timeZone)
+        if (at && at.getTime() > now.getTime()) return at
+      }
+  }
+  return null
+}
+
+/** How long ago, short: "just now", "5 min ago", "2 h ago", "3 d ago". */
 /** How long ago, short: "just now", "5 min ago", "2 h ago", "3 d ago". */
 export function agoText(iso: string, now: Date): string {
   const ms = now.getTime() - new Date(iso).getTime()

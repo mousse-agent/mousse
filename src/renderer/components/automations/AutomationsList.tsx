@@ -26,6 +26,7 @@ import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { defaultMay, groupAutomations, matchesSearch, missedText, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
+import { computerChoicesOf } from './computerChoice'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
 const POLL_MS = 15_000
@@ -181,7 +182,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const recent = useMemo(() => recentRuns(shown), [shown])
   const ordered = useMemo(() => [...visibleGroups.flatMap((group) => group.items), ...(pausedOpen ? pausedGroup?.items ?? [] : [])], [visibleGroups, pausedGroup, pausedOpen])
   const jobOf = (item: AutomationItem) => (item.link.kind === 'job' ? allJobs.find((job) => job.id === (item.link as { jobId: string }).jobId) : undefined)
-  const owner = index?.computer ?? { name: 'This computer', timeZone: viewerZone }
+  // This computer, then the person's other computers (the Computer chip; names show once there are two).
+  const computers = computerChoicesOf(index, viewerZone)
   // Computer names show only when the person has more than one.
   const manyComputers = (index?.computers?.length ?? 0) > 0
   const defaultAgent = settings ? agentNameOf(providers, { instanceId: settings.provider.instanceId, llmProvider: settings.provider.llmProvider }) ?? 'Default agent' : 'Default agent'
@@ -352,8 +354,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     }
   }
 
-  const create = async (input: CreateScheduledJobInput) => {
-    await window.mousse.scheduled.create(input)
+  // `node`: another computer stores and runs it; the daemon sends it there, or fails ("Laptop is offline.").
+  const create = async (input: CreateScheduledJobInput, node?: string) => {
+    await (node ? window.mousse.scheduled.create(input, node) : window.mousse.scheduled.create(input))
     await refresh()
   }
 
@@ -399,6 +402,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             defaultName={defaultAgent}
             profileId={profileId}
             viewerZone={viewerZone}
+            computers={computers}
             save={async (draft) => {
               const change = patchOf(initial, draft, catalog)
               if (!isUnchanged(change)) await window.mousse.scheduled.update(detailJob.id, change)
@@ -455,7 +459,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             catalog={catalog}
             library={library}
             defaultName={defaultAgent}
-            owner={owner}
+            computers={computers}
+            viewerZone={viewerZone}
             initialProjectId={activeProjectId}
             defaultMay={defaultMay(profileMode, ceiling)}
             ceiling={ceiling}

@@ -3,7 +3,7 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../sh
 import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
-import { MAX_BOT_CHAT_PAGE, type BotChatAttachment } from '../../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotComputerChoice } from '../../../shared/bots/personal/methods'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
@@ -85,6 +85,8 @@ export class BotChatService {
     modelChoices?(): Promise<Array<{ model: string; label: string }>>
     /** This computer's name. */
     computerName?(): string
+    /** The person's other computers, online or not. */
+    otherComputers?(): Array<{ node: string; name: string; online: boolean }>
   }) {}
 
   private get store(): BotStore {
@@ -330,14 +332,29 @@ export class BotChatService {
 
   /**
    * `bots.model.get` (#673, by hand): the bot's model (null: by usage) and the computer it runs on, with what the owner
-   * may pick. Models are the ready ones that can hold a bot here; computers are the ones this daemon can run it on,
-   * which is this computer until bots can run elsewhere.
+   * may pick. Models are the ready ones that can hold a bot here. Computers are this one and the person's other
+   * computers, the same list the Automations page's Computer chip offers; a bot runs on the computer that holds it, so
+   * the others are listed but cannot be picked (`unavailable` says why), and an offline one says so.
    */
-  async modelGet(botId: string): Promise<{ model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: Array<{ id: string; name: string }> }> {
+  async modelGet(botId: string): Promise<{ model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] }> {
     this.engine.definitionOf(botId)
     const models = await (this.options.modelChoices?.() ?? Promise.resolve([])).catch(() => [])
     const computer = this.options.computerName?.() ?? 'This computer'
-    return { model: this.engine.ownerModel(botId), models, computer: 'this_computer', computers: [{ id: 'this_computer', name: computer }] }
+    let others: Array<{ node: string; name: string; online: boolean }> = []
+    try {
+      others = this.options.otherComputers?.() ?? []
+    } catch {
+      // The device list cannot be read now: this computer is the one listed.
+    }
+    return {
+      model: this.engine.ownerModel(botId),
+      models,
+      computer: 'this_computer',
+      computers: [
+        { id: 'this_computer', name: computer },
+        ...others.map((other) => ({ id: other.node, name: other.name, ...(other.online ? {} : { offline: true as const }), unavailable: other.online ? 'A bot runs on the computer that holds it.' : `${other.name} is offline.` }))
+      ]
+    }
   }
 
   /** `bots.model.set`: the owner picks a model by hand, or by usage again (`null`). */

@@ -5,7 +5,7 @@
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClient'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -74,14 +74,24 @@ describe('About this bot', () => {
 
   it('runs by usage until the owner picks a model by hand, on this computer (#673)', async () => {
     await show()
-    expect(rows('RUNS ON')).toEqual(['Model', 'Computer'])
+    // One computer: no Computer row (computer names show only with two or more).
+    expect(rows('RUNS ON')).toEqual(['Model'])
     expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('By usage')
-    expect(host.querySelector('[data-testid="bot-about-computer"]')?.textContent).toContain('Desk')
     await click(host.querySelector('[aria-label="Inbox helper\'s model"]') ?? undefined)
     const sonnet = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Claude · sonnet'))
     await click(sonnet)
     expect(fake.calls).toContainEqual(['setModel', 'b1', 'sonnet'])
     expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('Claude · sonnet')
+  })
+
+  it('lists the person’s other computers in Computer, greyed: a bot runs on the computer that holds it', async () => {
+    vi.mocked(fake.client.model).mockImplementationOnce(async () => ({ model: null, models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }] }))
+    await show()
+    expect(rows('RUNS ON')).toEqual(['Model', 'Computer'])
+    expect(host.querySelector('[data-testid="bot-about-computer"]')?.textContent).toContain('Desk')
+    await click(host.querySelector('[aria-label="Inbox helper\'s computer"]') ?? undefined)
+    const laptop = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Laptop · offline'))
+    expect(laptop?.getAttribute('aria-disabled')).toBe('true')
   })
 
   it('lists what it can use and removes one', async () => {

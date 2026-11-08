@@ -165,6 +165,8 @@ export interface BotEngineHost {
   modelChoices?(): Promise<Array<{ model: string; label: string }>>
   /** This computer's name, the one computer a bot runs on for now. */
   computerName?(): string
+  /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
+  otherComputers?(): Array<{ node: string; name: string; online: boolean }>
   /**
    * Whether the skill or MCP tool an ask names exists here: a run never asks the owner for one that
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
@@ -319,7 +321,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.memory ? { memory: host.memory } : {}),
       now: () => this.now(),
       ...(host.modelChoices ? { modelChoices: host.modelChoices } : {}),
-      ...(host.computerName ? { computerName: host.computerName } : {})
+      ...(host.computerName ? { computerName: host.computerName } : {}),
+      ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
     })
     try {
       for (const row of host.store.all('SELECT thread_id, bot_id, role FROM bot_threads'))

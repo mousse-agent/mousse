@@ -692,6 +692,7 @@ export class MmsProfileServices {
         })
       },
       computerName: () => hostname(),
+      otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers

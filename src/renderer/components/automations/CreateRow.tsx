@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus } from '../../lib/icons'
-import { describePermissionMode, isStricter, PERMISSION_MODES, type PermissionMode } from '../../../shared/permissionMode'
+import { describePermissionMode, isStricter, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../../shared/permissionMode'
+import { offlineText } from '../../../shared/automations'
+import type { BotComputerChoice } from '../../../shared/bots/personal/methods'
 import type { BotSchedule } from '../../../shared/bots/personal/definition'
 import type { CreateScheduledJobInput, JobSchedule } from '../../../shared/types'
 import { workflowCommandText, workflowInputsReady } from '../../../shared/workflows/workflowCommand'
 import { Select, type SelectOption } from '../ui/Select'
-import { errorText, firstRunOf, nameFromPrompt, SCHEDULE_PRESETS } from '../scheduled/scheduledLabels'
+import { errorText, nameFromPrompt, SCHEDULE_PRESETS } from '../scheduled/scheduledLabels'
 import type { ScheduledCatalog } from '../scheduled/jobDraft'
 import { parseWhen } from './parseWhen'
-import { nextBeforeAdd } from './automationTime'
+import { firstRunInZone, nextBeforeAdd } from './automationTime'
+import { computerOptions, computersForProject, projectOnComputer, projectsOn, type ComputerChoice } from './computerChoice'
+import { botComputerOptions } from '../bots/BotAboutPanel'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { botWhen, matchWorkflows, parseWhoKey, whoKey, whoName, whoOptions, type AutomationLibrary, type Who, type WorkflowChoice } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
@@ -38,8 +42,13 @@ export interface CreateRowProps {
   library: AutomationLibrary
   /** The default agent's name, for the Who chip. */
   defaultName: string
-  /** The computer that will own it. */
-  owner: { name: string; timeZone: string }
+  /**
+   * This computer first, then the person's other computers. With two or more the Computer chip shows: the automation
+   * is stored and run by the one picked, on its clock.
+   */
+  computers: ComputerChoice[]
+  /** This computer's zone. */
+  viewerZone: string
   /** The project the page opens with. */
   initialProjectId: string
   /** The May a new automation gets (the profile's default mode, held to its ceiling). */
@@ -47,11 +56,12 @@ export interface CreateRowProps {
   /** The most it may have: the mode the person holds. */
   ceiling: PermissionMode
   isGitRepo: (projectId: string) => Promise<boolean>
-  create: (input: CreateScheduledJobInput) => Promise<void>
+  /** `node`: the other computer that owns it; absent, this one. */
+  create: (input: CreateScheduledJobInput, node?: string) => Promise<void>
   /** With a bot as Who, the bot gets the schedule (it stays the bot's, and it runs in the bot's chat); `model` is one picked by hand. */
   addBotSchedule: (botId: string, when: BotSchedule['when'], prompt: string, model?: string) => Promise<void>
   /** What a bot may run on, picked by hand (#673): the models that can hold it here, and the computers it can run on. */
-  botChoices?: (botId: string) => Promise<{ models: Array<{ model: string; label: string }>; computers: Array<{ id: string; name: string }> }>
+  botChoices?: (botId: string) => Promise<{ models: Array<{ model: string; label: string }>; computers: BotComputerChoice[] }>
   /** Opens the bot's chat, where its grant (its May) is shown. */
   onOpenBot: (botId: string) => void
   /** Bumped by ⌘N on the page: the row opens and takes focus. */
@@ -67,11 +77,13 @@ export interface CreateRowProps {
  * computer's clock and the effective May. An unread When says Choose when and keeps Add off. Typing `/` offers the
  * workflows; a workflow swaps the prompt for its inputs and the Who chip goes, since a workflow runs itself.
  */
-export function CreateRow({ profileId, catalog, library, defaultName, owner, initialProjectId, defaultMay, ceiling, isGitRepo, create, addBotSchedule, botChoices, onOpenBot, openRequest, prefill, title }: CreateRowProps) {
+export function CreateRow({ profileId, catalog, library, defaultName, computers, viewerZone, initialProjectId, defaultMay, ceiling, isGitRepo, create, addBotSchedule, botChoices, onOpenBot, openRequest, prefill, title }: CreateRowProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [picked, setPicked] = useState<Picked | null>(null)
   const [projectId, setProjectId] = useState(initialProjectId)
+  // The computer that will own it: '' is this one.
+  const [node, setNode] = useState('')
   const [may, setMay] = useState<PermissionMode>(defaultMay)
   const [who, setWho] = useState<Who>({ kind: 'default' })
   const [workflowId, setWorkflowId] = useState('')
@@ -81,12 +93,16 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
   const [repo, setRepo] = useState<Record<string, boolean>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const workflow: WorkflowChoice | undefined = library.workflows.find((entry) => entry.id === workflowId)
+  const manyComputers = computers.length > 1
+  const owner = computers.find((computer) => computer.node === node) ?? computers[0] ?? { node: '', name: 'This computer', timeZone: viewerZone }
+  // Another computer runs it with its own default agent: this computer's models, saved agents, workflows and bots are not there.
+  const remote = node !== ''
+  const workflow: WorkflowChoice | undefined = remote ? undefined : library.workflows.find((entry) => entry.id === workflowId)
   const { fields, loading: fieldsLoading } = useWorkflowFields(profileId, workflow)
 
   const focusInput = () => requestAnimationFrame(() => inputRef.current?.focus())
   useEffect(() => { setMay(defaultMay) }, [defaultMay])
-  useEffect(() => { if (!open) setProjectId(initialProjectId) }, [initialProjectId, open])
+  useEffect(() => { if (!open) { setProjectId(initialProjectId); setNode('') } }, [initialProjectId, open])
   useEffect(() => {
     if (openRequest === 0) return
     setOpen(true)
@@ -118,7 +134,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
   const typed = (picked || parsed.kind !== 'ok' ? text : parsed.prompt).trim()
   const suggestions = workflow ? [] : matchWorkflows(text, library.workflows)
   const prompt = workflow ? workflowCommandText(workflow.slug, inputs, fields) : typed
-  const bot = who.kind === 'bot' && !workflow ? library.bots.find((entry) => entry.id === who.id) : undefined
+  const bot = who.kind === 'bot' && !workflow && !remote ? library.bots.find((entry) => entry.id === who.id) : undefined
   const botSchedule = bot && when ? botWhen(when.schedule) : null
   // A bot runs by usage unless a model is picked by hand; it runs on this computer for now.
   const [botModel, setBotModel] = useState('')
@@ -132,10 +148,11 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
     botChoices(botId).then((choices) => { if (live) setRunsOn(choices) }, () => undefined)
     return () => { live = false }
   }, [botId, botChoices])
-  const savedAgent = who.kind === 'agent' && !workflow ? library.agents.find((entry) => entry.id === who.id) : undefined
-  const first = when ? firstRunOf(when.schedule, now) : null
+  const savedAgent = who.kind === 'agent' && !workflow && !remote ? library.agents.find((entry) => entry.id === who.id) : undefined
+  // Next follows the owning computer's clock.
+  const first = when ? firstRunInZone(when.schedule, now, owner.timeZone || viewerZone) : null
   const ready = workflow ? !fieldsLoading && workflowInputsReady(fields, inputs) : Boolean(typed) && !typed.startsWith('/')
-  const blocked = botSchedule && !botSchedule.ok ? botSchedule.reason : null
+  const blocked = botSchedule && !botSchedule.ok ? botSchedule.reason : owner.offline ? offlineText(owner) : null
   const canAdd = Boolean(when && ready && !busy && !blocked)
   const whenTitle = !when && parsed.kind === 'ambiguous' ? parsed.reason : !when ? 'Say when in the text, like "every weekday at 9", or pick one' : when.label
 
@@ -168,7 +185,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
         await addBotSchedule(bot.id, botSchedule.when, prompt, botModel || undefined)
       } else {
         const gitProject = projectId ? (repo[projectId] ?? await isGitRepo(projectId).catch(() => false)) : false
-        const model = who.kind === 'model' && !workflow ? catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key) : undefined
+        const model = who.kind === 'model' && !workflow && !remote ? catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key) : undefined
         await create({
           name: workflow ? workflow.name : nameFromPrompt(prompt) || 'Automation',
           prompt,
@@ -180,7 +197,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
           ...(model ? { selection: model.selection } : {}),
           ...(!savedAgent ? { permissionMode: may } : {}),
           tellMe: 'news'
-        })
+        }, remote ? node : undefined)
       }
       reset()
       setOpen(false)
@@ -205,10 +222,21 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
     )
   }
 
+  // With two or more computers, Where offers the chosen computer's projects.
   const projectOptions: SelectOption[] = [
     { value: '', label: 'No project' },
-    ...catalog.projects.map((project) => ({ value: project.id, label: project.name }))
+    ...(manyComputers ? projectsOn(catalog.projects, node) : catalog.projects).map((project) => ({ value: project.id, label: project.name }))
   ]
+  const computerChoices = computersForProject(computers, catalog.projects, projectId)
+  if (!computerChoices.some((computer) => computer.node === owner.node)) computerChoices.push(owner)
+  const chooseComputer = (next: string) => {
+    setNode(next)
+    // The same repository there, when that computer has it.
+    setProjectId(projectOnComputer(catalog.projects, projectId, next))
+    // Another computer lets this one run at most what it allows (Auto-accept edits unless raised there).
+    setMay(next ? narrowPermissionMode(defaultMay, 'accept_edits') : defaultMay)
+    setError(null)
+  }
   const mayOptions: SelectOption<PermissionMode>[] = PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode), disabled: isStricter(ceiling, mode) }))
   const whoKeyNow = whoKey(who)
   const naming = { defaultName, models: catalog.models, library }
@@ -269,7 +297,9 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
           renderValue={() => <span data-testid="automation-create-when">{when ? when.label : 'Choose when'}</span>}
           onChange={(key) => setPicked(PICKS.find((pick) => pick.key === key) ?? null)}
         />
-        {workflow ? null : (
+        {remote ? (
+          <span className="automation-chip readonly" data-testid="automation-create-who" title={`${owner.name}'s default agent. Saved agents, workflows and bots stay on the computer that keeps them.`}>{`${owner.name}'s default agent`}</span>
+        ) : workflow ? null : (
           <Select
             ariaLabel="Who"
             className="automation-chip-select"
@@ -293,20 +323,20 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
               renderValue={() => <span data-testid="automation-create-model">{botModel ? runsOn.models.find((choice) => choice.model === botModel)?.label ?? botModel : 'By usage'}</span>}
               onChange={setBotModel}
             />
-            {runsOn.computers.length ? (
+            {runsOn.computers.length > 1 ? (
               <Select
                 ariaLabel="Computer"
                 className="automation-chip-select"
                 size="small"
                 value={runsOn.computers[0]!.id}
-                options={runsOn.computers.map((computer) => ({ value: computer.id, label: computer.name }))}
-                title="The computer it runs on. Your other computers join this list later."
+                options={botComputerOptions(runsOn.computers)}
+                title={`${bot.name} runs on the computer that holds it`}
                 onChange={() => undefined}
               />
             ) : null}
           </>
         ) : null}
-        <DoPicker value={workflowId} workflows={library.workflows} onChange={chooseWorkflow} />
+        {remote ? null : <DoPicker value={workflowId} workflows={library.workflows} onChange={chooseWorkflow} />}
         {bot ? null : (
           <Select
             ariaLabel="Where"
@@ -317,6 +347,18 @@ export function CreateRow({ profileId, catalog, library, defaultName, owner, ini
             onChange={setProjectId}
           />
         )}
+        {manyComputers && !bot ? (
+          <Select
+            ariaLabel="Computer"
+            className="automation-chip-select"
+            size="small"
+            value={node}
+            options={computerOptions(computerChoices)}
+            title="The computer that stores and runs it, on its own clock"
+            renderValue={() => <span data-testid="automation-create-computer">{owner.name}</span>}
+            onChange={chooseComputer}
+          />
+        ) : null}
         {picked ? <button type="button" className="scheduled-link-btn" onClick={() => setPicked(null)} title="Read When from the text again">Use text</button> : null}
       </div>
       <div className="automation-create-line">

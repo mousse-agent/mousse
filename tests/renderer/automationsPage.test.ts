@@ -12,7 +12,9 @@ import type { LlmProviderOption } from '../../src/shared/settings'
 import type { Project, ScheduledJob } from '../../src/shared/types'
 import { parseWhen } from '../../src/renderer/components/automations/parseWhen'
 import { defaultMay, groupAutomations, matchesSearch, metaParts, pauseUntil, primaryOf } from '../../src/renderer/components/automations/automationList'
-import { nextBeforeAdd, ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
+import { firstRunInZone, nextBeforeAdd, ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
+import { computerOptions, computersForProject, projectOnComputer } from '../../src/renderer/components/automations/computerChoice'
+import { botComputerOptions } from '../../src/renderer/components/bots/BotAboutPanel'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, modelGroups, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
 import { clockText, describeSchedule, humanCron, nameFromPrompt } from '../../src/renderer/components/scheduled/scheduledLabels'
@@ -91,6 +93,38 @@ describe('time on the owning computer\'s clock', () => {
     const laptop = { name: 'Laptop', timeZone: ZONE === 'Asia/Kolkata' ? 'America/New_York' : 'Asia/Kolkata' }
     expect(ownedWhenText(at, NOW, laptop, ZONE)).toMatch(/ Laptop time$/)
     expect(nextBeforeAdd(at, NOW, { name: 'Desk', timeZone: 'Asia/Kolkata' })).toMatch(/ Desk time \(.+\)$/)
+  })
+
+  it('reads a cron on the owning computer’s clock for Next before Add', () => {
+    const now = new Date('2026-11-09T12:00:00.000Z') // Monday
+    expect(firstRunInZone({ kind: 'cron', expr: '0 9 * * 1-5' }, now, 'Asia/Kolkata')?.toISOString()).toBe('2026-11-10T03:30:00.000Z')
+    expect(firstRunInZone({ kind: 'cron', expr: '0 9 * * 1-5' }, now, 'America/New_York')?.toISOString()).toBe('2026-11-09T14:00:00.000Z')
+    expect(firstRunInZone({ kind: 'interval', minutes: 30 }, now, 'UTC')?.toISOString()).toBe('2026-11-09T12:30:00.000Z')
+    expect(firstRunInZone({ kind: 'manual' }, now, 'UTC')).toBeNull()
+    // 02:30 does not exist on 8 Mar 2026 in New York: the next day's is the first.
+    expect(firstRunInZone({ kind: 'cron', expr: '30 2 * * *' }, new Date('2026-03-08T05:00:00.000Z'), 'America/New_York')?.toISOString()).toBe('2026-03-09T06:30:00.000Z')
+    // A computer that has not said its zone: its name, never a guessed zone.
+    expect(nextBeforeAdd('2026-11-10T03:30:00.000Z', now, { name: 'Laptop', timeZone: '' })).toMatch(/ Laptop time$/)
+  })
+
+  it('offers the computers of the chosen project’s group, and the same repository on each', () => {
+    const groupProjects = [
+      { id: 'p1', name: 'mousse' },
+      { id: 'nod_laptop:p9', name: 'mousse', node: 'nod_laptop', sameAs: 'p1' },
+      { id: 'nod_studio:p3', name: 'site', node: 'nod_studio' }
+    ]
+    const all = [{ node: '', name: 'Desk', timeZone: ZONE }, { node: 'nod_laptop', name: 'Laptop', timeZone: ZONE }, { node: 'nod_studio', name: 'Studio', timeZone: ZONE, offline: true }]
+    expect(computersForProject(all, groupProjects, 'p1').map((computer) => computer.name)).toEqual(['Desk', 'Laptop'])
+    expect(computersForProject(all, groupProjects, '').map((computer) => computer.name)).toEqual(['Desk', 'Laptop', 'Studio'])
+    expect(projectOnComputer(groupProjects, 'p1', 'nod_laptop')).toBe('nod_laptop:p9')
+    expect(projectOnComputer(groupProjects, 'nod_laptop:p9', '')).toBe('p1')
+    expect(projectOnComputer(groupProjects, 'p1', 'nod_studio')).toBe('')
+    expect(computerOptions(all)[2]).toMatchObject({ disabled: true, description: 'Studio is offline.' })
+    // A bot runs on the computer that holds it: the others are listed, greyed, with why.
+    expect(botComputerOptions([{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }])).toEqual([
+      { value: 'this_computer', label: 'Desk' },
+      { value: 'nod_laptop', label: 'Laptop · offline', disabled: true, description: 'Laptop is offline.' }
+    ])
   })
 
   it('counts days and words times in the given zone', () => {
@@ -353,6 +387,46 @@ describe('the Automations page', () => {
       permissionMode: 'accept_edits',
       tellMe: 'news'
     }))
+  })
+
+  it('adds an automation on another computer from the Computer chip: its projects, its default agent, its clock', async () => {
+    const laptopZone = ZONE === 'Asia/Kolkata' ? 'America/New_York' : 'Asia/Kolkata'
+    const laptop = { name: 'Laptop', timeZone: laptopZone, local: false, node: 'nod_laptop' }
+    const phoneHome = { name: 'Studio', timeZone: ZONE, local: false, node: 'nod_studio', offline: true as const }
+    projects.push({ id: 'nod_laptop:p9', name: 'mousse', path: '', createdAt: '', order: 1, node: 'nod_laptop', sameAs: 'p1' } as Project)
+    try {
+      const mousse = await mount([], [], vi.fn(), { computers: [laptop, phoneHome] })
+      await click($('[data-testid="automation-create"]'))
+      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'every weekday at 9 review open PRs')
+      await click($('[aria-label="Where"]'))
+      await click(option('mousse'))
+      expect($('[data-testid="automation-create-computer"]')?.textContent).toBe('Desk')
+      await click($('[aria-label="Computer"]'))
+      // Only the computers that have this project; Studio has none of it.
+      expect(option('Studio')).toBeUndefined()
+      await click(option('Laptop'))
+      expect($('[data-testid="automation-create-computer"]')?.textContent).toBe('Laptop')
+      expect($('[data-testid="automation-create-who"]')?.textContent).toBe('Laptop\'s default agent')
+      // Next is on Laptop's clock, and always names its zone before Add.
+      expect($('[data-testid="automation-create-next"]')?.textContent).toMatch(/^Next .+ Laptop time \(.+\)$/)
+      await click($('[data-testid="automation-create-add"]'))
+      expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'nod_laptop:p9', schedule: { kind: 'cron', expr: '0 9 * * 1-5' } }), 'nod_laptop')
+      expect(mousse.scheduled.create.mock.calls[0]![0]).not.toHaveProperty('selection')
+    } finally {
+      projects.pop()
+    }
+  })
+
+  it('greys an offline computer in the chip, and shows no chip with one computer', async () => {
+    await mount([])
+    await click($('[data-testid="automation-create"]'))
+    expect($('[aria-label="Computer"]')).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    await mount([], [], vi.fn(), { computers: [{ name: 'Studio', timeZone: ZONE, local: false, node: 'nod_studio', offline: true }] })
+    await click($('[data-testid="automation-create"]'))
+    await click($('[aria-label="Computer"]'))
+    expect(option('Studio')?.getAttribute('aria-disabled')).toBe('true')
   })
 
   it('says Choose when and keeps Add off while When is unread; On demand only when picked', async () => {

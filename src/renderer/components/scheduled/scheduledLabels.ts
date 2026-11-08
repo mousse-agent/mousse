@@ -1,5 +1,5 @@
 import { ipcErrorMessage } from '../../utils/voiceErrors'
-import { clockText, parseSimpleCron, WEEKDAY_NAMES } from '../../../shared/scheduleLabel'
+import { clockText, WEEKDAY_NAMES } from '../../../shared/scheduleLabel'
 import type { JobSchedule, ScheduledWebhookDelivery, ScheduledWebhookDeliveryOutcome } from '../../../shared/types'
 
 export type SchedulePreset = 'hourly' | 'daily' | 'weekdays' | 'custom'
@@ -28,27 +28,6 @@ export const SCHEDULE_PRESETS: ReadonlyArray<{
 export function scheduleCode(schedule: JobSchedule): string | null {
   if (schedule.kind === 'cron') return schedule.expr?.trim() ?? null
   if (schedule.kind === 'interval') return `${schedule.minutes} min`
-  return null
-}
-
-/**
- * When a new automation would first run, for the create row's Next line only. Intervals count from now; the simple cron forms
- * are read on this computer's clock as the scheduler reads them. Anything else is null (the row shows the stored next run once saved).
- */
-export function firstRunOf(schedule: JobSchedule, now: Date = new Date()): Date | null {
-  if (schedule.kind === 'interval') return schedule.minutes ? new Date(now.getTime() + schedule.minutes * 60_000) : null
-  if (schedule.kind === 'once') return schedule.runAt ? new Date(schedule.runAt) : null
-  if (schedule.kind !== 'cron') return null
-  const cron = parseSimpleCron(schedule.expr)
-  if (!cron) return null
-  const candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes() + 1)
-  for (let step = 0; step < 8 * 24 * 60; step += 1) {
-    const at = new Date(candidate.getTime() + step * 60_000)
-    const minuteOk = cron.kind === 'minutes' ? at.getMinutes() % cron.every === 0 : at.getMinutes() === cron.minute
-    const hourOk = cron.kind === 'days' ? at.getHours() === cron.hour : cron.kind === 'hours' ? at.getHours() % cron.every === 0 : true
-    const dayOk = cron.kind !== 'days' || cron.days === 'all' || cron.days.includes(at.getDay())
-    if (minuteOk && hourOk && dayOk) return at
-  }
   return null
 }
 

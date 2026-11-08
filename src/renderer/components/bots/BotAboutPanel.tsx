@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import type { BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
+import type { BotComputerChoice, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { errorText } from '../../services/personalBotsClient'
-import { Select } from '../ui/Select'
+import { Select, type SelectOption } from '../ui/Select'
 import { BotFace } from './face/BotFace'
 
 /** "Mon 09:00" for a run's next time; today's runs show the time alone. */
@@ -16,8 +16,20 @@ export function nextRunText(at: string, now = new Date()): string {
 }
 
 /**
- * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (this one, until
- * bots can run on your other computers).
+ * The Computer picker's options for a bot: this computer, then the person's other computers, which a bot cannot be
+ * picked onto (it runs on the computer that holds it) and are greyed with the reason; an offline one says it is offline.
+ */
+export function botComputerOptions(computers: readonly BotComputerChoice[]): SelectOption[] {
+  return computers.map((computer) => ({
+    value: computer.id,
+    label: computer.offline ? `${computer.name} · offline` : computer.name,
+    ...(computer.unavailable ? { disabled: true, description: computer.unavailable } : {})
+  }))
+}
+
+/**
+ * What a bot runs on, by hand (#673): By usage (the default) or a model, and the computer it runs on (the one that
+ * holds it; the person's other computers are listed, greyed, once there are two or more).
  */
 function RunsOn({ botId, name }: { botId: string; name: string }) {
   const [choices, setChoices] = useState<BotsPersonalV2Result<'bots.model.get'> | null>(null)
@@ -47,10 +59,12 @@ function RunsOn({ botId, name }: { botId: string; name: string }) {
       <span>Model</span>
       <Select ariaLabel={`${name}'s model`} size="small" value={choices.model ?? ''} options={models} title="By usage picks a ready model each run" onChange={(model) => void pick(model)} />
     </div>
-    <div className="bot-about-row" data-testid="bot-about-computer">
-      <span>Computer</span>
-      <Select ariaLabel={`${name}'s computer`} size="small" value={choices.computer} options={choices.computers.map((computer) => ({ value: computer.id, label: computer.name }))} title="Your other computers join this list later" onChange={() => undefined} />
-    </div>
+    {choices.computers.length > 1 ? (
+      <div className="bot-about-row" data-testid="bot-about-computer">
+        <span>Computer</span>
+        <Select ariaLabel={`${name}'s computer`} size="small" value={choices.computer} options={botComputerOptions(choices.computers)} title={`${name} runs on the computer that holds it`} onChange={() => undefined} />
+      </div>
+    ) : null}
     {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
   </>
 }

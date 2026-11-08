@@ -30,6 +30,7 @@ import {
 import { describeScheduleLong, errorText, nameFromPrompt, scheduleCode, WEEKDAY_OPTIONS } from '../scheduled/scheduledLabels'
 import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTime'
 import { missedText, runText } from './automationList'
+import { computerOptions, projectsOn, type ComputerChoice } from './computerChoice'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
@@ -134,6 +135,8 @@ export function AutomationDetail({
   defaultName,
   profileId,
   viewerZone,
+  computers = [],
+  onMove,
   save,
   onBack,
   onRunNow,
@@ -155,6 +158,10 @@ export function AutomationDetail({
   defaultName: string
   profileId: string
   viewerZone: string
+  /** This computer first, then the person's other computers; with two or more the sentence names the computer. */
+  computers?: ComputerChoice[]
+  /** Move to computer: another computer stores and runs it from now on. Absent, the computer cannot be changed here. */
+  onMove?: (node: string) => void
   save: (draft: JobDraft) => Promise<void>
   onBack: () => void
   onRunNow: () => void
@@ -202,6 +209,9 @@ export function AutomationDetail({
   // A bot's row is paused too while its bot is (Resume then resumes the bot).
   const paused = job.state === 'paused' || item?.pausedBy === 'bot'
   const owner = item?.computer ?? { name: 'This computer', timeZone: viewerZone, local: true }
+  // Another computer's automation: its own default agent and projects, edited there.
+  const remoteNode = item?.computer.node
+  const manyComputers = computers.length > 1
   const now = new Date()
 
   const chooseBuilderKind = (kind: BuilderKind) => {
@@ -248,7 +258,7 @@ export function AutomationDetail({
   // Where, in the sentence.
   const projectOptions: SelectOption[] = [
     { value: '', label: 'no project' },
-    ...catalog.projects.map((project) => ({ value: project.id, label: project.name })),
+    ...(manyComputers ? projectsOn(catalog.projects, remoteNode ?? '') : catalog.projects).map((project) => ({ value: project.id, label: project.name })),
     ...(draft.projectId && !catalog.projects.some((project) => project.id === draft.projectId) ? [{ value: draft.projectId, label: 'Removed project' }] : [])
   ]
   const projectThreads = catalog.threads.filter((thread) => !draft.projectId || thread.projectId === draft.projectId)
@@ -313,7 +323,8 @@ export function AutomationDetail({
         { label: 'Delete', danger: true, onSelect: onDelete }
       ]
     : [
-        { label: job.trigger?.webhook ? 'Request URL…' : 'Add request URL…', onSelect: onWebhook },
+        // A request URL is served by the computer that runs it, and set up there.
+        ...(remoteNode ? [] : [{ label: job.trigger?.webhook ? 'Request URL…' : 'Add request URL…', onSelect: onWebhook }]),
         { label: 'Delete', danger: true, onSelect: onDelete }
       ]
 
@@ -360,6 +371,8 @@ export function AutomationDetail({
             <span className="automation-bot-face" aria-hidden="true"><BotFaceStill look={bot.look} state="idle" size={16} view="head" /></span>
             {bot.name}
           </span>
+        ) : remoteNode && !workflow ? (
+          <span className="automation-chip readonly" data-testid="automation-who" title={`Who does it is picked on ${owner.name}`}>{item?.who.name ?? whoLabel}</span>
         ) : workflow ? null : (
           <Select
             ariaLabel="Who"
@@ -373,7 +386,7 @@ export function AutomationDetail({
           />
         )}
         {workflow ? null : ' does '}
-        {bot ? <span className="automation-sentence-glue">this.</span> : (
+        {bot ? <span className="automation-sentence-glue">this.</span> : remoteNode ? <span className="automation-sentence-glue">this</span> : (
           <DoPicker
             value={doWorkflow?.id ?? (workflow ? draft.prompt.trim().split(/\s+/)[0] ?? '' : '')}
             workflows={doWorkflow || !workflow ? library.workflows : [...library.workflows, { id: draft.prompt.trim().split(/\s+/)[0] ?? '/', slug: (draft.prompt.trim().split(/\s+/)[0] ?? '/').slice(1), name: 'Workflow not found', revisionId: '' }]}
@@ -396,8 +409,25 @@ export function AutomationDetail({
               patch({ projectId, ...(keep || draft.threadId === '' || draft.workspaceKind === 'worktree' ? {} : { threadId: '' }) })
             }}
           />
-          .
+          {manyComputers ? null : '.'}
         </span>}
+        {manyComputers && !bot ? (
+          <span className="automation-sentence-glue">
+            {' on '}
+            <Select
+              ariaLabel="Computer"
+              className="automation-chip-select"
+              size="small"
+              value={remoteNode ?? ''}
+              options={computerOptions(computers.filter((computer) => computer.node === (remoteNode ?? '') || !remoteNode))}
+              disabled={!onMove}
+              title={onMove ? 'Move to computer: it is stored and run there from now on' : `It is stored and run on ${owner.name}`}
+              renderValue={() => <span data-testid="automation-computer">{owner.name}</span>}
+              onChange={(node) => { if (node !== (remoteNode ?? '')) onMove?.(node) }}
+            />
+            .
+          </span>
+        ) : null}
       </p>
 
       {builderOpen ? (
