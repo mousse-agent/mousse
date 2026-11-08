@@ -14,7 +14,8 @@ import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
-import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
+import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
+import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { isPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
@@ -155,6 +156,9 @@ import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/r
 import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
 import { resolveReviewScope } from '../actions/reviewRange'
+
+/** The writer holds of open terminals, one per thread and caller (`pty.create`). */
+const threadTerminalWriters = new ThreadTerminalWriters()
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -2414,14 +2418,29 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.workingFolder(projectPath ?? metadata.worktreePath, metadata)
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
-      const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
-      if (directory && !lease) throw new DomainRpcError('workspace_busy', leaseBusyMessage(readLeaseOwner(getExecutionLeasePath(directory)), 'Task writer is busy; wait for it to finish before opening a terminal'))
-      const actions = directory && metadata ? new ThreadActionService(directory) : undefined
-      const turnId = `terminal:${randomUUID()}`
-      const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
-        actor: { kind: 'user' as const }, heldThreadLease: lease!, presentationMessageStart: 0, presentationMessageEnd: 0,
-        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const },
-        externalEffects: [{ kind: 'unknown' as const, reversible: false as const, description: 'Interactive terminal commands may affect external services or ignored files.' }] } : undefined
+      // The thread's terminals (from this computer, or from one other computer) are one writer under one lease: the
+      // first takes it and starts the terminal turn, the others join, and the last to end checkpoints and releases.
+      const member = directory ? await threadTerminalWriters.join(`${resolve(directory)}|${routed ? `node:${routed.node}` : 'local'}`, {
+        acquire: () => tryAcquireExecutionLease(directory, { source: 'task-terminal' }),
+        busy: () => new DomainRpcError('workspace_busy', leaseBusyMessage(readLeaseOwner(getExecutionLeasePath(directory)), 'Task writer is busy; wait for it to finish before opening a terminal')),
+        begin: async (lease) => {
+          if (!metadata) return async () => undefined
+          const actions = new ThreadActionService(directory)
+          const actionOptions = { threadId, turnId: `terminal:${randomUUID()}`, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
+            actor: { kind: 'user' as const }, heldThreadLease: lease, presentationMessageStart: 0, presentationMessageEnd: 0,
+            nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const },
+            externalEffects: [{ kind: 'unknown' as const, reversible: false as const, description: 'Interactive terminal commands may affect external services or ignored files.' }] }
+          // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
+          const startSha = (await actions.recordOutsideChanges(actionOptions)).startSha
+          // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+          const startCheck = await actions.checkTurnStart(actionOptions.workspacePath, startSha)
+          actions.beginTurn(actionOptions, startSha, startCheck)
+          return async (end) => { await actions.checkpointExistingTurn(actionOptions, startSha, end) }
+        },
+        release: (lease) => { releaseExecutionLeaseHandle(lease) },
+        // A terminal joining the hold is admitted like one taking the lease: not while the thread is trashed or deleted.
+        admit: (lease) => withThreadLifecyclePath(directory, 'execution', () => assertHeldThreadLease(directory, lease))
+      }) : undefined
       let ptyId: string
       try {
         if (task && !task.projectId && !metadata) {
@@ -2437,19 +2456,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
-        const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
-        // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
-        const startCheck = actions && actionOptions ? await actions.checkTurnStart(actionOptions.workspacePath, startSha!) : undefined
-        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!, startCheck)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
-          ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
-            settled: async () => {
-              try { if (actions && actionOptions) await actions.checkpointExistingTurn(actionOptions, startSha!, 'completed') }
-              finally { releaseExecutionLeaseHandle(lease) }
-            } } : undefined
+          ownership: member ? { assert: () => assertHeldThreadLease(directory!, member.lease), heartbeat: () => { heartbeatExecutionLease(member.lease) },
+            settled: () => member.leave() } : undefined
         })
-      } catch (error) { if (lease) releaseExecutionLeaseHandle(lease); throw error }
+        member?.started()
+      } catch (error) { if (member) await member.leave(); throw error }
       // A terminal another computer opened is that computer's from the moment it exists.
       routed?.onTerminalCreated?.(ptyId)
       // `__unbound__` is used by project terminals opened without an active
