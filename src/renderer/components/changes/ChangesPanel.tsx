@@ -15,11 +15,25 @@ import { showToast } from '../ui/Toast'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { runSync, whileFolder, type SyncRequest } from '../git/gitSyncActions'
 import { IDLE_SYNC_ACTIVITY, syncLabel, syncState, type SyncActivity } from '../git/gitSyncLogic'
-import { changedFileCount, gitActionRowModel, gitChangeCounts, gitErrorMessage, pullRequestRow } from '../sideCard/gitSectionLogic'
+import { canAmendCommit, changedFileCount, gitActionRowModel, gitChangeCounts, gitErrorMessage, pullRequestRow } from '../sideCard/gitSectionLogic'
 import { commentCounts, commentScopeLabel, scopeKey } from '../review/reviewComments'
 import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type WorkspaceAvailability } from '../review/reviewData'
 import { turnChoices, type TurnChoice } from '../review/reviewModel'
-import { changesApi, changesApiAvailable, changesErrorCode, restoreAvailable, type ChangedFile, type ChangesResult, type RevertedEntry } from './changesApi'
+import {
+  changesApi,
+  changesApiAvailable,
+  changesErrorCode,
+  changesErrorText,
+  changesTarget,
+  commitSelectionFor,
+  revertAvailable,
+  undoLastCommitAvailable,
+  type ChangedFile,
+  type ChangesResult,
+  type LineChoice,
+  type RevertedEntry,
+  type SelectionState
+} from './changesApi'
 import {
   changesKeyAction,
   defaultScope,
@@ -250,14 +264,17 @@ export function ChangesPanel() {
   }, [targetJson, showsWorktree, uncommitted, isRepo, uncommittedKey])
 
   const apiKey = `${folderId ?? ''}\0${gitScope.projectId ?? ''}\0${gitScope.workspaceThreadId ?? ''}`
+  const apiTarget = useMemo(() => changesTarget(gitScope), [gitScope])
   const loadApi = useCallback(async () => {
-    if (!apiReady || !folderId || !isRepo || uncommitted === 0) return
+    if (!apiReady || !apiTarget || !folderId || !isRepo || uncommitted === 0) return
     try {
-      setApiResult({ key: apiKey, result: await changesApi.changes(gitScope) })
+      setApiResult({ key: apiKey, result: await changesApi.changes(apiTarget) })
     } catch (error) {
-      setMessage({ text: gitErrorMessage(error), tone: 'error' })
+      setMessage({ text: changesErrorText(error, gitErrorMessage), tone: 'error' })
     }
-  }, [apiReady, folderId, isRepo, uncommitted, apiKey, gitScope])
+  }, [apiReady, apiTarget, folderId, isRepo, uncommitted, apiKey])
+  // Another window, computer or view changed the selection.
+  useEffect(() => (apiReady ? changesApi.onSelectionChanged(() => void loadApi()) : undefined), [apiReady, loadApi])
 
   // Every status change (a commit, a stage, files written by a turn) re-reads what is shown, in place.
   useEffect(() => {
@@ -295,7 +312,7 @@ export function ChangesPanel() {
     return orderRows(
       result.files.map((entry) => {
         const apiFile = apiByPath.get(entry.path)
-        const conflict = showsWorktree && (conflicted.has(entry.path) || apiFile?.status === 'conflict')
+        const conflict = showsWorktree && (conflicted.has(entry.path) || apiFile?.change === 'conflict')
         return { ...entry, conflict, signature: fileSignature({ ...entry, version: apiFile?.version }), ...(apiFile ? { api: apiFile } : {}) }
       })
     )
@@ -349,9 +366,10 @@ export function ChangesPanel() {
     canCreatePullRequest: model?.createRow != null,
     pullRequest: prRow?.kind === 'found' ? { number: prRow.value, checks: prRow.checks } : null
   })
-  const canRevert = revertAllowed({ scopeId, showsUncommitted, turnRunning, apiAvailable: apiReady && restoreAvailable() })
-  const canInclude = apiReady && showsUncommitted && !turnRunning
-  const showChecks = canInclude && (choosing || api?.selection === 'chosen' || (!inThread && counts.stagedCount > 0 && counts.stagedCount < counts.changedCount))
+  // Hunks are computed with whitespace changes, so Include and Revert wait while the tab ignores whitespace.
+  const canRevert = revertAllowed({ scopeId, showsUncommitted, turnRunning, apiAvailable: apiReady && revertAvailable() && !ignoreWhitespace })
+  const canInclude = apiReady && showsUncommitted && !turnRunning && !ignoreWhitespace
+  const showChecks = canInclude && (choosing || api?.selection.state === 'chosen' || (!inThread && counts.stagedCount > 0 && counts.stagedCount < counts.changedCount))
 
   // ---- Actions
   const refreshAll = useCallback(() => {
@@ -405,10 +423,26 @@ export function ChangesPanel() {
   }, [result, threadId])
 
   const replaceApiFile = useCallback((file: ChangedFile) => {
-    setApiResult((current) => (current ? { ...current, result: { ...current.result, files: current.result.files.map((item) => (item.path === file.path ? file : item)), selection: 'chosen' } } : current))
+    setApiResult((current) => (current ? { ...current, result: { ...current.result, files: current.result.files.map((item) => (item.path === file.path ? file : item)) } } : current))
   }, [])
 
-  const include = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: { hunk: string; indexes: number[] }[]; include: boolean }) => {
+  /** Re-reads the given paths after a write and keeps the rest; the daemon's write results stay small for Bridge. */
+  const refreshPaths = useCallback(async (paths: string[], selection?: SelectionState) => {
+    if (!apiTarget) return
+    try {
+      const fresh = await changesApi.changes(apiTarget, paths)
+      setApiResult((current) => {
+        if (!current || current.key !== apiKey) return current
+        const others = current.result.files.filter((file) => !paths.includes(file.path))
+        return { ...current, result: { ...current.result, selection: selection ?? fresh.selection, files: [...others, ...fresh.files] } }
+      })
+    } catch {
+      void loadApi()
+    }
+  }, [apiTarget, apiKey, loadApi])
+
+  const include = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: LineChoice[]; include: boolean }) => {
+    if (!apiTarget) return
     // The screen moves on the next frame; Git confirms in the background.
     const whole = !input.hunks && !input.lines
     replaceApiFile({
@@ -417,28 +451,28 @@ export function ChangesPanel() {
       hunks: file.hunks.map((hunk) => (whole || input.hunks?.includes(hunk.id) ? { ...hunk, included: input.include ? 'yes' : 'no' } : input.lines?.some((line) => line.hunk === hunk.id) ? { ...hunk, included: 'partial' } : hunk))
     })
     try {
-      const fresh = await changesApi.include(gitScope, { path: file.path, version: file.version, ...input })
-      if ('files' in fresh) setApiResult({ key: apiKey, result: fresh })
-      else replaceApiFile(fresh)
+      const outcome = await changesApi.include(apiTarget, { path: file.path, version: file.version, ...input })
+      await refreshPaths([file.path, ...(file.oldPath ? [file.oldPath] : [])], outcome.selection)
     } catch (includeError) {
-      if (changesErrorCode(includeError) !== 'stale') setMessage({ text: gitErrorMessage(includeError), tone: 'error' })
+      setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: changesErrorCode(includeError) === 'stale' ? 'notice' : 'error' })
       void loadApi()
     }
-  }, [gitScope, apiKey, replaceApiFile, loadApi])
+  }, [apiTarget, replaceApiFile, refreshPaths, loadApi])
 
   const includeAll = useCallback(async (value: boolean) => {
+    if (!apiTarget) return
     try {
-      const fresh = await changesApi.include(gitScope, { all: true, include: value })
-      if ('files' in fresh) setApiResult({ key: apiKey, result: fresh })
-      else void loadApi()
+      await changesApi.include(apiTarget, { all: true, include: value })
+      void loadApi()
     } catch (includeError) {
-      setMessage({ text: gitErrorMessage(includeError), tone: 'error' })
+      setMessage({ text: changesErrorText(includeError, gitErrorMessage), tone: 'error' })
     }
-  }, [gitScope, apiKey, loadApi])
+  }, [apiTarget, loadApi])
 
   const restore = useCallback(async (revertId: string) => {
+    if (!apiTarget) return
     try {
-      const outcome = await changesApi.restoreReverted(gitScope, revertId)
+      const outcome = await changesApi.restoreReverted(apiTarget, revertId)
       if (outcome.restored) {
         undoStack.current = undoStack.current.filter((id) => id !== revertId)
         refreshAll()
@@ -446,28 +480,44 @@ export function ChangesPanel() {
         setMessage({ text: outcome.reason === 'expired' ? 'The kept copy is gone' : 'Changed since the revert; nothing restored', tone: 'error' })
       }
     } catch (restoreError) {
-      setMessage({ text: gitErrorMessage(restoreError), tone: 'error' })
+      setMessage({ text: changesErrorText(restoreError, gitErrorMessage), tone: 'error' })
     }
-  }, [gitScope, refreshAll])
+  }, [apiTarget, refreshAll])
 
-  const revert = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: { hunk: string; indexes: number[] }[] } = {}) => {
+  const revert = useCallback(async (file: ChangedFile, input: { hunks?: string[]; lines?: LineChoice[] } = {}) => {
+    if (!apiTarget) return
     try {
-      const outcome = await changesApi.revert(gitScope, { path: file.path, version: file.version, ...input })
+      const outcome = await changesApi.revert(apiTarget, { path: file.path, version: file.version, ...input })
       undoStack.current.push(outcome.revertId)
       showToast({ message: 'Reverted', action: { label: 'Undo', run: () => void restore(outcome.revertId) }, key: `revert:${outcome.revertId}` })
       refreshAll()
     } catch (revertError) {
-      setMessage({ text: gitErrorMessage(revertError), tone: 'error' })
+      setMessage({ text: changesErrorText(revertError, gitErrorMessage), tone: changesErrorCode(revertError) === 'stale' ? 'notice' : 'error' })
       void loadApi()
     }
-  }, [gitScope, restore, refreshAll, loadApi])
+  }, [apiTarget, restore, refreshAll, loadApi])
+
+  const undoLastCommit = useCallback(async () => {
+    const head = git.commits[0]
+    if (!projectId || !head || !begin('commit')) return
+    try {
+      await changesApi.undoLastCommit(projectId, head.hash)
+      refreshAll()
+    } catch (undoError) {
+      setMessage({ text: changesErrorText(undoError, gitErrorMessage), tone: 'error' })
+    } finally {
+      end()
+    }
+  }, [git.commits, projectId, begin, end, refreshAll])
 
   const openRow = rows.find((row) => row.path === openPath)
   const openHunks = hunks.path === openPath ? hunks.list : []
+  // A whole-file-only file (binary, rename, filters, a diverged selection…) has no hunk or line choices.
+  const hunkChoices = Boolean(openRow?.api && !openRow.api.wholeFileOnly)
   const daemonHunk = useCallback((hunk: HunkRange) => (openRow?.api ? matchDaemonHunk(hunk, openRow.api.hunks) : null), [openRow])
   const hunkActions: HunkActions = {
-    canRevert,
-    canInclude: canInclude && showChecks,
+    canRevert: canRevert && hunkChoices,
+    canInclude: canInclude && showChecks && hunkChoices,
     includedOf: (hunk) => daemonHunk(hunk)?.included ?? null,
     onRevert: (hunk) => {
       const match = daemonHunk(hunk)
@@ -485,12 +535,13 @@ export function ChangesPanel() {
   }, [folderId, gitScope, begin, end])
 
   const openRestore = useCallback(async () => {
+    if (!apiTarget) return
     try {
-      setReverted(await changesApi.revertedList(gitScope))
+      setReverted(await changesApi.revertedList(apiTarget))
     } catch (listError) {
-      setMessage({ text: gitErrorMessage(listError), tone: 'error' })
+      setMessage({ text: changesErrorText(listError, gitErrorMessage), tone: 'error' })
     }
-  }, [gitScope])
+  }, [apiTarget])
 
   // ---- Keys
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -521,7 +572,7 @@ export function ChangesPanel() {
         setFocusedHunk(stepHunk(openHunks.length, focusedHunk, action === 'next-hunk' ? 1 : -1))
         break
       case 'include': {
-        if (!canInclude || !openRow?.api || (onButton && (event.target as HTMLElement).tagName !== 'DIV')) return
+        if (!canInclude || !openRow?.api || !hunkChoices || (onButton && (event.target as HTMLElement).tagName !== 'DIV')) return
         const selected = selectionRef.current
         const file = openRow.api
         if (selected) {
@@ -535,7 +586,7 @@ export function ChangesPanel() {
         break
       }
       case 'revert': {
-        if (!canRevert || !openRow?.api) return
+        if (!canRevert || !openRow?.api || !hunkChoices) return
         const file = openRow.api
         const selected = selectionRef.current
         if (selected) {
@@ -593,7 +644,10 @@ export function ChangesPanel() {
     ...(canInclude ? [{ label: 'Choose what to commit', hint: 'Space', checked: showChecks, onSelect: () => setChoosing((value) => !value) }] : []),
     { label: 'Ignore whitespace', checked: ignoreWhitespace, onSelect: () => setIgnoreWhitespace(!ignoreWhitespace) },
     ...(width >= SPLIT_MIN_WIDTH ? [{ label: 'Split', checked: split, onSelect: () => setSplit((value) => !value) }] : []),
-    ...(apiReady && restoreAvailable() ? [{ label: 'Restore reverted…', onSelect: () => void openRestore() }] : []),
+    ...(!inThread && projectId && undoLastCommitAvailable() && canAmendCommit(git.commits)
+      ? [{ label: 'Undo last commit', title: git.commits[0]?.message, disabled: running !== null, onSelect: () => void undoLastCommit() }]
+      : []),
+    ...(revertAvailable() ? [{ label: 'Restore reverted…', onSelect: () => void openRestore() }] : []),
     { label: 'Keyboard shortcuts', hint: '?', onSelect: () => setHelpOpen(true) }
   ]
 
@@ -830,6 +884,7 @@ export function ChangesPanel() {
             refreshAll()
           }}
           onIncludeAll={canInclude ? () => void includeAll(true) : undefined}
+          commitSelection={apiReady ? commitSelectionFor(api?.selection) : undefined}
         />
       )}
       <FileJump

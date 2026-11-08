@@ -206,11 +206,13 @@ describe('rows', () => {
 
 describe('what a commit takes', () => {
   it('says Commit all when nothing was chosen, part when part is included, and asks for something when nothing is', () => {
-    const file = (path: string, included: 'yes' | 'no' | 'partial') => ({ path, status: 'modified' as const, version: 'v', hunks: [], included })
-    expect(selectionFromChanges({ selection: 'untouched', files: [file('a', 'no'), file('b', 'no')] })).toEqual({ kind: 'all', total: 2 })
-    expect(selectionFromChanges({ selection: 'chosen', files: [file('a', 'yes'), file('b', 'partial'), file('c', 'no')] })).toEqual({ kind: 'some', included: 2, total: 3 })
-    expect(selectionFromChanges({ selection: 'chosen', files: [file('a', 'no')] })).toEqual({ kind: 'none', total: 1 })
-    expect(selectionFromChanges({ selection: 'chosen', files: [file('a', 'yes')] })).toEqual({ kind: 'all', total: 1 })
+    const file = (path: string, included: 'yes' | 'no' | 'partial') => ({ path, change: 'modified' as const, kind: 'file' as const, binary: false, wholeFileOnly: false, indexDiverged: false, tooLarge: false, version: 'v', hunks: [], included })
+    const untouched = { state: 'untouched' as const, token: 't' }
+    const chosen = { state: 'chosen' as const, token: 't' }
+    expect(selectionFromChanges({ selection: untouched, files: [file('a', 'no'), file('b', 'no')] })).toEqual({ kind: 'all', total: 2 })
+    expect(selectionFromChanges({ selection: chosen, files: [file('a', 'yes'), file('b', 'partial'), file('c', 'no')] })).toEqual({ kind: 'some', included: 2, total: 3 })
+    expect(selectionFromChanges({ selection: chosen, files: [file('a', 'no')] })).toEqual({ kind: 'none', total: 1 })
+    expect(selectionFromChanges({ selection: chosen, files: [file('a', 'yes')] })).toEqual({ kind: 'all', total: 1 })
   })
 
   it('treats an empty index as no choice and a prepared one as exactly what it holds', () => {

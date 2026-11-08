@@ -245,7 +245,7 @@ export type CommitSelection =
 /** From the daemon's hunks when it has them: files that are fully or partly included count. */
 export function selectionFromChanges(result: Pick<ChangesResult, 'files' | 'selection'>): CommitSelection {
   const total = result.files.length
-  if (result.selection === 'untouched') return { kind: 'all', total }
+  if (result.selection.state === 'untouched') return { kind: 'all', total }
   const included = result.files.filter((file) => file.included !== 'no').length
   if (included === 0) return { kind: 'none', total }
   if (included === total && result.files.every((file) => file.included === 'yes')) return { kind: 'all', total }

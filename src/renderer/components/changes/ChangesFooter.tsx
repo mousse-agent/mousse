@@ -30,6 +30,7 @@ import {
   type GitActionRowModel
 } from '../sideCard/gitSectionLogic'
 import { MenuButton, type MenuItem } from './MenuButton'
+import { changesErrorText, type CommitSelectionField } from './changesApi'
 import { plural, type FooterState } from './changesModel'
 
 interface ChangesFooterProps {
@@ -48,6 +49,8 @@ interface ChangesFooterProps {
   onRetry: () => void
   /** The selection is really empty: the commit menu offers Include all. */
   onIncludeAll?: () => void
+  /** What Commit and Suggest send once the daemon reads selections: everything, or the chosen hunks with their token. */
+  commitSelection?: CommitSelectionField
 }
 
 /** How long a notice stays: it can carry something to act on. */
@@ -58,7 +61,7 @@ const NOTICE_MS = 15_000
  * then Push, Create PR and the pull request's chip. Push is never implicit; Ctrl/Cmd+Enter commits only from the
  * message field.
  */
-export function ChangesFooter({ state, path, scope, commits, model, running, begin, end, onReviewUncommitted, onResolveConflicts, onRetry, onIncludeAll }: ChangesFooterProps) {
+export function ChangesFooter({ state, path, scope, commits, model, running, begin, end, onReviewUncommitted, onResolveConflicts, onRetry, onIncludeAll, commitSelection }: ChangesFooterProps) {
   const footerRef = useRef<HTMLDivElement>(null)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const [message, setMessage] = useState('')
@@ -96,13 +99,13 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
     setSuggesting(true)
     setError(null)
     try {
-      const result = await suggestGitCommitMessage(path, scope)
+      const result = await suggestGitCommitMessage(path, scope, commitSelection)
       // Typing meanwhile takes over: the answer never replaces text the user wrote.
       if (suggestion.current === request && messageRef.current?.value === request.baseline) setMessage(result.message)
     } catch (suggestError) {
       if (suggestion.current !== request) return
       if (gitErrorCode(suggestError) === SUGGEST_NO_MODEL_CODE) setNoModel(true)
-      setError(gitErrorMessage(suggestError))
+      setError(changesErrorText(suggestError, gitErrorMessage))
     } finally {
       if (suggestion.current === request) {
         suggestion.current = null
@@ -128,7 +131,8 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
         amend,
         push: flow !== 'commit',
         ...(flow === 'push-pr' && model.createScope ? { openPullRequest: model.createScope, pullRequestFormHost: 'changes' as const } : {}),
-        onPhase: (next) => setPhase({ flow, phase: next })
+        onPhase: (next) => setPhase({ flow, phase: next }),
+        ...(commitSelection && !amend ? { selection: commitSelection } : {})
       })
       setMessage('')
       if (result.pullRequest?.kind === 'existing') setNotice(existingPullRequestNotice(result.pullRequest))
@@ -140,13 +144,13 @@ export function ChangesFooter({ state, path, scope, commits, model, running, beg
         setMessage('')
         setError(openPullRequestFailedMessage(commitError))
       } else if (!isGitCancelled(commitError)) {
-        setError(gitErrorMessage(commitError))
+        setError(changesErrorText(commitError, gitErrorMessage))
       }
     } finally {
       setPhase(null)
       end()
     }
-  }, [begin, end, message, model.createScope, path, scope])
+  }, [begin, end, message, model.createScope, path, scope, commitSelection])
 
   const push = async () => {
     if (!begin('push')) return
