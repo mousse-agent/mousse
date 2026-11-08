@@ -1,7 +1,7 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, copyFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { access, copyFile, lstat, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -16,6 +16,8 @@ import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv, privateIndexEnv } from './gitEnv'
 import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
+import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, pathDigest, recordRestored, recordRevert, replaceProven, revertsOf, revertSummary, REVERTED_LIST_MAX, sameFolder, type FoundRevert, type PathDigest, type RevertRecord, type Replacement } from './gitRevert'
+import { PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
@@ -37,6 +39,10 @@ import type {
   GitChangesResult,
   GitIncludeRequest,
   GitIncludeResult,
+  GitRestoreRevertedResult,
+  GitRevertedItem,
+  GitRevertRequest,
+  GitRevertResult,
   GitSelectionState,
   GitCheckoutOptions,
   GitCheckoutResult,
@@ -455,6 +461,43 @@ function wholeEntries(target: FileView, include: boolean): Map<string, Entry | n
   const entries = new Map<string, Entry | null>([[target.file.path, include ? target.work : target.head]])
   if (target.file.oldPath !== undefined) entries.set(target.file.oldPath, include ? target.oldWork : target.oldHead)
   return entries
+}
+
+/** What a revert left and kept: the copy, each path's digest after it, and the overlay entries it changed. */
+interface RevertDone {
+  kept: KeptCopy
+  after: Map<string, PathDigest>
+  overlay?: RevertRecord['overlay']
+  left?: string
+}
+
+/**
+ * Which changes of a text file a revert of `request`'s hunks or lines keeps (true), every other change kept; null when
+ * it reverts every change, which is then a revert of the whole file.
+ */
+function revertedChoices(target: FileView, request: GitRevertRequest): Choices | null {
+  const text = target.text
+  if (!text) throw selectionErrors.create('whole_file_only')
+  const choices: Choices = text.hunks.map((hunk) => hunk.lines.map(() => true))
+  const byId = new Map(text.hunks.map((hunk, index) => [hunk.id, index]))
+  for (const id of request.hunks ?? []) {
+    const index = byId.get(id)
+    if (index === undefined) throw selectionErrors.create('stale')
+    choices[index] = text.hunks[index]!.lines.map((line) => line.kind === ' ')
+  }
+  for (const pick of request.lines ?? []) {
+    const index = byId.get(pick.hunk)
+    if (index === undefined) throw selectionErrors.create('stale')
+    const hunk = text.hunks[index]!
+    if (hunk.block) throw selectionErrors.create('whole_file_only')
+    for (const at of pick.indexes) {
+      const line = hunk.lines[at]
+      if (!line || line.kind === ' ') throw new AppError({ code: 'invalid_params', message: 'lines must name added or removed lines of the hunk.', errorInfo: { category: 'invalid', retryable: false } })
+      choices[index]![at] = false
+    }
+  }
+  const keepsAny = choices.some((row, hunk) => row.some((value, line) => value && text.hunks[hunk]!.lines[line]!.kind !== ' '))
+  return keepsAny ? choices : null
 }
 
 /** What a Discard kept, and the paths it left as they are because they changed after the person pressed Discard. */
@@ -976,7 +1019,7 @@ export class GitService {
     })
   }
 
-  private async discardPaths(top: string, paths: readonly string[], keep: { owner: string }): Promise<DiscardedCopy | undefined> {
+  private async discardPaths(top: string, paths: readonly string[], keep: { owner: string }, operation: { type: 'git-discard' | 'git-revert'; action: string } = { type: 'git-discard', action: 'Discard' }): Promise<DiscardedCopy | undefined> {
     const selected = selectEntries(await this.statusEntries(top), paths)
     if (!selected.length) return undefined
     const unborn = !await this.hasHead(top)
@@ -1014,7 +1057,7 @@ export class GitService {
     let kept: KeptCopy
     try {
       // HEAD's versions are written at the restored paths, so whatever stands there is kept too: a folder of ignored files, say.
-      kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
+      kept = await keepCopy({ owner: keep.owner, top, operationType: operation.type, action: operation.action, paths: [...new Set([...restore, ...remove, ...untracked])], writes: [...restore].filter((path) => !submodule(path)) })
     } catch (error) {
       throw keepRefusal(error)
     }
@@ -2033,6 +2076,310 @@ ${run.output}`))
     } finally {
       await rm(index, { force: true }).catch(() => undefined)
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Revert and restore (`gitRevert.ts`)
+
+  /**
+   * Makes chosen hunks or lines of one listed file, or the whole file (both paths of a rename), match HEAD in the working
+   * tree and in the selection (`git.revert`). A copy is kept for `keep.owner` first, and the revert is recorded in its
+   * journal, so `restoreReverted` can put it back. Refused with `stale` when the file's `version` is not what was shown or
+   * the file changed before it was written (it is then left as it is), `whole_file_only` for hunks of a file only whole
+   * can be reverted in, or whose bytes would not survive the write, and `git_merge_unresolved` for a conflict.
+   *
+   * A whole file goes back the way Discard puts it back (its path and filter rules). Hunks and lines are written as Git's
+   * built-in conversion of the new content (line endings), and only when the file on disk is that conversion of what Git
+   * read, so the lines left alone keep their bytes. In a project folder the index entry loses the reverted changes too;
+   * in a thread the overlay entry does, and a whole file leaves the overlay.
+   */
+  revert(cwd: string, userRequested: UserAction, place: SelectionPlace, request: GitRevertRequest, keep: { owner: string }): Promise<GitRevertResult> {
+    return this.asUser(userRequested, () => this.serialized(cwd, async () => {
+      place.assertIdle?.()
+      const top = await this.toplevel(cwd)
+      const git = this.selectionGit(top)
+      const view = await this.readView(top, place, { paths: [request.path] })
+      const target = fileOf(view, request.path)
+      if (!target || target.file.version !== request.version) throw selectionErrors.create('stale')
+      if (target.file.change === 'conflict') throw gitErrors.create('git_merge_unresolved')
+      const partial = Boolean(request.hunks?.length || request.lines?.length)
+      if (partial && target.file.wholeFileOnly) throw selectionErrors.create('whole_file_only')
+      const markerHeld = place.kind === 'project' ? await this.markerHolds(top, place.markerFile) : false
+      const keepChoices = partial ? revertedChoices(target, request) : null
+      const done = keepChoices ? await this.revertHunks(top, git, place, view, target, keepChoices, keep) : await this.revertWhole(top, place, view, target, keep)
+      if (place.kind === 'project') await this.settleMarker(top, place.markerFile, markerHeld)
+      const index = place.kind === 'project' ? stagedEntryDigests(await this.indexEntries(top)) : undefined
+      const at = Date.now()
+      const record: RevertRecord = {
+        version: 1,
+        top,
+        path: target.file.path,
+        ...(target.file.oldPath !== undefined ? { oldPath: target.file.oldPath } : {}),
+        paths: target.paths,
+        after: target.paths.map((path) => ({ path, work: done.after.get(path) ?? null, ...(index ? { index: index.get(path) ?? null } : {}) })),
+        ...(done.overlay ? { overlay: done.overlay } : {}),
+        permissions: Object.fromEntries([...done.kept.permissions].filter(([path]) => target.paths.includes(path))),
+        summary: revertSummary(target.file.path, target.file.oldPath, request.lines?.length ? 0 : request.hunks?.length ?? 0, request.lines?.reduce((sum, pick) => sum + pick.indexes.length, 0) ?? 0),
+        at,
+        windowMs: done.kept.windowMs
+      }
+      recordRevert(keep.owner, done.kept.operationId, done.kept.ref, done.kept.sha, record)
+      const version = fileOf(await this.readView(top, place, { paths: [target.file.path] }), target.file.path)?.file.version ?? ''
+      return { revertId: done.kept.operationId, keptUntil: at + done.kept.windowMs, path: target.file.path, version, ...(done.left ? { left: done.left } : {}) }
+    }))
+  }
+
+  /** Whether the project folder's "everything left out" marker holds for HEAD and the index right now. */
+  private async markerHolds(top: string, markerFile: string): Promise<boolean> {
+    const now = await indexState(this.selectionGit(top))
+    return markerMatches(markerFile, top, now.head, now.indexDigest)
+  }
+
+  /** The bytes Git writes for `oid` at `path` (line endings and the other built-in conversion), or null. */
+  private async checkoutBytes(git: SelectionGit, path: string, oid: string): Promise<Buffer | null> {
+    const run = await git.bytes(['cat-file', '--filters', `--path=${path}`, oid])
+    return run.ok ? run.stdout : null
+  }
+
+  /** Reverts hunks or lines of one text file: the file is rewritten with the rest of its changes, proven unchanged first. */
+  private async revertHunks(top: string, git: SelectionGit, place: SelectionPlace, view: SelectionView, target: FileView, keepChoices: Choices, keep: { owner: string }): Promise<RevertDone> {
+    const text = target.text
+    if (!text) throw selectionErrors.create('whole_file_only')
+    const path = target.file.path
+    const content = applyChoices(text.head, text.hunks, keepChoices)
+    const oid = await storeBlob(git, content)
+    const gitMode = (target.work ?? target.head)!.mode
+    // The file on disk, and whether it is Git's checkout of what Git read or that content as it is: the new bytes are
+    // made the same way, so the lines the revert leaves keep their bytes. Anything else could not be written faithfully.
+    let expected: PathDigest = null
+    let checkout = true
+    let mode = modeBits(gitMode)
+    if (target.work) {
+      const full = join(top, ...path.split('/'))
+      const info = await lstat(full).catch(() => null)
+      if (!info?.isFile()) throw selectionErrors.create('stale')
+      const raw = await readFile(full)
+      if (await addedBlob(git, path, raw) !== target.work.oid) throw selectionErrors.create('stale')
+      if ((await this.checkoutBytes(git, path, target.work.oid))?.equals(raw)) checkout = true
+      else if (Buffer.concat(text.work).equals(raw)) checkout = false
+      else throw selectionErrors.create('whole_file_only')
+      mode = info.mode & 0o7777
+      expected = fileDigest(raw)
+    }
+    const bytes = checkout ? await this.checkoutBytes(git, path, oid) : content
+    if (!bytes || await addedBlob(git, path, bytes) !== oid) throw selectionErrors.create('whole_file_only')
+
+    let kept: KeptCopy
+    try {
+      kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-revert', action: 'Revert', paths: [path] })
+    } catch (error) {
+      throw keepRefusal(error)
+    }
+    // The copy holds what the new bytes were made from; a file saved in between is someone's newer work.
+    const keptDigest = kept.digests.get(path)
+    if ((keptDigest === undefined ? null : `file:${keptDigest}`) !== expected) throw selectionErrors.create('stale')
+    if (!await replaceProven(top, path, expected, { kind: 'file', bytes, mode })) throw selectionErrors.create('stale')
+
+    // The selection loses the reverted changes too; the changes it held otherwise stay as they were.
+    const headBytes = Buffer.concat(text.head)
+    const entryFor = async (selected: Buffer, entryMode: string): Promise<Entry | null> => {
+      if (selected.equals(headBytes)) return target.head
+      if (selected.equals(content)) return { mode: entryMode, oid }
+      return { mode: entryMode, oid: await storeBlob(git, selected) }
+    }
+    const reduced = text.choices ? applyChoices(text.head, text.hunks, text.choices.map((row, hunk) => row.map((value, line) => value && keepChoices[hunk]![line]!))) : null
+    let overlay: RevertDone['overlay']
+    if (place.kind === 'project') {
+      // Nothing chosen yet (`Commit all`): the index is HEAD's and stays so.
+      if (reduced && view.selection.state === 'chosen') {
+        const entry = await entryFor(reduced, target.selected?.mode ?? gitMode)
+        const stages = view.collected.paths.get(path)?.stages ?? []
+        const now = (await this.runGit(top, ['ls-files', '-s', '-z', '--', `:(literal)${path}`])).stdout.split('\0').filter(Boolean)
+        // Staged by someone else meanwhile: their staging stays.
+        if (!sameEntry(entry, target.selected) && now.join('\0') === stages.join('\0')) await this.writeIndexEntries(top, new Map([[path, entry]]))
+      }
+    } else {
+      const current = view.overlay!
+      const before = current.entries[path]
+      if (before && reduced) {
+        const working: Entry = { mode: gitMode, oid }
+        const chosen = await entryFor(reduced, before.chosen?.mode ?? gitMode)
+        const entries = { ...current.entries }
+        if (sameEntry(chosen, working)) delete entries[path]
+        else entries[path] = { head: target.head, working, chosen: sameEntry(chosen, target.head) ? null : chosen }
+        await writeOverlay(place.overlayFile, current, entries)
+        overlay = { before: { [path]: before }, after: { [path]: entries[path] ?? null } }
+      }
+    }
+    return { kept, after: new Map([[path, fileDigest(bytes)]]), ...(overlay ? { overlay } : {}) }
+  }
+
+  /** Reverts a whole file, or both paths of a rename, the way Discard puts files back: a copy first, then proven writes. */
+  private async revertWhole(top: string, place: SelectionPlace, view: SelectionView, target: FileView, keep: { owner: string }): Promise<RevertDone> {
+    const kept = await this.discardPaths(top, target.paths, keep, { type: 'git-revert', action: 'Revert' })
+    if (!kept) throw selectionErrors.create('stale')
+    const untouched = kept.left.filter((item) => item.reason === 'changed' || item.reason === 'unwritable')
+    // Nothing was written: refused, and the copy is left to its window.
+    if (target.paths.every((path) => untouched.some((item) => item.path === path))) {
+      throw untouched.some((item) => item.reason === 'unwritable') ? selectionErrors.create('whole_file_only') : selectionErrors.create('stale')
+    }
+    let overlay: RevertDone['overlay']
+    if (place.kind === 'thread') {
+      // The paths now equal HEAD: they leave the overlay.
+      const current = view.overlay!
+      const before = Object.fromEntries(target.paths.map((path) => [path, current.entries[path] ?? null]))
+      if (Object.values(before).some(Boolean)) {
+        const entries = { ...current.entries }
+        for (const path of target.paths) delete entries[path]
+        await writeOverlay(place.overlayFile, current, entries)
+        overlay = { before, after: Object.fromEntries(target.paths.map((path) => [path, null])) }
+      }
+    }
+    const after = new Map<string, PathDigest>()
+    for (const path of target.paths) after.set(path, await pathDigest(top, path))
+    const left = kept.left.length ? kept.left.map((item) => `${item.path} (${item.reason})`).join(', ') : undefined
+    return { kept, after, ...(overlay ? { overlay } : {}), ...(left ? { left: `Left as it was: ${left}.` } : {}) }
+  }
+
+  /**
+   * Puts a revert back (`git.restoreReverted`) when every path is still what the revert left: the working tree, and in a
+   * project folder the index too. A thread's overlay is not compared, so choosing another hunk of the file does not block
+   * it; it gets back the entries it had when the revert changed them. Paths already as kept (a retry, or Undo in the
+   * chat) count as restored, and nothing is written. `changed`: something else changed a path; nothing is written and
+   * the blobs of that path, now and as kept, are named. `expired`: the copy is gone. With `check`, nothing is written:
+   * `pending` says a write is needed (the caller then runs it as a recorded action).
+   */
+  restoreReverted(cwd: string, userRequested: UserAction, place: SelectionPlace, revertId: string, keep: { owner: string }, options: { check?: boolean } = {}): Promise<GitRestoreRevertedResult | { pending: true }> {
+    return this.asUser(userRequested, () => this.serialized(cwd, async () => {
+      place.assertIdle?.()
+      const top = await this.toplevel(cwd)
+      const found = findRevert(keep.owner, revertId)
+      const expired = { restored: false, reason: 'expired' } as const
+      if (!found || !sameFolder(found.record.top, top)) return expired
+      if (await this.read(top, ['rev-parse', '--verify', '--quiet', `${found.ref}^{commit}`]) !== found.sha) return expired
+      const git = this.selectionGit(top)
+      const { record } = found
+      const kept = await this.keptPaths(top, git, found)
+      const indexOf = async (): Promise<Map<string, string> | undefined> => (place.kind === 'project' ? stagedEntryDigests(await this.indexEntries(top)) : undefined)
+      let index = await indexOf()
+      const now = new Map<string, PathDigest>()
+      for (const path of record.paths) now.set(path, await pathDigest(top, path))
+      const keptIndex = (path: string): string | null => {
+        const staged = kept.get(path)?.staged
+        return staged ? stagedEntryDigests([`${staged.mode} ${staged.oid} 0\t${path}`]).get(path)! : null
+      }
+      const afterOf = (path: string) => record.after.find((item) => item.path === path)
+      const atKept = (path: string): boolean => now.get(path) === (kept.get(path)?.digest ?? null) && (!index || (index.get(path) ?? null) === keptIndex(path))
+      const atAfter = (path: string): boolean => now.get(path) === (afterOf(path)?.work ?? null) && (!index || (index.get(path) ?? null) === (afterOf(path)?.index ?? null))
+      const changed = async (path: string): Promise<GitRestoreRevertedResult> => {
+        const currentBlob = await this.blobAt(git, top, path)
+        const keptBlob = kept.get(path)?.entry?.oid
+        return { restored: false, reason: 'changed', ...(currentBlob ? { currentBlob } : {}), ...(keptBlob ? { keptBlob } : {}) }
+      }
+      if (record.paths.every(atKept)) {
+        if (!found.restored) recordRestored(keep.owner, revertId)
+        return { restored: true }
+      }
+      const moved = record.paths.find((path) => !atKept(path) && !atAfter(path))
+      if (moved !== undefined) return changed(moved)
+      if (options.check) return { pending: true }
+
+      const markerHeld = place.kind === 'project' ? await this.markerHolds(top, place.markerFile) : false
+      for (const path of record.paths) {
+        const want = kept.get(path)
+        if (now.get(path) === (want?.digest ?? null)) continue
+        const entry = want?.entry
+        const next: Replacement = !entry || !want?.bytes ? { kind: 'absent' }
+          : entry.mode === '120000' ? { kind: 'link', target: want.bytes }
+            : { kind: 'file', bytes: want.bytes, mode: record.permissions?.[path] ?? modeBits(entry.mode) }
+        if (!await replaceProven(top, path, afterOf(path)?.work ?? null, next)) return changed(path)
+      }
+      if (place.kind === 'project') {
+        // The staged versions as they were, unless someone staged the path meanwhile.
+        index = await indexOf()
+        const entries = new Map<string, Entry | null>()
+        for (const path of record.paths) {
+          if ((index!.get(path) ?? null) === keptIndex(path) || (index!.get(path) ?? null) !== (afterOf(path)?.index ?? null)) continue
+          entries.set(path, kept.get(path)?.staged ?? null)
+        }
+        await this.writeIndexEntries(top, entries)
+        await this.settleMarker(top, place.markerFile, markerHeld)
+      } else if (record.overlay) {
+        const current = await readOverlay(place.overlayFile)
+        const same = (a: OverlayEntry | null | undefined, b: OverlayEntry | null | undefined): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+        // Only entries still as the revert left them go back; a choice made since stays.
+        if (record.paths.every((path) => same(current.entries[path], record.overlay!.after[path]))) {
+          const entries = { ...current.entries }
+          for (const path of record.paths) {
+            const before = record.overlay.before[path]
+            if (before) entries[path] = before
+            else delete entries[path]
+          }
+          await writeOverlay(place.overlayFile, current, entries)
+        }
+      }
+      recordRestored(keep.owner, revertId)
+      return { restored: true }
+    }))
+  }
+
+  /** What the copy of a revert holds at each of its paths: the working version (its entry, bytes and digest) and the staged one. */
+  private async keptPaths(top: string, git: SelectionGit, found: FoundRevert): Promise<Map<string, { entry: Entry | null; bytes?: Buffer; digest: PathDigest; staged: Entry | null }>> {
+    const listed = async (commit: string): Promise<Map<string, Entry>> => {
+      const run = await git.read(['ls-tree', '-z', '-r', '--full-tree', commit, '--', ...found.record.paths], { env: { GIT_LITERAL_PATHSPECS: '1' } })
+      if (!run.ok) throw gitFailure(run, 'Git could not read the kept copy.')
+      const out = new Map<string, Entry>()
+      for (const line of run.stdout.split('\0')) {
+        const tab = line.indexOf('\t')
+        if (tab < 0) continue
+        const [mode, , oid] = line.slice(0, tab).split(' ')
+        out.set(line.slice(tab + 1), { mode: mode!, oid: oid! })
+      }
+      return out
+    }
+    const working = await listed(found.sha)
+    const staged = await listed(`${found.sha}^2`)
+    const out = new Map<string, { entry: Entry | null; bytes?: Buffer; digest: PathDigest; staged: Entry | null }>()
+    for (const path of found.record.paths) {
+      const entry = working.get(path) ?? null
+      let bytes: Buffer | undefined
+      let digest: PathDigest = null
+      if (entry && entry.mode !== '160000') {
+        const run = await git.bytes(['cat-file', 'blob', entry.oid])
+        if (!run.ok) throw gitFailure(run, 'Git could not read the kept copy.')
+        bytes = run.stdout
+        digest = entry.mode === '120000' ? linkDigest(bytes) : fileDigest(bytes)
+      }
+      out.set(path, { entry, ...(bytes ? { bytes } : {}), digest, staged: staged.get(path) ?? null })
+    }
+    return out
+  }
+
+  /** The blob of what stands at `path` now, its bytes as they are (a link's target), stored; undefined for nothing or a folder. */
+  private async blobAt(git: SelectionGit, top: string, path: string): Promise<string | undefined> {
+    const full = join(top, ...path.split('/'))
+    const info = await lstat(full).catch(() => null)
+    if (!info || !(info.isFile() || info.isSymbolicLink())) return undefined
+    const bytes = info.isSymbolicLink() ? Buffer.from(await readlink(full)) : await readFile(full)
+    return (await storeBlob(git, bytes).catch(() => undefined)) ?? undefined
+  }
+
+  /** The reverts of this folder its owner can still restore (`git.revertedList`), newest first. Reads only. */
+  async revertedList(cwd: string, owner: string): Promise<GitRevertedItem[]> {
+    if (!await this.isRepo(cwd)) return []
+    const top = await this.toplevel(cwd)
+    const refs = new Set(((await this.read(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS])) ?? '').split(/\r?\n/))
+    return revertsOf(owner, top)
+      .filter((item) => !item.restored && refs.has(`${item.ref} ${item.sha}`))
+      .slice(0, REVERTED_LIST_MAX)
+      .map((item) => ({
+        revertId: item.revertId,
+        path: item.record.path,
+        ...(item.record.oldPath !== undefined ? { oldPath: item.record.oldPath } : {}),
+        at: item.record.at,
+        keptUntil: item.record.at + item.record.windowMs,
+        summary: item.record.summary
+      }))
   }
 
   async lastCommitMessage(cwd: string): Promise<string | null> {

@@ -1611,6 +1611,44 @@ export interface GitIncludeResult {
   selection: GitSelectionState
 }
 
+/** `git.revert`: which hunks or lines (by index into `hunk.lines`) of a file go back to HEAD; neither means the whole file (both paths of a rename). */
+export interface GitRevertRequest {
+  path: string
+  version: string
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.revert`'s answer: what to restore it by, until when its copy is kept (ms since the epoch), and the file's version now. */
+export interface GitRevertResult {
+  revertId: string
+  keptUntil: number
+  path: string
+  /** The file's version after the revert; empty when it no longer differs from HEAD. */
+  version: string
+  /** Paths of a whole-file revert left as they were, and why, in a sentence. */
+  left?: string
+}
+
+/**
+ * `git.restoreReverted`'s answer. `changed`: the files are no longer what the revert left; nothing was written, and the
+ * blob ids (the file now, and as kept) let the tab show the difference. `expired`: the kept copy is gone.
+ */
+export type GitRestoreRevertedResult =
+  | { restored: true }
+  | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }
+
+/** One revert `git.restoreReverted` can still put back. Times are ms since the epoch. */
+export interface GitRevertedItem {
+  revertId: string
+  path: string
+  oldPath?: string
+  at: number
+  keptUntil: number
+  /** What was reverted, in a few words: `2 hunks of src/a.ts`. */
+  summary: string
+}
+
 /** A proposed commit message; the user edits it before committing. */
 export interface GitCommitSuggestion {
   message: string
