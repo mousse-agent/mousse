@@ -33,7 +33,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_LOCKED_REMOVED_OPTIONS, ClaudeLockedGate, claudeLockedOptions, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_LOCKED_REMOVED_OPTIONS, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -2124,6 +2124,9 @@ export class ClaudeSubscriptionProviderService {
     const env = locked && !locked.ownerEntry
       ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
       : this.finalEnv({ ...this.environment(), ...integrations?.env, ...compaction })
+    // A bot turn's gate knows Claude Code's own storage for it (its saved tool output), in the home
+    // this turn runs with: reading that back never needs the bot's file access.
+    const lockedTurn = locked ? { ...locked, own: claudeOwnStorage(claudeHomeOf(env), locked.cwd) } : undefined
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
     // cancellation. A one-shot query also hands it to the SDK; a live query has a lifetime of its own.
     const controller = new AbortController()
@@ -2252,7 +2255,7 @@ export class ClaudeSubscriptionProviderService {
     const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
       ? 'accept_edits'
       : requestedMode
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(locked ? { locked: new ClaudeLockedGate(locked, Boolean(input.mcp)) } : {}) }
+    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp)) } : {}) }
     try {
       const signedIn = await this.authenticated(controller.signal, env)
       if (!signedIn)
@@ -2351,7 +2354,7 @@ export class ClaudeSubscriptionProviderService {
       const lockedOptions = (sdkController: AbortController, turnOf: () => TurnContext): Options => {
         const options: Options = {
           ...buildOptions(sdkController, turnOf, false),
-          ...claudeLockedOptions(locked!, {
+          ...claudeLockedOptions(lockedTurn!, {
             env,
             // A bot's turn never attaches the MCP relay: its grant gate knows only Mousse's own tools.
             mcpServers: claudeMcpServers(input.mcp ? { url: input.mcp.url, token: input.mcp.token } : null),

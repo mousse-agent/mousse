@@ -126,22 +126,22 @@ describe('a bot through the v2 methods', () => {
     const listed = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, limit: 2 })
     expect(listed.messages).toHaveLength(2)
     const reply = listed.messages.at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', text: 'I need to read that folder.', ask: { status: 'open', kind: 'permission', title: expect.stringContaining('read files in') } })
-    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: expect.stringContaining('Wants to read files in') })
+    expect(reply).toMatchObject({ author: 'bot', text: 'I need to read that folder.', ask: { status: 'open', kind: 'permission', title: 'use files on this computer' } })
+    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
     const older = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, beforeSeq: listed.messages[0]!.seq })
     expect(older.messages.map((message) => message.text)).toEqual(['Hello, I sum up invoices.'])
 
     const answered = await call<{ message: BotChatMessage }>('bots.asks.answer', { botId, askId: reply.ask!.askId, answer: 'allow' })
     expect(answered.message.ask).toMatchObject({ status: 'allowed' })
     // The wall continues: the next dispatch says what the owner allowed.
-    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: read files in')
+    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: use files on this computer')
     await runDispatch(f, chat!.id, 2, { text: 'Total: 120 EUR.' })
     expect(await call('bots.chat.markRead', { botId, seq: 1_000 })).toEqual({})
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'idle', unread: 0 })
 
-    // About: the folder is listed and can be removed; so can a schedule.
+    // About: file access is listed once and can be removed; so can a schedule.
     let detail = await call<BotDetail>('bots.get', { botId })
-    expect(detail.permissions).toMatchObject([{ title: expect.stringContaining('read files in'), note: expect.any(String) }])
+    expect(detail.permissions).toMatchObject([{ title: 'use files on this computer', note: expect.any(String) }])
     f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Sum up new invoices.' }, 'bot')
     await f.bots.tickSchedules(new Date(f.clock.now))
     detail = await call<BotDetail>('bots.get', { botId })

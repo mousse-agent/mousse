@@ -38,7 +38,7 @@ beforeEach(() => {
       b1: {
         summary: bot,
         permissions: [
-          { id: 'fp1', title: 'read files in ~/Invoices', note: "Only this folder. It can't change anything.", grantedAt: '2026-11-06T10:00:00.000Z' },
+          { id: 'fp1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", grantedAt: '2026-11-06T10:00:00.000Z' },
           { id: 'fp2', title: 'use the pdf skill', note: '', grantedAt: '2026-11-06T11:00:00.000Z' }
         ],
         runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule' }]
@@ -74,8 +74,8 @@ describe('About this bot', () => {
 
   it('lists what it can use and removes one', async () => {
     await show()
-    expect(rows('CAN USE')).toEqual(['Read files in ~/Invoices', 'Use the pdf skill'])
-    await click(button('Remove read files in ~/Invoices'))
+    expect(rows('CAN USE')).toEqual(['Use files on this computer', 'Use the pdf skill'])
+    await click(button('Remove use files on this computer'))
     expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'fp1'])
     expect(rows('CAN USE')).toEqual(['Use the pdf skill'])
   })
