@@ -95,7 +95,8 @@ export const SEARCH_AFTER_ROWS = 12
  * match the name, where, when and who. Every term must match.
  */
 export function matchesSearch(item: AutomationItem, query: string): boolean {
-  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  // A quoted value keeps its spaces: computer:"desk pc".
+  const terms = (query.trim().toLowerCase().match(/\S+?:"[^"]*"?|"[^"]*"?|\S+/g) ?? []).map((term) => term.replace(/"/g, '')).filter(Boolean)
   return terms.every((term) => {
     const [key, ...rest] = term.split(':')
     const value = rest.join(':')

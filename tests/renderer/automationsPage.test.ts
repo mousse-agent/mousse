@@ -202,6 +202,13 @@ describe('the list as data', () => {
     expect(matchesSearch(claude, 'agent:codex')).toBe(false)
     expect(matchesSearch(claude, 'computer:lap review')).toBe(true)
     expect(matchesSearch(claude, 'computer:desk')).toBe(false)
+    // A computer name with a space is quoted; a row of this computer matches its own name.
+    const studio = item({ key: 'job:s', name: 'Nightly', computer: { name: 'Desk PC', timeZone: ZONE, local: false, node: 'nod_s' } })
+    expect(matchesSearch(studio, 'computer:"desk pc"')).toBe(true)
+    expect(matchesSearch(studio, 'computer:"desk pc" nightly')).toBe(true)
+    expect(matchesSearch(studio, 'computer:"desk laptop"')).toBe(false)
+    expect(matchesSearch(item({ key: 'job:mine' }), 'computer:desk')).toBe(true)
+
   })
 
   it('starts May at the profile default held to its ceiling, else Ask before acting', () => {
@@ -449,6 +456,15 @@ describe('the Automations page', () => {
     await click($('[data-testid="automation-move-confirm"]'))
     expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.move', { jobIds: ['a', 'b'], node: 'nod_laptop' })
     expect($('.scheduled-action-error')?.textContent).toBe('Moved 1 to Laptop. Not moved: Beta (It runs in a thread of this computer).')
+  })
+
+  it('searches across computers with computer:', async () => {
+    const laptop = { name: 'Laptop', timeZone: ZONE, local: false, node: 'nod_laptop' }
+    const rows = Array.from({ length: 13 }, (_, n) => item({ key: `job:${n}`, name: `Job ${n}`, trigger: 'on_demand', ...(n < 2 ? { computer: laptop, link: { kind: 'job' as const, jobId: `nod_laptop:${n}` } } : {}) }))
+    await mount(rows, [], vi.fn(), { computers: [laptop] })
+    await click($('[aria-label="Search automations"]'))
+    await type($<HTMLInputElement>('[data-testid="automations-search"]')!, 'computer:laptop')
+    expect($$('[data-testid="automation-row"]').map((row) => row.getAttribute('data-key'))).toEqual(['job:0', 'job:1'])
   })
 
   it('says Choose when and keeps Add off while When is unread; On demand only when picked', async () => {
