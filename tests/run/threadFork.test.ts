@@ -209,6 +209,53 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(pi.turns.at(-1)!.prompt).toContain('[user] Start')
   })
 
+  it('shows the conversation it carries and where it starts before its first message, and the model gets that history once', async () => {
+    const pi = piAdapter((input) => `reply to ${String(input.messages.at(-1)!.content)}`)
+    const d = (daemon = phase6Daemon(plainHome(), [pi]))
+    const source = d.store.createThread('Source')
+    d.orch.setThreadModelOverride(source.id, PI)
+    await d.orch.send('One', false, { threadId: source.id, clientRequestId: 'c-1' })
+    await d.orch.send('Two', false, { threadId: source.id, clientRequestId: 'c-2' })
+    const forked = await d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'carry' })
+
+    const before = d.orch.getMessages(forked.threadId)
+    expect(before.map((message) => [message.role, message.kind ?? '', message.content])).toEqual([
+      ['user', '', 'One'], ['assistant', '', 'reply to One'], ['assistant', 'context_handoff', 'Forked from Source']
+    ])
+    const sourceIds = new Set(d.orch.getMessages(source.id).map((message) => message.id))
+    for (const copy of before.slice(0, 2)) {
+      expect(copy.inherited?.threadId).toBe(source.id)
+      expect(copy.turnId).toBeUndefined()
+      expect(sourceIds.has(copy.id)).toBe(false)
+    }
+    expect(d.orch.getNativeContext(forked.threadId).messages).toEqual([])
+    // The marker takes the time of the reply it follows, so that turn keeps the time it took.
+    expect(before[2].timestamp).toBe(before[1].timestamp)
+
+    await d.orch.send('Three', false, { threadId: forked.threadId, clientRequestId: 'c-3' })
+    expect(headers(pi.turns.at(-1)!.prompt)).toBe(1)
+    expect(pi.turns.at(-1)!.prompt).toContain('[user] One')
+    expect(pi.turns.at(-1)!.prompt).not.toContain('Two')
+    const after = d.orch.getMessages(forked.threadId)
+    expect(after.map((message) => message.kind === 'context_handoff' ? 'marker' : message.content)).toEqual(['One', 'reply to One', 'marker', 'Three', 'reply to Three'])
+    expect(after[2]).toMatchObject({ content: 'Forked from Source', contextHandoff: { transfer: 'fork', strategy: 'full_summary' } })
+  })
+
+  it('a native fork names the source thread in its marker, not the fork', async () => {
+    const pi = piAdapter((input) => `reply to ${input.prompt}`, { fork: 'native' }, 'session-1')
+    pi.forkSession = async (ref) => ({ ...ref, sessionId: 'forked-session' })
+    const d = (daemon = phase6Daemon(plainHome(), [pi]))
+    const source = d.store.createThread('Source')
+    d.orch.setThreadModelOverride(source.id, PI)
+    await d.orch.send('Start', false, { threadId: source.id, clientRequestId: 'nm-1' })
+    const forked = await d.engine.forkThread({ sourceThreadId: source.id, clientRequestId: 'native-marker' })
+    await d.orch.send('Continue in the fork', false, { threadId: forked.threadId, clientRequestId: 'nm-2' })
+    expect(d.engine.transfers.get(forked.transferId)).toMatchObject({ status: 'consumed', payload: { forkStrategy: 'native' } })
+    const markers = d.orch.getMessages(forked.threadId).filter((message) => message.kind === 'context_handoff')
+    expect(markers).toHaveLength(1)
+    expect(markers[0]).toMatchObject({ content: 'Forked from Source', contextHandoff: { transfer: 'fork', strategy: 'native_resume' } })
+  })
+
   /** A fork whose first turn is stopped before it commits anything, then a second turn that completes. */
   const stoppedFirstTurn = async () => {
     const adapter = new StoppableAdapter(['reply', 'wait', 'reply'])

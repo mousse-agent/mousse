@@ -5182,7 +5182,52 @@ export class OrchestratorService extends EventEmitter {
       this.threadStore.updateThreadMeta(fork.id, { permissionMode: this.requestedPermissionMode(creation.sourceThreadId) })
     const session = this.getOrCreateSession(fork.id)
     session.modelOverride = override ? structuredClone(override) : undefined
+    // The fork shows the conversation it carries, then where it starts. Its first turn fills the marker in.
+    const inherited = this.forkInheritedMessages(creation.sourceThreadId, creation.sourceRunId)
+    const lastModel = [...inherited].reverse().find((message) => message.role === 'user' && message.modelSelection)?.modelSelection
+    const selection: MessageModelSelection = override ? { provider: override.llmProvider, model: override.model } : lastModel ?? { provider: '', model: '' }
+    const marker: ChatMessage = {
+      id: uuidv4(),
+      role: 'assistant',
+      kind: 'context_handoff',
+      content: `Forked from ${sourceThread.name}`,
+      contextHandoff: { from: selection, to: selection, transfer: 'fork' },
+      // The time of the last message it follows, so the turn it closes keeps the time it took.
+      timestamp: inherited.at(-1)?.timestamp ?? new Date().toISOString()
+    }
+    this.sessionAls.run(session, () => {
+      session.messages = [...inherited.map(({ modelSelection: _model, ...message }) => message), marker]
+      this.persist(true)
+    })
     return { threadId: fork.id }
+  }
+
+  /**
+   * Copies of the source's visible conversation up to the fork point, as the fork shows them above its own: the
+   * messages of runs up to `sourceRunId` (and those before any run), after the last `/clear` among them, the same
+   * cut the fork's transfer hands the model (`handoffTranscript`). Each copy gets its own id and keeps no turn or
+   * action of the source, so the fork's Undo, edit and fork never act on it.
+   */
+  private forkInheritedMessages(sourceThreadId: string, sourceRunId: string): ChatMessage[] {
+    const engine = this.runEngine
+    const through = engine?.getRun(sourceRunId)?.ordinal
+    if (through === undefined) return []
+    let ordinal: number | null = null
+    let copies: ChatMessage[] = []
+    for (const message of this.getMessagesForPersistence(sourceThreadId)) {
+      if (message.turnId) {
+        const run = engine?.getRun(message.turnId)
+        if (run && run.threadId === sourceThreadId) ordinal = run.ordinal
+      }
+      if (message.hidden || message.streaming || (ordinal !== null && ordinal > through)) continue
+      if (message.kind === 'context_cleared') {
+        copies = []
+        continue
+      }
+      const { turnId, actionId: _action, conversationBranchId: _branch, queueItemId: _queue, workflowInvocationId: _workflow, ...rest } = structuredClone(message)
+      copies.push({ ...rest, id: uuidv4(), inherited: { threadId: sourceThreadId, ...(turnId ? { turnId } : {}) } })
+    }
+    return copies
   }
 
   /**
@@ -5282,7 +5327,7 @@ export class OrchestratorService extends EventEmitter {
           }
         }
         planned.push(branched?.sessionId
-          ? { kind: 'fork', transfer: fork, forkStrategy: 'native', plan: engine.handoffs.plan({ threadId, targetRunId: runId, from: branched, to: { ...to, sessionId: branched.sessionId }, caps }) }
+          ? { kind: 'fork', transfer: fork, forkStrategy: 'native', plan: engine.handoffs.plan({ threadId, targetRunId: runId, from: branched, to: { ...to, sessionId: branched.sessionId }, caps, sourceThreadId: fork.sourceThreadId }) }
           : {
               kind: 'fork',
               transfer: fork,
@@ -5369,7 +5414,7 @@ export class OrchestratorService extends EventEmitter {
 
   /** What a thread's worktree branch is named from: its first message, else its name. */
   private branchNameSource(threadId: string, messages?: readonly ChatMessage[], pending?: string): string | undefined {
-    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())?.content ?? pending
+    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && !message.inherited && message.content.trim())?.content ?? pending
     // A subagent's first message is its guidance, then its task: the branch is named from the task.
     const text = first ? withoutSubagentPreamble(first).trim() : ''
     return text || this.threadStore?.getThread(threadId)?.name
@@ -5444,18 +5489,31 @@ export class OrchestratorService extends EventEmitter {
         continue
       }
       const from = plan.record.fromRef
-      const sourceName = this.threadStore?.getThread(plan.sourceThreadId)?.name ?? plan.sourceThreadId
+      // The transfer names the thread the history came from; the plan's own source is the target for a native fork.
+      const sourceThreadId = entry.transfer?.sourceThreadId ?? plan.sourceThreadId
+      const sourceName = this.threadStore?.getThread(sourceThreadId)?.name ?? sourceThreadId
+      const contextHandoff = {
+        from: { provider: from?.provider ?? to.provider, model: from?.model ?? to.model },
+        to,
+        ...artifact,
+        transfer: entry.kind
+      }
+      // A fork made its marker when it was created, between the conversation it carries and its own.
+      const made = entry.kind === 'fork'
+        ? session.messages.find((message) => message.kind === 'context_handoff' && !message.inherited && message.contextHandoff?.transfer === 'fork' && !message.contextHandoff.handoffId)
+        : undefined
+      if (made) {
+        made.content = `Forked from ${sourceName}`
+        made.contextHandoff = contextHandoff
+        this.emitMessageUpdated(made)
+        continue
+      }
       const marker: ChatMessage = {
         id: uuidv4(),
         role: 'assistant',
         kind: 'context_handoff',
         content: entry.kind === 'fork' ? `Forked from ${sourceName}` : `Merged back from ${sourceName}`,
-        contextHandoff: {
-          from: { provider: from?.provider ?? to.provider, model: from?.model ?? to.model },
-          to,
-          ...artifact,
-          transfer: entry.kind
-        },
+        contextHandoff,
         timestamp: new Date().toISOString(),
         turnId
       }
