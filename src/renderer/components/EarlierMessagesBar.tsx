@@ -9,27 +9,15 @@ interface EarlierMessagesBarViewProps {
   busy: boolean
   error?: string
   onLoad: () => void
-  /** Called once the bar scrolls into view; earlier messages then load without a click. */
-  onVisible?: () => void
 }
 
 /**
  * Above the transcript of a long thread, which arrives as its newest part: says how many older messages are
- * left, loads them when the bar scrolls into view, and keeps a button for loading them by hand.
+ * left, with a button that loads them. Scrolling the transcript up to its top loads them too.
  */
-export function EarlierMessagesBarView({ count, busy, error, onLoad, onVisible }: EarlierMessagesBarViewProps) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const element = ref.current
-    if (!element || !onVisible || typeof IntersectionObserver === 'undefined') return
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) onVisible()
-    })
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [onVisible])
+export function EarlierMessagesBarView({ count, busy, error, onLoad }: EarlierMessagesBarViewProps) {
   return (
-    <div className="earlier-messages-bar" ref={ref}>
+    <div className="earlier-messages-bar">
       <span>{count === 1 ? '1 earlier message' : `${count} earlier messages`}</span>
       <button type="button" className="earlier-messages-load" disabled={busy} onClick={onLoad}>
         {busy ? 'Loading…' : 'Load'}
@@ -70,9 +58,35 @@ export function EarlierMessagesBar() {
   const [error, setError] = useState('')
   // A page that failed is not loaded again by scrolling; the button still is.
   const failedAt = useRef<string | null>(null)
+  const loading = useRef(false)
+  useEffect(() => {
+    if (!threadId || !earlier) return
+    // Scrolling the transcript up to within a screen of its top loads the page before it, once at a time.
+    let lastTop = Number.POSITIVE_INFINITY
+    const onScroll = (event: Event): void => {
+      const list = event.target
+      if (!(list instanceof HTMLElement) || !list.classList.contains('an-message-list')) return
+      const movingUp = list.scrollTop < lastTop
+      lastTop = list.scrollTop
+      if (!movingUp || list.scrollTop > list.clientHeight || loading.current || failedAt.current === earlier.before) return
+      loading.current = true
+      setBusy(true)
+      void loadEarlierPage(threadId, earlier.before)
+        .catch((cause: unknown) => {
+          failedAt.current = earlier.before
+          setError(ipcErrorLine(cause) || 'Could not load earlier messages.')
+        })
+        .finally(() => {
+          loading.current = false
+          setBusy(false)
+        })
+    }
+    document.addEventListener('scroll', onScroll, true)
+    return () => document.removeEventListener('scroll', onScroll, true)
+  }, [threadId, earlier])
   if (!threadId || !earlier) return null
   const load = () => {
-    if (busy) return
+    if (busy || loading.current) return
     setBusy(true)
     setError('')
     failedAt.current = null
@@ -83,8 +97,5 @@ export function EarlierMessagesBar() {
       })
       .finally(() => setBusy(false))
   }
-  const onVisible = () => {
-    if (!busy && failedAt.current !== earlier.before) load()
-  }
-  return <EarlierMessagesBarView count={earlier.count} busy={busy} error={error} onLoad={load} onVisible={onVisible} />
+  return <EarlierMessagesBarView count={earlier.count} busy={busy} error={error} onLoad={load} />
 }

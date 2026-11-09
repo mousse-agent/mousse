@@ -1146,7 +1146,9 @@ export function registerGuiIpc(
           earlier: snap.earlier
         },
         broadcast,
-        presentation
+        // The window's own selection (`currentPresentation`): checked against the base state, the selected thread
+        // looked unselected, and its view (and its earlier-messages pointer) was dropped.
+        currentPresentation()
       )
       for (const q of full.pendingQuestions ?? []) {
         broadcast('orchestrator:questionsPending', {
@@ -1667,7 +1669,8 @@ export function registerGuiIpc(
         earlier: snap.earlier
       },
       broadcast,
-      presentation
+      // The window's own selection, which `threads:select` just set (see `resnapshotBase`).
+      currentPresentation()
     )
     for (const q of full.pendingQuestions ?? []) {
       broadcast('orchestrator:questionsPending', {
