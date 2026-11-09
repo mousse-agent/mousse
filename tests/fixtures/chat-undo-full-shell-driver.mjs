@@ -2,6 +2,7 @@ import { app, BrowserWindow } from 'electron'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 import { exitWithParent, keepWindowsOffScreen } from './fullShellWindow.mjs'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_CHAT_UNDO_CONFIG, 'utf8'))
@@ -19,6 +20,16 @@ async function until(read, accept, label) {
   throw new Error(`${label}: ${JSON.stringify(value)}`)
 }
 function nativeMessages() {
+  // A thread kept in thread.db: its model context is the `c:a` rows, in order.
+  const dbPath = join(config.threadDirectory, 'thread.db')
+  if (existsSync(dbPath)) {
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      return db.prepare("SELECT payload FROM items WHERE coll = 'c:a' ORDER BY ord, rid").all().map((row) => JSON.parse(row.payload))
+    } finally {
+      db.close()
+    }
+  }
   const manifestPath = join(config.threadDirectory, 'manifest.json')
   if (existsSync(manifestPath)) {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))

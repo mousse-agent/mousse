@@ -477,7 +477,7 @@ export class ThreadDataStore extends EventEmitter {
     void (async () => {
       await pause(options.delayMs ?? 10_000)
       for (const thread of this.listAllThreads()) {
-        if (run.stopped) return
+        if (run.stopped || !this.sqliteStoreEnabled()) return
         let threadDir: string
         try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
         if (ThreadDbStore.usesDb(threadDir) || existsSync(join(threadDir, EXPORTED_MARKER))) continue

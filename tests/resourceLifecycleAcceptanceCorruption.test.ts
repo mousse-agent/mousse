@@ -32,6 +32,8 @@ describe('durable authority failure acceptance', () => {
 
   it('retains a task whose legacy child ownership data cannot be read', async () => {
     const f = await lifecycleHarness()
+    // Legacy ownership records are JSON files: this thread is made on JSON storage.
+    f.services.threads.setSqliteStoreEnabled(false)
     let agentsPath: string | undefined
     let beforeAgents: Buffer | undefined
     try {
