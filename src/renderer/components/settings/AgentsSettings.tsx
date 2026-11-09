@@ -1,7 +1,8 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
+import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import { Select, type SelectOption } from '../ui/Select'
 import type { Project } from '../../../shared/types'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
@@ -9,6 +10,11 @@ import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 import { openSettingsSection } from '../../lib/settingsNavigation'
+
+const IDLE_COMPACTION_OPTIONS: SelectOption<IdleCompactionSetting>[] = [
+  { value: 'suggest', label: 'Suggest compacting' },
+  { value: 'off', label: "Don't suggest" }
+]
 
 /**
  * Settings > Agents: the default model, thread title model and bots' model, plus context
@@ -168,6 +174,19 @@ export function AgentsSettings({
               context={context}
               model={compactionModel}
               onSave={(next) => void updateSettings({ context: next })}
+            />
+          }
+        />
+        <SettingsRow
+          title="When the cache expires"
+          anchor="agents-idle-compaction"
+          description="After a pause, the next message re-reads the whole thread."
+          control={
+            <Select
+              ariaLabel="When the cache expires"
+              value={context.idleCompaction}
+              onChange={(idleCompaction) => void updateSettings({ context: { ...context, idleCompaction } })}
+              options={IDLE_COMPACTION_OPTIONS}
             />
           }
         />

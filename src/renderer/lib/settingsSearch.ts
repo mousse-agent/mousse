@@ -61,6 +61,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
   { title: 'Bot model', section: 'agents', anchor: 'agents-bot-model', keywords: ['bot model', 'bots', 'personal bots'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },
+  { title: 'When the cache expires', section: 'agents', anchor: 'agents-idle-compaction', keywords: ['cache', 'idle', 'compact', 'suggest'] },
   { title: 'Agent access', section: 'agents', anchor: 'agents-access', keywords: ['reach beyond their own threads', 'read other threads', 'manage threads', 'access level'] },
   { title: 'Agents may answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions'] },
   { title: 'Let agents start subagents on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'create subagents on other devices'] },
