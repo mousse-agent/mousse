@@ -129,6 +129,57 @@ it('persists Claude measurements, populates response metadata and counts usage a
   }
 })
 
+it('shows the prompt cache a Claude turn left, until the history changes or is compacted', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-cache-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+    const thread = main.threads.createThread('Cached Claude')
+    const hour = 60 * 60_000
+    let promptCache: { at: number; ttlMs?: number } = { at: Date.parse('2026-11-09T09:00:00Z'), ttlMs: hour }
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      input.onText('Cached answer')
+      input.onMetrics?.({
+        totalResponseTimeMs: 1000,
+        usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 90_000, totalTokens: 90_030, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        context: { input: 10, cacheRead: 0, cacheWrite: 90_000, contextWindow: 200000 },
+        promptCache
+      })
+      return 'Cached answer'
+    })
+    const usage = () => main.orchestrator.getContextUsage({ draftInput: '', mode: 'agent' }, thread.id)
+    expect((await usage()).promptCache).toBeUndefined()
+    await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+    // A subscription has no price per token.
+    expect((await usage()).promptCache).toEqual({ lastRequestAt: Date.parse('2026-11-09T09:00:00Z'), ttlMs: hour })
+    expect(main.threads.loadThreadData(thread.id).llmContext?.promptCache).toMatchObject({ lastRequestAt: Date.parse('2026-11-09T09:00:00Z'), ttlMs: hour, modelKey: 'claude-subscription:opus' })
+    // A turn that only read the cache keeps the lifetime; the time moves.
+    promptCache = { at: Date.parse('2026-11-09T09:30:00Z') }
+    await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id })
+    expect((await usage()).promptCache).toEqual({ lastRequestAt: Date.parse('2026-11-09T09:30:00Z'), ttlMs: hour })
+    // Another model has its own cache.
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
+    expect((await usage()).promptCache).toBeUndefined()
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'opus' })
+    expect((await usage()).promptCache).toBeDefined()
+    // Claude Code's own /compact leaves Mousse's history (and its revision) as it was; the cache is cold all the same.
+    vi.spyOn(main.claudeSubscription, 'compactConversation').mockResolvedValue(true)
+    expect(await main.orchestrator.compactConversationContext(thread.id)).toBe('native')
+    expect((await usage()).promptCache).toBeUndefined()
+    // A /clear changes the history the same way.
+    await main.orchestrator.send({ content: 'third', mode: 'agent' }, false, { threadId: thread.id })
+    expect((await usage()).promptCache).toBeDefined()
+    main.orchestrator.clearConversationContext(thread.id)
+    expect((await usage()).promptCache).toBeUndefined()
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 describe('a turn whose notes come before its tool calls', () => {
   let home: string
   let main: MousseMainService

@@ -1725,6 +1725,10 @@ export function registerGuiIpc(
     await guiMms.request('threads.compact', { threadId, ...(focus ? { focus } : {}) })
   })
 
+  registerHandler('threads:stopCompaction', async (_e, threadId: string) => {
+    await guiMms.request('threads.stopCompaction', { threadId })
+  })
+
   registerHandler('threads:regenerateTitle', async (_e, threadId: string) => {
     const res = await guiMms.request<{ thread: unknown }>('threads.regenerateTitle', {
       threadId

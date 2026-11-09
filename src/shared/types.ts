@@ -729,6 +729,12 @@ export interface ChatMessage {
     /** Set when the handoff came from a thread transfer (SPEC §16.2). */
     transfer?: 'fork' | 'merge_back'
   }
+  /**
+   * A `context_compaction` row: `manual` when a person started it (`/compact`, Compact now), so it can be
+   * stopped while it runs; `kept` when it ended with the full history still in place (stopped, timed out,
+   * or cut short by a daemon restart).
+   */
+  compaction?: { manual?: true; kept?: 'stopped' | 'interrupted' }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
