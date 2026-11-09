@@ -319,7 +319,7 @@ describe('reduced motion', () => {
     for (let i = 0; i < 5; i++) fake.tick()
     // The two alike faces share one cached frame.
     expect(fake.draws).toHaveLength(2)
-    expect(fake.draws[0]!.uniforms).toEqual(faceUniforms({ colour: 'yellow', accessory: 'beret' }, stillPose('stuck'), { view: 'head', size: 40, samples: 1 }))
+    expect(fake.draws[0]!.uniforms).toEqual(faceUniforms({ colour: 'yellow', accessory: 'beret' }, stillPose('stuck'), { view: 'head', size: 40, samples: 2 }))
     expect(fake.pending()).toBe(0)
   })
 
@@ -432,7 +432,7 @@ describe('the shared renderer', () => {
     const ticks = Math.ceil((IDLE_LIVE_SECONDS * 1000) / 50) + 1
     for (let i = 0; i < ticks; i++) fake.tick(50)
     expect(renderer.running).toBe(false)
-    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('idle'), { view: 'head', size: 40, samples: 1 }))
+    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('idle'), { view: 'head', size: 40, samples: 2 }))
     const drawn = fake.draws.length
     fake.tick(1000)
     expect(fake.draws).toHaveLength(drawn)
@@ -452,7 +452,7 @@ describe('the shared renderer', () => {
     const ticks = Math.ceil((UNFOCUSED_LIVE_SECONDS * 1000) / 50) + 1
     for (let i = 0; i < ticks; i++) fake.tick(50)
     expect(renderer.running).toBe(false)
-    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('working'), { view: 'head', size: 40, samples: 1 }))
+    expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('working'), { view: 'head', size: 40, samples: 2 }))
     const drawn = fake.draws.length
     fake.setFocus(true)
     expect(renderer.running).toBe(true)
@@ -483,6 +483,29 @@ describe('the shared renderer', () => {
     expect(Math.max(...counts)).toBe(perTick)
     expect(drawnTo.size).toBe(20)
     for (const draw of fake.draws) expect(draw.side).toBe(80)
+    renderer.dispose()
+  })
+
+  it('draws still faces with 2×2 samples, counted four times against the budget', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const looks = ['coral', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const
+    for (const colour of looks) renderer.register(document.createElement('canvas'), spec({ look: { colour, accessory: 'none' }, still: true }))
+    const perTick = Math.max(1, Math.floor(SAMPLE_BUDGET / (80 * 80 * 4)))
+    fake.tick()
+    expect(fake.draws).toHaveLength(perTick)
+    for (const draw of fake.draws) expect(draw.uniforms.uV[2]).toBe(2)
+    while (fake.draws.length < looks.length) fake.tick()
+    expect(fake.draws).toHaveLength(looks.length)
+    renderer.dispose()
+  })
+
+  it('draws live faces with one sample', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), spec({ state: 'working' }))
+    fake.tick()
+    expect(fake.draws[0]!.uniforms.uV[2]).toBe(1)
     renderer.dispose()
   })
 

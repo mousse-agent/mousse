@@ -20,8 +20,10 @@ import { MICE_FRAGMENT_SHADER, MICE_UNIFORMS, MICE_VERTEX_SHADER, type MiceUnifo
  * - A tick draws at most `SAMPLE_BUDGET` shader samples (drawn pixels), blank faces first,
  *   then the most overdue; the rest wait for the next tick. Many faces then lower the frame rate,
  *   not the frame time.
- * - Still faces (reduced motion, `still`) draw once. Their frame is cached per look, state, view
- *   and pixel size, so a long list of the same still face costs one draw.
+ * - Still faces (reduced motion, `still`, settled faces) draw once, with 2×2 samples for clean
+ *   edges (counted four times against the budget). Their frame is cached per look, state, view
+ *   and pixel size, so a long list of the same still face costs one draw. Live faces take one
+ *   sample; the shader softens their edges by how near each ray passes to the surface.
  * - A live face settles into its still pose a few seconds after its state last changed when it is
  *   idle or paused, and a few seconds after the window lost focus in any state; a busy face moves
  *   again when the window has focus.
@@ -437,7 +439,9 @@ export class FaceRenderer {
     let spent = 0
     for (const { slot } of due) {
       const { spec } = slot
-      const view = { view: spec.view, size: spec.size, samples: 1 as const }
+      // Still frames are drawn once and cached, so they take 2×2 samples for clean edges.
+      const samples: 1 | 2 = slot.drawnStill ? 2 : 1
+      const view = { view: spec.view, size: spec.size, samples }
       const cacheKey = slot.drawnStill ? `${spec.look.colour}|${spec.look.accessory}|${spec.look.kind ?? 'mouse'}|${spec.look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
       if (cacheKey) {
         const cached = this.cache.get(cacheKey)
@@ -453,7 +457,7 @@ export class FaceRenderer {
         // Two still faces alike on one tick: the second copies the first's frame next tick.
         if (jobs.some((job) => job.cacheKey === cacheKey)) continue
       }
-      const cost = slot.drawPx * slot.drawPx
+      const cost = slot.drawPx * slot.drawPx * samples * samples
       if (spent > 0 && spent + cost > SAMPLE_BUDGET) continue
       spent += cost
       if (cacheKey) {

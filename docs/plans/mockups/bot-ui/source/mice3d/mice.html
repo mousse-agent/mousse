@@ -126,6 +126,10 @@ float accD(vec3 q,vec3 b,float ac){
 }
 // ---------- the Mousse (kind 1), in the logo's units: 100 logo units = 1, the foot at y = 0 ----------
 const float MS=.7;
+// The size of one pixel in logo units, set per pixel by shade: thin parts (the glass, the rim) stay at least this wide.
+float gPx=.02;
+// The view ray in the logo frame, for measuring the eyes' outline where the ray crosses them.
+vec3 gRd=vec3(0.,0.,-1.);
 // The pose (hop, squash, roll) as for the mouse; P is the logo frame, Q also turns with the head (yaw, a little pitch).
 vec3 toP(vec3 p){p.y-=uB.x;float sq=uB.y;p.y=(p.y+1.47)/sq-1.47;p.xz*=sqrt(sq);p.xy=R(-uB.z)*(p.xy-vec2(0.,-1.47))+vec2(0.,-1.47);return vec3(p.x,p.y+1.48,p.z)/MS;}
 vec3 toQ(vec3 P){vec3 Q=P-vec3(0.,2.6,0.);Q.xz=R(uH.x)*Q.xz;Q.yz=R(-uH.y*.5)*Q.yz;return Q+vec3(0.,2.6,0.);}
@@ -180,23 +184,24 @@ float gD(vec3 Q){vec2 q=vec2(length(Q.xz),Q.y);
  float d=min(seg2(q,vec2(0.,1.36),vec2(.55,1.41)),seg2(q,vec2(.55,1.41),vec2(1.,1.57)));
  float y=clamp(q.y,1.57,4.11),dr=(gR(min(y+.02,4.11))-gR(max(y-.02,1.57)))/.04;
  float e=q.y>4.11?length(q-vec2(1.36,4.11)):q.y<1.57?length(q-vec2(1.,1.57)):abs(q.x-gR(y))/sqrt(1.+dr*dr);
- return min(d,e)-.014;}
+ return min(d,e)-max(.014,.55*gPx);}
 float stemM(vec3 P){float d=sdE(P-vec3(0.,.04,0.),vec3(.87,.045,.87));
  d=smin(d,sdRC(P,vec3(0.,.1,0.),vec3(0.,.32,0.),.3,.13),.06);d=min(d,sdRC(P,vec3(0.,.32,0.),vec3(0.,1.1,0.),.13,.105));return smin(d,sdRC(P,vec3(0.,1.1,0.),vec3(0.,1.37,0.),.105,.24),.04);}
 // The eyes: flat shapes on the front of the glass where the logo's < > are, in any of the shapes and feelings.
-float eyesM(vec3 Q){
+// With fl = 1, the distance to their outline where the view ray crosses them, for soft edges.
+float eyesM(vec3 Q,float fl){
  float blk=1e5,es=uE2.z,op=uE.x;
  for(int i=0;i<2;i++){float s=i==0?-1.:1.;float a=s*.255+uE2.x*.22,ey=2.2+uE2.y*1.2;vec3 n=vec3(sin(a),0.,cos(a)),tg=vec3(cos(a),0.,-sin(a)),e=n*1.465+vec3(0.,ey,0.);
-  vec3 r=Q-e;vec2 f=vec2(dot(r,tg),r.y)/1.35;float w=dot(r,n);
+  vec3 r=Q-e;if(fl>.5)r-=gRd*dot(r,n)/dot(gRd,n);vec2 f=vec2(dot(r,tg),r.y)/1.35;float w=dot(r,n);
   float d2=eye2(f,op,es,s,uK.y);float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(f.x*s);d2=-smin(-d2,-(f.y-top)*.7,.03);
   float py=uE.z>0.?f.y:-f.y;float dc=arc(vec2(f.x,py+.13),1.1,.17)-.045*es;d2=mix(d2,dc,uE.y)*1.35;
-  vec2 v=vec2(d2,abs(w)-.012);blk=min(blk,min(max(v.x,v.y),0.)+length(max(v,0.)));}
+  vec2 v=vec2(d2,abs(w)-.012);blk=min(blk,fl>.5?d2:min(max(v.x,v.y),0.)+length(max(v,0.)));}
  return blk;
 }
 vec2 mapM(vec3 p){
  vec3 P=toP(p),Q=toQ(P);
  float clay=mousseD(Q);
- float gl=stemM(P),rim=length(vec2(length(Q.xz)-1.36,Q.y-4.11))-.024,blk=eyesM(Q);
+ float gl=stemM(P),rim=length(vec2(length(Q.xz)-1.36,Q.y-4.11))-max(.024,.5*gPx),blk=eyesM(Q,0.);
  // Accessories in the mouse's frames, placed on the Mousse: hats (beret, beanie, cap, crown, chef's hat)
  // tilted on its left shoulder beside the curl, headphones, goggles and hood around its top, glasses on
  // its eyes, the bow tie, scarf and laptop by the stem.
@@ -252,10 +257,12 @@ float ao(vec3 p,vec3 n){float o=0.,s=1.;for(int i=1;i<=5;i++){float h=.02+.07*fl
 vec4 shade(vec2 uv){
  float vx=uV.x;if(uK.x>.5&&vx>.5)vx=.6;vec3 tg=vec3(0.,vx,0.),ro=vec3(0.,vx+.9,9.);vec3 fw=normalize(tg-ro),rt=normalize(cross(fw,vec3(0.,1.,0.))),up=cross(rt,fw);
  float th=uV.y/9.*(uK.x>.5&&uV.x>.5?1.16:1.);vec3 rd=normalize(fw+uv.x*th*rt+uv.y*th*up);
- vec3 oc=ro-vec3(0.,.35,0.);float bb=dot(oc,rd),cc=dot(oc,oc)-8.5,hh=bb*bb-cc;float t=0.;bool hit=false;
- if(hh>0.){hh=sqrt(hh);t=max(-bb-hh,0.);float tm=-bb+hh;for(int i=0;i<110;i++){float d=map(ro+rd*t).x;if(d<.0012*t){hit=true;break;}t+=d;if(t>tm)break;}}
+ vec3 oc=ro-vec3(0.,.35,0.);float bb=dot(oc,rd),cc=dot(oc,oc)-8.5,hh=bb*bb-cc;float t=0.;bool hit=false;float pxa=th*2./uRes.y,tol=min(.0012,.3*pxa),md=1e5,mt=0.,cov=1.;gPx=pxa*9./MS;
+ if(hh>0.){hh=sqrt(hh);t=max(-bb-hh,0.);float tm=-bb+hh;for(int i=0;i<110;i++){float d=map(ro+rd*t).x;if(d<md*t){md=d/t;mt=t;}if(d<tol*t){hit=true;break;}t+=d;if(t>tm)break;}}
+ // A ray that passes within a pixel of the surface covers part of the pixel: soft edges at no extra cost.
+ if(!hit&&md<tol+.8*pxa){hit=true;t=mt;cov=clamp(1.-(md-tol)/(.8*pxa),0.,1.);}
  bool mk=uK.x>.5;vec4 bg=vec4(0.);
- if(!hit&&rd.y<0.){vec3 g=ro+rd*((-1.48-ro.y)/rd.y);bg=vec4(0.,0.,0.,exp(-(g.x*g.x/.45+g.z*g.z/.16))*.42*(1.-clamp(uB.x*1.4,0.,.7)));}
+ if((!hit||cov<1.)&&rd.y<0.){vec3 g=ro+rd*((-1.48-ro.y)/rd.y);bg=vec4(0.,0.,0.,exp(-(g.x*g.x/.45+g.z*g.z/.16))*.42*(1.-clamp(uB.x*1.4,0.,.7)));}
  float ga=0.;vec3 gc=vec3(0.);
  if(mk&&hh>0.){float tg=max(-bb-hh,0.),te=hit?t:-bb+hh;
   for(int i=0;i<64;i++){vec3 q=ro+rd*tg;float d=gD(toQ(toP(q)))*MS;if(d<.0008*tg){vec3 ng=normalize(vec3(gD(toQ(toP(q+vec3(.002,0.,0.))))-gD(toQ(toP(q-vec3(.002,0.,0.)))),gD(toQ(toP(q+vec3(0.,.002,0.))))-gD(toQ(toP(q-vec3(0.,.002,0.)))),gD(toQ(toP(q+vec3(0.,0.,.002))))-gD(toQ(toP(q-vec3(0.,0.,.002))))));
@@ -267,8 +274,8 @@ vec4 shade(vec2 uv){
  float spc=pow(clamp(dot(n,normalize(L-rd)),0.,1.),m>.5?36.:12.);
  vec3 col;
  float band=mix(.8,1.,smoothstep(-.06,.06,dot(n,L)+.12));
- if(mk&&m<.5){col=pow(mousseCol(toP(p).y),vec3(2.2))*band;}
- else if(mk&&m<1.5){col=uK.z>.5?vec3(1.):vec3(.004);}
+ if(mk&&m<1.5){vec3 bc=pow(mousseCol(toP(p).y),vec3(2.2))*(m>.5?1.:band);if(ga>0.)bc=mix(bc,gc,ga);
+  vec3 qp=toQ(toP(p));gRd=normalize(toQ(toP(p+rd))-qp);float ec=clamp(.5-eyesM(qp,1.)/(pxa*t/MS),0.,1.);col=mix(bc,uK.z>.5?vec3(1.):vec3(.004),ec);}
  else if(mk&&m>5.5){col=pow(m<6.5?uCol*.76:mix(uCol,vec3(1.),.35),vec3(2.2))*band;}
  else if(m<.5){vec3 a=pow(uCol,vec3(2.2));col=a*(.16+1.0*wr)*mix(.5,1.,o)+a*fil*.14+.05*spc*dif+a*fr*.3+a*a*.15*(1.-dif)*o;col+=vec3(.55,.7,1.)*a*uH2.w*.45*clamp(dot(n,normalize(vec3(0.,-.5,1.))),0.,1.)*smoothstep(-.4,.2,p.y-uB.x);}
  else if(m<1.5){col=vec3(.02)*(.5+wr)*mix(.6,1.,o)+.3*spc*dif*o+vec3(.07)*fr*o;}
@@ -277,8 +284,8 @@ vec4 shade(vec2 uv){
   col=a*(.14+.9*wr)*mix(.55,1.,o)+a*fil*.12+(uAC.w>.5?a*1.4*sp2+a*fr*.5:vec3(.12)*sp2*dif)+vec3(.05)*fr*o;}
  else if(m<4.5){vec3 a=vec3(.05,.052,.06);col=a*(.3+.9*wr)*mix(.6,1.,o)+.28*pow(clamp(dot(n,normalize(L-rd)),0.,1.),40.)+vec3(.12)*fr;}
  else{col=vec3(.8,.9,1.);}
- if(ga>0.&&!(mk&&m>.5&&m<1.5))col=mix(col,gc,ga);
- return vec4(pow(col,vec3(1./2.2)),1.);
+ if(ga>0.&&!(mk&&m<1.5))col=mix(col,gc,ga);
+ return vec4(pow(col,vec3(1./2.2))*cov,cov)+bg*(1.-cov);
 }
 void main(){vec2 fc=gl_FragCoord.xy-uOrg;vec4 c=vec4(0.);float n=uV.z;
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){if(float(i)>=n||float(j)>=n)continue;vec2 o=(vec2(float(i),float(j))+.5)/n-.5;c+=shade(((fc+o)/uRes)*2.-1.);}
