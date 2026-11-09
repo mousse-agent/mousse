@@ -68,7 +68,7 @@ import {
   type TurnError,
   type UserInput
 } from './protocol'
-import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLimits'
+import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits } from './rateLimits'
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
@@ -204,11 +204,13 @@ function savedWindow(value: unknown): RateLimitWindow | null {
 function savedSnapshot(snapshot: RateLimitSnapshot): RateLimitSnapshot {
   const reached = snapshot.rateLimitReachedType
   const plan = snapshot.planType
+  const resets = trimResetCredits(snapshot.rateLimitResetCredits)
   return {
     primary: savedWindow(snapshot.primary),
     secondary: savedWindow(snapshot.secondary),
     ...(typeof reached === 'string' || reached === null ? { rateLimitReachedType: reached } : {}),
-    ...(typeof plan === 'string' && /^[a-z_]{1,32}$/i.test(plan) ? { planType: plan } : {})
+    ...(typeof plan === 'string' && /^[a-z_]{1,32}$/i.test(plan) ? { planType: plan } : {}),
+    ...(resets ? { rateLimitResetCredits: resets } : {})
   }
 }
 
@@ -1474,8 +1476,11 @@ export class CodexProviderService {
     try {
       const conn = await this.connection()
       const response = await conn.request('account/rateLimits/read', undefined, { timeoutMs: 10_000, signal })
-      this.rememberLimits(response.rateLimits, this.account()?.subject)
-      return { snapshot: response.rateLimits, at: Date.now(), live: true }
+      // The reset credits come beside the limits in the read reply; they travel with the snapshot.
+      const resets = trimResetCredits(response.rateLimitResetCredits)
+      const snapshot = resets ? { ...response.rateLimits, rateLimitResetCredits: resets } : response.rateLimits
+      this.rememberLimits(snapshot, this.account()?.subject)
+      return { snapshot, at: Date.now(), live: true }
     } catch (error) {
       // Only the signed-in account's own last snapshot stands in: never another account's limits.
       const last = this.lastLimits
@@ -1506,7 +1511,10 @@ export class CodexProviderService {
   private rememberLimits(snapshot: RateLimitSnapshot, subject: string | undefined): void {
     const account = limitsOwner(subject)
     const saved = this.settings.rateLimits
-    this.lastLimits = account ? { snapshot: savedSnapshot(snapshot), at: Date.now(), account } : undefined
+    // A turn's update has no reset credits: the same account keeps the ones the last read reported.
+    const previous = this.lastLimits?.account === account ? this.lastLimits?.snapshot.rateLimitResetCredits : undefined
+    const merged = snapshot.rateLimitResetCredits || !previous ? snapshot : { ...snapshot, rateLimitResetCredits: previous }
+    this.lastLimits = account ? { snapshot: savedSnapshot(merged), at: Date.now(), account } : undefined
     if (!this.lastLimits && !saved) return
     if (this.lastLimits) this.settings.rateLimits = this.lastLimits
     else delete this.settings.rateLimits

@@ -1,5 +1,5 @@
-import type { ProviderUsageWindow } from '../../../../shared/providerAuth'
-import { codexErrorKind, codexHttpStatus, type CodexErrorInfo, type RateLimitSnapshot, type RateLimitWindow } from './protocol'
+import type { ProviderUsageWindow, UsageResets } from '../../../../shared/providerAuth'
+import { codexErrorKind, codexHttpStatus, type CodexErrorInfo, type RateLimitResetCredits, type RateLimitSnapshot, type RateLimitWindow } from './protocol'
 
 /** The limit the windows of a snapshot stand for. `resetsAt` (epoch seconds) is absent when the server did not report every exhausted window's reset. */
 export interface CodexLimitReset {
@@ -22,6 +22,50 @@ function windowLabel(window: RateLimitWindow, slot: 'primary' | 'secondary'): st
   if (minutes && minutes % 1_440 === 0) return `${minutes / 1_440}-day limit`
   if (minutes && minutes % 60 === 0) return `${minutes / 60}-hour limit`
   return slot === 'primary' ? 'Usage limit' : 'Secondary usage limit'
+}
+
+/**
+ * The reset credits of a read reply, trimmed to what Mousse keeps: the available count and, per
+ * credit, its type, status, title and expiry (no ids). Undefined for anything else.
+ */
+export function trimResetCredits(value: unknown): RateLimitResetCredits | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const count = raw.availableCount
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > 1_000) return undefined
+  const text = (entry: unknown) => (typeof entry === 'string' && entry.trim() && entry.length <= 120 ? entry.trim() : undefined)
+  const credits = (Array.isArray(raw.credits) ? raw.credits : []).slice(0, 20).flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const credit = item as Record<string, unknown>
+    const expires = credit.expiresAt
+    const kept = {
+      ...(text(credit.resetType) ? { resetType: text(credit.resetType) } : {}),
+      ...(text(credit.status) ? { status: text(credit.status) } : {}),
+      ...(text(credit.title) ? { title: text(credit.title) } : {}),
+      ...(typeof expires === 'number' && Number.isFinite(expires) && expires > 0 ? { expiresAt: expires } : {})
+    }
+    return [kept]
+  })
+  return { availableCount: count, ...(credits.length ? { credits } : {}) }
+}
+
+/** The usage page's resets for a snapshot: what Codex reports available, with each credit's expiry. */
+export function snapshotResets(snapshot: RateLimitSnapshot | null | undefined): UsageResets | undefined {
+  const credits = snapshot?.rateLimitResetCredits
+  if (!credits) return undefined
+  // Codex sends epoch seconds; a value that large is already milliseconds.
+  const iso = (at: number) => new Date(at > 1e12 ? at : at * 1000).toISOString()
+  return {
+    available: credits.availableCount,
+    ...(credits.credits?.length ? {
+      credits: credits.credits.map((credit) => ({
+        ...(credit.title ? { title: credit.title } : {}),
+        ...(credit.resetType ? { type: credit.resetType } : {}),
+        ...(credit.status ? { status: credit.status } : {}),
+        ...(credit.expiresAt ? { expiresAt: iso(credit.expiresAt) } : {})
+      }))
+    } : {})
+  }
 }
 
 /** The plan a snapshot's limits belong to, named as ChatGPT does ("Plus", "Pro"), when Codex says. */

@@ -1,4 +1,4 @@
-import type { ProviderUsage, ProviderUsageWindow } from '../../../../shared/providerAuth'
+import type { ProviderUsage, ProviderUsageWindow, UsageResets } from '../../../../shared/providerAuth'
 
 /** The overall windows, in the order the page shows them. */
 const OVERALL = [
@@ -54,6 +54,36 @@ function parseWindow(id: string, label: string, value: unknown): ProviderUsageWi
   }
 }
 
+/** The account's limit-reset grant programs (null on every account seen so far; their shape is not documented). */
+const RESET_GRANTS = ['cedar_ember', 'juniper_tide'] as const
+const COUNT_KEYS = ['availableCount', 'available_count', 'available', 'remaining', 'count'] as const
+const EXPIRY_KEYS = ['expiresAt', 'expires_at', 'expiry', 'expires'] as const
+
+/**
+ * Resets an account has available from its reset grant programs, read only when a program is an
+ * object with an obvious whole-number count (`available`, `remaining`, `count`, …); its expiry is
+ * kept when it is a date or epoch time. Anything else is not read: no count, no resets shown.
+ */
+export function claudeResetGrants(limits: Record<string, unknown>): UsageResets | undefined {
+  let available = 0
+  let found = false
+  const credits: NonNullable<UsageResets['credits']> = []
+  for (const program of RESET_GRANTS) {
+    const grant = object(limits[program])
+    if (!grant) continue
+    const count = COUNT_KEYS.map((key) => grant[key]).find((value) => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 1_000) as number | undefined
+    if (count === undefined) continue
+    found = true
+    available += count
+    const raw = EXPIRY_KEYS.map((key) => grant[key]).find((value) => value !== undefined && value !== null)
+    const at = typeof raw === 'string' && raw.length <= 64 ? Date.parse(raw) : typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? (raw > 1e12 ? raw : raw * 1000) : Number.NaN
+    if (count > 0) credits.push(Number.isFinite(at) ? { expiresAt: new Date(at).toISOString() } : {})
+  }
+  if (!found) return undefined
+  const dated = credits.filter((credit) => credit.expiresAt)
+  return { available, ...(dated.length ? { credits: dated } : {}) }
+}
+
 /** Only the official SDK's account quotas belong here; session tokens do not measure plan limits. */
 export function parseClaudeSubscriptionUsage(value: unknown): ProviderUsage {
   const result: ProviderUsage = {
@@ -68,6 +98,8 @@ export function parseClaudeSubscriptionUsage(value: unknown): ProviderUsage {
   const limits = object(root.rate_limits)
   if (!limits) return result
   result.windows.push(...claudeLimitWindows(limits))
+  const resets = claudeResetGrants(limits)
+  if (resets) result.resets = resets
   if (result.windows.length) {
     result.status = 'available'
     delete result.message

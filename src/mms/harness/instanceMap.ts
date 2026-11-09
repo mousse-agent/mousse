@@ -130,6 +130,11 @@ export class ProviderInstanceService {
     return listed
   }
 
+  /** Whether `instanceId` is turned off on this computer (Settings → Providers). */
+  isDisabled(instanceId: string): boolean {
+    return this.list()[instanceId]?.enabled === false
+  }
+
   /** Whether `instanceId` was removed from this profile (a tombstone); only an explicit add revives it. */
   isRemoved(instanceId: string): boolean {
     return removedIds(this.readStored().stored.removed).includes(instanceId)

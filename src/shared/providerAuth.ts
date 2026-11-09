@@ -134,6 +134,35 @@ export interface ProviderUsage {
   proxy?: UsageProxyState
   /** Each account's own windows, when the provider reads several (a proxy with several sign-ins). */
   accounts?: UsageAccount[]
+  /** A prepaid credit balance, for a provider billed by credits rather than limit windows. */
+  credit?: UsageCredit
+  /** Limit resets the account has available, when the provider reports them. */
+  resets?: UsageResets
+  /** The entry is set up and turned on but not signed in: listed so the usage page can offer Reconnect. */
+  signedOut?: true
+  /** Why there are no numbers, when the reader knows: it decides what the page says and offers. */
+  problem?: UsageProblem
+  /** How the provider is signed in, for a pi-ai provider (an API key or OAuth). */
+  authType?: ProviderAuthType
+}
+
+/**
+ * Why a provider has no usage numbers: no subscription on the account, an expired sign-in, an
+ * expired or rejected key, or nothing certain (`unavailable`).
+ */
+export type UsageProblem = 'no_subscription' | 'session_expired' | 'key_expired' | 'key_rejected' | 'unavailable'
+
+/** Limit resets an account has available: how many, and what the provider says of each. */
+export interface UsageResets {
+  available: number
+  credits?: Array<{ title?: string; type?: string; status?: string; expiresAt?: string }>
+}
+
+/** A credit balance in USD: what is left, what was spent, and the limit when the provider has one. */
+export interface UsageCredit {
+  balanceUsd: number
+  usedUsd?: number
+  limitUsd?: number
 }
 
 /** One account of a provider that reads several: its label, its windows, or why it has none. */
@@ -144,6 +173,10 @@ export interface UsageAccount {
   windows: ProviderUsageWindow[]
   /** Why this account has no windows, in a few words ("Sign-in expired"). */
   problem?: string
+  /** Limit resets this account has available, when the provider reports them. */
+  resets?: UsageResets
+  /** Listed, its usage not read yet (a page filling sign-ins in one by one). */
+  pending?: true
 }
 
 /** A detected CLI-to-API proxy, as the usage page shows it. Never carries the key itself. */
@@ -158,6 +191,26 @@ export interface UsageProxyState {
 
 /** The answer to saving a proxy key: kept only when the proxy accepted it. */
 export type UsageProxyKeyResult = { ok: true } | { ok: false; reason: 'rejected' | 'unreachable' | 'no_proxy' }
+
+/** A provider the usage page shows, before its usage is read: how to name it, and its last reading. */
+export interface UsageSlot {
+  id: string
+  label: string
+  authType?: ProviderAuthType
+  signedOut?: true
+  /** The last reading this computer made, dated (`readAt`), to show until the fresh one arrives. */
+  cached?: ProviderUsage
+}
+
+export interface UsageSlotsResponse {
+  slots: UsageSlot[]
+}
+
+/** One provider's fresh usage, or one of its sign-ins (`accountId`), or its sign-ins before their usage (`preview`). */
+export interface UsageForResponse {
+  provider?: ProviderUsage
+  account?: UsageAccount
+}
 
 export interface ProvidersUsageResponse {
   providers: ProviderUsage[]

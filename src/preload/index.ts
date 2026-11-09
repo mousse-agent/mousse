@@ -112,7 +112,7 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent, UsageProxyKeyResult } from '../shared/providerAuth'
+import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
@@ -980,6 +980,11 @@ const api = {
   },
   providers: {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
+    /** Every provider the usage page shows, with its last reading, before any is read. */
+    usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** One provider's usage (or one proxy sign-in's, or its sign-ins before their usage). */
+    getUsageFor: (request: { providerId: string; accountId?: string; preview?: boolean }): Promise<UsageForResponse> =>
+      ipcRenderer.invoke('providers:getUsageFor', request),
     getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     /** Saves a proxy's management key for usage (checked first); the key never comes back. */

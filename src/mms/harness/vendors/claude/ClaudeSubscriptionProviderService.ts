@@ -12,6 +12,7 @@ import type {
   ProviderLoginOption,
   ProviderLoginResult,
   ProviderUsage,
+  UsageAccount,
   UsageProxyKeyResult
 } from '../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
@@ -57,7 +58,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
-import { checkProxyKey, localProxyOrigin, PROXY_KEY_VARIABLES, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from '../../../providers/localProxyUsage'
+import { checkProxyKey, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from '../../../providers/localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
@@ -249,6 +250,10 @@ type Dependencies = {
   usageLimitHoldMs?: number
   /** Reads the limits of a local proxy Claude Code's base URL points at (default `readLocalProxyClaudeUsage`; tests). */
   proxyUsage?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
+  /** The proxy's sign-ins before their usage (default `previewLocalProxyClaudeAccounts`; tests). */
+  proxyAccountsPreview?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
+  /** One proxy sign-in's usage (default `readLocalProxyClaudeAccount`; tests). */
+  proxyAccount?: (options: ProxyUsageOptions, accountId: string) => Promise<UsageAccount | undefined>
   /** Checks a proxy key before it is saved (default `checkProxyKey`; tests). */
   checkProxyKey?: (options: { baseUrl: string | undefined; key: string; signal?: AbortSignal }) => Promise<UsageProxyKeyResult>
   /** Where proxy keys entered in Mousse are kept, encrypted (tests: a scratch file and codec). */
@@ -1489,15 +1494,38 @@ export class ClaudeSubscriptionProviderService {
 
   /** Only Claude Code's own base URL counts, and the key only from the user's Claude environment. */
   private async localProxyUsage(signal?: AbortSignal): Promise<ProxyUsage | undefined> {
+    const options = this.proxyOptions(signal)
+    return options ? (this.dependencies.proxyUsage ?? readLocalProxyClaudeUsage)(options) : undefined
+  }
+
+  /** Where Claude Code's base URL points and the key for it: Claude's environment first, else the one saved here for that origin. */
+  private proxyOptions(signal?: AbortSignal): ProxyUsageOptions | undefined {
     const env = this.environment()
     const baseUrl = claudeEffectiveVariable(env, 'ANTHROPIC_BASE_URL')
     if (!baseUrl) return undefined
-    // A key in Claude's environment wins; else the one saved in Mousse for exactly this proxy's origin.
     const fromEnv = PROXY_KEY_VARIABLES.map((name) => claudeEffectiveVariable(env, name)).find(Boolean)
     const origin = localProxyOrigin(baseUrl)
     const saved = fromEnv || !origin ? undefined : this.usageProxyKeys().get(origin)
     const keySource = fromEnv ? 'environment' as const : saved ? 'saved' as const : undefined
-    return (this.dependencies.proxyUsage ?? readLocalProxyClaudeUsage)({ baseUrl, managementKey: fromEnv ?? saved, ...(keySource ? { keySource } : {}), ...(signal ? { signal } : {}) })
+    return { baseUrl, managementKey: fromEnv ?? saved, ...(keySource ? { keySource } : {}), ...(signal ? { signal } : {}) }
+  }
+
+  /**
+   * The local proxy's Claude sign-ins before their usage is read, for a usage page that fills them in
+   * one by one; undefined unless Claude Code runs through a proxy with several sign-ins.
+   */
+  async usageAccountsPreview(signal?: AbortSignal): Promise<ProviderUsage | undefined> {
+    if (this.checkDue()) await this.status()
+    if (!this.configured()) return undefined
+    const options = this.proxyOptions(signal)
+    const preview = options ? await (this.dependencies.proxyAccountsPreview ?? previewLocalProxyClaudeAccounts)(options) : undefined
+    return preview ? { ...parseClaudeSubscriptionUsage(undefined), ...preview, message: undefined } : undefined
+  }
+
+  /** One proxy sign-in's usage, by its credential id (see `usageAccountsPreview`). */
+  async usageAccount(accountId: string, signal?: AbortSignal): Promise<UsageAccount | undefined> {
+    const options = this.proxyOptions(signal)
+    return options ? (this.dependencies.proxyAccount ?? readLocalProxyClaudeAccount)(options, accountId) : undefined
   }
 
   private proxyKeyStore?: UsageProxyKeyStore

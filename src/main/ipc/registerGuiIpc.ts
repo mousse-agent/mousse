@@ -2651,6 +2651,10 @@ export function registerGuiIpc(
   registerHandler('providers:getUsage', async () =>
     guiMms.request('providers.getUsage')
   )
+  registerHandler('providers:usageSlots', async () => guiMms.request('providers.usageSlots'))
+  registerHandler('providers:getUsageFor', async (_e, request: { providerId: string; accountId?: string; preview?: boolean }) =>
+    guiMms.request('providers.getUsageFor', request)
+  )
   registerHandler('providers:setUsageProxyKey', async (_e, providerId: string, key: string) =>
     guiMms.request('providers.setUsageProxyKey', { providerId, key })
   )

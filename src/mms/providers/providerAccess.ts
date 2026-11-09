@@ -1,6 +1,6 @@
 import { AppError } from '../../shared/errors'
 import type { ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../../shared/dictation'
-import type { ProvidersUsageResponse } from '../../shared/providerAuth'
+import type { ProviderAuthType, ProvidersUsageResponse, ProviderUsage } from '../../shared/providerAuth'
 import type { ProviderSpeechRequest, ProviderSpeechResult } from '../../shared/readAloud'
 import type { ProviderAuthService } from './ProviderAuthService'
 
@@ -21,12 +21,14 @@ export class ProviderRemovedError extends AppError {
 /** The shared calls `providerAccess` guards; `ProviderAuthService` stays profile-free. */
 export type SharedProviderCalls = Pick<
   ProviderAuthService,
-  'synthesizeSpeech' | 'transcribeAudio' | 'getSubscriptionUsage' | 'getUsage' | 'getProviderDisplayName'
+  'synthesizeSpeech' | 'transcribeAudio' | 'getSubscriptionUsage' | 'getUsage' | 'getProviderDisplayName' | 'getConfiguredProviders'
 >
 
 /** What `providerAccess` asks the profile's instance map. */
 export interface ProfileInstances {
   isRemoved(instanceId: string): boolean
+  /** Turned off on this computer: the usage page leaves it out. */
+  isDisabled?(instanceId: string): boolean
   instanceIdForLegacyProvider(llmProvider: string): string
 }
 
@@ -42,6 +44,10 @@ export interface ProviderAccess {
   subscriptionUsage(providerId: string): Promise<string | undefined>
   /** Usage of every credentialed provider, without the ones removed from this profile. */
   usage(): Promise<ProvidersUsageResponse>
+  /** The credentialed providers the usage page lists, without reading any. */
+  usageSlots(): Array<{ id: string; label: string; authType?: ProviderAuthType }>
+  /** One credentialed provider's usage; undefined for one removed from this profile or not credentialed. */
+  usageFor(providerId: string): Promise<ProviderUsage | undefined>
 }
 
 export function createProviderAccess(auth: SharedProviderCalls, instances: ProfileInstances): ProviderAccess {
@@ -54,6 +60,14 @@ export function createProviderAccess(auth: SharedProviderCalls, instances: Profi
       return false
     }
     return instances.isRemoved(instanceId)
+  }
+  // A provider turned off in Settings is not shown on the usage page (nor read for it).
+  const disabled = (providerId: string): boolean => {
+    try {
+      return instances.isDisabled?.(instances.instanceIdForLegacyProvider(providerId)) ?? false
+    } catch {
+      return false
+    }
   }
   const refuseRemoved = (providerId: string): void => {
     if (removed(providerId)) throw new ProviderRemovedError(auth.getProviderDisplayName(providerId), providerId)
@@ -72,6 +86,8 @@ export function createProviderAccess(auth: SharedProviderCalls, instances: Profi
       return auth.getSubscriptionUsage(providerId)
     },
     // A removed provider's usage is not read at all (no request with the shared key).
-    usage: () => auth.getUsage((providerId) => !removed(providerId))
+    usage: () => auth.getUsage((providerId) => !removed(providerId)),
+    usageSlots: () => auth.getConfiguredProviders().filter((provider) => !removed(provider.id) && !disabled(provider.id)).map((provider) => ({ id: provider.id, label: provider.label, authType: provider.authType })),
+    usageFor: async (providerId) => (removed(providerId) || disabled(providerId) ? undefined : (await auth.getUsage((id) => id === providerId)).providers[0])
   }
 }
