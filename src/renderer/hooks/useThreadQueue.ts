@@ -108,11 +108,16 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // shown, and the open edits are saved with the profile's workspace, so a reload keeps them.
   const shownEdit = useAppStore((state) => (threadId ? state.queueEditDrafts[threadId] : undefined))
   const draftMoved = useAppStore((state) => Boolean(threadId && state.queueDraftNotices[threadId]))
+  // The last list of each thread with an open edit seen while that thread was not shown: a save that fails there
+  // decides on it.
+  const hiddenLists = useRef(new Map<string, QueuedMessage[]>())
   const toComposer = useRef(onDraftToComposer)
   toComposer.current = onDraftToComposer
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
   const itemsRef = useRef(items)
   itemsRef.current = items
+  const itemsThreadRef = useRef(itemsThread)
+  itemsThreadRef.current = itemsThread
 
   const threadIdRef = useRef(threadId)
   threadIdRef.current = threadId
@@ -182,6 +187,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     // Taken out of the store at once: a second update before the next render finds nothing to recover, and the
     // saved workspace no longer has it, so a reload does not recover it again.
     const taken = store.takeQueueEditDraft(thread, draft.itemId)
+    hiddenLists.current.delete(thread)
     if (!taken) return
     const text = taken.draft.trim()
     const images = taken.images?.length ? taken.images : undefined
@@ -201,7 +207,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     // another thread only matters to an edit open there.
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
-      if (updatedId !== threadId) { reconcileEdit(updatedId, next); return }
+      if (updatedId !== threadId) {
+        if (useAppStore.getState().queueEditDrafts[updatedId]) hiddenLists.current.set(updatedId, next)
+        reconcileEdit(updatedId, next)
+        return
+      }
       settled = true
       loadGeneration.current += 1
       setItems(next)
@@ -214,6 +224,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     return () => {
       unsub()
       window.clearTimeout(fallback)
+      // The list this thread had when it stopped being shown, for an edit of it still saving.
+      if (useAppStore.getState().queueEditDrafts[threadId] && itemsThreadRef.current === threadId) hiddenLists.current.set(threadId, itemsRef.current)
       // Stops a load that is retrying for this thread, and makes its changes still in flight change nothing.
       loadGeneration.current += 1
       threadSession.current += 1
@@ -329,8 +341,12 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     } finally {
       useAppStore.getState().updateQueueEditDraft(thread, itemId, (open) => (outcome === 'saved' ? null : { ...open, saving: false }))
       if (live()) markBusy(itemId, false)
+      // Not saved while the thread is not shown: the last list seen of it decides whether the draft is recovered.
+      // (The thread shown decides on its own list, in the effect above.)
+      const hidden = hiddenLists.current.get(thread)
+      if (outcome !== 'saved' && thread !== threadIdRef.current && hidden) reconcileEdit(thread, hidden)
     }
-  }, [threadId, loadQueue, markBusy, changeScope])
+  }, [threadId, loadQueue, markBusy, changeScope, reconcileEdit])
 
   const clearError = useCallback(() => setError(null), [])
   const dismissDraftMoved = useCallback(() => {

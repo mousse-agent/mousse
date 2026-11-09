@@ -387,6 +387,8 @@ describe('a change that answers after the thread changed', () => {
     act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId }))))
     await act(async () => { push!({ threadId, items }) })
   }
+  /** Shows no thread at all. */
+  const close = () => { act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId: null })))) }
   const editT1 = async (text: string) => {
     await open('t1', t1)
     await click(button('a', 'Edit'))
@@ -488,6 +490,23 @@ describe('a change that answers after the thread changed', () => {
     })
     expect(toComposer).toHaveBeenCalledTimes(1)
   })
+
+  for (const away of ['another thread', 'no thread'] as const) {
+    it(`recovers the draft when a save fails after its message left the queue, with ${away} shown`, async () => {
+      const answer = deferred<{ item: QueuedMessage }>()
+      api.edit.mockReturnValueOnce(answer.promise)
+      await editT1('one, edited')
+      await click(button('a', 'Save'))
+      if (away === 'no thread') close()
+      else await open('t2', t2)
+      // The message started while the save was in flight: nothing is decided until the save answers.
+      await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
+      expect(toComposer).not.toHaveBeenCalled()
+      await act(async () => { answer.reject(new Error('Queue item a already started and can no longer be edited.')) })
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+      expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
+    })
+  }
 
   it("does not reload the old thread over the new one's load", async () => {
     const answer = deferred<QueuedMessage[]>()
