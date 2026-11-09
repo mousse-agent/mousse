@@ -862,7 +862,8 @@ const api = {
     /** Stops the thread's running `/compact`; the full history stays. */
     stopCompaction: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:stopCompaction', threadId),
     /** `/fork`: a new thread from the thread's latest finished turn, selected. */
-    fork: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId),
+    /** Forks after the thread's latest finished turn, or after the turn `atRunId` names (a message's `turnId`). */
+    fork: (threadId: string, options?: { atRunId?: string }): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId, options),
     setModel: (
       threadId: string,
       model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }

@@ -24,7 +24,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, History, ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -294,6 +294,35 @@ function formatTimestamp(date: Date): string {
   return dateFormatter.format(date);
 }
 
+/** Fork from here: a new thread that starts after this finished turn, with the conversation up to it. */
+function ForkFromTurnButton({ turnId }: { turnId: string }) {
+  const turnActions = useTurnActions();
+  const [forking, setForking] = useState(false);
+  if (!turnActions?.forkFrom) return null;
+  const forkFrom = turnActions.forkFrom;
+  return (
+    <button
+      type="button"
+      disabled={forking}
+      onClick={() => {
+        setForking(true);
+        forkFrom(turnId);
+        window.setTimeout(() => setForking(false), 1500);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      title="Fork from here"
+      aria-label="Fork from here"
+      className={cn(
+        "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
+        "opacity-50 bg-transparent enabled:hover:opacity-100 enabled:hover:bg-an-foreground/10 disabled:cursor-default",
+      )}
+    >
+      <GitFork className="w-3.5 h-3.5 text-an-foreground-muted" />
+    </button>
+  );
+}
+
 function CopyButton({
   text,
   onCopied,
@@ -505,6 +534,7 @@ function MessageToolbar({
   alignClass,
   onCopied,
   undoMessageId,
+  forkTurnId,
   metadata,
   speechKey,
   speechText,
@@ -517,6 +547,8 @@ function MessageToolbar({
   alignClass: string;
   onCopied?: () => void;
   undoMessageId?: string;
+  /** The finished turn Fork from here starts after (its run, the `turnId` of its messages). */
+  forkTurnId?: string;
   metadata?: ResponseMetadata;
   /** Identifies the message for read aloud; the button shows only with text. */
   speechKey?: string;
@@ -548,6 +580,7 @@ function MessageToolbar({
         <ReadAloudButton speechKey={speechKey} markdown={speechText ?? text} />
       )}
       {text && <CopyButton text={text} onCopied={onCopied} />}
+      {forkTurnId && <ForkFromTurnButton turnId={forkTurnId} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
           <MetadataButton metadata={metadata} onOpenChange={setMetadataOpen} />
@@ -1697,6 +1730,8 @@ export const MessageList = memo(function MessageList({
                     const toolbarText = showCopyToolbar ? assistantText : "";
                     // Read aloud reads the answer, not the notes the agent wrote while it worked.
                     const speechText = turnAnswerText(turn.assistantMsgs);
+                    // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
+                    const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
 
                     const promptId = turn.userMsg?.id;
                     const workedMs = isTurnStreaming
@@ -1892,6 +1927,7 @@ export const MessageList = memo(function MessageList({
                             metadata={turnMetadata}
                             speechKey={copyKey}
                             speechText={speechText}
+                            forkTurnId={forkTurnId}
                           />
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
@@ -1904,6 +1940,7 @@ export const MessageList = memo(function MessageList({
                             metadata={turnMetadata}
                             speechKey={copyKey}
                             speechText={speechText}
+                            forkTurnId={forkTurnId}
                           />
                         ) : null}
                       </div>

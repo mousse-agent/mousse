@@ -2208,7 +2208,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       const run = ctx.mms.runEngine.getRun(runId)
-      if (!run) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
+      // A run named with a thread is that thread's, or there is none.
+      const threadId = asOptionalString(p.threadId, 256)
+      if (!run || (threadId !== undefined && run.threadId !== threadId)) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
       return { run }
     }
     case 'runs.events': {
