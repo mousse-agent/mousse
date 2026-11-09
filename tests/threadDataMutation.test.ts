@@ -161,14 +161,15 @@ describe('ThreadDataStore.mutateThreadData atomicity', () => {
     expect(final.messages.map((m) => m.id)).toEqual(['m1', 'm2'])
     expect(final.agents.map((a) => a.id).sort()).toEqual(['a-keep', 'a-new'])
 
-    // Contrast: full saveThreadData with stale snapshot still can overwrite (documented).
+    // Contrast: a full saveThreadData with a stale snapshot still replaces agents (documented). Messages are rows
+    // in thread.db: the stale list never held m2, so saving it does not remove m2.
     store.saveThreadData(threadId, {
       ...stale,
       messages: [...stale.messages, userMsg('m-stale', 'stale')]
     })
     const clobbered = store.loadThreadData(threadId)
     expect(clobbered.agents.map((a) => a.id)).toEqual(['a-keep'])
-    expect(clobbered.messages.some((m) => m.id === 'm2')).toBe(false)
+    expect(clobbered.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm-stale'])
   })
 
   it('queue remains independent of thread-data mutation', () => {
