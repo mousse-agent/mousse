@@ -185,6 +185,94 @@ describe('queued messages in the conversation', () => {
   })
 })
 
+/** A promise the test settles. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+describe('a change that answers after the thread changed', () => {
+  /** The chat with a thread switch: the hook stays, the conversation (and its queue) is drawn per thread. */
+  function SwitchingChat({ threadId }: { threadId: string }) {
+    const thread = useThreadQueue({ threadId })
+    return createElement(Fragment, null,
+      createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
+      createElement(ComposerNoticeSlot),
+      createElement(QueuedMessages, { key: threadId, queue: thread }))
+  }
+  const open = async (threadId: string, items: QueuedMessage[]) => {
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId }))))
+    await act(async () => { push!({ threadId, items }) })
+  }
+  const t1 = [queued('a', 'one'), queued('b', 'two')]
+  const t2 = [queued('x', 'other thread', { threadId: 't2' })]
+  const ids = () => rows().map((entry) => entry.dataset.queuedId)
+
+  it("leaves the new thread's queue alone when a reorder of the old one is saved late", async () => {
+    const answer = deferred<QueuedMessage[]>()
+    api.reorder.mockReturnValueOnce(answer.promise)
+    await open('t1', t1)
+    await key(button('a', 'Reorder')!, { key: 'ArrowDown', altKey: true })
+    await open('t2', t2)
+    await act(async () => { answer.resolve([t1[1]!, t1[0]!]) })
+    expect(ids()).toEqual(['x'])
+  })
+
+  it('shows nothing and reloads nothing when a change of the old thread fails late', async () => {
+    const reorder = deferred<QueuedMessage[]>()
+    const remove = deferred<null>()
+    const steer = deferred<boolean>()
+    api.reorder.mockReturnValueOnce(reorder.promise)
+    api.remove.mockReturnValueOnce(remove.promise)
+    api.promoteToSteer.mockReturnValueOnce(steer.promise)
+    await open('t1', t1)
+    await key(button('a', 'Reorder')!, { key: 'ArrowDown', altKey: true })
+    await click(button('b', 'Remove'))
+    await click(button('a', 'Send'))
+    await open('t2', t2)
+    api.list.mockClear()
+    await act(async () => {
+      reorder.reject(new Error('nope'))
+      remove.reject(new Error('nope'))
+      steer.resolve(false)
+    })
+    await act(async () => { await new Promise((done) => setTimeout(done, 200)) })
+    expect(ids()).toEqual(['x'])
+    expect(host.querySelector('.composer-notice')).toBeNull()
+    expect(api.list).not.toHaveBeenCalledWith('t1')
+  })
+
+  it("does not put the old thread's messages back when its edit fails late", async () => {
+    const answer = deferred<QueuedMessage>()
+    api.edit.mockReturnValueOnce(answer.promise)
+    await open('t1', t1)
+    await click(button('a', 'Edit'))
+    await type(row('a').querySelector('textarea')!, 'changed')
+    await click(button('a', 'Save'))
+    await open('t2', t2)
+    await act(async () => { answer.reject(new Error('nope')) })
+    expect(ids()).toEqual(['x'])
+    expect(host.querySelector('.composer-notice')).toBeNull()
+  })
+
+  it("does not reload the old thread over the new one's load", async () => {
+    const answer = deferred<QueuedMessage[]>()
+    api.reorder.mockReturnValueOnce(answer.promise)
+    await open('t1', t1)
+    await key(button('a', 'Reorder')!, { key: 'ArrowDown', altKey: true })
+    // The new thread has no update yet: its own load fills it.
+    listed = t2
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId: 't2' }))))
+    await act(async () => { answer.reject(new Error('nope')) })
+    await act(async () => { await new Promise((done) => setTimeout(done, 200)) })
+    expect(api.list).not.toHaveBeenCalledWith('t1')
+    expect(api.list).toHaveBeenCalledWith('t2')
+    expect(ids()).toEqual(['x'])
+  })
+})
+
 describe('queued messages while a compaction runs', () => {
   const state = () => host.querySelector<HTMLElement>('.queued-message-state')!
 

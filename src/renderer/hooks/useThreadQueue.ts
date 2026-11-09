@@ -75,10 +75,20 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   const loadGeneration = useRef(0)
   const retryTimer = useRef<number | null>(null)
   const loggedLoadFailure = useRef(false)
+  // Bumped when the thread changes or the component unmounts, so a change that answers later (send now,
+  // remove, reorder, edit) changes nothing in the thread shown now.
+  const threadSession = useRef(0)
+  /** Whether a change started now for `id` still belongs to the thread shown when it answers. */
+  const changeScope = useCallback((id: string) => {
+    const session = threadSession.current
+    return () => threadSession.current === session && threadIdRef.current === id
+  }, [])
 
   // A failed load is never shown: the last list stays, and the load keeps retrying quietly with
   // backoff until it succeeds or is superseded. Only the first failure of a streak is logged.
   const loadQueue = useCallback(async (id: string) => {
+    // A load for a thread no longer shown must not supersede the shown thread's load.
+    if (threadIdRef.current !== id) return
     const generation = ++loadGeneration.current
     const current = () => loadGeneration.current === generation && threadIdRef.current === id
     for (let attempt = 0; ; attempt += 1) {
@@ -106,6 +116,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     setItems([])
     setError(null)
+    setBusyIds({})
     if (!threadId) return
     // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list.
     let settled = false
@@ -121,8 +132,9 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     return () => {
       unsub()
       window.clearTimeout(fallback)
-      // Stops a load that is retrying for this thread.
+      // Stops a load that is retrying for this thread, and makes its changes still in flight change nothing.
       loadGeneration.current += 1
+      threadSession.current += 1
       loggedLoadFailure.current = false
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
       retryTimer.current = null
@@ -145,71 +157,87 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     })
   }, [])
 
+  // Every change below checks, once it answers, that its thread is still the one shown (`changeScope`):
+  // the answer of a thread left behind neither shows nor reloads anything here.
   const reorder = useCallback(async (orderedIds: string[]) => {
     if (!threadId) return
+    const live = changeScope(threadId)
     const previous = itemsRef.current
     setItems(reorderByIds(previous, orderedIds))
     try {
-      setItems(await window.mousse.queue.reorder(threadId, orderedIds))
+      const next = await window.mousse.queue.reorder(threadId, orderedIds)
+      if (!live()) return
+      setItems(next)
       setError(null)
     } catch (err) {
+      if (!live()) return
       setItems(previous)
       setError(readableError(err, 'Could not reorder the queue.'))
       void loadQueue(threadId)
     }
-  }, [threadId, loadQueue])
+  }, [threadId, loadQueue, changeScope])
 
   const remove = useCallback(async (itemId: string) => {
     if (!threadId) return
+    const live = changeScope(threadId)
     markBusy(itemId, true)
     try {
       await window.mousse.queue.remove(threadId, itemId)
+      if (!live()) return
       setError(null)
     } catch (err) {
+      if (!live()) return
       setError(readableError(err, 'Could not remove the queued message.'))
       void loadQueue(threadId)
     } finally {
-      markBusy(itemId, false)
+      if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy])
+  }, [threadId, loadQueue, markBusy, changeScope])
 
   const steer = useCallback(async (itemId: string) => {
     if (!threadId) return
+    const live = changeScope(threadId)
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
     setError(null)
     try {
-      if (!(await window.mousse.queue.promoteToSteer(threadId, itemId))) {
+      const ok = await window.mousse.queue.promoteToSteer(threadId, itemId)
+      if (!live()) return
+      if (!ok) {
         setError(refused)
         void loadQueue(threadId)
       }
     } catch (err) {
+      if (!live()) return
       setError(readableError(err, refused))
       void loadQueue(threadId)
     } finally {
-      markBusy(itemId, false)
+      if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy])
+  }, [threadId, loadQueue, markBusy, changeScope])
 
   const edit = useCallback(async (itemId: string, content: string) => {
     if (!threadId) return false
+    const live = changeScope(threadId)
     const previous = itemsRef.current
     markBusy(itemId, true)
     setItems(previous.map((item) => (item.id === itemId ? { ...item, content } : item)))
     try {
       const saved = await window.mousse.queue.edit(threadId, itemId, content)
+      if (!live()) return false
       setItems((current) => current.map((item) => (item.id === saved.id ? saved : item)))
       setError(null)
       return true
     } catch (err) {
+      if (!live()) return false
       setItems(previous)
       setError(readableError(err, 'Could not edit the queued message.'))
       void loadQueue(threadId)
       return false
     } finally {
-      markBusy(itemId, false)
+      if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy])
+  }, [threadId, loadQueue, markBusy, changeScope])
 
   const clearError = useCallback(() => setError(null), [])
 
