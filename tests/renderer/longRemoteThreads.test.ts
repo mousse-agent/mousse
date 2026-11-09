@@ -178,3 +178,23 @@ describe('images that were fetched stay', () => {
     expect(again).toEqual(['1'])
   })
 })
+
+describe('a long thread opened at its newest page', () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeThreadId: 't', messages: [message('50'), message('51')], earlierByThread: { t: { before: '50', count: 49 } } })
+  })
+
+  it('leaves a change to an older, unloaded message where it is', () => {
+    useAppStore.getState().updateMessage(message('10', { content: 'edited' }))
+    expect(useAppStore.getState().messages.map((m) => m.id)).toEqual(['50', '51'])
+    useAppStore.getState().updateMessage(message('52'))
+    expect(useAppStore.getState().messages.map((m) => m.id)).toEqual(['50', '51', '52'])
+  })
+
+  it('forgets the earlier prompt when the whole transcript replaces it', () => {
+    const all = Array.from({ length: 51 }, (_, at) => message(String(at + 1)))
+    useAppStore.getState().applyThreadMessages({ threadId: 't', messages: all, replace: true } as never, useAppStore.getState().profileId)
+    expect(useAppStore.getState().earlierByThread.t).toBeUndefined()
+    expect(useAppStore.getState().messages).toHaveLength(51)
+  })
+})

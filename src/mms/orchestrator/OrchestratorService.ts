@@ -7220,6 +7220,11 @@ export class OrchestratorService extends EventEmitter {
     })}))
   }
 
+  /** True when the thread's session is loaded (reading it then costs nothing). */
+  hasSession(threadId: string): boolean {
+    return this.boundSession.threadId === threadId || this.sessions.has(threadId)
+  }
+
   getMessages(threadId?: string): ChatMessage[] {
     return this.getMessagesForPersistence(threadId).filter((message) => !message.hidden)
   }
@@ -11554,15 +11559,31 @@ export class OrchestratorService extends EventEmitter {
     if (this.lifecycle.stopping) return
     if (!this.threadStore) return
     setImmediate(() => {
-      try {
-        this.recoverAndDrainPendingQueues()
-      } catch (err) {
+      this.recoverAndDrainPendingQueuesAsync().catch((err: unknown) => {
         this.emit('queue-drain-failed', {
           threadId: null,
           error: err instanceof Error ? err.message : String(err)
         })
-      }
+      })
     })
+  }
+
+  /**
+   * `recoverAndDrainPendingQueues` for the start of the daemon: each thread kept in thread.db is read in the read
+   * worker just before its session loads, one at a time, so the start never loads every transcript on the event
+   * loop in one go.
+   */
+  private async recoverAndDrainPendingQueuesAsync(): Promise<void> {
+    if (this.lifecycle.stopping || !this.threadStore) return
+    const ordered = this.startupRecoveryOrder()
+    for (const thread of ordered) if (!thread.settledAt) this.reclaimForStartup(thread.id)
+    for (const thread of ordered) {
+      if (this.lifecycle.stopping) return
+      if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
+      if (!this.sessions.has(thread.id)) await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      this.considerStartupDrain(thread.id)
+    }
+    this.pumpStartupDrainQueue()
   }
 
   /**
@@ -11573,51 +11594,54 @@ export class OrchestratorService extends EventEmitter {
   recoverAndDrainPendingQueues(): void {
     if (this.lifecycle.stopping) return
     if (!this.threadStore) return
-    const threads = this.threadStore.listAllThreads()
-    // Deterministic order for scheduling.
-    const ordered = [...threads].sort((a, b) => a.id.localeCompare(b.id))
-
+    const ordered = this.startupRecoveryOrder()
+    for (const thread of ordered) if (!thread.settledAt) this.reclaimForStartup(thread.id)
     for (const thread of ordered) {
-      if (thread.settledAt) continue
-      try {
-        this.reclaimAbandonedClaimsForThread(thread.id)
-      } catch (err) {
-        this.emit('queue-drain-failed', {
-          threadId: thread.id,
-          error: err instanceof Error ? err.message : String(err)
-        })
-      }
+      if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
+      this.considerStartupDrain(thread.id)
     }
-
-    for (const thread of ordered) {
-      if (thread.settledAt) continue
-      if (this.startupDrainScheduled.has(thread.id)) continue
-      try {
-        const session = this.getOrCreateSession(thread.id)
-        if (session.deleted || session.isTurnRunning()) continue
-        this.reclaimStaleThreadLease(thread.id)
-        if (this.isThreadLeaseHeldExternally(thread.id, session.executionLease?.owner.token)) {
-          continue
-        }
-        // Only enqueue threads that still have pending normal work after reclaim.
-        this.refreshSessionQueueFromDisk(session)
-        const hasPendingNormal = listPendingQueue(session.queue).some(
-          (item) => item.intent === 'normal' && item.state === 'pending'
-        )
-        // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
-        // settled as interrupted when the session loaded, and its saved hold is removed here).
-        if (!hasPendingNormal || this.pausedHoldsQueue(thread.id, session.queue) || this.compactionHoldsQueue(thread.id)) continue
-        this.startupDrainScheduled.add(thread.id)
-        this.startupDrainPending.push(thread.id)
-      } catch (err) {
-        this.emit('queue-drain-failed', {
-          threadId: thread.id,
-          error: err instanceof Error ? err.message : String(err)
-        })
-      }
-    }
-
     this.pumpStartupDrainQueue()
+  }
+
+  /** Every thread, in the deterministic order startup recovery schedules them in. */
+  private startupRecoveryOrder(): Thread[] {
+    return [...(this.threadStore?.listAllThreads() ?? [])].sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  private reclaimForStartup(threadId: string): void {
+    try {
+      this.reclaimAbandonedClaimsForThread(threadId)
+    } catch (err) {
+      this.emit('queue-drain-failed', {
+        threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    }
+  }
+
+  /** Loads one thread's session and schedules its drain when it still has pending normal work. */
+  private considerStartupDrain(threadId: string): void {
+    try {
+      const session = this.getOrCreateSession(threadId)
+      if (session.deleted || session.isTurnRunning()) return
+      this.reclaimStaleThreadLease(threadId)
+      if (this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) return
+      // Only enqueue threads that still have pending normal work after reclaim.
+      this.refreshSessionQueueFromDisk(session)
+      const hasPendingNormal = listPendingQueue(session.queue).some(
+        (item) => item.intent === 'normal' && item.state === 'pending'
+      )
+      // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
+      // settled as interrupted when the session loaded, and its saved hold is removed here).
+      if (!hasPendingNormal || this.pausedHoldsQueue(threadId, session.queue) || this.compactionHoldsQueue(threadId)) return
+      this.startupDrainScheduled.add(threadId)
+      this.startupDrainPending.push(threadId)
+    } catch (err) {
+      this.emit('queue-drain-failed', {
+        threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    }
   }
 
   private pumpStartupDrainQueue(): void {

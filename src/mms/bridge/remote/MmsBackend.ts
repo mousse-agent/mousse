@@ -450,6 +450,10 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    * long transcript is cut to its newest 16 MiB (`earlier` says where the rest begins, and
    * `thread.messages` pages it), where a phone's snapshot is whole and fails past its bound.
    */
+  async warm(threadId: string): Promise<void> {
+    if (this.remoteThread(threadId)) await this.services.threads.warmThread(threadId)
+  }
+
   snapshot(
     threadId: string,
     maximumBytes = 25 * 1024 * 1024,

@@ -142,6 +142,14 @@ interface SearchPlan {
   scan: Thread[]
 }
 
+export interface MessagePageResult {
+  messages: ChatMessage[]
+  earlier?: { before: string; count: number }
+  later?: { after: string; count: number }
+  seq: number
+  epoch: number
+}
+
 export type ThreadImportOutcome =
   | { status: 'imported'; messages: number }
   | { status: 'already' }
@@ -270,6 +278,57 @@ export class ThreadDataStore extends EventEmitter {
   private threadDb(): ThreadDbStore {
     if (!this.threadDbStore) this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
     return this.threadDbStore
+  }
+
+  /** True when the thread keeps its history in `thread.db`. */
+  usesThreadDb(id: string): boolean {
+    return ThreadDbStore.usesDb(this.getThreadDir(id))
+  }
+
+  /**
+   * A page of a thread's visible messages, read in the read worker without loading the thread: the newest, or those
+   * just before or after a message. `undefined` when the cursor message is not in the thread. `seq`/`epoch` are
+   * where `changesSince` continues from.
+   */
+  async readMessagePage(id: string, request: { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }): Promise<MessagePageResult | undefined> {
+    const page = await this.threadDb().client.call('page', this.getThreadDir(id), request)
+    if (page.missing) return undefined
+    return {
+      messages: page.messages.map((payload) => JSON.parse(payload) as ChatMessage),
+      ...(page.earlier ? { earlier: page.earlier } : {}),
+      ...(page.later ? { later: page.later } : {}),
+      seq: page.info.seq,
+      epoch: page.info.epoch
+    }
+  }
+
+  /**
+   * The visible messages that changed since `seq`, oldest first, and the ids of those removed. `reset` means the
+   * reader is too far behind (or the thread was renumbered) and starts again from a page.
+   */
+  async readMessageChanges(id: string, seq: number, epoch?: number): Promise<{ seq: number; epoch: number; reset: boolean; messages: ChatMessage[]; removed: string[] }> {
+    const changes = await this.threadDb().client.call('messageChanges', this.getThreadDir(id), seq, epoch)
+    return {
+      seq: changes.info.seq,
+      epoch: changes.info.epoch,
+      reset: changes.reset,
+      messages: changes.messages.map((row) => JSON.parse(row.payload) as ChatMessage),
+      removed: changes.removed
+    }
+  }
+
+  /** One message whole, images included, read without loading the thread. */
+  async readMessage(id: string, messageId: string): Promise<ChatMessage | undefined> {
+    const payload = await this.threadDb().client.call('messageById', this.getThreadDir(id), messageId)
+    return payload === undefined ? undefined : (JSON.parse(payload) as ChatMessage)
+  }
+
+  /** The thread database's change sequence and epoch, or undefined for a JSON thread. */
+  threadDbPosition(id: string): { seq: number; epoch: number } | undefined {
+    const dir = this.getThreadDir(id)
+    if (!ThreadDbStore.usesDb(dir)) return undefined
+    const info = this.threadDb().info(dir)
+    return { seq: info.seq, epoch: info.epoch }
   }
 
   /** How many transcript messages a thread folder holds, without loading them. */
@@ -1844,7 +1903,7 @@ export class ThreadDataStore extends EventEmitter {
       this.flushIndexNotices()
       const batch = Math.max(limit, 50)
       for (let offset = 0; distinct.size < limit; offset += batch) {
-        const hits = await this.threadDb().client.call('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset })
+        const hits = await this.threadDb().client.callIndex('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset })
         for (const hit of hits) {
           const thread = byId.get(hit.threadId)
           if (!thread) continue
@@ -1981,7 +2040,7 @@ export class ThreadDataStore extends EventEmitter {
     if (!this.indexDirty.size || !this.threadDbStore) return
     const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
     this.indexDirty.clear()
-    this.threadDbStore.client.call('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
+    this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -2010,7 +2069,7 @@ export class ThreadDataStore extends EventEmitter {
     const sweep = (): void => {
       const live = this.databaseThreads()
       if (!live.length && !this.threadDbStore) return
-      this.threadDb().client.call('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+      this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
         console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
       })
     }

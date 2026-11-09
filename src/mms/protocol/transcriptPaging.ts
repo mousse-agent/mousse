@@ -44,6 +44,48 @@ export function newestMessages<T extends Identified>(
   return left > 0 ? { messages: kept, earlier: { before: kept[0].id, count: left } } : { messages: kept }
 }
 
+/** The newest messages, at most `limit` of them within `maxBytes`; `earlier` names the older ones left out. */
+export function newestPage<T extends Identified>(
+  messages: readonly T[],
+  limit: number,
+  maxBytes: number
+): { messages: T[]; earlier?: EarlierMessages } {
+  const kept = takeNewest(messages, messages.length, maxBytes, limit)
+  const left = messages.length - kept.length
+  return left > 0 && kept.length ? { messages: kept, earlier: { before: kept[0].id, count: left } } : { messages: kept }
+}
+
+/** What is left after the last message a reader was given: load it from `after` with `thread.messages`. */
+export interface LaterMessages {
+  after: string
+  count: number
+}
+
+/**
+ * Up to `limit` messages immediately after the message `after`, within `maxBytes`, in order.
+ * Undefined when `after` is not in the transcript.
+ */
+export function messagesAfter<T extends Identified>(
+  messages: readonly T[],
+  after: string,
+  limit: number,
+  maxBytes: number
+): { messages: T[]; later?: LaterMessages } | undefined {
+  const at = messages.findIndex((message) => message.id === after)
+  if (at < 0) return undefined
+  let bytes = 0
+  let end = at + 1
+  while (end < messages.length && end - at - 1 < limit) {
+    const size = sizeOf(messages[end])
+    if (end > at + 1 && bytes + size > maxBytes) break
+    bytes += size
+    end += 1
+  }
+  const kept = messages.slice(at + 1, end) as T[]
+  const left = messages.length - end
+  return left > 0 && kept.length ? { messages: kept, later: { after: kept[kept.length - 1].id, count: left } } : { messages: kept }
+}
+
 /**
  * Up to `limit` messages immediately before the message `before`, within `maxBytes`, in order.
  * Undefined when `before` is not in the transcript.

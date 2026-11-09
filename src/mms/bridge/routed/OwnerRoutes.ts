@@ -819,6 +819,7 @@ export class OwnerRoutes {
       messages?: unknown[]
       queue?: WithImages[]
       claimed?: WithImages[]
+      earlier?: { before: string; count: number }
     }
     const kept = newestMessages(
       withImageBudget((snapshot.messages ?? []) as Array<{ id: string; images?: unknown }>),
@@ -831,7 +832,10 @@ export class OwnerRoutes {
       ...(Array.isArray(snapshot.claimed)
         ? { claimed: snapshot.claimed.map(withoutImageData) }
         : {}),
-      ...(kept.earlier ? { earlier: kept.earlier } : {}),
+      // A snapshot that was already a page (a long thread kept in thread.db) adds what it left out.
+      ...(kept.earlier
+        ? { earlier: { before: kept.earlier.before, count: kept.earlier.count + (snapshot.earlier?.count ?? 0) } }
+        : {}),
       ...(head ? { streamHead: head } : {})
     }
   }

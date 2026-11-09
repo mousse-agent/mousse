@@ -48,6 +48,9 @@ import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
 
+/** A window opens a thread at its newest messages; older ones load as it scrolls back (`thread.messages`). */
+const GUI_SNAPSHOT_NEWEST = 200
+
 export type GuiMmsConnectionState =
   | 'idle'
   | 'starting_daemon'
@@ -529,7 +532,7 @@ export class GuiMmsController extends EventEmitter {
     const needed = client?.requiresResnapshot === true
     client?.clearResnapshotFlag()
     try {
-      return await this.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+      return await this.request<ThreadSnapshotResult>('thread.snapshot', { threadId, newest: GUI_SNAPSHOT_NEWEST })
     } catch (error) {
       if (needed) client?.markResnapshotNeeded()
       throw error
@@ -543,7 +546,7 @@ export class GuiMmsController extends EventEmitter {
     const needed = session.client.requiresResnapshot
     session.client.clearResnapshotFlag()
     try {
-      return await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+      return await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId, newest: GUI_SNAPSHOT_NEWEST })
     } catch (error) {
       if (needed) session.client.markResnapshotNeeded()
       throw error

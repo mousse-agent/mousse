@@ -49,7 +49,7 @@ import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
 import { AppError, createErrorProvider, knownAppError } from '../../shared/errors'
 import type { DiscardedCopy, GitOperationHandle } from '../git/GitService'
-import { listClaimedQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
+import { listClaimedQueue, listPendingQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -93,8 +93,8 @@ import {
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
-import { imageAt, messagesBefore, withoutImageBytes } from './transcriptPaging'
-import { ROUTED_MESSAGES_PAGE_BYTES } from '../../shared/bridge/routed'
+import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
+import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
@@ -243,6 +243,8 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
 /** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
 const MESSAGES_PAGE_DEFAULT = 100
 const MESSAGES_PAGE_MAX = 500
+/** The most messages a `thread.snapshot` with `newest` returns. */
+const SNAPSHOT_NEWEST_MAX = 2000
 
 function isMergeMethod(value: unknown): value is PullRequestMergeMethod {
   return value === 'merge' || value === 'squash' || value === 'rebase'
@@ -2041,52 +2043,105 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
       if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      // A thread kept in thread.db is read off the event loop first, so loading its session below finds it in memory.
-      await ctx.mms.threads.warmThread(threadId)
-      const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
-      const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       // `transcript: false` is a routed reader that already holds the messages and the queue on its stream.
       const withTranscript = asOptionalBoolean(p.transcript, 'transcript') !== false
-      const messages = withTranscript ? ctx.mms.orchestrator.getMessages(threadId) : []
-      const queue = withTranscript ? ctx.mms.orchestrator.listQueue(threadId) : []
-      const claimed = listClaimedQueue(session.queue).filter((item) => !item.internal)
+      // `newest`: only the newest messages (and `earlier` for the rest), for a reader that pages back on scroll.
+      const newest = asOptionalBoundedInt(p.newest, 'newest', { min: 1, max: SNAPSHOT_NEWEST_MAX })
+      const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       const turnActive = ctx.mms.orchestrator.isTurnActive(threadId)
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
-      const connectionFailed =
-        session.failedConnectionRequest !== null || rt.connectionFailed
       // A person on another computer is offered "Always" only for what that computer's permission limit allows.
       const limit = deviceLimit(ctx)
       const pendingQuestions = limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listPendingForThread(threadId)
-      return {
+      const common = {
         thread,
-        messages,
-        queue,
-        claimed,
         agents: rt.agents.list(),
         tasks: rt.tasks.list(),
         ptys: ctx.mms.ptyManager.list(threadId),
         activity: rt.activity,
         pendingQuestions,
         activeTurn: { active: turnActive, running: turnRunning },
-        connectionFailed,
         turnState: ctx.mms.orchestrator.getTurnState(threadId),
         turnSnapshot: withoutLocalOnlyKeys(ctx, ctx.mms.orchestrator.getTurnSnapshot()),
         revision: ctx.globalSequence()
       }
+      if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)) {
+        // Opening a thread that is not loaded reads one page from its database in the read worker; the whole thread
+        // is loaded only when something needs it (a turn, a queue drain).
+        const page = withTranscript
+          ? await ctx.mms.threads.readMessagePage(threadId, {
+            limit: newest ?? Number.MAX_SAFE_INTEGER,
+            maxBytes: newest ? ROUTED_SNAPSHOT_MESSAGE_BYTES : Number.MAX_SAFE_INTEGER,
+            images: true
+          })
+          : undefined
+        const items = ctx.mms.threads.loadMessageQueue(threadId)
+        return {
+          ...common,
+          messages: page?.messages ?? [],
+          ...(page?.earlier ? { earlier: page.earlier } : {}),
+          queue: withTranscript ? listPendingQueue(items).filter((item) => !item.internal) : [],
+          claimed: listClaimedQueue(items).filter((item) => !item.internal),
+          connectionFailed: rt.connectionFailed,
+          ...(page ? { seq: page.seq, epoch: page.epoch } : {})
+        }
+      }
+      // A thread kept in thread.db is read off the event loop first, so loading its session below finds it in memory.
+      await ctx.mms.threads.warmThread(threadId)
+      const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
+      const all = withTranscript ? ctx.mms.orchestrator.getMessages(threadId) : []
+      const shown = newest ? newestPage(all, newest, ROUTED_SNAPSHOT_MESSAGE_BYTES) : { messages: all }
+      const position = ctx.mms.threads.threadDbPosition(threadId)
+      return {
+        ...common,
+        messages: shown.messages,
+        ...(shown.earlier ? { earlier: shown.earlier } : {}),
+        queue: withTranscript ? ctx.mms.orchestrator.listQueue(threadId) : [],
+        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal),
+        connectionFailed: session.failedConnectionRequest !== null || rt.connectionFailed,
+        ...(position ?? {})
+      }
     }
     case 'thread.messages': {
-      // A page of the messages before one, for a reader that was given only the newest part of a long transcript.
+      // A page of the messages before (or after) one, for a reader that was given only part of a long transcript.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'before', 'limit'])
+      rejectUnknownKeys(p, ['threadId', 'before', 'after', 'limit'])
       const threadId = asString(p.threadId, 'threadId', 256)
-      const before = asString(p.before, 'before', 256)
+      const before = asOptionalString(p.before, 256)
+      const after = asOptionalString(p.after, 256)
+      if ((before === undefined) === (after === undefined)) throw new DomainRpcError('invalid_params', 'Name a message to page before or after.')
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: MESSAGES_PAGE_MAX }) ?? MESSAGES_PAGE_DEFAULT
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      await ctx.mms.threads.warmThread(threadId)
-      const page = messagesBefore(ctx.mms.orchestrator.getMessages(threadId), before, limit, ROUTED_MESSAGES_PAGE_BYTES)
-      if (!page) throw new DomainRpcError('message_not_found', 'That message is not in this thread.', { threadId, before })
+      const cursor = before ?? after
+      let page: { messages: ChatMessage[]; earlier?: unknown; later?: unknown } | undefined
+      if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)) {
+        // An index range in the read worker; the thread is not loaded.
+        page = await ctx.mms.threads.readMessagePage(threadId, { before, after, limit, maxBytes: ROUTED_MESSAGES_PAGE_BYTES })
+      } else {
+        await ctx.mms.threads.warmThread(threadId)
+        const messages = ctx.mms.orchestrator.getMessages(threadId)
+        page = before !== undefined ? messagesBefore(messages, before, limit, ROUTED_MESSAGES_PAGE_BYTES) : messagesAfter(messages, after!, limit, ROUTED_MESSAGES_PAGE_BYTES)
+      }
+      if (!page) throw new DomainRpcError('message_not_found', 'That message is not in this thread.', { threadId, ...(before !== undefined ? { before } : { after: cursor }) })
       // Images are loaded one at a time when they are shown (`thread.messageImage`).
-      return { messages: page.messages.map(withoutImageBytes), ...(page.earlier ? { earlier: page.earlier } : {}) }
+      return {
+        messages: page.messages.map(withoutImageBytes),
+        ...(page.earlier ? { earlier: page.earlier } : {}),
+        ...(page.later ? { later: page.later } : {})
+      }
+    }
+    case 'thread.changesSince': {
+      // What changed in a thread's visible messages since a reader's `seq` (from `thread.snapshot`): an index range in
+      // its database. A thread still on JSON files has no sequence; its reader starts again from a snapshot.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'seq', 'epoch'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const seq = asBoundedInt(p.seq, 'seq', { min: 0, max: Number.MAX_SAFE_INTEGER })
+      const epoch = asOptionalBoundedInt(p.epoch, 'epoch', { min: 0, max: Number.MAX_SAFE_INTEGER })
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (!ctx.mms.threads.usesThreadDb(threadId)) return { reset: true, messages: [], removed: [] }
+      const changes = await ctx.mms.threads.readMessageChanges(threadId, seq, epoch)
+      return { ...changes, messages: changes.messages.map(withoutImageBytes) }
     }
     case 'thread.messageImage': {
       const p = isObject(params) ? params : {}
@@ -2097,9 +2152,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const queueItemId = asOptionalString(p.queueItemId, 256)
       if ((messageId === undefined) === (queueItemId === undefined)) throw new DomainRpcError('invalid_params', 'Name a messageId or a queueItemId.')
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const unloaded = !ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.usesThreadDb(threadId)
       const owner = messageId !== undefined
-        ? ctx.mms.orchestrator.getMessages(threadId).find((message) => message.id === messageId)
-        : ctx.mms.orchestrator.listQueue(threadId).find((item) => item.id === queueItemId)
+        ? unloaded
+          ? await ctx.mms.threads.readMessage(threadId, messageId)
+          : ctx.mms.orchestrator.getMessages(threadId).find((message) => message.id === messageId)
+        : unloaded
+          ? ctx.mms.threads.loadMessageQueue(threadId).find((item) => item.id === queueItemId)
+          : ctx.mms.orchestrator.listQueue(threadId).find((item) => item.id === queueItemId)
       const image = imageAt(owner, index)
       if (!image) throw new DomainRpcError('image_not_found', 'There is no such image.', { threadId, ...(messageId !== undefined ? { messageId } : { queueItemId }), index })
       return image
@@ -2241,6 +2301,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
+      // A turn loads the whole thread; one kept in thread.db is read off the event loop first.
+      if (ctx.mms.threads.getThread(threadId)) await ctx.mms.threads.warmThread(threadId).catch(() => undefined)
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }

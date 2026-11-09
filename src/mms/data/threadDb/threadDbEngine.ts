@@ -16,7 +16,7 @@ import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget }
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
-export const THREAD_DB_FORMAT = 1
+export const THREAD_DB_FORMAT = 2
 /** Rows are spaced this far apart, so a message inserted between two others rarely moves anything. */
 export const ORD_STEP = 1024
 
@@ -49,6 +49,18 @@ export type BuildResult =
 
 export interface ThreadDbSummary { seq: number; messages: number }
 
+export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
+export interface MessagePage {
+  info: DbInfo
+  /** Message payloads (JSON), oldest first. */
+  messages: string[]
+  earlier?: { before: string; count: number }
+  later?: { after: string; count: number }
+  missing?: true
+}
+export interface MessageChanges { info: DbInfo; reset: boolean; messages: Array<{ ord: number; payload: string }>; removed: string[] }
+
+
 const SCHEMA = `
 CREATE TABLE info(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE items(
@@ -59,6 +71,7 @@ CREATE TABLE items(
   role TEXT,
   kind TEXT,
   ts TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
   rev INTEGER NOT NULL DEFAULT 1,
   changed_seq INTEGER NOT NULL,
   payload TEXT NOT NULL,
@@ -68,7 +81,7 @@ CREATE INDEX items_order ON items(coll, ord, rid);
 CREATE INDEX items_changed ON items(changed_seq);
 CREATE INDEX items_msg ON items(coll, msg_id);
 CREATE TABLE state(key TEXT PRIMARY KEY, rev INTEGER NOT NULL DEFAULT 1, changed_seq INTEGER NOT NULL, payload TEXT NOT NULL);
-CREATE TABLE removed(rid INTEGER NOT NULL, coll TEXT NOT NULL, changed_seq INTEGER NOT NULL);
+CREATE TABLE removed(rid INTEGER NOT NULL, coll TEXT NOT NULL, changed_seq INTEGER NOT NULL, msg_id TEXT);
 CREATE INDEX removed_changed ON removed(changed_seq);
 `
 
@@ -106,14 +119,14 @@ function createSchema(db: DatabaseSync): void {
 
 function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: Record<string, string>): number {
   const { collections, state } = decompose(data)
-  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
+  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, hidden, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)')
   let rows = 0
   for (const [coll, items] of collections) {
     items.forEach((item, index) => {
       const fields = rowFields(coll, item)
       const encoded = encodeRow(skeletonOf(item) ?? null)
       for (const blob of encoded.blobs) writeBlob(dir, blob)
-      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
+      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
       rows += 1
     })
   }
@@ -195,7 +208,19 @@ export class ThreadDbEngine {
       const db = new DatabaseSync(path)
       try {
         db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
-        const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+        let version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+        if (version === 1) {
+          // Format 2: a hidden flag for paging, and the message id of removed rows for changesSince.
+          db.exec('BEGIN IMMEDIATE')
+          try {
+            db.exec("ALTER TABLE items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0; UPDATE items SET hidden = 1 WHERE coll = 'm' AND json_extract(payload, '$.hidden') = 1; ALTER TABLE removed ADD COLUMN msg_id TEXT; PRAGMA user_version=2;")
+            db.exec('COMMIT')
+          } catch (error) {
+            if (db.isTransaction) db.exec('ROLLBACK')
+            throw error
+          }
+          version = 2
+        }
         if (version !== THREAD_DB_FORMAT) throw new ThreadDbError('format', `Unsupported thread database format ${version} at ${path}`)
       } catch (error) {
         db.close()
@@ -300,12 +325,14 @@ export class ThreadDbEngine {
       }
       const seq = info.seq + 1
       const remove = this.statement(connection, 'DELETE FROM items WHERE rid = ? AND coll = ?')
-      const tombstone = this.statement(connection, 'INSERT INTO removed(rid, coll, changed_seq) VALUES (?, ?, ?)')
+      const tombstone = this.statement(connection, 'INSERT INTO removed(rid, coll, changed_seq, msg_id) VALUES (?, ?, ?, ?)')
+      const removedId = this.statement(connection, 'SELECT msg_id FROM items WHERE rid = ?')
       for (const entry of request.deletes) {
+        const msgId = (removedId.get(entry.rid) as { msg_id: string | null } | undefined)?.msg_id ?? null
         remove.run(entry.rid, entry.coll)
-        tombstone.run(entry.rid, entry.coll, seq)
+        tombstone.run(entry.rid, entry.coll, seq, msgId)
       }
-      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, payload = ?, blob_paths = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
+      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, hidden = ?, payload = ?, blob_paths = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
       const move = this.statement(connection, 'UPDATE items SET ord = ?, changed_seq = ? WHERE rid = ?')
       for (const entry of request.updates) {
         if (entry.payload === undefined) {
@@ -313,13 +340,13 @@ export class ThreadDbEngine {
           continue
         }
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, entry.payload, entry.blobPaths ?? null, seq, entry.rid)
+        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, entry.payload, entry.blobPaths ?? null, seq, entry.rid)
       }
-      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, hidden, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       const rids: number[] = []
       for (const entry of request.inserts) {
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, seq, entry.payload, entry.blobPaths ?? null)
+        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, seq, entry.payload, entry.blobPaths ?? null)
         rids[entry.tmp] = Number(result.lastInsertRowid)
       }
       const upsertState = this.statement(connection, 'INSERT INTO state(key, changed_seq, payload) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, changed_seq = excluded.changed_seq, rev = rev + 1')
@@ -352,6 +379,78 @@ export class ThreadDbEngine {
       if (db.isTransaction) db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  /**
+   * A page of the visible transcript, read in one transaction: the newest messages, or those just before or after
+   * the message `before`/`after` (its last occurrence when an id repeats), up to `limit` and `maxBytes` (always at
+   * least one). `earlier`/`later` say how many visible messages are left on each side. Image data is left out
+   * unless `images`; it is fetched one image at a time. `missing` when the cursor message is not in the thread.
+   */
+  page(dir: string, request: MessagePageRequest): MessagePage {
+    const { db } = this.open(dir)
+    db.exec('BEGIN')
+    try {
+      const info = readInfo(db)
+      const cursorId = request.before ?? request.after
+      let cursor: { ord: number; rid: number } | undefined
+      if (cursorId !== undefined) {
+        cursor = db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(cursorId) as { ord: number; rid: number } | undefined
+        if (!cursor) return { info, messages: [], missing: true }
+      }
+      const forward = request.after !== undefined
+      const where = cursor ? (forward ? 'AND (ord > ? OR (ord = ? AND rid > ?))' : 'AND (ord < ? OR (ord = ? AND rid < ?))') : ''
+      const order = forward ? 'ORDER BY ord ASC, rid ASC' : 'ORDER BY ord DESC, rid DESC'
+      const args = cursor ? [cursor.ord, cursor.ord, cursor.rid] : []
+      const statement = db.prepare(`SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
+      const raw = statement.all(...args, request.limit) as unknown as Array<DbRow & { blob_paths: string | null }>
+      const kept: typeof raw = []
+      let bytes = 0
+      for (const row of raw) {
+        const size = row.payload.length
+        if (kept.length && bytes + size > request.maxBytes) break
+        bytes += size
+        kept.push(row)
+      }
+      if (!forward) kept.reverse()
+      const rows = hydrateRows(dir, kept, { images: request.images === true })
+      const out: MessagePage = { info, messages: rows.map((row) => row.payload) }
+      if (rows.length) {
+        const first = kept[0]!
+        const last = kept[kept.length - 1]!
+        const before = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord < ? OR (ord = ? AND rid < ?))").get(first.ord, first.ord, first.rid) as { n: number }
+        const after = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord > ? OR (ord = ? AND rid > ?))").get(last.ord, last.ord, last.rid) as { n: number }
+        const firstId = (JSON.parse(rows[0]!.payload) as { id: string }).id
+        const lastId = (JSON.parse(rows[rows.length - 1]!.payload) as { id: string }).id
+        if (Number(before.n) > 0) out.earlier = { before: firstId, count: Number(before.n) }
+        if (Number(after.n) > 0) out.later = { after: lastId, count: Number(after.n) }
+      }
+      return out
+    } finally {
+      if (db.isTransaction) db.exec('COMMIT')
+    }
+  }
+
+  /** The visible transcript messages that changed since `since`, the ids of those removed, and the new sequence. */
+  messageChanges(dir: string, since: number, epoch?: number): MessageChanges {
+    const changes = this.changes(dir, since, epoch)
+    const rows = changes.rows
+    if (changes.reset) return { info: changes.info, reset: true, messages: [], removed: [] }
+    const removedIds = this.statement(this.open(dir), "SELECT DISTINCT msg_id FROM removed WHERE coll = 'm' AND changed_seq > ? AND msg_id IS NOT NULL").all(since) as Array<{ msg_id: string }>
+    return {
+      info: changes.info,
+      reset: false,
+      messages: rows.filter((row) => row.coll === 'm').map((row) => ({ ord: row.ord, payload: row.payload })).filter((row) => (JSON.parse(row.payload) as { hidden?: unknown }).hidden !== true),
+      removed: removedIds.map((row) => row.msg_id)
+    }
+  }
+
+  /** One transcript message, whole (images included), by id; its last occurrence when an id repeats. */
+  messageById(dir: string, id: string): string | undefined {
+    const connection = this.open(dir)
+    const row = this.statement(connection, "SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(id) as (DbRow & { blob_paths: string | null }) | undefined
+    if (!row) return undefined
+    return hydrateRows(dir, [row], { images: true })[0]!.payload
   }
 
   /** A value kept in `info`, such as the source fingerprint of an import. */

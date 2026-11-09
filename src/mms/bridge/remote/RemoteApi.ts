@@ -26,6 +26,8 @@ export interface RemoteBackendPort {
   /** `queue.enqueue` params carry resolved `images` instead of staged `attachments`. */
   execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown>
   snapshot(threadId: string): unknown
+  /** Reads a thread kept in thread.db off the event loop, so the snapshot that follows finds it in memory. */
+  warm?(threadId: string): Promise<void>
   /**
    * Must bind signal to this exact admitted run and return only after its lease/turn settles.
    * `onAccepted` is called once the message is stored on the thread, never for a turn that was
@@ -118,7 +120,10 @@ export class RemoteApi {
     validateRemoteParams(method, params)
     if (context.signal.aborted) throw new NetError('cancelled')
     if (context.deadlineAt <= this.clock.now()) throw new NetError('deadline_exceeded')
-    if (method === 'thread.snapshot') return this.backend.snapshot(params.threadId as string)
+    if (method === 'thread.snapshot') {
+      await this.backend.warm?.(params.threadId as string)
+      return this.backend.snapshot(params.threadId as string)
+    }
     if (method === 'attachments.stage') {
       try {
         return this.stage(params, context)

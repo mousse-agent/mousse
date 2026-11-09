@@ -589,6 +589,12 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         ? sortMessagesDeterministic(snapshot.messages)
         : reconcileMessageSnapshot(s.messages, snapshot.messages)
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      // A replacement is the whole transcript: nothing earlier is left to load.
+      if (snapshot.replace && s.activeThreadId && s.earlierByThread[s.activeThreadId]) {
+        const earlierByThread = { ...s.earlierByThread }
+        delete earlierByThread[s.activeThreadId]
+        return { messages, earlierByThread }
+      }
       return { messages }
     }),
   addMessage: (message) =>
@@ -599,6 +605,12 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     }),
   updateMessage: (message) =>
     set((s) => {
+      // A change to a message in a part of the thread this window has not loaded stays there; it arrives with
+      // that page, instead of appearing out of place among the loaded ones.
+      if (s.activeThreadId && s.earlierByThread[s.activeThreadId] && !s.messages.some((existing) => existing.id === message.id)) {
+        const first = s.messages[0]
+        if (first && sortMessagesDeterministic([message, first])[0] === message) return s
+      }
       const messages = upsertMessage(s.messages, message)
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
