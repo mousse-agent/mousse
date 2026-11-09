@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { CircleGauge, House, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { Automations, CircleGauge, House, Search, Settings, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, sidebarProfileShown, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
@@ -78,7 +78,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
         onClick={() => void search()}>
         <Search size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
-      {shortcut('automations', 'Automations', Workflow)}
+      {shortcut('automations', 'Automations', Automations)}
       {/* Pinned to the bottom; the empty space above it is still rail, so hovering it peeks. */}
       <div className="navigation-rail-bottom">
         <DownloadsIndicator variant="rail" />
