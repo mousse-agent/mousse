@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
 import { occurrenceOutcome, tellMeNotifies, type ScheduledRunEnded } from '../../shared/automations'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
@@ -19,6 +19,8 @@ import {
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
 import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
 import { requestRefusal } from '../../shared/requestTrigger'
+import { eventNouns, threadEventsOfOccurrence } from '../../shared/threadEvents'
+import { isWorkflowPrompt } from './jobPermission'
 
 /** Runs one tick starts at most; a catch-up after downtime follows over the next ticks instead of in one second. */
 const MAX_STARTS_PER_TICK = 3
@@ -262,6 +264,18 @@ export class ScheduledJobService extends EventEmitter {
     this.emitUpdated()
     this.wake()
     return result
+  }
+
+  /**
+   * Pull request events for a thread-event job: they start a run within seconds, or wait for the rate limit; one its
+   * own run caused (`own`) is only logged. See `ScheduledJobStore.queueThreadEvent`.
+   */
+  queueThreadEvent(id: string, kinds: ThreadEventKind[], options: { own?: string } = {}): void {
+    if (this.lifecycle.stopping) return
+    const outcome = this.store.queueThreadEvent(id, kinds, { now: this.clock(), ...options })
+    if (outcome === 'unknown') return
+    this.emitUpdated()
+    if (outcome === 'started') this.wake()
   }
 
   /** Whether a delivery's payload is still stored (Resend). */
@@ -721,6 +735,10 @@ export class ScheduledJobService extends EventEmitter {
     job: ScheduledJob,
     claim: ScheduledJob['runClaim']
   ): { error?: undefined; prompt: string; missing: string[] } | { error: string; prompt?: undefined; missing?: undefined } {
+    // Pull request events say what woke the run, in the daemon's own words (nothing from the pull request's text).
+    const events = threadEventsOfOccurrence(claim?.occurrenceKey)
+    const wakesOn = job.trigger?.threadEvent
+    if (events?.length && wakesOn && !isWorkflowPrompt(job.prompt)) return { prompt: `${job.prompt}\n\n(Woke on pull request #${wakesOn.number}: ${eventNouns(events)}.)`, missing: [] }
     const occurrenceId = claim?.webhookOccurrenceId
     if (!occurrenceId || !hasPlaceholders(job.prompt)) return { prompt: job.prompt, missing: [] }
     if (job.prompt.trimStart().startsWith('/')) return { error: 'A workflow prompt cannot use webhook placeholders.' }

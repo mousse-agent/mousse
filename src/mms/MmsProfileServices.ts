@@ -123,7 +123,8 @@ import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
-import { PullRequestWatchService } from './git/PullRequestWatchService'
+import { PullRequestWatchService, type PullRequestWatchRead, type PullRequestWatchUpdate } from './git/PullRequestWatchService'
+import { ThreadEventTriggers } from './automations/threadEventTriggers'
 import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
@@ -1076,6 +1077,13 @@ export class MmsProfileServices {
     })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
+    // Thread-event automations wake on their pull request's activity, never on what their own run caused.
+    const threadEvents = new ThreadEventTriggers({
+      jobs: () => this.scheduled.listJobs(),
+      queue: (jobId, kinds, options) => this.scheduled.queueThreadEvent(jobId, kinds, options)
+    })
+    this.pullRequestWatch.on('read', (event: PullRequestWatchRead) => threadEvents.onRead(event))
+    this.pullRequestWatch.on('updated', (event: PullRequestWatchUpdate) => threadEvents.onUpdated(event))
     const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
     this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
       this.storageCleanup.scheduleAfterPolicyChange()
@@ -1312,6 +1320,21 @@ export class MmsProfileServices {
   }
 
   /** The Automations page's one list (`automations.list`): jobs (bots' schedules among them) and pull request watches. */
+  /**
+   * A thread's pull request watch for its thread-event automations: on (in `event` mode, unless Notify already serves it)
+   * while one of them needs it, and an `event` watch off once none does. A failure to turn it on is shown on the row
+   * (the watch is off), never thrown at the edit that caused it.
+   */
+  syncThreadEventWatch(threadId: string): void {
+    try {
+      const needed = this.scheduled.listJobs().some((job) => job.trigger?.threadEvent?.threadId === threadId)
+      if (needed) this.pullRequestWatch.ensureEventWatch(threadId)
+      else this.pullRequestWatch.releaseEventWatch(threadId)
+    } catch (error) {
+      console.warn('a thread-event automation\'s pull request watch did not change', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   automationIndex(): AutomationIndex {
     const bots = this.personalBots
     return buildAutomationIndex({

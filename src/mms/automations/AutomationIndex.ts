@@ -16,6 +16,7 @@ import { narrowPermissionMode, type PermissionMode } from '../../shared/permissi
 import { isWorkflowPrompt } from '../../shared/jobPermissionEdit'
 import { tellMeOf, type ScheduledJob, type ScheduledJobRunRecord, type ScheduledWebhookDelivery, type Thread } from '../../shared/types'
 import { deliveryStartedRun, takesRequests } from '../../shared/requestTrigger'
+import { threadEventsOfOccurrence, threadEventText } from '../../shared/threadEvents'
 import type { BotAutomationFacts, BotAutomationRunStatus } from '../bots/chat/BotChatService'
 import type { AgentJobAsk } from './AgentJobAsks'
 import { describeSchedule } from '../../shared/scheduleLabel'
@@ -172,6 +173,21 @@ function requestPart(job: ScheduledJob, sources: AutomationIndexSources): Automa
   return { url: sources.requestUrl(job.id), deliveries }
 }
 
+/** A thread-event job's pull request: the thread it is linked to, whether its watch reads it, what waits, and the log. */
+function threadEventPart(job: ScheduledJob, wakesOn: NonNullable<NonNullable<ScheduledJob['trigger']>['threadEvent']>, sources: AutomationIndexSources): NonNullable<AutomationItem['threadEvent']> {
+  const thread = safely(() => sources.thread(wakesOn.threadId))
+  const watch = safely(() => sources.watchStatus?.(wakesOn.threadId))
+  return {
+    threadId: wakesOn.threadId,
+    ...(thread?.name ? { threadName: thread.name } : {}),
+    number: wakesOn.number,
+    events: wakesOn.events,
+    watching: watch ? watch.state === 'watching' || watch.state === 'paused' : false,
+    ...(job.pendingEvent ? { heldUntil: job.pendingEvent.dueAt } : {}),
+    log: [...(job.eventLog ?? [])].reverse()
+  }
+}
+
 function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: AutomationItem['computer'], now: Date): AutomationItem {
   const workflow = isWorkflowPrompt(job.prompt)
   const who: AutomationWho = workflow
@@ -179,7 +195,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     : job.agent
       ? { kind: 'saved_agent', name: savedAgentName(job.agent.definitionId, sources), definitionId: job.agent.definitionId }
       : { kind: 'agent', name: job.selection?.model ?? 'Default agent' }
-  const trigger = job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
+  const wakesOn = job.trigger?.threadEvent
+  const trigger = wakesOn ? 'thread_event' : job.trigger?.webhook && job.schedule.kind === 'manual' ? 'request' : job.schedule.kind === 'manual' ? 'on_demand' : 'time'
   const paused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
   const active = jobActiveRun(job, now)
   const last = jobLastEndedRun(job)
@@ -188,6 +205,8 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const runs = [...(job.runHistory ?? [])].reverse().slice(0, RUNS_PER_ITEM).map((record) => {
     const run = jobRecordRun(record)
     const occurrenceId = requestOf(record)
+    const events = threadEventsOfOccurrence(record.occurrenceKey)
+    if (events?.length) return { ...run, events }
     return occurrenceId ? { ...run, request: { occurrenceId, ...(resendable.has(occurrenceId) ? { resendable: true as const } : {}) } } : run
   })
   // A run waiting for the person's answer on its thread is an open ask; a permission request on it is answered in place.
@@ -207,7 +226,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     name: job.name,
     trigger,
     schedule: job.schedule,
-    whenText: '',
+    whenText: wakesOn ? threadEventText(wakesOn.number, wakesOn.events) : '',
     who,
     ...(job.projectId ? { where: { projectId: job.projectId, name: projectName ?? 'Removed project' } } : {}),
     paused,
@@ -224,6 +243,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.createdBy && job.expiresAt ? { keepable: true as const } : {}),
     ...(request ? { request } : {}),
+    ...(wakesOn ? { threadEvent: threadEventPart(job, wakesOn, sources) } : {}),
     ...(attention ? { attention } : {}),
     link: { kind: 'job', jobId: job.id },
     computer

@@ -30,6 +30,7 @@ export function moveRefusal(job: ScheduledJob): string | undefined {
   if (job.agent) return 'Its saved agent is kept on this computer.'
   if (isWorkflowPrompt(job.prompt)) return 'Its workflow is kept on this computer.'
   if (job.trigger?.webhook) return 'Turn off its request URL first.'
+  if (job.trigger?.threadEvent) return 'It wakes on a pull request of a thread on this computer.'
   if (job.threadId) return 'It runs in a thread of this computer.'
   if (job.createdBy && job.expiresAt) return 'An agent added it with an end. Keep it first.'
   if (job.state === 'running' || job.runClaim || job.pendingOccurrence) return 'Wait for its run to end.'

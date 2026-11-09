@@ -11,6 +11,8 @@ import type { AutomationIndex, AutomationItem } from '../../src/shared/automatio
 import type { LlmProviderOption } from '../../src/shared/settings'
 import type { Project, ScheduledJob } from '../../src/shared/types'
 import { parseWhen } from '../../src/renderer/components/automations/parseWhen'
+import { parseThreadEvent } from '../../src/renderer/components/automations/parseThreadEvent'
+import type { Thread } from '../../src/shared/types'
 import { defaultMay, groupAutomations, matchesSearch, metaParts, pauseUntil, primaryOf } from '../../src/renderer/components/automations/automationList'
 import { firstRunInZone, nextBeforeAdd, ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
 import { computerOptions, computersForProject, projectOnComputer } from '../../src/renderer/components/automations/computerChoice'
@@ -44,6 +46,25 @@ function item(patch: Partial<AutomationItem> & { key: string }): AutomationItem 
     ...patch
   }
 }
+
+describe('a pull request\'s activity, read from English', () => {
+  it('reads "when #712 gets a review" and leaves the rest as what to do', () => {
+    expect(parseThreadEvent('when #712 gets a review address the comments')).toMatchObject({ kind: 'ok', number: 712, events: ['review'], prompt: 'address the comments' })
+    expect(parseThreadEvent('when #712 gets a review…')).toMatchObject({ kind: 'ok', events: ['review'], prompt: '' })
+    expect(parseThreadEvent('fix it when PR #9 checks fail')).toMatchObject({ kind: 'ok', number: 9, events: ['checks_failed'], prompt: 'fix it' })
+    expect(parseThreadEvent('when pull request 42 passes CI, then merge it')).toMatchObject({ kind: 'ok', number: 42, events: ['checks_passed'], prompt: 'merge it' })
+    expect(parseThreadEvent('when #7 gets a new comment reply')).toMatchObject({ events: ['comment'], prompt: 'reply' })
+    expect(parseThreadEvent('when #7 is reviewed summarize it')).toMatchObject({ events: ['review'] })
+    expect(parseThreadEvent('when #7 goes red look into it')).toMatchObject({ events: ['checks_failed'] })
+    expect(parseThreadEvent('when #7 gets any activity tell me').kind === 'ok' && parseThreadEvent('when #7 gets any activity tell me')).toMatchObject({ events: ['checks_failed', 'checks_passed', 'review', 'comment'] })
+  })
+
+  it('never guesses: a pull request with no event it can read is ambiguous, and a time is not a pull request', () => {
+    expect(parseThreadEvent('when #712 is ready ship it')).toMatchObject({ kind: 'ambiguous', number: 712 })
+    expect(parseThreadEvent('when 9 check the weather').kind).toBe('none')
+    expect(parseThreadEvent('every weekday at 9 review open PRs').kind).toBe('none')
+  })
+})
 
 describe('When, read from English', () => {
   const ok = (text: string) => {
@@ -248,6 +269,8 @@ describe('labels', () => {
 
 const providers = [{ id: 'anthropic', instanceId: 'claude:main', label: 'Claude', models: [{ id: 'sonnet', label: 'Sonnet' }] }] as unknown as LlmProviderOption[]
 const projects = [{ id: 'p1', name: 'mousse', path: '/work/mousse', createdAt: '', order: 0 }] as Project[]
+/** The threads the pickers list (a test that needs a thread with a pull request puts one here). */
+let catalogThreads: Thread[] = []
 const catalog: ScheduledCatalog = { models: modelGroups(providers), projects, threads: [], defaultPermissionMode: 'accept_edits' }
 
 function job(patch: Partial<ScheduledJob> = {}): ScheduledJob {
@@ -332,7 +355,7 @@ function api(index: AutomationIndex, jobs: ScheduledJob[]) {
     personalBots: { onChanged: vi.fn(() => () => undefined) },
     settings: { getOptions: async () => ({ llmProviders: providers }), get: async () => ({ permissions: { defaultMode: 'accept_edits' }, provider: { llmProvider: 'anthropic', instanceId: 'claude:main', model: 'sonnet' } }) },
     projects: { list: async () => projects },
-    threads: { listAll: async () => [] },
+    threads: { listAll: async () => catalogThreads },
     orchestrator: { answerQuestionsDetailed: vi.fn(async () => ({ ok: true })) },
     git: { status: vi.fn(async () => ({ isRepo: true })) }
   }
@@ -372,6 +395,75 @@ afterEach(() => {
 })
 
 describe('the Automations page', () => {
+  it('creates a thread-event automation from "when #712 gets a review…", on the pull request\'s thread', async () => {
+    catalogThreads = [{ id: 't-pr', name: 'Fix flaky checkout test', projectId: 'p1', pullRequest: { number: 712 } } as Thread]
+    try {
+      const mousse = await mount([])
+      await click($('[data-testid="automation-create"]'))
+      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'when #712 gets a review address the comments')
+      expect($('[data-testid="automation-create-when"]')?.textContent).toBe('When #712 gets a review')
+      expect($('[data-testid="automation-create-next"]')?.textContent).toBe('Runs on Fix flaky checkout test · at most every 10 min')
+      expect($('[aria-label="Where"]')).toBeNull()
+      await click($('[data-testid="automation-create-add"]'))
+      expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'address the comments',
+        prompt: 'address the comments',
+        schedule: { kind: 'manual' },
+        threadEvent: { threadId: 't-pr', number: 712, events: ['review'] },
+        threadId: 't-pr',
+        projectId: 'p1'
+      }))
+      expect(mousse.scheduled.create.mock.calls[0]![0]).not.toHaveProperty('createThread')
+      // A pull request no thread has linked keeps Add off and says why.
+      await click($('[data-testid="automation-create"]'))
+      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'when #999 checks fail fix them')
+      expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
+      expect($('[data-testid="automation-create-blocked"]')?.textContent).toMatch(/No thread here has #999/)
+      // Or pick When → When a thread…
+      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'fix the failing checks')
+      await click($('[aria-label="When"]'))
+      await click(option('When a thread…'))
+      await click($('[aria-label="Event"]'))
+      await click(option('Checks fail'))
+      expect($('[data-testid="automation-create-when"]')?.textContent).toBe('When #712 checks fail')
+      expect($('[data-testid="automation-create-thread"]')?.textContent).toBe('#712 · Fix flaky checkout test')
+      await click($('[data-testid="automation-create-add"]'))
+      expect(mousse.scheduled.create).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: 'fix the failing checks', threadEvent: { threadId: 't-pr', number: 712, events: ['checks_failed'] } }))
+    } finally {
+      catalogThreads = []
+    }
+  })
+
+  it('shows a thread-event row in Watching next to a notify-only watch, and its (why?) says what it ignores', async () => {
+    const watchRow = item({ key: 'watch:t-w', kind: 'watch', name: 'Fix CI on #742', trigger: 'thread_event', whenText: 'PR #742', who: { kind: 'none', name: 'Notify' }, notifyOnly: true, link: { kind: 'thread', threadId: 't-w' } })
+    const eventRow = item({
+      key: 'job:j1', name: 'Address reviews', trigger: 'thread_event', whenText: '#712 gets a review',
+      threadEvent: { threadId: 't-pr', threadName: 'Fix flaky checkout test', number: 712, events: ['review'], watching: true, log: [
+        { at: new Date(Date.now() - 60_000).toISOString(), kinds: ['checks_failed'], outcome: 'own', reason: 'its own push' },
+        { at: new Date(Date.now() - 120_000).toISOString(), kinds: ['review'], outcome: 'held', until: new Date(Date.now() + 300_000).toISOString() }
+      ] }
+    })
+    const stored = job({ id: 'j1', name: 'Address reviews', schedule: { kind: 'manual' }, nextRunAt: null, threadId: 't-pr', trigger: { threadEvent: { threadId: 't-pr', number: 712, events: ['review'] } } })
+    const mousse = await mount([eventRow, watchRow], [stored])
+    const watching = $('[data-group="watching"]')!
+    expect([...watching.querySelectorAll('[data-testid="automation-row"]')].map((row) => row.getAttribute('data-key'))).toEqual(['job:j1', 'watch:t-w'])
+    expect(watching.querySelector('[data-key="watch:t-w"]')!.textContent).toContain('Notify')
+    expect(watching.querySelector('[data-key="job:j1"]')!.textContent).toContain('#712 gets a review')
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    expect($('[data-testid="automation-when"]')?.textContent).toBe('When #712 gets a review')
+    await click($('[data-testid="automation-why"]'))
+    const why = $('[data-testid="automation-why-panel"]')!.textContent!
+    expect(why).toContain('Ignores what its own run caused')
+    expect(why).toContain('At most one run every 10 minutes')
+    expect($$('[data-testid="automation-event-log"] li').map((entry) => entry.textContent)).toEqual([
+      expect.stringContaining('checks failed · ignored: its own push'),
+      expect.stringMatching(/review · held until .+ \(one run per 10 minutes\)/)
+    ])
+    await click($('[aria-label="When"]'))
+    await click(option('Any of these'))
+    expect(mousse.scheduled.update).toHaveBeenCalledWith('j1', { threadEvent: { events: ['checks_failed', 'checks_passed', 'review', 'comment'] } })
+  })
+
   it('opens the quiet create row in place and adds a real scheduled job from one English line', async () => {
     const mousse = await mount([])
     expect($('[data-testid="automation-create"]')?.textContent).toContain('New automation…')

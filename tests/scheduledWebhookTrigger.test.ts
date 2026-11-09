@@ -1072,6 +1072,27 @@ describe('scheduled job webhook trigger', () => {
       for (const blocker of blockers.splice(0)) await new Promise<void>((resolve) => blocker.close(() => resolve()))
     })
 
+    it('creates a thread-event automation on a thread with a pull request, turns its watch on, refuses a request URL, and lets the watch go on delete', async () => {
+      // The watch is stubbed: nothing here may read a real pull request.
+      const ensure = vi.spyOn(mms.pullRequestWatch, 'ensureEventWatch').mockImplementation((threadId) => ({ threadId, viewer: null, host: 'github.com', mode: 'event', state: 'watching', nextCheckAt: null, ended: null }))
+      const release = vi.spyOn(mms.pullRequestWatch, 'releaseEventWatch').mockImplementation(() => undefined)
+      const thread = mms.threads.createThread('Fix flaky checkout test')
+      const bare = mms.threads.createThread('No pull request')
+      mms.threads.updateThreadMeta(thread.id, { pullRequest: { number: 712, url: 'https://github.com/acme/app/pull/712', host: 'github.com', nameWithOwner: 'acme/app', headRefName: 'f', baseRefName: 'main', headRepository: 'acme/app', isCrossRepository: false, linkedAt: new Date().toISOString() } })
+      const input = (threadId: string, extra: Record<string, unknown> = {}) => ({ input: { name: 'Address reviews', prompt: 'Address the review comments', schedule: { kind: 'manual' }, threadEvent: { threadId, events: ['review'], ...extra } } })
+      await expect(client.request('scheduled.create', input(bare.id))).rejects.toThrow(/no pull request linked/)
+      await expect(client.request('scheduled.create', input(thread.id, { number: 713 }))).rejects.toThrow(/#712 now/)
+      const created = await client.request<{ job: ScheduledJob }>('scheduled.create', input(thread.id, { number: 712 }))
+      expect(created.job).toMatchObject({ threadId: thread.id, schedule: { kind: 'manual' }, trigger: { threadEvent: { threadId: thread.id, number: 712, events: ['review'] } } })
+      expect(ensure).toHaveBeenCalledWith(thread.id)
+      await expect(client.request('scheduled.webhook.enable', { id: created.job.id })).rejects.toThrow(/wakes on its pull request/)
+      await expect(client.request('scheduled.update', { id: created.job.id, patch: { schedule: { kind: 'interval', minutes: 60 } } })).rejects.toThrow(/no clock/)
+      const edited = await client.request<{ job: ScheduledJob }>('scheduled.update', { id: created.job.id, patch: { threadEvent: { events: ['checks_failed', 'comment'] } } })
+      expect(edited.job.trigger?.threadEvent?.events).toEqual(['checks_failed', 'comment'])
+      await client.request('scheduled.delete', { id: created.job.id })
+      expect(release).toHaveBeenCalledWith(thread.id)
+    })
+
     it('enable starts the listener and shows the secret once; the job runs on a signed request; disable stops verification', async () => {
       const calls: string[] = []
       ;(mms.scheduled as unknown as { runner: { runIsolated: (prompt: string) => Promise<{ text: string; silent: boolean }> } }).runner = {

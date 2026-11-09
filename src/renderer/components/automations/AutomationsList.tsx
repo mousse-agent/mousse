@@ -4,7 +4,7 @@ import { listingServes } from '../../../shared/providerInstances'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { LlmProviderOption, MousseSettings } from '../../../shared/settings'
 import type { AutomationIndex, AutomationItem } from '../../../shared/automations'
-import type { CreateScheduledJobInput, ScheduledJob, SchedulerStatus } from '../../../shared/types'
+import type { CreateScheduledJobInput, ScheduledJob, SchedulerStatus, ThreadEventKind } from '../../../shared/types'
 import { answerAttention, createAutomationsClient } from '../../services/automationsClient'
 import { useCommand, useShortcutTitle } from '../../commands/commandRegistry'
 import { openThread } from '../../lib/openThread'
@@ -431,6 +431,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             requestApi={requestApi}
             onResend={(occurrenceId) => void resend(detailJob.id, occurrenceId)}
             onKeep={() => void keep(detailJob.id)}
+            {...(detailJob.trigger?.threadEvent && detailItem.computer.local ? { onEvents: (events: ThreadEventKind[]) => void act(() => window.mousse.scheduled.update(detailJob.id, { threadEvent: { events } })) } : {})}
             onOpenThread={goThread}
             onOpenBot={openBot}
           />

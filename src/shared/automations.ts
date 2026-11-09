@@ -1,6 +1,6 @@
 import type { BotLook } from './bots/personal/look'
 import type { PermissionMode } from './permissionMode'
-import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, ScheduledWebhookDeliveryOutcome, TellMe } from './types'
+import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, ScheduledWebhookDeliveryOutcome, TellMe, ThreadEventKind } from './types'
 
 /**
  * Automations: everything that runs on its own, in one list (the Automations page). Phase 1 reads three sources
@@ -56,6 +56,8 @@ export interface AutomationRun {
   missed?: { count: number; since: string }
   /** A request started it: the delivery, and whether its stored payload is still there to Resend. */
   request?: { occurrenceId: string; resendable?: true }
+  /** Pull request events started it. */
+  events?: ThreadEventKind[]
 }
 
 /** One request to an automation's URL and what became of it (its delivery log). */
@@ -241,6 +243,19 @@ export interface AutomationItem {
   notifyOnly?: true
   /** It takes signed requests: where senders post, and the newest requests with what became of each. */
   request?: { url: string; deliveries: AutomationDelivery[] }
+  /**
+   * It wakes on a pull request's activity: the thread the PR is linked to, what wakes it, whether the watch reads it now,
+   * events waiting for the rate limit, and the newest events with what became of each ("(why?)").
+   */
+  threadEvent?: {
+    threadId: string
+    threadName?: string
+    number: number
+    events: ThreadEventKind[]
+    watching: boolean
+    heldUntil?: string
+    log: ScheduledEventLogEntry[]
+  }
   /** Present exactly when the item is in Needs you. */
   attention?: AutomationAttention
   link: AutomationLink

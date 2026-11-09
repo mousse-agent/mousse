@@ -37,6 +37,8 @@ import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
 import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
 import { BotFaceStill } from '../bots/face/BotFace'
 import { DeliveryLog, RequestFields, RequestSetup, type RequestApi } from './RequestTrigger'
+import { eventNouns, THREAD_EVENT_CHOICES, THREAD_EVENT_MIN_GAP_MS, threadEventChoice, threadEventText } from '../../../shared/threadEvents'
+import type { ScheduledEventLogEntry, ThreadEventKind } from '../../../shared/types'
 
 /** The custom schedule builder's choices. Daily and Weekly are plain forms that save as cron. */
 type BuilderKind = 'interval' | 'daily' | 'weekly' | 'cron' | 'once' | 'manual'
@@ -70,6 +72,21 @@ export const PROJECT_WORKSPACE_WARNING =
 const MORE_FIELDS = new Set<DraftField>(['name', 'worktreePath', 'workspace'])
 const BUILDER_FIELDS = new Set<DraftField>(['minutes', 'expr', 'runAt', 'schedule'])
 const RECENT_RUNS = 5
+
+/** One line of a thread-event automation's log in "(why?)": "review · held until 14:10". */
+export function eventLogText(entry: ScheduledEventLogEntry, when: (iso: string) => string): string {
+  const what = eventNouns(entry.kinds)
+  switch (entry.outcome) {
+    case 'started':
+      return `${what} · ran`
+    case 'held':
+      return entry.until ? `${what} · held until ${when(entry.until)} (one run per ${THREAD_EVENT_MIN_GAP_MS / 60_000} minutes)` : `${what} · held`
+    case 'own':
+      return `${what} · ignored: ${entry.reason ?? 'its own run'}`
+    case 'paused':
+      return `${what} · ignored: paused`
+  }
+}
 
 /** The When of the sentence: "Every weekday at 9:00", "Every 30 minutes", "When you run it". */
 export function whenSentence(draft: JobDraft): string {
@@ -147,6 +164,7 @@ export function AutomationDetail({
   requestApi,
   onResend,
   onKeep,
+  onEvents,
   onOpenThread,
   onOpenBot
 }: {
@@ -176,6 +194,8 @@ export function AutomationDetail({
   onResend: (occurrenceId: string) => void
   /** Keep: an agent-added automation loses only its end. */
   onKeep: () => void
+  /** A thread-event automation: what on its pull request wakes it (saved at once). */
+  onEvents?: (events: ThreadEventKind[]) => void
   onOpenThread: (threadId: string) => void
   /** A bot's automation: opens the bot's chat, where its grant (its May) is shown. */
   onOpenBot?: (botId: string) => void
@@ -218,6 +238,9 @@ export function AutomationDetail({
   const remoteNode = item?.computer.node
   const manyComputers = computers.length > 1
   const now = new Date()
+  // A thread-event automation's When is its pull request, not a clock.
+  const wakesOn = job.trigger?.threadEvent
+  const events = item?.threadEvent
 
   const chooseBuilderKind = (kind: BuilderKind) => {
     if (kind === 'daily' || kind === 'weekly') {
@@ -361,9 +384,23 @@ export function AutomationDetail({
 
       <p className="automation-sentence" data-testid="automation-sentence">
         <span className="automation-sentence-glue">
-          <button type="button" className="automation-chip" aria-expanded={builderOpen} onClick={() => setBuilderOpen((open) => !open)} data-testid="automation-when">
-            {whenSentence(draft)}
-          </button>
+          {wakesOn ? (
+            <Select
+              ariaLabel="When"
+              className="automation-chip-select"
+              size="small"
+              value={threadEventChoice(wakesOn.events)}
+              options={THREAD_EVENT_CHOICES.map((choice) => ({ value: choice.value, label: choice.label }))}
+              disabled={!onEvents}
+              title={`What on #${wakesOn.number} wakes it`}
+              renderValue={() => <span data-testid="automation-when">{`When ${threadEventText(wakesOn.number, wakesOn.events)}`}</span>}
+              onChange={(choice) => { const picked = THREAD_EVENT_CHOICES.find((entry) => entry.value === choice); if (picked) onEvents?.(picked.events) }}
+            />
+          ) : (
+            <button type="button" className="automation-chip" aria-expanded={builderOpen} onClick={() => setBuilderOpen((open) => !open)} data-testid="automation-when">
+              {whenSentence(draft)}
+            </button>
+          )}
           ,
         </span>
         {' '}
@@ -431,7 +468,7 @@ export function AutomationDetail({
         ) : null}
       </p>
 
-      {builderOpen ? (
+      {builderOpen && !wakesOn ? (
         <div className="scheduled-builder automation-builder">
           <div className="scheduled-segmented" role="radiogroup" aria-label="When" {...field('schedule')}>
             {(bot ? BOT_BUILDER_KINDS : BUILDER_KINDS).map((option) => (
@@ -551,11 +588,23 @@ export function AutomationDetail({
         <span className="automation-detail-value" data-testid="automation-next">
           {paused
             ? job.resumeAt ? `Paused until ${ownedWhenText(job.resumeAt, now, owner, viewerZone)}` : item?.pausedBy === 'bot' ? `${item.pausedReason ?? 'Paused'} · the bot is paused` : 'Paused'
+            : wakesOn
+              ? events?.heldUntil ? `Held until ${ownedWhenText(events.heldUntil, now, owner, viewerZone)}` : events && !events.watching ? 'Not watching. Resume to watch again.' : `When ${threadEventText(wakesOn.number, wakesOn.events)}`
             : scheduleChanged ? 'Shown after Save' : next ? ownedWhenText(next, now, owner, viewerZone) : savedSchedule.kind === 'manual' ? 'When you run it' : 'None'}
         </span>
         <button type="button" className="scheduled-link-btn" aria-expanded={whyOpen} onClick={() => setWhyOpen((open) => !open)} data-testid="automation-why">(why?)</button>
       </div>
-      {whyOpen ? (
+      {whyOpen && wakesOn ? (
+        <div className="automation-why" data-testid="automation-why-panel">
+          <p>{`Wakes when ${threadEventText(wakesOn.number, wakesOn.events)}${events?.threadName ? ` · on ${events.threadName}` : ''}${events && !events.watching ? ' · its watch is off' : ''}`}</p>
+          <p>{`Ignores what its own run caused: its comments, reviews and pushes. At most one run every ${THREAD_EVENT_MIN_GAP_MS / 60_000} minutes.`}</p>
+          {events?.log.length ? (
+            <ul data-testid="automation-event-log">
+              {events.log.map((entry, index) => <li key={`${entry.at}-${index}`}>{`${ownedWhenText(entry.at, now, owner, viewerZone)} · ${eventLogText(entry, (iso) => ownedWhenText(iso, now, owner, viewerZone))}`}</li>)}
+            </ul>
+          ) : <p>No pull request events yet.</p>}
+        </div>
+      ) : whyOpen ? (
         <div className="automation-why" data-testid="automation-why-panel">
           <p>{describeScheduleLong(savedSchedule, now).replace(", this computer's time", '')}{code ? <> · <span className="scheduled-mono">{code}</span></> : null}</p>
           <p>
@@ -579,7 +628,7 @@ export function AutomationDetail({
               <li key={`${run.at}-${index}`} className="automation-run" data-state={run.state}>
                 <span className={`automation-run-glyph ${run.state}`} aria-hidden="true">{RUN_GLYPH[run.state]}</span>
                 <span className="automation-run-when">{ownedWhenText(run.at, now, owner, viewerZone)}</span>
-                <span className="automation-run-text">{runText(run, now, owner, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
+                <span className="automation-run-text">{runText(run, now, owner, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}{run.events?.length ? ` · on ${eventNouns(run.events)}` : ''}</span>
                 {run.ranBy ? <span className="automation-run-who" data-testid="automation-run-who" title="Who ran it">{run.ranBy}</span> : null}
                 {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
                 {run.agentChanged ? <span className="automation-run-changed" data-testid="automation-run-changed" title="The saved agent was published again since the run before">agent changed since last run</span> : null}

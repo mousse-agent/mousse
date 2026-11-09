@@ -210,6 +210,9 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
   else if (item.who.kind !== 'none') parts.push({ key: 'who', text: ctx.modelName?.(item) ?? item.who.name })
   if (item.where) parts.push({ key: 'where', text: item.where.name })
   if (ctx.manyComputers) parts.push({ key: 'computer', text: owner.name })
+  // A thread-event automation whose watch is off wakes on nothing until it is resumed; one held by its rate limit says till when.
+  if (item.threadEvent && !item.paused && !item.threadEvent.watching) parts.push({ key: 'watch', text: 'not watching', tone: 'warn' })
+  else if (item.threadEvent?.heldUntil && !item.active) parts.push({ key: 'held', text: `held until ${ownedWhenText(item.threadEvent.heldUntil, ctx.now, owner, ctx.viewerZone)}`, tone: 'muted' })
   if (item.active) parts.push({ key: 'run', text: runText(item.active, ctx.now, owner, ctx.viewerZone), tone: item.active.state === 'waiting' ? 'muted' : undefined })
   else if (item.last && item.trigger === 'request') parts.push({ key: 'run', text: agoText(item.last.at, ctx.now) })
   else if (item.last && item.who.kind === 'bot') parts.push({ key: 'run', text: `told you ${agoText(item.last.at, ctx.now)}` })

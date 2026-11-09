@@ -16,6 +16,9 @@ import { botComputerOptions } from '../bots/BotAboutPanel'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { botWhen, matchWorkflows, parseWhoKey, whoKey, whoName, whoOptions, type AutomationLibrary, type Who, type WorkflowChoice } from './whoDo'
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
+import { parseThreadEvent } from './parseThreadEvent'
+import { THREAD_EVENT_CHOICES, threadEventChoice, threadEventText } from '../../../shared/threadEvents'
+import type { Thread, ThreadEventKind } from '../../../shared/types'
 
 /** A When the person picked from the chip; it wins over what the text says. */
 type Picked = { key: string; schedule: JobSchedule; label: string }
@@ -25,6 +28,20 @@ const PICKS: Picked[] = [
   // On demand exists only when picked: text never makes one.
   { key: 'manual', schedule: { kind: 'manual' }, label: 'On demand' }
 ]
+
+/** "When a thread…": the thread whose pull request wakes it, and what on it. */
+type EventPick = { threadId: string; choice: string }
+
+/** The local threads with a pull request linked: the ones a thread-event automation can wake on. */
+export function pullRequestThreads(threads: readonly Thread[]): Thread[] {
+  return threads.filter((thread) => thread.pullRequest && !thread.botOwned && !thread.node)
+}
+
+/** The thread #number is linked to, preferring one in the chosen project. */
+export function threadForPullRequest(threads: readonly Thread[], number: number, projectId: string): Thread | undefined {
+  const linked = pullRequestThreads(threads).filter((thread) => thread.pullRequest!.number === number)
+  return linked.find((thread) => thread.projectId === projectId) ?? linked[0]
+}
 
 /** What another surface opens the create row with (Automate…, Repeat this…). */
 export interface CreatePrefill {
@@ -81,6 +98,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [picked, setPicked] = useState<Picked | null>(null)
+  const [eventPick, setEventPick] = useState<EventPick | null>(null)
   const [projectId, setProjectId] = useState(initialProjectId)
   // The computer that will own it: '' is this one.
   const [node, setNode] = useState('')
@@ -130,8 +148,20 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
 
   const now = new Date()
   const parsed = useMemo(() => parseWhen(text, new Date()), [text])
-  const when: Pick<Picked, 'schedule' | 'label'> | null = picked ?? (parsed.kind === 'ok' ? { schedule: parsed.schedule, label: parsed.label } : null)
-  const typed = (picked || parsed.kind !== 'ok' ? text : parsed.prompt).trim()
+  const eventParse = useMemo(() => parseThreadEvent(text), [text])
+  // A thread-event automation: picked from When ("When a thread…"), or typed ("when #712 gets a review…").
+  const typedEvent = !picked && !eventPick && eventParse.kind === 'ok' ? eventParse : null
+  const eventThread = eventPick ? catalog.threads.find((thread) => thread.id === eventPick.threadId) : typedEvent ? threadForPullRequest(catalog.threads, typedEvent.number, projectId) : undefined
+  const eventKinds: ThreadEventKind[] | null = eventPick ? THREAD_EVENT_CHOICES.find((choice) => choice.value === eventPick.choice)?.events ?? null : typedEvent ? typedEvent.events : null
+  const onEvent = Boolean(eventPick || typedEvent)
+  const eventNumber = eventThread?.pullRequest?.number ?? typedEvent?.number
+  const eventLabel = eventKinds && eventNumber !== undefined ? `When ${threadEventText(eventNumber, eventKinds)}` : null
+  // "when #712 gets a review every day at 9" says two things.
+  const timeAndEvent = Boolean(typedEvent && parsed.kind === 'ok')
+  const when: Pick<Picked, 'schedule' | 'label'> | null = onEvent
+    ? eventKinds && eventThread && eventLabel && !timeAndEvent ? { schedule: { kind: 'manual' }, label: eventLabel } : null
+    : picked ?? (parsed.kind === 'ok' ? { schedule: parsed.schedule, label: parsed.label } : null)
+  const typed = (typedEvent ? typedEvent.prompt : picked || eventPick || parsed.kind !== 'ok' ? text : parsed.prompt).trim()
   const suggestions = workflow ? [] : matchWorkflows(text, library.workflows)
   const prompt = workflow ? workflowCommandText(workflow.slug, inputs, fields) : typed
   const bot = who.kind === 'bot' && !workflow && !remote ? library.bots.find((entry) => entry.id === who.id) : undefined
@@ -152,13 +182,20 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
   // Next follows the owning computer's clock.
   const first = when ? firstRunInZone(when.schedule, now, owner.timeZone || viewerZone) : null
   const ready = workflow ? !fieldsLoading && workflowInputsReady(fields, inputs) : Boolean(typed) && !typed.startsWith('/')
-  const blocked = botSchedule && !botSchedule.ok ? botSchedule.reason : owner.offline ? offlineText(owner) : null
+  const eventBlock = !onEvent ? null
+    : timeAndEvent ? 'Say one: a time or the pull request.'
+      : !eventThread ? (typedEvent ? `No thread here has #${typedEvent.number} linked. Link it from its thread first.` : 'Pick the thread whose pull request wakes it.')
+        : bot ? 'A bot runs on its schedule. Pick another Who.'
+          : remote ? 'The pull request’s thread is on this computer. Pick it in Computer.'
+            : null
+  const blocked = eventBlock ?? (botSchedule && !botSchedule.ok ? botSchedule.reason : owner.offline ? offlineText(owner) : null)
   const canAdd = Boolean(when && ready && !busy && !blocked)
-  const whenTitle = !when && parsed.kind === 'ambiguous' ? parsed.reason : !when ? 'Say when in the text, like "every weekday at 9", or pick one' : when.label
+  const whenTitle = !when && eventParse.kind === 'ambiguous' ? eventParse.reason : !when && parsed.kind === 'ambiguous' ? parsed.reason : !when ? 'Say when in the text, like "every weekday at 9" or "when #712 gets a review", or pick one' : when.label
 
   const reset = () => {
     setText('')
     setPicked(null)
+    setEventPick(null)
     setWho({ kind: 'default' })
     setWorkflowId('')
     setInputs({})
@@ -181,7 +218,22 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
     setBusy(true)
     setError(null)
     try {
-      if (bot && botSchedule?.ok) {
+      if (onEvent && eventThread?.pullRequest && eventKinds) {
+        // It runs on the pull request's thread, in that thread's own workspace.
+        const model = who.kind === 'model' && !workflow ? catalog.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key) : undefined
+        await create({
+          name: workflow ? workflow.name : nameFromPrompt(prompt) || 'Automation',
+          prompt,
+          schedule: { kind: 'manual' },
+          threadEvent: { threadId: eventThread.id, number: eventThread.pullRequest.number, events: eventKinds },
+          threadId: eventThread.id,
+          ...(eventThread.projectId ? { projectId: eventThread.projectId } : {}),
+          ...(savedAgent ? { agent: { definitionId: savedAgent.id } } : {}),
+          ...(model ? { selection: model.selection } : {}),
+          ...(!savedAgent ? { permissionMode: may } : {}),
+          tellMe: 'news'
+        })
+      } else if (bot && botSchedule?.ok) {
         await addBotSchedule(bot.id, botSchedule.when, prompt, botModel || undefined)
       } else {
         const gitProject = projectId ? (repo[projectId] ?? await isGitRepo(projectId).catch(() => false)) : false
@@ -289,14 +341,50 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
           className={`automation-chip-select when${when ? '' : ' unresolved'}`}
           size="small"
           title={whenTitle}
-          value={picked?.key ?? 'text'}
+          value={eventPick ? 'thread' : picked?.key ?? 'text'}
           options={[
-            { value: 'text', label: parsed.kind === 'ok' ? parsed.label : 'Choose when', disabled: parsed.kind !== 'ok' },
-            ...PICKS.map((pick) => ({ value: pick.key, label: pick.label }))
+            { value: 'text', label: typedEvent && eventLabel ? eventLabel : parsed.kind === 'ok' ? parsed.label : 'Choose when', disabled: !typedEvent && parsed.kind !== 'ok' },
+            ...PICKS.map((pick) => ({ value: pick.key, label: pick.label })),
+            { value: 'thread', label: 'When a thread…' }
           ]}
-          renderValue={() => <span data-testid="automation-create-when">{when ? when.label : 'Choose when'}</span>}
-          onChange={(key) => setPicked(PICKS.find((pick) => pick.key === key) ?? null)}
+          renderValue={() => <span data-testid="automation-create-when">{when ? when.label : eventLabel ?? 'Choose when'}</span>}
+          onChange={(key) => {
+            if (key === 'thread') {
+              const linked = pullRequestThreads(catalog.threads)
+              const first = (typedEvent ? eventThread : undefined) ?? linked.find((thread) => !projectId || thread.projectId === projectId) ?? linked[0]
+              setPicked(null)
+              setEventPick({ threadId: first?.id ?? '', choice: (typedEvent ? threadEventChoice(typedEvent.events) : '') || 'review' })
+              return
+            }
+            setEventPick(null)
+            setPicked(PICKS.find((pick) => pick.key === key) ?? null)
+          }}
         />
+        {eventPick ? (
+          <>
+            <Select
+              ariaLabel="Thread"
+              className="automation-chip-select"
+              size="small"
+              value={eventPick.threadId}
+              options={pullRequestThreads(catalog.threads).length
+                ? pullRequestThreads(catalog.threads).map((thread) => ({ value: thread.id, label: `#${thread.pullRequest!.number} · ${thread.name}` }))
+                : [{ value: '', label: 'No thread has a pull request', disabled: true }]}
+              title="The thread whose pull request wakes it; it runs there"
+              renderValue={() => <span data-testid="automation-create-thread">{eventThread?.pullRequest ? `#${eventThread.pullRequest.number} · ${eventThread.name}` : 'Pick a thread'}</span>}
+              onChange={(threadId) => setEventPick({ ...eventPick, threadId })}
+            />
+            <Select
+              ariaLabel="Event"
+              className="automation-chip-select"
+              size="small"
+              value={eventPick.choice}
+              options={THREAD_EVENT_CHOICES.map((choice) => ({ value: choice.value, label: choice.label }))}
+              title="What on the pull request wakes it"
+              onChange={(choice) => setEventPick({ ...eventPick, choice })}
+            />
+          </>
+        ) : null}
         {remote ? (
           <span className="automation-chip readonly" data-testid="automation-create-who" title={`${owner.name}'s default agent. Saved agents, workflows and bots stay on the computer that keeps them.`}>{`${owner.name}'s default agent`}</span>
         ) : workflow ? null : (
@@ -337,7 +425,7 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
           </>
         ) : null}
         {remote ? null : <DoPicker value={workflowId} workflows={library.workflows} onChange={chooseWorkflow} />}
-        {bot ? null : (
+        {bot || onEvent ? null : (
           <Select
             ariaLabel="Where"
             className="automation-chip-select"
@@ -359,11 +447,13 @@ export function CreateRow({ profileId, catalog, library, defaultName, computers,
             onChange={chooseComputer}
           />
         ) : null}
-        {picked ? <button type="button" className="scheduled-link-btn" onClick={() => setPicked(null)} title="Read When from the text again">Use text</button> : null}
+        {picked || eventPick ? <button type="button" className="scheduled-link-btn" onClick={() => { setPicked(null); setEventPick(null) }} title="Read When from the text again">Use text</button> : null}
       </div>
       <div className="automation-create-line">
         <span data-testid="automation-create-next">
-          {when
+          {onEvent
+            ? when && eventThread ? `Runs on ${eventThread.name} · at most every 10 min` : 'Choose when'
+            : when
             ? when.schedule.kind === 'manual'
               ? 'Runs when you run it'
               : first ? `Next ${nextBeforeAdd(first.toISOString(), now, owner)}` : `${describeSchedule(when.schedule, now)}`

@@ -22,8 +22,12 @@ import type {
   ScheduledMissedRuns,
   ScheduledOccurrenceResult,
   ScheduledWebhookDelivery,
-  ScheduledWebhookDeliveryOutcome
+  ScheduledWebhookDeliveryOutcome,
+  ScheduledEventLogEntry,
+  ThreadEventKind
 } from '../../shared/types'
+import { THREAD_EVENT_KINDS } from '../../shared/types'
+import { THREAD_EVENT_MIN_GAP_MS, threadEventOccurrenceKey, threadEventsOfOccurrence } from '../../shared/threadEvents'
 import { DEFAULT_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { TERMINAL_RUN_STATUSES, type RunStatus } from '../run/types'
@@ -73,6 +77,8 @@ const WEBHOOK_RECEIPT_RETENTION_S = WEBHOOK_TIMESTAMP_TOLERANCE_S + 60
  * check: at the cap the job refuses new requests instead (see `saturatedUntil`).
  */
 const MAX_WEBHOOK_RECEIPTS = 2000
+/** Pull request events a thread-event job remembers for "(why?)". */
+const MAX_EVENT_LOG = 10
 /** A refusal of the same kind is logged at most this often per job, so a flood cannot churn the log file. */
 const REFUSAL_LOG_INTERVAL_MS = 1000
 
@@ -269,6 +275,9 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     runClaim: job.runClaim,
     pendingOccurrence: job.pendingOccurrence,
     pendingTrigger: job.pendingTrigger,
+    pendingEvent: job.pendingEvent,
+    lastEventRunAt: job.lastEventRunAt,
+    eventLog: job.eventLog,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed ?? 0 }
       : undefined
@@ -302,6 +311,9 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
     runClaim: runtime?.runClaim,
     pendingOccurrence: runtime?.pendingOccurrence,
     pendingTrigger: runtime?.pendingTrigger,
+    pendingEvent: runtime?.pendingEvent,
+    lastEventRunAt: runtime?.lastEventRunAt,
+    eventLog: runtime?.eventLog,
     repeat
   }
 }
@@ -496,6 +508,7 @@ export class ScheduledJobStore {
       createdBy: input.createdBy,
       accessCap: input.accessCap,
       expiresAt: input.expiresAt,
+      ...(input.threadEvent ? { trigger: { threadEvent: { threadId: input.threadEvent.threadId, number: input.threadEvent.number, events: [...input.threadEvent.events] } } } : {}),
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
       runHistory: [],
       createdAt: options.createdAt ?? now,
@@ -611,11 +624,12 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       if (!job) return null
       if (trigger && job.schedule.kind === 'once') throw new Error('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
+      if (trigger && job.trigger?.threadEvent) throw new Error('It wakes on its pull request, so it takes no request URL.')
       const dropped = trigger ? undefined : job.pendingTrigger
       // A new or rotated secret verifies no earlier signature, so the old replay record goes with it. This is also
       // how an unreadable replay record is repaired.
       if (trigger) resetReceipts(this.homeDir, job.id)
-      job.trigger = trigger ? { webhook: trigger } : undefined
+      job.trigger = trigger ? { ...job.trigger, webhook: trigger } : job.trigger?.threadEvent ? { threadEvent: job.trigger.threadEvent } : undefined
       if (dropped) job.pendingTrigger = undefined
       job.updatedAt = new Date().toISOString()
       this.saveJobs(jobs)
@@ -738,6 +752,55 @@ export class ScheduledJobStore {
       this.logDelivery(job.id, { occurrenceId: next, receivedAt: nowIso, outcome: 'accepted', bodyBytes: stored.bodyBytes, resentFrom: occurrenceId })
       this.pruneKeptPayloads(job)
       return { occurrenceId: next }
+    })
+  }
+
+  /**
+   * Pull request events for a thread-event job (`ThreadEventTriggers` decided they are its own and not caused by its
+   * own run). They wait in one pending slot until the rate limit allows a run (one per `minGapMs`, counted from the last
+   * run events started), and a later event joins the slot. A paused job ignores them; `own` logs one that was ignored
+   * because the job's own run caused it. Every outcome is logged for "(why?)". Returns what became of them.
+   */
+  queueThreadEvent(
+    jobId: string,
+    kinds: ThreadEventKind[],
+    options: { now?: Date; minGapMs?: number; own?: string } = {}
+  ): ScheduledEventLogEntry['outcome'] | 'unknown' {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === jobId)
+      if (!job?.trigger?.threadEvent || !kinds.length) return 'unknown'
+      const now = options.now ?? new Date()
+      const nowIso = now.toISOString()
+      const log = (entry: Omit<ScheduledEventLogEntry, 'at' | 'kinds'>): void => {
+        job.eventLog = [...(job.eventLog ?? []), { at: nowIso, kinds, ...entry }].slice(-MAX_EVENT_LOG)
+      }
+      let outcome: ScheduledEventLogEntry['outcome']
+      if (options.own) {
+        outcome = 'own'
+        log({ outcome, reason: options.own })
+      } else if (!job.enabled || job.state === 'paused') {
+        outcome = 'paused'
+        log({ outcome })
+      } else {
+        const gap = options.minGapMs ?? THREAD_EVENT_MIN_GAP_MS
+        const last = Date.parse(job.lastEventRunAt ?? '')
+        const allowed = Number.isFinite(last) ? Math.max(now.getTime(), last + gap) : now.getTime()
+        const pending = job.pendingEvent
+        const dueAt = pending ? pending.dueAt : new Date(allowed).toISOString()
+        job.pendingEvent = {
+          kinds: THREAD_EVENT_KINDS.filter((kind) => kinds.includes(kind) || pending?.kinds.includes(kind)),
+          firstAt: pending?.firstAt ?? nowIso,
+          dueAt
+        }
+        // A run in flight holds the slot too: the events wait for it to end, then for the rate limit.
+        const held = Date.parse(dueAt) > now.getTime() || job.state === 'running' || Boolean(job.runClaim) || Boolean(job.pendingOccurrence)
+        outcome = held ? 'held' : 'started'
+        log(held ? { outcome, until: dueAt } : { outcome })
+      }
+      job.updatedAt = nowIso
+      this.saveRuntimeDurably(jobs)
+      return outcome
     })
   }
 
@@ -954,6 +1017,11 @@ export class ScheduledJobStore {
           job.pendingTrigger = undefined
           dirty = true
         }
+        // Pull request events waiting when the job was paused do not run later either.
+        if (job.pendingEvent && (!job.enabled || job.state === 'paused') && job.state !== 'running' && !job.runClaim) {
+          job.pendingEvent = undefined
+          dirty = true
+        }
         // An idle job an agent created ends once its time is up; it does not start again by itself, so a person keeps it.
         if (job.state !== 'running' && !job.runClaim && !job.pendingOccurrence) {
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
@@ -977,6 +1045,17 @@ export class ScheduledJobStore {
           job.pendingTrigger = undefined
           job.state = 'running'
           job.runClaim = { ...newRunClaim(webhookOccurrenceKey(occurrenceId)), webhookOccurrenceId: occurrenceId }
+          due.push({ ...job, runClaim: { ...job.runClaim } })
+          dirty = true
+          continue
+        }
+        // Pull request events start a run once the rate limit allows it; it does not move the job's own timer.
+        if (job.pendingEvent && Date.parse(job.pendingEvent.dueAt) <= now.getTime()) {
+          const { kinds, firstAt } = job.pendingEvent
+          job.pendingEvent = undefined
+          job.lastEventRunAt = now.toISOString()
+          job.state = 'running'
+          job.runClaim = newRunClaim(threadEventOccurrenceKey(firstAt, kinds))
           due.push({ ...job, runClaim: { ...job.runClaim } })
           dirty = true
           continue
@@ -1084,6 +1163,8 @@ export class ScheduledJobStore {
       ...(waiting && result.retryAt ? { usageLimitUntil: result.retryAt } : {}),
       ...(occurrenceKey ? { occurrenceKey } : {}),
       ...(job.runClaim?.missed ? { missed: job.runClaim.missed } : {}),
+      ...(job.runClaim?.claimedAt ? { startedAt: job.runClaim.claimedAt } : {}),
+      endedAt: nowIso,
       ...details
     }
     const history = [...(job.runHistory ?? [])]
@@ -1216,6 +1297,9 @@ export class ScheduledJobStore {
       if (!job || !claim || job.state !== 'running' || claim.token !== claimToken || claim.runId) return null
       const now = new Date().toISOString()
       if (claim.webhookOccurrenceId) job.pendingTrigger = { occurrenceId: claim.webhookOccurrenceId, receivedAt: now }
+      // Pull request events go back to waiting, due at once: the rate limit already let them start.
+      const events = threadEventsOfOccurrence(claim.occurrenceKey)
+      if (events?.length) job.pendingEvent = { kinds: events, firstAt: claim.claimedAt, dueAt: now }
       job.runClaim = undefined
       job.state = 'scheduled'
       job.waitingBehind = { threadId, since: job.waitingBehind?.threadId === threadId ? job.waitingBehind.since : now }
@@ -1285,7 +1369,7 @@ export class ScheduledJobStore {
       const now = new Date().toISOString()
       job.runHistory = [
         ...(job.runHistory ?? []),
-        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
+        { runAt: now, status: 'queued' as const, occurrenceKey: claim.occurrenceKey, startedAt: claim.claimedAt, ...(claim.missed ? { missed: claim.missed } : {}), ...details, threadId, runId, ...(queueItemId ? { queueItemId } : {}) }
       ].slice(-20)
       job.pendingOccurrence = {
         occurrenceKey: claim.occurrenceKey,

@@ -70,6 +70,9 @@ export interface ScheduledJobRunRecord {
   agent?: ScheduledRunAgent
   /** This run stands for repeats missed while the computer was off: they collapsed into it, and it ran once. */
   missed?: ScheduledMissedRuns
+  /** When the occurrence was claimed and when it ended; a thread-event job reads them to know its own run's effects. */
+  startedAt?: string
+  endedAt?: string
 }
 
 /** Repeats of a job that fell while its computer was off or asleep ("Missed while offline"). */
@@ -145,6 +148,42 @@ export interface ScheduledJobWebhookTrigger {
   secretRef: string
   createdAt: string
   rotatedAt?: string
+}
+
+/** What on a pull request wakes a thread-event automation: the watch's own change kinds. */
+export type ThreadEventKind = 'checks_failed' | 'checks_passed' | 'review' | 'comment'
+export const THREAD_EVENT_KINDS: readonly ThreadEventKind[] = ['checks_failed', 'checks_passed', 'review', 'comment']
+
+export function isThreadEventKind(value: unknown): value is ThreadEventKind {
+  return typeof value === 'string' && (THREAD_EVENT_KINDS as readonly string[]).includes(value)
+}
+
+/**
+ * A job that wakes on its pull request's activity (`PullRequestWatchService` reads it on the thread the PR is linked to).
+ * The job runs on demand otherwise; its runs go to its own thread (`ScheduledJob.threadId`, the PR's thread by default).
+ */
+export interface ScheduledThreadEventTrigger {
+  /** The thread the pull request is linked to. */
+  threadId: string
+  number: number
+  events: ThreadEventKind[]
+}
+
+/** Events that arrived and wait for their run: one at a time, held by the rate limit until `dueAt`. */
+export interface ScheduledPendingEvent {
+  kinds: ThreadEventKind[]
+  firstAt: string
+  dueAt: string
+}
+
+/** What became of one pull request event, for "(why?)": it ran, was held by the rate limit, or was ignored. */
+export interface ScheduledEventLogEntry {
+  at: string
+  kinds: ThreadEventKind[]
+  outcome: 'started' | 'held' | 'own' | 'paused'
+  /** With `held`: when the run may start. With `own`: what the run did that caused it. */
+  until?: string
+  reason?: string
 }
 
 /** A verified delivery waiting for the scheduler to start it; its payload is stored under the job's trigger folder. */
@@ -274,10 +313,16 @@ export interface ScheduledJob {
   liveStatus?: 'running' | 'needs_answer'
   /** The thread the current occurrence runs on, with `liveStatus`; derived when listed, never stored. */
   liveThreadId?: string
-  /** A signed request starts this job; absent when the job has no webhook. */
-  trigger?: { webhook: ScheduledJobWebhookTrigger }
+  /** A signed request starts this job (`webhook`), or its pull request's activity does (`threadEvent`). */
+  trigger?: { webhook?: ScheduledJobWebhookTrigger; threadEvent?: ScheduledThreadEventTrigger }
   /** A verified delivery that the next tick starts (one at a time). */
   pendingTrigger?: ScheduledJobPendingTrigger
+  /** Pull request events waiting for their run (a thread-event job). */
+  pendingEvent?: ScheduledPendingEvent
+  /** When a pull request event last started a run: the rate limit counts from it. */
+  lastEventRunAt?: string
+  /** The newest pull request events and what became of each (at most 10). */
+  eventLog?: ScheduledEventLogEntry[]
   createdAt: string
   updatedAt: string
 }
@@ -331,6 +376,8 @@ export interface CreateScheduledJobInput {
   /** Daemon-only: a bot's schedule (`bots.schedules.add`, `bot_schedule_add`). The protocol refuses it. */
   bot?: ScheduledJobBot
   repeat?: { times?: number }
+  /** It wakes on this pull request's activity; the protocol sends the thread and events, the daemon adds the number. */
+  threadEvent?: ScheduledThreadEventTrigger
 }
 
 /** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
@@ -349,6 +396,8 @@ export interface ScheduledJobPatch {
   permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
   tellMe?: TellMe
+  /** A thread-event job: what on its pull request wakes it. */
+  threadEvent?: { events: ThreadEventKind[] }
 }
 
 /**

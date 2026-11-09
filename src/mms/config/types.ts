@@ -112,6 +112,9 @@ export interface ScheduledJobRuntime {
   runClaim?: ScheduledJob['runClaim']
   pendingOccurrence?: ScheduledJob['pendingOccurrence']
   pendingTrigger?: ScheduledJob['pendingTrigger']
+  pendingEvent?: ScheduledJob['pendingEvent']
+  lastEventRunAt?: ScheduledJob['lastEventRunAt']
+  eventLog?: ScheduledJob['eventLog']
 }
 
 export interface MousseConf {
