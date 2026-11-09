@@ -191,7 +191,9 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     if (!taken) return
     const text = taken.draft.trim()
     const images = taken.images?.length ? taken.images : undefined
-    if (!text || text === base.text) return
+    // Changed is not the same as having text: an edit that cleared the text of a message with attachments still
+    // gives the attachments back.
+    if (text === base.text || (!text && !base.markers && !images)) return
     toComposer.current?.(thread, { text, markers: base.markers, ...(images ? { images } : {}) })
     store.setQueueDraftNotice(thread, true)
     // The notice says what happened; an error about the same message (its edit refused) adds nothing.

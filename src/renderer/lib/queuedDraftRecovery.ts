@@ -18,7 +18,8 @@ export function restoreQueuedDraft(
   const store = useAppStore.getState()
   const parts = composerPartsFromMarkers(recovered.markers)
   const text = [recovered.text, parts.text].filter(Boolean).join('\n\n')
-  store.setComposerDraft(threadId, withDraftAppended(store.composerDrafts[threadId] ?? '', text))
+  // An edit that cleared the text gives back only the attachments: the composer's text stays as it is.
+  if (text) store.setComposerDraft(threadId, withDraftAppended(store.composerDrafts[threadId] ?? '', text))
   for (const reference of parts.references) store.addComposerReference(threadId, reference)
   for (const element of parts.browserElements) {
     store.addBrowserElementAttachment(threadId, { ...element, id: crypto.randomUUID(), text: element.text ?? '' })

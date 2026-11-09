@@ -271,6 +271,16 @@ describe('queued messages in the conversation', () => {
       expect(toComposer).toHaveBeenCalledWith('t1', { text: 'Look at that', markers, images: [image] })
     })
 
+    it('gives the images back when the edit cleared the text of a message with images', async () => {
+      const image = { name: 'shot.png', mimeType: 'image/png', data: btoa('png bytes') }
+      await show([queued('a', 'Look at this', { images: [image] }), queued('b', 'two')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, '')
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      expect(toComposer).toHaveBeenCalledWith('t1', { text: '', markers: '', images: [image] })
+      expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
+    })
+
     it('puts the text in an empty composer, or on a new line after what it has', () => {
       expect(withDraftAppended('', 'edit')).toBe('edit')
       expect(withDraftAppended('  ', 'edit')).toBe('edit')

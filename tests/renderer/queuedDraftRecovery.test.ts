@@ -40,6 +40,13 @@ describe('an unsaved edit of a queued message, back in the composer', () => {
     expect(files[0].previewUrl).toBe('blob:preview')
   })
 
+  it('leaves the composer text alone when only the images come back', () => {
+    const addFiles = vi.fn()
+    restoreQueuedDraft('t1', { text: '', markers: '', images: [{ name: 'shot.png', mimeType: 'image/png', data: btoa('png bytes') }] }, addFiles)
+    expect(useAppStore.getState().composerDrafts.t1).toBe('already typed')
+    expect(addFiles).toHaveBeenCalledTimes(1)
+  })
+
   it('fills an empty composer with the text alone and adds no files when the message had none', () => {
     useAppStore.setState({ composerDrafts: {} })
     const addFiles = vi.fn()
