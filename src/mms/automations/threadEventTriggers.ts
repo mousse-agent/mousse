@@ -102,7 +102,8 @@ export class ThreadEventTriggers {
 
   /** What changed on a watched pull request: each automation on that thread whose events match wakes, unless it caused them. */
   onUpdated(event: PullRequestWatchUpdate): void {
-    const kinds = eventKindsOf(event.changes)
+    // An update with no list of changes (a bare refresh) wakes nothing, and never throws into the watch's other listeners.
+    const kinds = eventKindsOf(event.changes ?? [])
     if (!kinds.length) return
     const now = this.deps.now?.() ?? Date.now()
     let jobs: ScheduledJob[]

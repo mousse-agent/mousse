@@ -165,6 +165,8 @@ const TERMINAL_KILL: Phrase = phrase('Closed a terminal', 'closed a terminal', '
 const CREATE: Phrase = phrase('Created a thread', 'created a thread', 'created {n} threads')
 const PROJECT: Phrase = phrase('Changed a project', 'changed a project', 'changed projects {n} times')
 const PROJECT_OPEN: Phrase = phrase('Opened a folder as a project', 'opened a folder as a project', 'opened {n} folders as projects')
+const AUTOMATION: Phrase = phrase('Changed an automation', 'changed an automation', 'changed automations {n} times')
+const AUTOMATION_RUN: Phrase = phrase('Ran an automation', 'ran an automation', 'ran automations {n} times')
 const OTHER: Phrase = phrase('Made a change', 'made a change', 'made {n} other changes')
 
 /** A change that is a notice to the owner, not a thing to count. */
@@ -281,7 +283,13 @@ const PHRASES: Record<string, Phrase> = {
   'projects.rename': PROJECT,
   'projects.pin': PROJECT,
   'projects.remove': PROJECT,
-  'projects.open': PROJECT_OPEN
+  'projects.open': PROJECT_OPEN,
+  'scheduled.create': AUTOMATION,
+  'scheduled.update': AUTOMATION,
+  'scheduled.pause': AUTOMATION,
+  'scheduled.resume': AUTOMATION,
+  'scheduled.delete': AUTOMATION,
+  'scheduled.run': AUTOMATION_RUN
 }
 
 /** Every method the owner audits as a change that has words of its own; the test checks it against the routed table. */

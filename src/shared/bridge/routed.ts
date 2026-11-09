@@ -914,6 +914,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'Drafts and the Automation manager’s thread belong to the computer whose manager wrote them; Turn on happens there.'
   },
   {
+    methods: ['automations.inbox.list', 'automations.inbox.counts', 'automations.inbox.resolve', 'automations.inbox.undo', 'automations.inbox.calibrate', 'automations.tuning.remove'],
+    reason: 'The inbox (runs, Needs you and Tuning notes) is kept by the computer that runs the automations, and read and changed there.'
+  },
+  {
     prefixes: ['providers.'],
     reason:
       'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'
