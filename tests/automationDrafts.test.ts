@@ -38,6 +38,7 @@ function setup(options: { ceiling?: PermissionMode } = {}) {
     ['t-pr', { id: 't-pr', name: 'Fix checkout', projectId: 'p1', pullRequest: { number: 712 } } as Thread]
   ])
   const reused: string[] = []
+  const botSchedules: Array<{ botId: string; prompt: string; name: string }> = []
   const drafts = new AutomationDrafts({
     get: (id) => service.getJob(id),
     list: () => service.listJobs(),
@@ -47,20 +48,22 @@ function setup(options: { ceiling?: PermissionMode } = {}) {
     pause: (id, reason, until) => service.pauseJob(id, reason, until),
     projects: () => [{ id: 'p1', name: 'mousse' }],
     thread: (id) => threads.get(id),
-    savedAgent: (id) => id === 'agent-1',
-    validate: (job) => ({ ...(job.selection ? { selection: job.selection } : {}) }),
+    botExists: (id) => id === 'bot_1',
+    addBotSchedule: (botId, input) => {
+      botSchedules.push({ botId, ...input })
+      return service.createJob({ name: input.name, prompt: input.prompt, schedule: input.schedule, tellMe: input.tellMe, bot: { botId, scheduleId: 's1', createdBy: 'owner' } }, { id: `bot-${botId}--s1` })
+    },
     personCeiling: () => options.ceiling ?? 'accept_edits',
     reuseThread: (jobId) => { reused.push(jobId); return { id: `thread-for-${jobId}` } }
   })
   const tick = () => (service as unknown as { tickOwned: () => Promise<void> }).tickOwned()
   const settle = () => Promise.all([...(service as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()])
-  return { store, service, drafts, prompts, tick, settle, reused }
+  return { store, service, drafts, prompts, tick, settle, reused, botSchedules }
 }
 
 const PR_CHECK = {
   name: 'PR check',
   trigger: { kind: 'time', schedule: { kind: 'cron', expr: '0 5 * * 4' } },
-  agent: { kind: 'default' },
   prompt: 'Review open PRs and comment on risky ones.',
   result: { thread: 'new', tellMe: 'news' }
 }
@@ -141,14 +144,35 @@ describe('automation drafts', () => {
     expect(cliNameOf('  PR check: Thursday!  ')).toBe('pr-check-thursday')
   })
 
-  it('reads the rest of the contract: a pull request event, a saved agent, a workflow, one reused thread', () => {
+  it('takes Who from the person, never the manager: a bot\'s draft turns on as the bot\'s own schedule', () => {
+    const { drafts, service, botSchedules } = setup()
+    expect(() => drafts.save({ ...PR_CHECK, agent: { kind: 'bot', botId: 'bot_1' } }, { managerThreadId: 'manager' })).toThrow(/picked by the person/)
+    // The person picked Pip in the composer: the manager's next draft is Pip's, and needs no project.
+    drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })
+    const pip = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    expect(pip.problems).toEqual([])
+    expect(drafts.list().find((entry) => entry.id === pip.draftId)!.agent).toEqual({ kind: 'bot', botId: 'bot_1' })
+    // A bot repeats: a CLI trigger is a problem until When repeats.
+    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' }).problems).toEqual(['A bot repeats: give it a time that repeats, at most every 5 minutes.'])
+    drafts.save({ draftId: pip.draftId, trigger: PR_CHECK.trigger }, { managerThreadId: 'manager' })
+    const on = drafts.turnOn(pip.draftId)
+    expect(botSchedules).toEqual([expect.objectContaining({ botId: 'bot_1', name: 'PR check', prompt: PR_CHECK.prompt })])
+    expect(on.bot).toMatchObject({ botId: 'bot_1' })
+    expect(service.getJob(pip.draftId)).toBeUndefined()
+    // Changing Who on the card back to the default agent asks for a project again.
+    drafts.nextWho({}, { kind: 'default' })
+    const plain = drafts.save(PR_CHECK, { managerThreadId: 'manager' })
+    drafts.setWho(plain.draftId, { kind: 'bot', botId: 'bot_1' })
+    expect(service.getJob(plain.draftId)!.draft).toMatchObject({ who: { kind: 'bot', botId: 'bot_1' }, problems: [] })
+    drafts.setWho(plain.draftId, { kind: 'default' })
+    expect(service.getJob(plain.draftId)!.draft!.problems).toEqual(['Which project should it run in?'])
+  })
+
+  it('reads the rest of the contract: a pull request event and one reused thread', () => {
     const { drafts, service, reused } = setup()
     const event = drafts.save({ ...PR_CHECK, project: 'p1', trigger: { kind: 'thread_event', threadId: 't-pr', events: ['review'] } }, {})
     expect(event.problems).toEqual([])
     expect(service.getJob(event.draftId)).toMatchObject({ schedule: { kind: 'manual' }, threadId: 't-pr', trigger: { threadEvent: { threadId: 't-pr', number: 712, events: ['review'] } } })
-    expect(drafts.save({ ...PR_CHECK, project: 'p1', agent: { kind: 'saved_agent', id: 'gone' } }, {}).problems).toEqual(['That saved agent does not exist or is not published.'])
-    const workflow = drafts.save({ ...PR_CHECK, project: 'p1', agent: { kind: 'workflow', slug: 'release-notes' }, prompt: '--tag v1' }, {})
-    expect(service.getJob(workflow.draftId)!.prompt).toBe('/release-notes --tag v1')
     const reuse = drafts.save({ ...PR_CHECK, project: 'p1', result: { thread: 'reuse', tellMe: 'problems' } }, {})
     const on = drafts.turnOn(reuse.draftId)
     expect(reused).toEqual([reuse.draftId])

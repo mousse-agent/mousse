@@ -5,6 +5,9 @@ import { describeSchedule } from '../../../shared/scheduleLabel'
 import type { ScheduledJob } from '../../../shared/types'
 import { ownedWhenText } from './automationTime'
 import type { MetaContext } from './automationList'
+import { Select } from '../ui/Select'
+import { whoChoices } from './AutomationComposer'
+import type { BotChoice } from './whoDo'
 
 /** One block of the card: a title line and a quieter line under it. */
 export interface CardBlock {
@@ -40,11 +43,15 @@ export function resultBlock(item: AutomationItem): CardBlock {
  * An automation as three blocks, When → Agent → Result, with its May. A draft adds Turn on, Edit details and Discard,
  * its problems and the manager's open question with quick answers; an automation's detail shows the card alone.
  */
-export function DraftCard({ item, job, who, ctx, onTurnOn, onEditDetails, onDiscard, onAnswer, onOpenConversation }: {
+export function DraftCard({ item, job, who, ctx, bots = [], onWho, onTurnOn, onEditDetails, onDiscard, onAnswer, onOpenConversation }: {
   item: AutomationItem
   job?: ScheduledJob
   /** The name of who does it, as the page names agents. */
   who: string
+  /** The bots Who offers on a draft. */
+  bots?: BotChoice[]
+  /** A draft's Who changed: `default`, `bot:<id>`, or a new bot. */
+  onWho?: (key: string) => void
   ctx: Pick<MetaContext, 'now' | 'viewerZone'>
   onTurnOn?: () => Promise<void>
   onEditDetails?: () => void
@@ -90,7 +97,12 @@ export function DraftCard({ item, job, who, ctx, onTurnOn, onEditDetails, onDisc
             {index > 0 ? <span className="automation-card-arrow" aria-hidden="true">→</span> : null}
             <div className="automation-card-block" data-block={block.key}>
               <span className="automation-card-label">{block.label}</span>
-              <span className="automation-card-title" title={block.title}>{block.title}</span>
+              {block.key === 'agent' && draft && onWho ? (
+                <span className="automation-card-title">
+                  <Select ariaLabel="Who" className="automation-chip-select" size="small" value={draft.who ? `bot:${draft.who.botId}` : 'default'} options={whoChoices(bots)} title="Who does it" onChange={onWho} />
+                  {` · ${item.where?.name ?? 'no project'}`}
+                </span>
+              ) : <span className="automation-card-title" title={block.title}>{block.title}</span>}
               <span className="automation-card-sub" title={block.key === 'agent' ? job?.prompt : block.sub}>{block.sub}</span>
             </div>
           </div>

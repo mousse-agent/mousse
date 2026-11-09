@@ -58,7 +58,7 @@ import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
 import { createBotContextProvider } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
-import { BotScheduleBook } from './scheduled/botJobs'
+import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
 import { migrateBotSchedules } from './scheduled/botScheduleMigration'
 import type { BotStore } from './bots/store/BotStore'
 import { botScheduleLabel } from '../shared/scheduleLabel'
@@ -882,15 +882,13 @@ export class MmsProfileServices {
       pause: (id, reason, until) => this.scheduled.pauseJob(id, reason, until),
       projects: () => this.projects.listProjects().map(({ id, name }) => ({ id, name })),
       thread: (id) => this.threads.getThread(id),
-      savedAgent: (id) => {
-        try {
-          this.platform.agentDefinitions.get(id)
-          return true
-        } catch {
-          return false
-        }
+      botExists: (botId) => this.personalBots?.list().some((bot) => bot.id === botId) ?? false,
+      addBotSchedule: (botId, input) => {
+        const when = botWhenOf(input.schedule)
+        if (!when) throw new Error('A bot repeats: give it a time that repeats.')
+        const entry = this.botSchedules.add(botId, { when, prompt: input.prompt }, 'owner')
+        return this.scheduled.updateJob(entry.jobId, { name: input.name, tellMe: input.tellMe }) ?? this.scheduled.getJob(entry.jobId)!
       },
-      validate: (job) => validateScheduledJobOptions(job, jobOptionDeps),
       personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
       reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId)
     })

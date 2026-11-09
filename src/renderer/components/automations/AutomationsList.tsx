@@ -22,10 +22,11 @@ import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentEntries, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
-import { AutomationComposer, MANAGER_KEY, type ComposerSend } from './AutomationComposer'
+import { AutomationComposer, MANAGER_KEY, NEW_BOT_KEY, type ComposerSend } from './AutomationComposer'
+import { NewBotDialog } from '../bots/NewBotDialog'
+import type { AutomationWhoPick } from '../../services/automationsClient'
 import { DraftCard } from './DraftCard'
 import { AutomationOverview } from './AutomationOverview'
-import type { AutomationLibrary } from './whoDo'
 import { deliveryText, type RequestApi } from './RequestTrigger'
 import { KeyDialog } from './KeyDialog'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
@@ -33,6 +34,11 @@ import { computerChoicesOf } from './computerChoice'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
 const POLL_MS = 15_000
+
+/** The Who chip's value as the daemon reads it. */
+function pickOf(key: string): AutomationWhoPick {
+  return key.startsWith('bot:') ? { kind: 'bot', botId: key.slice('bot:'.length) } : { kind: 'default' }
+}
 
 function browserRequestApi(): RequestApi {
   const webhook = window.mousse.scheduled.webhook
@@ -51,20 +57,9 @@ export function pageHasFocus(doc: Pick<Document, 'activeElement' | 'querySelecto
   return Boolean(page && focused && page.contains(focused))
 }
 
-/**
- * What the composer opens with for a request from another surface (Automate…, Repeat this…): the words to send, with
- * the saved agent or workflow named so the manager uses it, and the project.
- */
-export function prefillOf(request: AutomationCreateRequest, library: AutomationLibrary): { nonce: number; text: string; projectId?: string } {
-  const agent = request.agentId ? library.agents.find((entry) => entry.id === request.agentId) : undefined
-  const workflow = request.workflowId ? library.workflows.find((entry) => entry.id === request.workflowId) : undefined
-  const lead = agent ? `Have the saved agent “${agent.name}” (${agent.id}) ` : workflow ? `Run the workflow /${workflow.slug} ` : ''
-  const prompt = request.prompt?.trim() ?? ''
-  return {
-    nonce: request.nonce,
-    text: lead ? `${lead}${prompt ? `to: ${prompt}` : 'every '}` : prompt,
-    ...(request.projectId !== undefined ? { projectId: request.projectId } : {})
-  }
+/** What the composer opens with for Repeat this…: the words to send and the project. */
+export function prefillOf(request: AutomationCreateRequest): { nonce: number; text: string; projectId?: string } {
+  return { nonce: request.nonce, text: request.prompt?.trim() ?? '', ...(request.projectId !== undefined ? { projectId: request.projectId } : {}) }
 }
 
 /** How long the composer says "Setting it up…" for a bot, which reports in its own chat. */
@@ -82,7 +77,7 @@ function agentNameOf(providers: LlmProviderOption[], selection: { instanceId?: s
  * it…, runs, and Edit details for the full form), their bot chat or their thread. ⇧/⌘-click and ⌘A select rows for
  * Pause…, Resume and Delete.
  */
-export function AutomationsList({ active, onOpenLibrary }: { active: boolean; onOpenLibrary: () => void }) {
+export function AutomationsList({ active }: { active: boolean }) {
   const client = useMemo(() => createAutomationsClient(window.mousse.platformRequest), [])
   const [index, setIndex] = useState<AutomationIndex | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -111,6 +106,10 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [editing, setEditing] = useState(false)
   // The manager the composer last sent to, and when: the status line follows it.
   const [sent, setSent] = useState<{ builtBy: string; at: number } | null>(null)
+  // Who does it, as the person picks it in the composer (`default`, `bot:<id>`); the manager never picks it.
+  const [who, setWho] = useState('default')
+  // + New bot…: the dialog, prefilled with these words, and where the new bot goes (the composer, or a draft by id).
+  const [newBot, setNewBot] = useState<{ text: string; draftId?: string } | null>(null)
   const [managerThreadId, setManagerThreadId] = useState<string | null>(null)
   const [, setTick] = useState(0)
   const automateRequest = useAutomationCreate((state) => state.request)
@@ -179,15 +178,13 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.automation-composer-input')?.focus())
   }, () => active && pageHasFocus(), { keysOnly: true })
 
-  // Automate… and Repeat this…: the composer opens with the request's words.
+  // Repeat this…: the composer opens with the request's words.
   useEffect(() => {
     if (!automateRequest || !settings) return
-    // A saved agent or workflow is named once the Library is read.
-    if ((automateRequest.agentId && !library.agents.length) || (automateRequest.workflowId && !library.workflows.length)) return
     setDetail(null)
-    setPrefill(prefillOf(automateRequest, library))
+    setPrefill(prefillOf(automateRequest))
     takeAutomationCreate()
-  }, [automateRequest, settings, library])
+  }, [automateRequest, settings])
 
   const items = useMemo(() => index?.items ?? [], [index])
   const detailItem = detail ? items.find((item) => item.key === detail) : undefined
@@ -266,7 +263,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   // ── The manager: the composer's words go to it as a person's message, with the project and computer picked. ──
   const knownManagerThread = managerThreadId ?? items.find((item) => item.draft?.managerThreadId)?.draft?.managerThreadId ?? null
   const botsClient = useMemo(() => createPersonalBotsClient(window.mousse.platformRequest), [])
-  const sendToManager = async (send: ComposerSend & { draftId?: string; automationId?: string }) => {
+  const sendToManager = async (send: Omit<ComposerSend, 'who'> & { who?: string; draftId?: string; automationId?: string }) => {
     const project = catalog.projects.find((entry) => entry.id === send.projectId)
     const computer = send.node ? computers.find((entry) => entry.node === send.node)?.name : undefined
     const message = managerMessage({
@@ -276,6 +273,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       ...(send.draftId ? { draftId: send.draftId } : {}),
       ...(send.automationId ? { automationId: send.automationId } : {})
     })
+    // The drafts this manager writes next take the Who the person picked.
+    if (send.who !== undefined) await client.nextWho(send.builtBy === MANAGER_KEY ? undefined : send.builtBy.slice('bot:'.length), pickOf(send.who))
     if (send.builtBy === MANAGER_KEY) {
       const threadId = knownManagerThread ?? await client.managerThread()
       setManagerThreadId(threadId)
@@ -328,7 +327,27 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     setEditing(true)
     void loadCatalog()
   })
-  const whoOf = (item: AutomationItem) => modelName(item) ?? item.who.name
+  const whoOf = (item: AutomationItem) => {
+    const botId = item.draft?.who?.botId
+    if (botId) return library.bots.find((bot) => bot.id === botId)?.name ?? 'Bot'
+    return item.draft ? 'Default agent' : modelName(item) ?? item.who.name
+  }
+  // Who on the composer or a draft's card: a bot or the default agent, or + New bot… (the dialog, then back here).
+  const chooseWho = (key: string, text: string) => {
+    if (key === NEW_BOT_KEY) setNewBot({ text })
+    else setWho(key)
+  }
+  const chooseDraftWho = (item: AutomationItem, key: string) => {
+    if (key === NEW_BOT_KEY) { setNewBot({ text: jobOf(item)?.prompt ?? item.name, draftId: item.id }); return }
+    void act(() => client.setWho(item.id, pickOf(key)))
+  }
+  const botMade = (botId: string) => {
+    const target = newBot
+    setNewBot(null)
+    reloadLibrary()
+    if (target?.draftId) void act(() => client.setWho(target.draftId!, { kind: 'bot', botId }))
+    else setWho(`bot:${botId}`)
+  }
 
   const runNow = (jobId: string) => act(() => window.mousse.scheduled.run(jobId))
   // Needs you answers an ask in place, with the daemon method its own surface uses.
@@ -472,6 +491,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   const dialogs = (
     <>
+      {newBot ? <NewBotDialog initialDescription={newBot.text} onCreated={(bot) => botMade(bot.id)} onClose={() => setNewBot(null)} /> : null}
       {addingKey ? <KeyDialog {...(addingKey.name ? { name: addingKey.name } : {})} stored={storedKeys} onSave={(name, value) => saveKey(addingKey.jobId, name, value)} onClose={() => setAddingKey(null)} /> : null}
       {moving ? <MovePicker count={moving.length} computers={computers.filter((computer) => computer.node !== '')} onCancel={() => setMoving(null)} onMove={(node) => move(moving, node)} /> : null}
       {pausing ? <PausePicker count={pausing.length} onCancel={() => setPausing(null)} onPause={(until) => pause(pausing, until)} /> : null}
@@ -503,6 +523,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             job={detailJob}
             who={whoOf(detailItem)}
             ctx={ctx}
+            bots={library.bots}
+            onWho={(key) => chooseDraftWho(detailItem, key)}
             onBack={() => setDetail(null)}
             onRunNow={() => void runNow(detailJob.id)}
             onPause={() => setPausing([detailItem.key])}
@@ -573,7 +595,6 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       <header className="rail-page-header automations-header">
         <h1>Automations</h1>
         <span className="automations-header-spacer" />
-        <button type="button" className="automations-link" data-testid="automations-library-link" onClick={onOpenLibrary} title="Saved agents and workflows">Library</button>
         {rowCount > SEARCH_AFTER_ROWS ? (
           searchOpen || query ? (
             <span className="automations-search">
@@ -607,6 +628,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             onSend={sendToManager}
             onStop={stopManager}
             onSetUpByHand={(projectId) => void setUpByHand(projectId)}
+            who={who}
+            onWho={chooseWho}
+            starters={Boolean(index) && rowCount === 0}
             {...(sentBot || knownManagerThread ? { onOpenConversation: () => openConversation() } : {})}
           />
 
@@ -642,6 +666,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
                   job={jobOf(item)}
                   who={whoOf(item)}
                   ctx={ctx}
+                  bots={library.bots}
+                  onWho={(key) => chooseDraftWho(item, key)}
                   onTurnOn={() => turnOn(item)}
                   onEditDetails={() => openItem(item, true)}
                   onDiscard={() => void discard(item)}
@@ -675,6 +701,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
                     onOpen={() => openItem(item)}
                     onSelect={(mode) => select(item, mode)}
                     onPrimary={() => primary(item)}
+                    {...(item.link.kind === 'job' && item.link.botId ? { onOpenBot: () => openBot((item.link as { botId: string }).botId) } : {})}
                   />
                 ))}
               </div>

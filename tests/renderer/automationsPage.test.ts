@@ -248,6 +248,8 @@ const LIBRARY: Record<string, unknown> = {
   'automations.drafts.discard': { ok: true },
   'automations.drafts.answered': { ok: true },
   'automations.drafts.create': { job: { id: 'd-new' } },
+  'automations.drafts.nextWho': { ok: true },
+  'automations.drafts.setWho': { job: {} },
   'bots.chat.send': { message: {} },
   'bots.chat.stop': {}
 }
@@ -279,11 +281,11 @@ function api(index: AutomationIndex, jobs: ScheduledJob[]) {
   }
 }
 
-async function mount(items: AutomationItem[], jobs: ScheduledJob[] = [], onOpenLibrary = vi.fn(), extra: Partial<AutomationIndex> = {}) {
+async function mount(items: AutomationItem[], jobs: ScheduledJob[] = [], _unused?: unknown, extra: Partial<AutomationIndex> = {}) {
   const mousse = api({ items, computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '', ...extra }, jobs)
   ;(window as unknown as { mousse: unknown }).mousse = mousse
   const { AutomationsList } = await import('../../src/renderer/components/automations/AutomationsList')
-  await act(async () => root.render(createElement(AutomationsList, { active: true, onOpenLibrary })))
+  await act(async () => root.render(createElement(AutomationsList, { active: true })))
   await act(async () => {})
   return mousse
 }
@@ -402,7 +404,7 @@ describe('the Automations page', () => {
     const mousse = await mount([draft], [stored])
     const card = $('[data-testid="automation-draft-card"]')!
     expect([...card.querySelectorAll('.automation-card-label')].map((label) => label.textContent)).toEqual(['When', 'Agent', 'Result'])
-    expect(card.querySelector('[data-block="agent"]')!.textContent).toContain('Claude · mousse')
+    expect(card.querySelector('[data-block="agent"]')!.textContent).toContain('Default agent · mousse')
     expect(card.querySelector('[data-testid="automation-card-may"]')!.textContent).toBe('May: Auto-accept edits')
     expect($('[data-group="needs"]')).toBeNull()
     await click([...$('[data-testid="automation-draft-ask"]')!.querySelectorAll('button')].find((button) => button.textContent === 'Yes'))
@@ -457,16 +459,57 @@ describe('the Automations page', () => {
     expect($('[data-testid="automation-detail"]')?.getAttribute('data-job-id')).toBe('d-new')
   })
 
-  it('fills the composer from Repeat this… and Automate…', async () => {
+  it('fills the composer from Repeat this…', async () => {
     const { openAutomationCreate, useAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
     openAutomationCreate({ prompt: 'summarize yesterday\'s commits', projectId: 'p1' })
     await mount([])
     await act(async () => {})
     expect($<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!.value).toBe('summarize yesterday\'s commits')
     expect(useAutomationCreate.getState().request).toBeNull()
-    await act(async () => { openAutomationCreate({ agentId: 'agent-1' }) })
-    await act(async () => {})
-    expect($<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!.value).toMatch(/^Have the saved agent “PR reviewer” \(agent-1\)/)
+  })
+
+  it('lets the person pick Who: the default agent, a bot, or + New bot…, and the manager\'s next draft takes it', async () => {
+    const mousse = await mount([])
+    await click($('[aria-label="Who"]'))
+    expect($$('.ui-select-option-label').map((entry) => entry.textContent)).toEqual(['Default agent', 'Pip', '+ New bot…'])
+    expect($('[data-testid="automation-new-bot"]')).not.toBeNull()
+    await click(option('Pip'))
+    const input = $<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'every morning at 8 tell me the weather')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await click($('[data-testid="automation-composer-send"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.nextWho', { botId: 'bot_1', who: { kind: 'bot', botId: 'bot_1' } })
+    // + New bot… opens the New bot dialog with the composer's words.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'triage new issues daily')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await click($('[aria-label="Who"]'))
+    await click(option('+ New bot…'))
+    expect($<HTMLTextAreaElement>('#bot-new-text')?.value).toBe('triage new issues daily')
+  })
+
+  it('changes Who on a draft\'s card', async () => {
+    const draft = item({ key: 'job:d1', name: 'PR check', where: { projectId: 'p1', name: 'mousse' }, draft: { draftId: 'd1', problems: [] } })
+    const mousse = await mount([draft], [job({ id: 'd1', enabled: false })])
+    await click($('[data-testid="automation-draft-card"] [aria-label="Who"]'))
+    await click(option('Pip'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.setWho', { draftId: 'd1', who: { kind: 'bot', botId: 'bot_1' } })
+  })
+
+  it('shows use-case starters on an empty page; one fills the composer and picks no bot', async () => {
+    await mount([])
+    const starters = $('[data-testid="automation-starters"]')!
+    expect([...starters.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['Review PRs', 'Morning brief', 'Triage issues', 'Watch CI'])
+    await click([...starters.querySelectorAll('button')][0])
+    expect($<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!.value).toMatch(/review open pull requests/)
+    expect($('[data-testid="automation-who"]')?.textContent).toBe('Default agent')
+    act(() => root.unmount())
+    root = createRoot(host)
+    await mount([item({ key: 'job:a', name: 'A', trigger: 'on_demand' })])
+    expect($('[data-testid="automation-starters"]')).toBeNull()
   })
 
   it('shows a thread-event row in Watching next to a notify-only watch, and its (why?) says what it ignores', async () => {
@@ -545,7 +588,7 @@ describe('the Automations page', () => {
     // A bot's row is a normal row: its next time, then the bot (its face, then its name).
     expect($$('[data-key="job:b--s"] [data-meta]').map((part) => part.dataset.meta).slice(0, 2)).toEqual(['when', 'bot'])
     expect($('[data-key="job:b--s"] [data-meta="bot"]')?.textContent).toBe('Pip')
-    expect($('[data-key="job:b--s"] [data-testid="automation-bot-face"]')).not.toBeNull()
+    expect($('[data-key="job:b--s"] [data-testid="automation-bot-face"]')?.getAttribute('title')).toBe('Open Pip')
     expect($('[data-key="watch:t1"] .automation-row-meta')?.textContent).toContain('Notify')
     await click($('[data-key="watch:t1"] .automation-row-main'))
     expect(openThread).toHaveBeenCalledWith('t1')
@@ -737,12 +780,10 @@ describe('the Automations page', () => {
     expect(mousse.scheduled.update).toHaveBeenCalledWith('b--s', { tellMe: 'problems' })
   })
 
-  it('shows search past twelve rows, and opens the Library from the header', async () => {
-    const openLibrary = vi.fn()
-    await mount(Array.from({ length: 13 }, (_, at) => item({ key: `job:${at}`, name: `Job ${at}`, trigger: 'on_demand' })), [], openLibrary)
+  it('shows search past twelve rows, and has no Library', async () => {
+    await mount(Array.from({ length: 13 }, (_, at) => item({ key: `job:${at}`, name: `Job ${at}`, trigger: 'on_demand' })))
     expect($('[aria-label="Search automations"]')).not.toBeNull()
-    await click($('[data-testid="automations-library-link"]'))
-    expect(openLibrary).toHaveBeenCalledOnce()
+    expect($('[data-testid="automations-library-link"]')).toBeNull()
   })
 
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {

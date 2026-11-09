@@ -4,7 +4,6 @@ import { ArchiveDefinitionDialog, FixIssuesLink, PublishImpactDialog, SaveFailed
 import { parseWorkflowCommand } from '../../../shared/workflows/workflowCommand'
 import { definitionSaveState, publishBlockReason } from '../automations/editorState'
 import { RowMenu } from '../integrations/RowMenu'
-import { openAutomationCreate } from '../../stores/automationCreateStore'
 import type { WorkflowBundle, WorkflowDiagnostic, WorkflowEditorDocument, WorkflowManifest, WorkflowNode } from '../../../shared/workflows'
 import { useCommands } from '../../commands/commandRegistry'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'
@@ -615,14 +614,6 @@ export function WorkflowEditor({
             label="Workflow actions"
             disabled={saving || archiving}
             items={[
-              {
-                label: 'Automate…',
-                action: 'automate',
-                testId: 'library-automate',
-                disabled: !document.head,
-                title: document.head ? 'Run this workflow on a schedule' : 'Publish it first: automations run the published workflow.',
-                onSelect: () => requestLeave(() => openAutomationCreate({ workflowId: definitionId }))
-              },
               ...(duplicateSupported ? [{ label: 'Duplicate', action: 'duplicate', onSelect: () => requestLeave(duplicate) }] : []),
               {
                 label: 'Export',

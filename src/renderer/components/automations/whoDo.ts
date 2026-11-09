@@ -1,28 +1,23 @@
-import type { AgentDefinitionSummary } from '../../../shared/agents/types'
 import type { BotLook } from '../../../shared/bots/personal/look'
 import type { SelectOption } from '../ui/Select'
 import type { ModelGroup } from '../scheduled/jobDraft'
 
 /**
- * The Who and Do of an automation as data: what the pickers offer (models, saved agents, bots; a prompt or a
- * workflow) and how a choice is written as one Select value. Pure, so the detail's form and its tests read the same
- * rules.
+ * The Who of an automation as data: what the picker offers (the default agent, the models, your bots) and how a choice
+ * is written as one Select value. Pure, so the detail's form and its tests read the same rules. Bots are the only
+ * reusable Who; an automation made with a saved agent before they were removed keeps it until it is changed.
  */
 
-export interface SavedAgentChoice { id: string; name: string; purpose?: string }
-export interface WorkflowChoice { id: string; slug: string; name: string; description?: string; revisionId: string }
 export interface BotChoice { id: string; name: string; look: BotLook }
 
-/** What fills the Who and Do slots: published, turned-on saved agents and workflows, and the person's bots. */
+/** What fills Who: the person's bots. */
 export interface AutomationLibrary {
-  agents: SavedAgentChoice[]
-  workflows: WorkflowChoice[]
   bots: BotChoice[]
 }
 
-export const EMPTY_LIBRARY: AutomationLibrary = { agents: [], workflows: [], bots: [] }
+export const EMPTY_LIBRARY: AutomationLibrary = { bots: [] }
 
-/** Who does it: the default agent, a model, a saved agent, or a bot. */
+/** Who does it: the default agent, a model, a saved agent made before, or a bot. */
 export type Who =
   | { kind: 'default' }
   | { kind: 'model'; key: string }
@@ -48,29 +43,14 @@ export function parseWhoKey(key: string): Who {
   return { kind: 'default' }
 }
 
-/** The library from the daemon's lists: only what can run now (published and turned on, not archived). */
-export function libraryFrom(input: {
-  agents?: readonly AgentDefinitionSummary[]
-  workflows?: ReadonlyArray<{ id: string; slug: string; name: string; description?: string; enabled: boolean; archived?: boolean; headRevisionId?: string | null }>
-  bots?: ReadonlyArray<{ id: string; name: string; look: BotLook }>
-}): AutomationLibrary {
-  const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name)
-  return {
-    agents: (input.agents ?? [])
-      .filter((agent) => agent.publishedRevision && agent.enabled && !agent.archived)
-      .map((agent) => ({ id: agent.id, name: agent.name, ...(agent.purpose ? { purpose: agent.purpose } : {}) }))
-      .sort(byName),
-    workflows: (input.workflows ?? [])
-      .filter((workflow) => workflow.headRevisionId && workflow.enabled && !workflow.archived)
-      .map((workflow) => ({ id: workflow.id, slug: workflow.slug, name: workflow.name, revisionId: workflow.headRevisionId!, ...(workflow.description ? { description: workflow.description } : {}) }))
-      .sort(byName),
-    bots: (input.bots ?? []).map((bot) => ({ id: bot.id, name: bot.name, look: bot.look })).sort(byName)
-  }
+/** The library from the daemon's list of bots, by name. */
+export function libraryFrom(input: { bots?: ReadonlyArray<{ id: string; name: string; look: BotLook }> }): AutomationLibrary {
+  return { bots: (input.bots ?? []).map((bot) => ({ id: bot.id, name: bot.name, look: bot.look })).sort((a, b) => a.name.localeCompare(b.name)) }
 }
 
 /**
- * The Who picker's options: your default agent first, then the models by provider, your saved agents and (on the
- * create row) your bots. A saved agent or bot that is gone stays listed as it was, so the choice is never silently lost.
+ * The Who picker's options: your default agent first, then the models by provider and (when asked) your bots. A choice
+ * that is gone stays listed as it was, so it is never silently lost.
  */
 export function whoOptions(input: {
   defaultName: string
@@ -81,7 +61,6 @@ export function whoOptions(input: {
 }): SelectOption[] {
   const options: SelectOption[] = [{ value: 'default', label: input.defaultName }]
   for (const group of input.models) for (const choice of group.choices) options.push({ value: `model:${choice.key}`, label: choice.label, group: group.label })
-  for (const agent of input.library.agents) options.push({ value: `agent:${agent.id}`, label: agent.name, group: 'Saved agents' })
   if (input.withBots) for (const bot of input.library.bots) options.push({ value: `bot:${bot.id}`, label: bot.name, group: 'Bots' })
   if (input.current && !options.some((option) => option.value === input.current!.key)) options.push({ value: input.current.key, label: input.current.label })
   return options
@@ -91,6 +70,6 @@ export function whoOptions(input: {
 export function whoName(who: Who, input: { defaultName: string; models: readonly ModelGroup[]; library: AutomationLibrary }): string {
   if (who.kind === 'default') return input.defaultName
   if (who.kind === 'model') return input.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key)?.label ?? 'A model'
-  if (who.kind === 'agent') return input.library.agents.find((agent) => agent.id === who.id)?.name ?? 'Saved agent'
+  if (who.kind === 'agent') return 'Saved agent'
   return input.library.bots.find((bot) => bot.id === who.id)?.name ?? 'Bot'
 }

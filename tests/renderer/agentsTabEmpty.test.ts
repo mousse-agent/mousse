@@ -31,7 +31,6 @@ vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', async () =>
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
-const { LibraryView } = await import('../../src/renderer/components/automations/LibraryView')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
@@ -133,22 +132,5 @@ describe('the Agents pane', () => {
     expect(button('New chat')).toBeUndefined()
     show(ChatWorkspace, [agent])
     expect(button('New chat')).toBeDefined()
-  })
-})
-
-describe('the Automations Library', () => {
-  it('has Agents and Workflows, and no Bots or Scheduled tab', () => {
-    act(() => root.render(createElement(LibraryView)))
-    expect(text('[role="tab"]').map((label) => label?.trim())).toEqual(['Agents', 'Workflows'])
-    expect(host.querySelector('#automations-bots-tab')).toBeNull()
-    expect(host.querySelector('#automations-scheduled-tab')).toBeNull()
-  })
-
-  it('goes Back to the list', async () => {
-    const back = vi.fn()
-    act(() => root.render(createElement(LibraryView, { onBack: back })))
-    click(host.querySelector('[data-testid="automations-library-back"]') ?? undefined)
-    await act(async () => {})
-    expect(back).toHaveBeenCalledOnce()
   })
 })

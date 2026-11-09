@@ -1,22 +1,14 @@
 import { create } from 'zustand'
-import type { ModelOverride } from '../../shared/providerInstances'
 import { useAppStore } from './appStore'
 
 /**
- * A request to open the Automations page's composer, prefilled: "Automate…" on a saved agent or a workflow in the
- * Library, and "Repeat this…" on a thread message. The page shows its list and the row opens with what it carries.
+ * A request to open the Automations page's composer, prefilled: "Repeat this…" on a thread message. The page shows its list and the row opens with what it carries.
  */
 export interface AutomationCreateRequest {
   /** Bumped for each request, so the same request can open the row twice. */
   nonce: number
   prompt?: string
   projectId?: string
-  /** A saved agent as Who. */
-  agentId?: string
-  /** A model as Who (a thread's model), matched to the pickers' model list. */
-  selection?: ModelOverride
-  /** A workflow as Do. */
-  workflowId?: string
 }
 
 interface AutomationCreateState {

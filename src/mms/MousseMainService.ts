@@ -257,7 +257,9 @@ export class MousseMainService extends MmsProfileServices {
           turnOn: (draftId) => services.automationDrafts.turnOn(draftId),
           discard: (draftId) => services.automationDrafts.discard(draftId),
           blank: (projectId) => services.automationDrafts.blank(projectId),
-          answered: (draftId) => services.automationDrafts.answered(draftId)
+          answered: (draftId) => services.automationDrafts.answered(draftId),
+          setWho: (draftId, who) => services.automationDrafts.setWho(draftId, who),
+          nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
         },
         managerThread: () => services.automationManagerThread()
       }

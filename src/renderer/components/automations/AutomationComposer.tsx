@@ -16,12 +16,34 @@ export function defaultBuiltBy(bots: readonly BotChoice[]): string {
   return bots[0] ? `bot:${bots[0].id}` : MANAGER_KEY
 }
 
+/** The Who chip's value for "+ New bot…": it opens the New bot dialog instead of being chosen. */
+export const NEW_BOT_KEY = '__new_bot__'
+
+/** Who does it: the default agent, one of your bots, or a new bot. The person picks it; the manager never does. */
+export function whoChoices(bots: readonly BotChoice[]): SelectOption[] {
+  return [
+    { value: 'default', label: 'Default agent' },
+    ...bots.map((bot) => ({ value: `bot:${bot.id}`, label: bot.name })),
+    { value: NEW_BOT_KEY, label: <span data-testid="automation-new-bot">+ New bot…</span>, textValue: '+ New bot…' }
+  ]
+}
+
+/** One Use-case starter: a sentence for the composer. Starters never pick Who. */
+export const STARTERS: ReadonlyArray<{ label: string; text: string }> = [
+  { label: 'Review PRs', text: 'Every weekday at 9, review open pull requests and comment on risky changes.' },
+  { label: 'Morning brief', text: 'Every morning at 8, sum up what changed in the project yesterday.' },
+  { label: 'Triage issues', text: 'Every day at 10, triage new issues: label them and flag the urgent ones.' },
+  { label: 'Watch CI', text: 'When checks fail on my pull request, find the cause and suggest a fix.' }
+]
+
 export interface ComposerSend {
   text: string
   projectId: string
   /** Another computer's Net node; '' for this one. */
   node: string
   builtBy: string
+  /** Who does it: `default` or `bot:<id>`. */
+  who: string
 }
 
 /**
@@ -29,7 +51,7 @@ export interface ComposerSend {
  * a draft. Project is prefilled and required (the manager asks when it is missing); Computer shows with two or more.
  * While the manager works, one line says so, with Stop.
  */
-export function AutomationComposer({ projects, computers, bots, initialProjectId, prefill, working, onSend, onStop, onSetUpByHand, onOpenConversation }: {
+export function AutomationComposer({ projects, computers, bots, initialProjectId, prefill, working, who, onWho, starters, onSend, onStop, onSetUpByHand, onOpenConversation }: {
   projects: readonly Project[]
   computers: ComputerChoice[]
   bots: BotChoice[]
@@ -37,6 +59,11 @@ export function AutomationComposer({ projects, computers, bots, initialProjectId
   /** Text and project from Automate… or Repeat this…; a new nonce fills the composer again. */
   prefill?: { nonce: number; text: string; projectId?: string } | null
   working: boolean
+  /** Who does it (`default`, `bot:<id>`); `NEW_BOT_KEY` asks for a new bot. */
+  who: string
+  onWho: (key: string, text: string) => void
+  /** Use-case starters, when the page is empty. */
+  starters?: boolean
   onSend: (send: ComposerSend) => Promise<void>
   onStop: () => void
   onSetUpByHand: (projectId: string) => void
@@ -74,7 +101,7 @@ export function AutomationComposer({ projects, computers, bots, initialProjectId
     setBusy(true)
     setError(null)
     try {
-      await onSend({ text: text.trim(), projectId, node, builtBy })
+      await onSend({ text: text.trim(), projectId, node, builtBy, who })
       setText('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -85,6 +112,13 @@ export function AutomationComposer({ projects, computers, bots, initialProjectId
 
   return (
     <div className="automation-composer-wrap">
+      {starters ? (
+        <div className="automation-starters" data-testid="automation-starters" aria-label="Ideas">
+          {STARTERS.map((starter) => (
+            <button key={starter.label} type="button" className="automation-chip" title={starter.text} onClick={() => { setText(starter.text); requestAnimationFrame(() => input.current?.focus()) }}>{starter.label}</button>
+          ))}
+        </div>
+      ) : null}
       <div className="automation-composer" data-testid="automation-composer">
         <textarea
           ref={input}
@@ -104,6 +138,9 @@ export function AutomationComposer({ projects, computers, bots, initialProjectId
         <div className="automation-create-chips">
           <span data-testid="automation-project">
             <Select ariaLabel="Project" className="automation-chip-select" size="small" value={projectId} options={projectOptions} title="Where it runs" onChange={setProjectId} />
+          </span>
+          <span data-testid="automation-who">
+            <Select ariaLabel="Who" className="automation-chip-select" size="small" value={who} options={whoChoices(bots)} title="Who does it" onChange={(key) => onWho(key, text)} />
           </span>
           {many ? (
             <span data-testid="automation-composer-computer">

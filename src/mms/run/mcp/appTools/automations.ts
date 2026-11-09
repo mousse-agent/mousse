@@ -28,20 +28,6 @@ const TRIGGER_SCHEMA = {
   required: ['kind']
 }
 
-const AGENT_SCHEMA = {
-  type: 'object',
-  description: 'Who does the work: {kind:"default"} (the profile\'s default agent), {kind:"model", instanceId, model}, {kind:"saved_agent", id} or {kind:"workflow", slug}. Default when left out.',
-  properties: {
-    kind: { type: 'string', enum: ['default', 'model', 'saved_agent', 'workflow', 'bot'] },
-    instanceId: { type: 'string' },
-    model: { type: 'string' },
-    id: { type: 'string' },
-    slug: { type: 'string' },
-    botId: { type: 'string' }
-  },
-  required: ['kind']
-}
-
 const RESULT_SCHEMA = {
   type: 'object',
   description: 'Where the outcome goes: thread "new" (a new thread each run, the default) or "reuse" (one thread for every run); tellMe "every", "news" (the default: only when there is something new) or "problems".',
@@ -55,7 +41,6 @@ const RESULT_SCHEMA = {
 const FIELDS = {
   name: { type: 'string', description: 'A short name, a few words.' },
   trigger: TRIGGER_SCHEMA,
-  agent: AGENT_SCHEMA,
   prompt: { type: 'string', description: 'What the agent is asked to do on each run, written for an agent that has none of this conversation.' },
   project: { type: ['string', 'null'], description: 'The project it runs in, by id or name. Required before it can be turned on.' },
   result: RESULT_SCHEMA,
@@ -101,7 +86,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       ...common,
       name: 'automation_draft_save',
       description:
-        'Write the person\'s request as an automation draft (Trigger → Agent → Result). A draft never runs: the person turns it on. Pass draftId to change a draft you wrote. Returns { draftId, problems[] }: each problem is something to fix or to ask the person about.',
+        'Write the person\'s request as an automation draft (Trigger → Agent → Result). You fill in When (trigger), what to do (prompt), the result and the project; who does it is the person\'s pick, never yours. A draft never runs: the person turns it on. Pass draftId to change a draft you wrote. Returns { draftId, problems[] }: each problem is something to fix or to ask the person about.',
       inputSchema: { type: 'object', properties: { draftId: { type: 'string' }, ...FIELDS }, required: ['name', 'trigger', 'prompt'] },
       class: 'mutation',
       handler: (args, ctx) => run(ctx, (tools) => tools.drafts.save(args, author(tools, ctx)))
@@ -121,7 +106,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     {
       ...common,
       name: 'automation_list',
-      description: 'List the automations and drafts, each as { id, name, draft, enabled, paused, trigger, agent, prompt, project, result, permissionMode, nextRunAt, cliName?, problems?, ask? }.',
+      description: 'List the automations and drafts, each as { id, name, draft, enabled, paused, trigger, agent (who does it: {kind:"default"} or {kind:"bot", botId}), prompt, project, result, permissionMode, nextRunAt, cliName?, problems?, ask? }.',
       inputSchema: { type: 'object', properties: {} },
       class: 'read',
       handler: (_args, ctx) => run(ctx, (tools) => ({ automations: tools.drafts.list() }))
@@ -130,7 +115,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       ...common,
       name: 'automation_update',
       description:
-        'Change an automation (or a draft) by id: pass only the fields to change. A change to an automation takes effect at once and must leave it with no problems. Its permission mode can only be lowered here.',
+        'Change an automation (or a draft) by id: pass only the fields to change (not who does it: the person picks that). A change to an automation takes effect at once and must leave it with no problems. Its permission mode can only be lowered here.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' }, ...FIELDS }, required: ['id'] },
       class: 'mutation',
       handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.update(args) }))

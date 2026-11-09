@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import { Loader2 } from '../../lib/icons'
 import { pickDistinctLook } from '../../../shared/bots/personal/look'
+import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { useBotsStore } from '../../stores/botsStore'
 import { useChatsStore } from '../../stores/chatsStore'
 import { BotDialogFrame } from './BotDialogs'
@@ -12,15 +13,21 @@ import '../../styles/bots.css'
  * New bot (bot-ui §4.2): a look already picked (one the owner's other bots don't wear), an optional
  * name and one sentence. Create bot opens its chat at once; there is nothing else to fill in.
  * What the owner puts in is the store's draft, so closing, a click beside the dialog or a remount
- * never loses it; once anything is put in, only Close or Escape closes the dialog.
+ * never loses it; once anything is put in, only Close or Escape closes the dialog. From Automations it opens
+ * with the automation's words and, once made, returns there with the bot picked (`onCreated`) instead.
  */
-export function NewBotDialog() {
+export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { initialDescription?: string; onCreated?: (bot: BotSummary) => void; onClose?: () => void } = {}) {
   const bots = useBotsStore((s) => s.bots)
   const busy = useBotsStore((s) => s.busy)
   // Only an error about no bot is New bot's: another bot's stays in that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === null ? s.error : null))
   const draft = useBotsStore((s) => s.newBotDraft)
-  const { closeNewBot, setNewBotDraft } = useBotsStore.getState()
+  const { setNewBotDraft } = useBotsStore.getState()
+  const close = () => { useBotsStore.getState().closeNewBot(); onClose?.() }
+  // Opened from Automations: the automation's words become the draft's sentence, before the first paint.
+  useLayoutEffect(() => {
+    if (initialDescription.trim()) setNewBotDraft({ description: initialDescription.slice(0, 500) })
+  }, [initialDescription, setNewBotDraft])
   // The first time it opens, a look is picked and kept with the draft.
   const [firstLook] = useState(() => pickDistinctLook(bots.map((bot) => bot.look)))
   const look = draft.look ?? firstLook
@@ -35,9 +42,10 @@ export function NewBotDialog() {
     if (!description || state.busy) return
     const name = state.newBotDraft.name.trim()
     const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}) })
-    if (bot) await useChatsStore.getState().openBot(bot.id)
+    if (bot && onCreated) onCreated(bot)
+    else if (bot) await useChatsStore.getState().openBot(bot.id)
   }
-  return <BotDialogFrame title="New bot" onClose={closeNewBot} busy={busy} keepOnBackdrop={draft.touched} width={520}>
+  return <BotDialogFrame title="New bot" onClose={close} busy={busy} keepOnBackdrop={draft.touched} width={520}>
     <form className="bot-new-form" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void submit() }}>
       <BotLookPicker look={look} onChange={(next) => setNewBotDraft({ look: next })} existingLooks={bots.map((bot) => bot.look)} />
       <label className="bot-new-label" htmlFor="bot-new-name">Name</label>

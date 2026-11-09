@@ -24,8 +24,7 @@ export function RepeatThisMenu({ text }: { text: string }) {
           title: 'Run this prompt on a schedule',
           onSelect: () => openAutomationCreate({
             prompt: text.trim(),
-            ...(thread.projectId ? { projectId: thread.projectId } : {}),
-            ...(thread.modelOverride ? { selection: thread.modelOverride } : {})
+            ...(thread.projectId ? { projectId: thread.projectId } : {})
           })
         }]}
       />

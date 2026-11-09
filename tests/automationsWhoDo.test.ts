@@ -10,32 +10,15 @@ import { ranAgent } from '../src/mms/scheduled/ScheduledJobService'
 import { savedAgentRefusal } from '../src/mms/automations/scheduledAgent'
 import { asCreateScheduledJobInput, asScheduledJobPatch } from '../src/mms/protocol/validators'
 import { jobRecordRun } from '../src/shared/automations'
-import type { AgentDefinitionSummary } from '../src/shared/agents/types'
 
 describe('Who', () => {
-  const library = libraryFrom({
-    agents: [
-      { id: 'a', name: 'PR reviewer', publishedRevision: 'r1', enabled: true, archived: false },
-      { id: 'b', name: 'Unpublished', enabled: true, archived: false },
-      { id: 'c', name: 'Off', publishedRevision: 'r1', enabled: false, archived: false }
-    ] as unknown as AgentDefinitionSummary[],
-    workflows: [
-      { id: 'w', slug: 'release-notes', name: 'Release notes', enabled: true, headRevisionId: 'h' },
-      { id: 'x', slug: 'draft-only', name: 'Draft only', enabled: true, headRevisionId: null }
-    ],
-    bots: [{ id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'none' } }]
-  })
+  const library = libraryFrom({ bots: [{ id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'none' } }] })
 
-  it('offers only what can run now: published, turned-on saved agents and workflows', () => {
-    expect(library.agents.map((agent) => agent.name)).toEqual(['PR reviewer'])
-    expect(library.workflows.map((workflow) => workflow.slug)).toEqual(['release-notes'])
-  })
-
-  it('lists the default agent first, then models, saved agents and (on the create row) bots', () => {
+  it('lists the default agent first, then models and (when asked) bots; never saved agents', () => {
     const models = [{ label: 'Claude', choices: [{ key: 'claude\u0000sonnet', label: 'Sonnet', selection: { instanceId: 'claude', llmProvider: 'anthropic', model: 'sonnet' } }] }]
     const options = whoOptions({ defaultName: 'Claude', models, library, withBots: true })
     expect(options.map((option) => [option.value, option.group ?? ''])).toEqual([
-      ['default', ''], ['model:claude\u0000sonnet', 'Claude'], ['agent:a', 'Saved agents'], ['bot:bot_1', 'Bots']
+      ['default', ''], ['model:claude\u0000sonnet', 'Claude'], ['bot:bot_1', 'Bots']
     ])
     expect(whoOptions({ defaultName: 'Claude', models, library, withBots: false }).some((option) => option.value.startsWith('bot:'))).toBe(false)
     // A chosen agent that is gone stays listed, so the choice is never silently lost.

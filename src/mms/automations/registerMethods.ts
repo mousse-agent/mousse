@@ -3,6 +3,7 @@ import { isId } from '../../shared/net'
 import { isKeyName, MAX_KEY_VALUE_BYTES } from '../../shared/automationKeys'
 import type { ScheduledJob } from '../../shared/types'
 import type { AgentJobAsk } from './AgentJobAsks'
+import type { DraftWho } from './AutomationDrafts'
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 
 /** What the Automations methods need from the profile. */
@@ -23,7 +24,16 @@ export interface AutomationsDomain {
   /** Saved keys: their names in the profile's secret store (never values), and storing one typed into a masked field. */
   keys: { list(): string[]; set(name: string, value: string): void }
   /** Drafts: Turn on (the person's creation), Discard, a blank one to set up by hand, and an answered question. */
-  drafts: { turnOn(draftId: string): ScheduledJob; discard(draftId: string): void; blank(projectId?: string): ScheduledJob; answered(draftId: string): void }
+  drafts: {
+    turnOn(draftId: string): ScheduledJob
+    discard(draftId: string): void
+    blank(projectId?: string): ScheduledJob
+    answered(draftId: string): void
+    /** The person changed Who on a draft's card. */
+    setWho(draftId: string, who: DraftWho): ScheduledJob
+    /** The person's Who for the next drafts a manager (the Automation manager, or a bot) writes. */
+    nextWho(botId: string | undefined, who: DraftWho): void
+  }
   /** The Automation manager's hidden thread, made the first time. */
   managerThread(): { id: string }
 }
@@ -188,6 +198,45 @@ export function registerAutomationMethods(
       } catch (error) {
         return refused(error)
       }
+    }
+  })
+  const whoOf = (value: unknown): DraftWho => {
+    const who = domainObject(value ?? {}, ['kind', 'botId'])
+    if (who.kind === 'default') return { kind: 'default' }
+    if (who.kind === 'bot' && typeof who.botId === 'string' && who.botId && who.botId.length <= 256) return { kind: 'bot', botId: who.botId }
+    throw new DomainRpcError('invalid_params', 'who is { kind: "default" } or { kind: "bot", botId }')
+  }
+  domains.register({
+    method: 'automations.drafts.setWho',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params): Record<string, unknown> => {
+      const p = domainObject(params ?? {}, ['profileId', 'draftId', 'who'])
+      if (typeof p.draftId !== 'string' || !p.draftId || p.draftId.length > 256) throw new DomainRpcError('invalid_params', 'A draft id is required')
+      return { ...p, who: whoOf(p.who) }
+    },
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      try {
+        return { job: (await bound(binding)).drafts.setWho(params.draftId as string, params.who as DraftWho) }
+      } catch (error) {
+        return refused(error)
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.drafts.nextWho',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params): Record<string, unknown> => {
+      const p = domainObject(params ?? {}, ['profileId', 'botId', 'who'])
+      if (p.botId !== undefined && (typeof p.botId !== 'string' || !p.botId || p.botId.length > 256)) throw new DomainRpcError('invalid_params', 'botId is a bot id')
+      return { ...p, who: whoOf(p.who) }
+    },
+    async handle(context, params, binding) {
+      personOnly(context.connection?.clientType)
+      ;(await bound(binding)).drafts.nextWho(params.botId as string | undefined, params.who as DraftWho)
+      return { ok: true }
     }
   })
   domains.register({

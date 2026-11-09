@@ -26,7 +26,7 @@ export function glyphOf(item: AutomationItem): { glyph: string; kind: string; ti
  * "…". A selected row is tinted; nothing marks its edge. An ask Needs you answers in place is the ask card's row
  * (`AskCard`), not this.
  */
-export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, onSelect, onPrimary }: {
+export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, onSelect, onPrimary, onOpenBot }: {
   item: AutomationItem
   selected: boolean
   ctx: MetaContext
@@ -37,6 +37,8 @@ export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, 
   /** ⇧ or ⌘/Ctrl click: extend or toggle the selection. */
   onSelect: (mode: 'range' | 'toggle') => void
   onPrimary: () => void
+  /** The bot's face opens the bot. */
+  onOpenBot?: () => void
 }) {
   const glyph = glyphOf(item)
   const parts = metaParts(item, ctx)
@@ -64,7 +66,14 @@ export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, 
           {parts.map((part) => (
             <span key={part.key} className={`automation-row-seg${part.tone ? ` tone-${part.tone}` : ''}`} data-meta={part.key} data-arrow={part.arrow ? 'true' : undefined}>
               {part.key === 'bot' && item.who.kind === 'bot' ? (
-                <span className="automation-bot-face" aria-hidden="true" data-testid="automation-bot-face"><BotFaceStill look={item.who.look} state="idle" size={16} view="head" /></span>
+                <span
+                  className="automation-bot-face"
+                  data-testid="automation-bot-face"
+                  role={onOpenBot ? 'link' : undefined}
+                  title={onOpenBot ? `Open ${item.who.name}` : undefined}
+                  aria-hidden={onOpenBot ? undefined : true}
+                  onClick={onOpenBot ? (event) => { event.stopPropagation(); onOpenBot() } : undefined}
+                ><BotFaceStill look={item.who.look} state="idle" size={16} view="head" /></span>
               ) : null}
               {part.text}
             </span>

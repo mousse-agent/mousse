@@ -27,7 +27,14 @@ export interface AutomationsClient {
   answered(draftId: string): Promise<void>
   /** The Automation manager's hidden thread, made the first time (`automations.manager.thread`). */
   managerThread(): Promise<string>
+  /** The person changed Who on a draft (`automations.drafts.setWho`). */
+  setWho(draftId: string, who: AutomationWhoPick): Promise<void>
+  /** The person's Who for the next drafts this manager writes (`automations.drafts.nextWho`). */
+  nextWho(botId: string | undefined, who: AutomationWhoPick): Promise<void>
 }
+
+/** Who does it, as the person picks it: the default agent or a bot. */
+export type AutomationWhoPick = { kind: 'default' } | { kind: 'bot'; botId: string }
 
 /** Uses the host's profile-bound bridge. */
 export function createAutomationsClient(transport: PlatformRequestApi): AutomationsClient {
@@ -43,7 +50,9 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     discard: async (draftId) => { await transport.request('automations.drafts.discard', { draftId }) },
     createDraft: async (projectId) => (await transport.request<{ job: ScheduledJob }>('automations.drafts.create', projectId ? { projectId } : {})).job,
     answered: async (draftId) => { await transport.request('automations.drafts.answered', { draftId }) },
-    managerThread: async () => (await transport.request<{ threadId: string }>('automations.manager.thread', {})).threadId
+    managerThread: async () => (await transport.request<{ threadId: string }>('automations.manager.thread', {})).threadId,
+    setWho: async (draftId, who) => { await transport.request('automations.drafts.setWho', { draftId, who }) },
+    nextWho: async (botId, who) => { await transport.request('automations.drafts.nextWho', { ...(botId ? { botId } : {}), who }) }
   }
 }
 

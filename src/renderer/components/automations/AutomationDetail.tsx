@@ -33,8 +33,6 @@ import { missedText, runText } from './automationList'
 import { computerOptions, projectsOn, type ComputerChoice } from './computerChoice'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
-import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
-import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
 import { BotFaceStill } from '../bots/face/BotFace'
 import { DeliveryLog, RequestFields, RequestSetup, type RequestApi } from './RequestTrigger'
 import { eventNouns, THREAD_EVENT_CHOICES, THREAD_EVENT_MIN_GAP_MS, threadEventChoice, threadEventText } from '../../../shared/threadEvents'
@@ -174,7 +172,7 @@ export function AutomationDetail({
   item?: AutomationItem
   initial: JobDraft
   catalog: ScheduledCatalog
-  /** Saved agents and workflows that fill Who and Do. */
+  /** The bots that may fill Who. */
   library: AutomationLibrary
   /** The default agent's name. */
   defaultName: string
@@ -307,7 +305,8 @@ export function AutomationDetail({
   const staleModel = draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey))
     ? `${modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)`
     : undefined
-  const savedAgentName = draft.agentId ? library.agents.find((agent) => agent.id === draft.agentId)?.name ?? (draft.agentId === initial.agentId && item?.who.kind === 'saved_agent' ? item.who.name : 'Saved agent') : undefined
+  // A saved agent an automation was made with before saved agents were removed keeps its name until it is changed.
+  const savedAgentName = draft.agentId ? (draft.agentId === initial.agentId && item?.who.kind === 'saved_agent' ? item.who.name : 'Saved agent') : undefined
   const whoLabel = staleModel ?? savedAgentName ?? nameOfWho(who, naming)
   const whoChoices = whoOptions({ ...naming, withBots: false, current: { key: whoKey(who), label: whoLabel } })
   const chooseWho = (key: string) => {
@@ -315,17 +314,6 @@ export function AutomationDetail({
     if (next.kind === 'agent') patch({ agentId: next.id, modelKey: '' })
     else if (next.kind === 'model') patch({ agentId: '', modelKey: next.key })
     else patch({ agentId: '', modelKey: '' })
-  }
-
-  // Do: a prompt, or a workflow whose inputs replace the prompt.
-  const command = parseWorkflowCommand(draft.prompt)
-  const doWorkflow = command ? library.workflows.find((entry) => entry.slug === command.slug) : undefined
-  const { fields, loading: fieldsLoading } = useWorkflowFields(profileId, doWorkflow)
-  const chooseDo = (workflowId: string) => {
-    const chosen = library.workflows.find((entry) => entry.id === workflowId)
-    if (chosen) patch({ prompt: `/${chosen.slug}`, agentId: '' })
-    else patch({ prompt: '' })
-    if (!chosen) requestAnimationFrame(() => promptRef.current?.focus())
   }
 
   // May: the effective mode a run gets, from what is chosen here, held to what the person holds.
@@ -429,14 +417,7 @@ export function AutomationDetail({
           />
         )}
         {workflow ? null : ' does '}
-        {bot ? <span className="automation-sentence-glue">this.</span> : remoteNode ? <span className="automation-sentence-glue">this</span> : (
-          <DoPicker
-            value={doWorkflow?.id ?? (workflow ? draft.prompt.trim().split(/\s+/)[0] ?? '' : '')}
-            workflows={doWorkflow || !workflow ? library.workflows : [...library.workflows, { id: draft.prompt.trim().split(/\s+/)[0] ?? '/', slug: (draft.prompt.trim().split(/\s+/)[0] ?? '/').slice(1), name: 'Workflow not found', revisionId: '' }]}
-            promptLabel="this"
-            onChange={chooseDo}
-          />
-        )}
+        {bot ? <span className="automation-sentence-glue">this.</span> : <span className="automation-sentence-glue" data-testid="automation-do">{workflow ? draft.prompt.trim().split(/\s+/)[0] : 'this'}</span>}
         {workflow ? ' runs' : null}
         {bot ? null : ' in '}
         {bot ? null : <span className="automation-sentence-glue">
@@ -527,29 +508,18 @@ export function AutomationDetail({
         </div>
       ) : null}
 
-      {doWorkflow && command ? (
-        <WorkflowInputs
-          fields={fields}
-          values={command.values}
-          loading={fieldsLoading}
-          onChange={(key, value) => patch({ prompt: workflowCommandText(doWorkflow.slug, { ...command.values, [key]: value }, fields) })}
-        />
-      ) : (
-        <>
-          <label className="scheduled-sr-only" htmlFor={id('prompt')}>What it does</label>
-          <textarea
-            ref={promptRef}
-            id={id('prompt')}
-            className="scheduled-prompt"
-            placeholder={bot ? `What should ${bot.name} do?` : 'What should the agent do?'}
-            rows={3}
-            value={draft.prompt}
-            {...field('prompt')}
-            onChange={(event) => patch({ prompt: event.target.value })}
-          />
-          {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
-        </>
-      )}
+      <label className="scheduled-sr-only" htmlFor={id('prompt')}>What it does</label>
+      <textarea
+        ref={promptRef}
+        id={id('prompt')}
+        className="scheduled-prompt"
+        placeholder={bot ? `What should ${bot.name} do?` : 'What should the agent do?'}
+        rows={3}
+        value={draft.prompt}
+        {...field('prompt')}
+        onChange={(event) => patch({ prompt: event.target.value })}
+      />
+      {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
       {fieldError('prompt')}
 
       <div className="automation-detail-pair">

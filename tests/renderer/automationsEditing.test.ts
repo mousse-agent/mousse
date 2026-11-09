@@ -241,9 +241,7 @@ describe('agent editor header', () => {
     expect(favorite.getAttribute('aria-pressed')).toBe('false')
     expect(button('Duplicate')).toBeUndefined()
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Agent actions"]')!.click())
-    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Automate…', 'Duplicate', 'Export', 'Archive'])
-    // Automate… runs the published agent, so an agent never published cannot be automated yet.
-    expect(document.querySelector<HTMLButtonElement>('[data-testid="library-automate"]')!.disabled).toBe(true)
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(['Duplicate', 'Export', 'Archive'])
   })
 
   it('an edit saves itself, disables Export until it has, and never publishes', async () => {

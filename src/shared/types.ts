@@ -347,6 +347,8 @@ export interface AutomationDraftState {
   managerThreadId?: string
   /** A bot wrote it (Built by a bot); absent: the Automation manager or a person. */
   botId?: string
+  /** Who does it, as the person picked: a bot; absent: the default agent. */
+  who?: { kind: 'bot'; botId: string }
   /** What still keeps Turn on off, in the manager's and the person's words. */
   problems: string[]
   /** The manager's open question, answered inline under the card. */

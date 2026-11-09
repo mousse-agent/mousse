@@ -1,9 +1,8 @@
 import { narrowPermissionMode, isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { isTellMe, tellMeOf, type CreateScheduledJobInput, type JobSchedule, type ScheduledJob, type TellMe, type Thread, type ThreadEventKind } from '../../shared/types'
-import type { ModelOverride } from '../../shared/providerInstances'
-import { isWorkflowPrompt } from '../../shared/jobPermissionEdit'
 import { asCreateScheduledJobInput } from '../protocol/validators'
 import { computeNextRun, cronProblem } from '../scheduled/computeNextRun'
+import { botScheduleProblem, botWhenOf } from '../scheduled/botJobs'
 
 /**
  * Automation drafts: what the Automation manager (or a bot) builds from a person's words, in the contract of the v4
@@ -18,12 +17,12 @@ export type DraftTrigger =
   | { kind: 'http' }
   | { kind: 'thread_event'; threadId: string; events: ThreadEventKind[] }
 
-export type DraftAgent =
-  | { kind: 'default' }
-  | { kind: 'model'; instanceId: string; model: string }
-  | { kind: 'saved_agent'; id: string }
-  | { kind: 'workflow'; slug: string }
-  | { kind: 'bot'; botId: string }
+/**
+ * Who does the work: the default agent or a bot. The person picks it (the composer's Who, or the draft's card); the
+ * manager never does. `saved_agent` is only read back from an automation made before saved agents were removed.
+ */
+export type DraftWho = { kind: 'default' } | { kind: 'bot'; botId: string }
+export type DraftAgent = DraftWho | { kind: 'saved_agent'; id: string }
 
 export interface DraftResult {
   thread: 'new' | 'reuse'
@@ -65,12 +64,10 @@ export interface AutomationDraftsDeps {
   pause(id: string, reason?: string, until?: string): ScheduledJob | null
   projects(): Array<{ id: string; name: string }>
   thread(id: string): Pick<Thread, 'id' | 'projectId' | 'pullRequest' | 'settledAt'> | undefined
-  /** Whether a saved agent exists and has a published revision. */
-  savedAgent?(id: string): boolean
-  /** Whether a workflow with this slug exists. */
-  workflow?(slug: string): boolean
-  /** Checks the model as the protocol does; throws words the manager can act on. */
-  validate(job: { projectId?: string; threadId?: string; selection?: ModelOverride }): { selection?: ModelOverride; threadId?: string }
+  /** Whether the bot exists (and is not deleted). */
+  botExists?(botId: string): boolean
+  /** Turn on with a bot as Who: the bot's schedule, made the way its own schedules are (`BotScheduleBook.add`). */
+  addBotSchedule?(botId: string, input: { schedule: JobSchedule; prompt: string; name: string; tellMe: TellMe }): ScheduledJob
   /** The mode the person holds for a run on this thread (or the profile's): Turn on holds the draft to it. */
   personCeiling(threadId?: string): PermissionMode
   /** One reusable thread for every run of an automation (Result: reuse). */
@@ -129,25 +126,6 @@ function parseTrigger(value: unknown): DraftTrigger {
   }
 }
 
-function parseAgent(value: unknown): DraftAgent {
-  if (value === undefined || value === null) return { kind: 'default' }
-  const raw = object(value, 'agent')
-  switch (raw.kind) {
-    case 'default':
-      return { kind: 'default' }
-    case 'model':
-      return { kind: 'model', instanceId: text(raw.instanceId, 'agent.instanceId', 256), model: text(raw.model, 'agent.model', 256) }
-    case 'saved_agent':
-      return { kind: 'saved_agent', id: text(raw.id, 'agent.id', 256) }
-    case 'workflow':
-      return { kind: 'workflow', slug: text(raw.slug, 'agent.slug', 128).replace(/^\//, '') }
-    case 'bot':
-      return { kind: 'bot', botId: text(raw.botId, 'agent.botId', 256) }
-    default:
-      return fail('agent.kind is default, model, saved_agent, workflow or bot')
-  }
-}
-
 function parseResult(value: unknown): DraftResult {
   if (value === undefined || value === null) return { thread: 'new', tellMe: 'news' }
   const raw = object(value, 'result')
@@ -162,7 +140,6 @@ function parseResult(value: unknown): DraftResult {
 interface DraftFields {
   name?: string
   trigger?: DraftTrigger
-  agent?: DraftAgent
   prompt?: string
   project?: string | null
   result?: DraftResult
@@ -173,7 +150,8 @@ function parseFields(args: Record<string, unknown>): DraftFields {
   const fields: DraftFields = {}
   if (args.name !== undefined) fields.name = text(args.name, 'name', MAX_NAME)
   if (args.trigger !== undefined) fields.trigger = parseTrigger(args.trigger)
-  if (args.agent !== undefined) fields.agent = parseAgent(args.agent)
+  // Who is the person's pick: the manager never chooses it.
+  if (args.agent !== undefined) fail('Who does it is picked by the person, not by you: leave agent out.')
   if (args.prompt !== undefined) fields.prompt = text(args.prompt, 'prompt')
   if (args.project !== undefined) fields.project = args.project === null ? null : text(args.project, 'project', 256)
   if (args.result !== undefined) fields.result = parseResult(args.result)
@@ -192,14 +170,12 @@ export function contractOf(job: ScheduledJob, projectName: (id: string) => strin
     : job.trigger?.webhook ? { kind: 'http' }
     : job.schedule.kind === 'manual' ? { kind: 'cli', ...(job.cliName ? { name: job.cliName } : {}) }
     : { kind: 'time', schedule: job.schedule }
-  const workflow = isWorkflowPrompt(job.prompt)
-  const agent: DraftAgent = workflow
-    ? { kind: 'workflow', slug: job.prompt.trim().split(/\s+/)[0]!.slice(1) }
-    : job.agent ? { kind: 'saved_agent', id: job.agent.definitionId }
+  const agent: DraftAgent = job.draft?.who
+    ? { ...job.draft.who }
     : job.bot ? { kind: 'bot', botId: job.bot.botId }
-    : job.selection?.instanceId ? { kind: 'model', instanceId: job.selection.instanceId, model: job.selection.model }
+    : job.agent ? { kind: 'saved_agent', id: job.agent.definitionId }
     : { kind: 'default' }
-  const prompt = workflow ? job.prompt.trim().split(/\s+/).slice(1).join(' ') : job.prompt
+  const prompt = job.prompt
   const reuse = Boolean(job.draft?.reuseThread || (job.threadId && !wakesOn))
   return {
     id: job.id,
@@ -222,6 +198,10 @@ export function contractOf(job: ScheduledJob, projectName: (id: string) => strin
 
 export class AutomationDrafts {
   constructor(private readonly deps: AutomationDraftsDeps) {}
+
+  /** The Who the person picked for the next draft each manager writes (`nextWho`): the manager's, or a bot's. */
+  private readonly pendingWho = new Map<string, DraftWho>()
+  private authorKey = (author: DraftAuthor) => (author.botId ? `bot:${author.botId}` : 'manager')
 
   private now(): Date {
     return this.deps.now?.() ?? new Date()
@@ -258,15 +238,16 @@ export class AutomationDrafts {
    * The job a draft's fields make, with what keeps Turn on off. `current` is the job being changed (a draft, or an
    * automation for `update`); its values fill what the fields leave out.
    */
-  private build(fields: DraftFields, current: ScheduledJob | undefined): { job: Partial<ScheduledJob> & { name: string; prompt: string; schedule: JobSchedule }; problems: string[]; reuseThread: boolean } {
+  private build(fields: DraftFields, current: ScheduledJob | undefined, who: DraftWho | undefined = current?.draft?.who): { job: Partial<ScheduledJob> & { name: string; prompt: string; schedule: JobSchedule }; problems: string[]; reuseThread: boolean } {
     const problems: string[] = []
     const before = current ? contractOf(current, this.projectName) : undefined
     const name = fields.name ?? before?.name ?? ''
     const trigger = fields.trigger ?? before?.trigger ?? { kind: 'cli' }
-    const agent = fields.agent ?? before?.agent ?? { kind: 'default' }
-    const promptText = fields.prompt ?? before?.prompt ?? ''
+    const prompt = fields.prompt ?? before?.prompt ?? ''
     const result = fields.result ?? before?.result ?? { thread: 'new', tellMe: 'news' }
-    const projectId = fields.project !== undefined ? this.resolveProject(fields.project, problems) : current?.projectId ?? this.resolveProject(undefined, problems)
+    // A bot works where its grant lets it; the default agent needs a project.
+    const bot = who?.kind === 'bot' ? who.botId : undefined
+    const projectId = fields.project !== undefined ? this.resolveProject(fields.project, bot ? [] : problems) : current?.projectId ?? (bot ? undefined : this.resolveProject(undefined, problems))
 
     if (!name) problems.push('Give it a name.')
     let schedule: JobSchedule = { kind: 'manual' }
@@ -301,28 +282,11 @@ export class AutomationDrafts {
       }
     }
 
-    let prompt = promptText
-    let selection: ModelOverride | undefined
-    let savedAgent: ScheduledJob['agent']
-    switch (agent.kind) {
-      case 'model':
-        try {
-          selection = this.deps.validate({ ...(projectId ? { projectId } : {}), selection: { instanceId: agent.instanceId, model: agent.model } as ModelOverride }).selection
-        } catch (error) {
-          problems.push(error instanceof Error ? error.message : String(error))
-        }
-        break
-      case 'saved_agent':
-        if (this.deps.savedAgent && !this.deps.savedAgent(agent.id)) problems.push('That saved agent does not exist or is not published.')
-        savedAgent = { definitionId: agent.id }
-        break
-      case 'workflow':
-        if (this.deps.workflow && !this.deps.workflow(agent.slug)) problems.push(`There is no workflow /${agent.slug}.`)
-        prompt = `/${agent.slug}${promptText ? ` ${promptText}` : ''}`
-        break
-      case 'bot':
-        problems.push('A bot as the agent is set up from the bot\'s chat for now. Pick the default agent, a model or a saved agent.')
-        break
+    if (bot) {
+      if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
+      const when = trigger.kind === 'time' ? botWhenOf(trigger.schedule) : undefined
+      const problem = when ? botScheduleProblem(when, prompt || 'x') : 'A bot repeats: give it a time that repeats, at most every 5 minutes.'
+      if (problem) problems.push(problem)
     }
     if (!prompt.trim()) problems.push('Say what it should do.')
     if (result.botChat) problems.push('Sending the result to a bot\'s chat is not available yet. Use the run\'s thread and Tell me.')
@@ -340,8 +304,9 @@ export class AutomationDrafts {
       prompt,
       schedule,
       projectId,
-      selection,
-      agent: savedAgent,
+      // An automation keeps who it has (a model or a saved agent made before); a draft's Who is its `who`.
+      selection: current?.selection,
+      agent: current?.agent,
       tellMe: result.tellMe,
       cliName,
       trigger: threadEvent ?? (current?.trigger?.webhook ? { webhook: current.trigger.webhook } : undefined),
@@ -359,7 +324,8 @@ export class AutomationDrafts {
     // A bot changes only its own drafts, and the manager only its own and the person's.
     if (current && current.draft!.botId !== author.botId) fail(`No draft ${draftId}.`)
     const fields = parseFields(args)
-    const { job, problems, reuseThread } = this.build(fields, current)
+    const who = current ? current.draft!.who : this.pendingWho.get(this.authorKey(author))
+    const { job, problems, reuseThread } = this.build(fields, current, who)
     // Held to what the person holds now; Turn on holds it again.
     const ceiling = this.deps.personCeiling(job.threadId)
     const permissionMode = job.permissionMode ? narrowPermissionMode(job.permissionMode, ceiling) : current?.permissionMode
@@ -368,6 +334,7 @@ export class AutomationDrafts {
       draftId: current?.id ?? '',
       ...(author.managerThreadId ?? current?.draft?.managerThreadId ? { managerThreadId: author.managerThreadId ?? current?.draft?.managerThreadId } : {}),
       ...(author.botId ? { botId: author.botId } : {}),
+      ...(who?.kind === 'bot' ? { who } : {}),
       problems,
       // A new save answers the open question unless it asks again (`automation_ask`).
       ...(reuseThread ? { reuseThread: true as const } : {})
@@ -383,8 +350,6 @@ export class AutomationDrafts {
       prompt: job.prompt,
       schedule: job.schedule,
       ...(job.projectId ? { projectId: job.projectId } : {}),
-      ...(job.selection ? { selection: job.selection } : {}),
-      ...(job.agent ? { agent: job.agent } : {}),
       ...(job.threadId ? { threadId: job.threadId } : {}),
       ...(job.createThread ? { createThread: true } : {}),
       ...(job.trigger?.threadEvent ? { threadEvent: job.trigger.threadEvent } : {}),
@@ -398,6 +363,22 @@ export class AutomationDrafts {
     this.deps.update(created.id, { draft: { ...draft, draftId: created.id } })
     this.deps.changed?.()
     return { draftId: created.id, problems }
+  }
+
+  /** The person picked Who in the composer: the next drafts this manager writes take it. */
+  nextWho(author: DraftAuthor, who: DraftWho): void {
+    this.pendingWho.set(this.authorKey(author), who.kind === 'bot' ? { kind: 'bot', botId: who.botId } : { kind: 'default' })
+  }
+
+  /** The person changed Who on a draft's card. */
+  setWho(draftId: string, who: DraftWho): ScheduledJob {
+    const job = this.draftJob(draftId)
+    const { who: _who, ...rest } = job.draft!
+    const draft = who.kind === 'bot' ? { ...rest, who: { kind: 'bot' as const, botId: who.botId } } : rest
+    this.deps.update(job.id, { draft })
+    this.recheck(job.id)
+    this.deps.changed?.()
+    return this.deps.get(job.id)!
   }
 
   /** "Set up by hand": a blank draft the person fills in with Edit details. */
@@ -493,6 +474,15 @@ export class AutomationDrafts {
       this.deps.update(job.id, { draft: { ...job.draft!, problems } })
       this.deps.changed?.()
       fail(problems[0]!)
+    }
+    // A bot does it: the automation is one of the bot's schedules, run in its lane under its grant (its May).
+    const who = job.draft!.who
+    if (who?.kind === 'bot') {
+      if (!this.deps.addBotSchedule) fail('Bots are not available now.')
+      const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job) })
+      this.deps.remove(job.id)
+      this.deps.changed?.()
+      return made
     }
     const threadId = reuseThread ? this.deps.reuseThread(job.id, job.name, job.projectId).id : job.threadId
     const ceiling = this.deps.personCeiling(threadId)

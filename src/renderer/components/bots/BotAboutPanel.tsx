@@ -3,6 +3,7 @@ import { Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotComputerChoice, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
+import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
 import { Select, type SelectOption } from '../ui/Select'
 import { BotFace } from './face/BotFace'
@@ -100,6 +101,11 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         <button type="button" aria-label={`Remove ${run.label}`} onClick={() => void store().removeSchedule(bot.id, run.id)}>Remove</button>
       </div>)
       : detail && <p className="bot-about-empty">Only when you message it. Ask it to run on a schedule.</p>}
+    {detail?.runs.length
+      ? <button type="button" className="bot-ghost-button bot-about-automations" data-testid="bot-about-automations" title="Open them in Automations" onClick={() => useAppStore.getState().setScheduledOpen(true)}>
+        {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}
+      </button>
+      : null}
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} />
     <div className="bot-about-foot">

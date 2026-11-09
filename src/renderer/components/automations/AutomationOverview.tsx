@@ -6,6 +6,7 @@ import { RowMenu } from '../integrations/RowMenu'
 import { DraftCard } from './DraftCard'
 import { missedText, runText, type MetaContext } from './automationList'
 import { ownedWhenText } from './automationTime'
+import type { BotChoice } from './whoDo'
 
 const RUN_GLYPH: Record<AutomationRun['state'], string> = {
   done: '✓', nothing_new: '·', incomplete: '◐', failed: '✕', queued: '◌', running: '◌', waiting: '◷'
@@ -17,11 +18,14 @@ const RECENT_RUNS = 5
  * Edit details, which opens the full form. A draft's card has Turn on and Discard; an automation's head has Run now
  * and Pause.
  */
-export function AutomationOverview({ item, job, who, ctx, onBack, onRunNow, onPause, onResume, onDelete, onTurnOn, onDiscard, onAnswer, onEditDetails, onChangeIt, onOpenThread, onOpenConversation }: {
+export function AutomationOverview({ item, job, who, ctx, bots, onWho, onBack, onRunNow, onPause, onResume, onDelete, onTurnOn, onDiscard, onAnswer, onEditDetails, onChangeIt, onOpenThread, onOpenConversation }: {
   item: AutomationItem
   job: ScheduledJob
   who: string
   ctx: MetaContext
+  bots: BotChoice[]
+  /** A draft's Who changed. */
+  onWho: (key: string) => void
   onBack: () => void
   onRunNow: () => void
   onPause: () => void
@@ -87,6 +91,8 @@ export function AutomationOverview({ item, job, who, ctx, onBack, onRunNow, onPa
         job={job}
         who={who}
         ctx={ctx}
+        bots={bots}
+        onWho={onWho}
         onTurnOn={onTurnOn}
         onEditDetails={onEditDetails}
         onDiscard={onDiscard}

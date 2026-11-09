@@ -10,7 +10,8 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
 
 export const AUTOMATIONS_METHODS = [
   'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
-  'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.manager.thread'
+  'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho',
+  'automations.manager.thread'
 ] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
@@ -273,6 +274,8 @@ export interface AutomationItem {
     draftId: string
     managerThreadId?: string
     botId?: string
+    /** Who does it, as the person picked: a bot; absent: the default agent. */
+    who?: { kind: 'bot'; botId: string }
     problems: string[]
     ask?: { question: string; options: string[] }
   }
