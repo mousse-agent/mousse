@@ -174,9 +174,19 @@
     "digest": "f53d0aa6063bfdc2",
     "security": "6f012c3ca58ce7c5"
   },
+  "git.checkUpstream": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
+  },
   "git.commit": {
     "version": 2,
     "digest": "a47cf64c2d31d423",
+    "security": "6f012c3ca58ce7c5"
+  },
+  "git.continueInProgress": {
+    "version": 1,
+    "digest": "b776a1bd49461dcd",
     "security": "6f012c3ca58ce7c5"
   },
   "git.createBranch": {

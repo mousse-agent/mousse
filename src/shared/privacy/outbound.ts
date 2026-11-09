@@ -130,13 +130,14 @@ export const OUTBOUND: readonly OutboundEntry[] = [
   {
     label: 'Providers you set up',
     kind: 'contacted',
-    hosts: ['api.anthropic.com', 'api.openai.com', 'auth.openai.com', 'opencode.ai', 'grok.com', 'cli-chat-proxy.grok.com'],
-    when: 'Only for a provider you added: Claude API key, ChatGPT sign-in in Mousse, OpenCode, Grok.',
+    hosts: ['api.anthropic.com', 'api.openai.com', 'auth.openai.com', 'opencode.ai', 'grok.com', 'cli-chat-proxy.grok.com', 'ai-gateway.vercel.sh'],
+    when: 'Only for a provider you added: Claude API key, ChatGPT sign-in in Mousse, OpenCode, Grok, Vercel AI Gateway.',
     sends: 'your chats, the provider sign-in, and requests for its models and usage.',
     sources: [
       'src/mms/harness/claude/apiKey.ts',
       'src/mms/harness/chatgpt/discovery.ts',
       'src/mms/providers/ProviderAuthService.ts',
+      'src/mms/providers/vercelGatewayCredits.ts',
       'src/mms/providers/xaiBilling.ts'
     ]
   },
@@ -144,7 +145,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     label: 'Links and names Mousse never connects to',
     kind: 'link',
     hosts: [
-      'accounts.google.com', 'agentclientprotocol.com', 'auth.x.ai', 'chatgpt.com', 'code.claude.com',
+      'accounts.google.com', 'agentclientprotocol.com', 'api.example.com', 'auth.x.ai', 'chatgpt.com', 'code.claude.com',
       'example.com', 'example.invalid', 'www.apple.com', 'www.w3.org'
     ]
   },

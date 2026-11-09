@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -189,7 +189,8 @@ describe('project folder selection', () => {
 
   it('shows a mode-only change and a submodule as whole files without hunks', async () => {
     const cwd = repo(), place = projectPlace(), service = new GitService()
-    git(cwd, 'update-index', '--chmod=+x', 'b.txt')
+    // The file on disk too, so Git sees the same mode change where it tracks modes (not only on Windows).
+    chmodSync(join(cwd, 'b.txt'), 0o755); git(cwd, 'update-index', '--chmod=+x', 'b.txt')
     const nested = join(cwd, 'sub')
     mkdirSync(nested); git(nested, 'init', '-q', '-b', 'main'); git(nested, 'config', 'user.name', 'n'); git(nested, 'config', 'user.email', 'n@example.invalid')
     git(nested, 'config', 'commit.gpgsign', 'false')
@@ -199,6 +200,21 @@ describe('project folder selection', () => {
     const changes = await service.readChanges(cwd, place)
     expect(fileIn(changes, 'b.txt')).toMatchObject({ mode: { old: '100644', new: '100755' }, wholeFileOnly: true, hunks: [] })
     expect(fileIn(changes, 'sub')).toMatchObject({ kind: 'submodule', wholeFileOnly: true, hunks: [] })
+  })
+
+  // Windows reads a file's mode from the index, so a mode is never staged apart from the file there.
+  it.skipIf(process.platform === 'win32')('shows a mode staged without the file on disk as diverged, not as left out', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    git(cwd, 'update-index', '--chmod=+x', 'b.txt')
+    const file = fileIn(await service.readChanges(cwd, place), 'b.txt')
+    expect(file).toMatchObject({ included: 'partial', indexDiverged: true, wholeFileOnly: true, hunks: [] })
+  })
+
+  it('shows a staged new file deleted from disk as diverged', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    writeFileSync(join(cwd, 'new.txt'), 'new\n'); git(cwd, 'add', 'new.txt'); rmSync(join(cwd, 'new.txt'))
+    const file = fileIn(await service.readChanges(cwd, place), 'new.txt')
+    expect(file).toMatchObject({ included: 'partial', indexDiverged: true, wholeFileOnly: true, hunks: [] })
   })
 
   it('gives repeated identical hunks their own ids and chooses them apart', async () => {

@@ -54,7 +54,6 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Executable path', section: 'providers', anchor: 'providers-executable', keywords: ['binary', 'cli'] },
   { title: 'Launch arguments', section: 'providers', anchor: 'providers-arguments', keywords: ['flags', 'args'] },
   { title: 'Variables', section: 'providers', anchor: 'providers-variables', keywords: ['environment', 'env'] },
-  { title: 'Account home', section: 'providers', anchor: 'providers-home', keywords: ['config folder'] },
   { title: 'Display name', section: 'providers', anchor: 'providers-display-name', keywords: ['rename'] },
 
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
