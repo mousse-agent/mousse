@@ -96,6 +96,15 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['fetch', '--progress'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
   })
 
+  it('treats an empty refmap as narrowing a fetch, and any other refmap as widening it', () => {
+    // The upstream check: an empty refmap keeps the remote's configured refspecs from moving its tracking refs.
+    const check = ['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', '--', 'origin', '+refs/heads/main:refs/mousse/upstream-check/x']
+    expect(decide({ args: check })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['fetch', '--no-tags', '--refmap', '', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['fetch', '--no-tags', '--refmap=+refs/heads/*:refs/remotes/origin/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--no-tags', '--refmap', 'refs/heads/*:refs/heads/*', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
+  })
+
   it('never treats a push as owned, whatever the branch is called: it publishes to the user\'s remote', () => {
     expect(decide({ args: ['push', '--no-verify', 'origin', 'refs/mousse/r/1:refs/heads/mousse/dispatch/1'] })).toMatchObject({ access: 'userRequested', allowed: false, reason: expect.stringContaining('pushes to a remote') })
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/main'] })).toMatchObject({ allowed: false })

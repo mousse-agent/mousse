@@ -1786,6 +1786,16 @@ export interface GitFetchResult {
   behindAfter: number
 }
 
+/**
+ * What a quiet look at the branch's upstream found, without changing anything the person sees: how far HEAD
+ * and the remote branch are apart on the remote now. `none` when there is nothing to look at (no branch, no
+ * upstream, a shallow clone); `unreachable` when the remote did not answer or refused.
+ */
+export type GitUpstreamCheck =
+  | { state: 'checked'; branch: string; head: string; ahead: number; behind: number; checkedAt: number }
+  | { state: 'unreachable'; branch: string; head: string; reason: 'signed-out' | 'offline' | 'gone'; checkedAt: number }
+  | { state: 'none' }
+
 export type GitOperationKind = 'push' | 'pull' | 'fetch' | 'commit' | 'checkout'
 
 export type GitOperationPhase = 'started' | 'integrating' | 'hook' | 'output' | 'done' | 'failed' | 'cancelled'

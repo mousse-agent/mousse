@@ -126,6 +126,7 @@ import type {
   GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
+  GitUpstreamCheck,
   GitDeleteBranchOptions,
   GitFetchOptions,
   GitPullOptions,
@@ -2416,6 +2417,10 @@ export function registerGuiIpc(
   // The daemon only stops an action for the window connection that started it, which is this sender's.
   registerStorageHandler('git:cancelOperation', async (_e, operationId: string, threadId?: unknown, projectId?: unknown) =>
     guiMms.request<{ cancelled: boolean }>('git.cancelOperation', withProjectId(withThreadId({ operationId }, threadId), projectId))
+  )
+  // A service from before the upstream check has no such method; the card then shows what the status says.
+  registerHandler('git:checkUpstream', async (_e, scope?: GitScope) =>
+    (await guiMms.request<{ check: GitUpstreamCheck }>('git.checkUpstream', daemonGitParams(scope))).check
   )
   registerHandler('git:lastCommitMessage', async (_e, scope?: GitScope) =>
     (await guiMms.request<{ message: string | null }>('git.lastCommitMessage', daemonGitParams(scope))).message

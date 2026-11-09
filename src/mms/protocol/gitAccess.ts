@@ -217,6 +217,7 @@ export const GIT_ACCESS = {
   'git.branches': 'owned',
   'git.diffStats': 'owned',
   'git.lastCommitMessage': 'owned',
+  'git.checkUpstream': 'owned',
   'git.checkout': 'userRequested',
   'git.commit': 'userRequested',
   'git.suggestCommitMessage': 'owned',

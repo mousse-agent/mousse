@@ -140,7 +140,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
 ])
 
 /** Calls that change nothing a read returns, so they leave shared reads in flight (a long wait, the event cursor). */
-const SHARING_NEUTRAL_METHODS: ReadonlySet<string> = new Set(['events.subscribe', 'speech.host.wait'])
+const SHARING_NEUTRAL_METHODS: ReadonlySet<string> = new Set(['events.subscribe', 'speech.host.wait', 'git.checkUpstream'])
 
 /**
  * Whether `error` is an overload refusal: too many requests in flight on the connection, from

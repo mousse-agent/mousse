@@ -4074,6 +4074,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await materializeRequestedWorkspace(ctx, p)
       return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
     }
+    case 'git.checkUpstream': {
+      const p = isObject(params) ? params : {}
+      await materializeRequestedWorkspace(ctx, p)
+      return { check: await ctx.mms.gitService.checkUpstream(projectRootContext(ctx, p)) }
+    }
     case 'git.lastCommitMessage': {
       const p = isObject(params) ? params : {}
       await materializeRequestedWorkspace(ctx, p)

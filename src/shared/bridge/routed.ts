@@ -192,6 +192,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     required: ['scope', 'path']
   }),
   'git.status': read('folder', [...FOLDER]),
+  // How far the branch and its upstream are apart on the remote now, read on the computer that has the folder.
+  'git.checkUpstream': read('folder', [...FOLDER]),
   // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
   'git.changes': read('folder', [...FOLDER, 'paths']),
   // The reverts of the folder its copies still let the person restore.
