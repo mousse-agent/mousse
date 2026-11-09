@@ -125,8 +125,8 @@ export class RemoteAutomations implements RemoteAutomationsPort {
     return job as unknown as ScheduledJob
   }
 
-  async pause(node: string, jobId: string, until?: string, options: { idem?: string; signal?: AbortSignal } = {}): Promise<void> {
-    await this.options.client.call(node as NodeId, 'scheduled.pause', { id: jobId, ...(until ? { until } : {}) }, options)
+  async resume(node: string, jobId: string, options: { idem?: string; signal?: AbortSignal } = {}): Promise<void> {
+    await this.options.client.call(node as NodeId, 'scheduled.resume', { id: jobId }, options)
   }
 
   matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null> {

@@ -1558,7 +1558,13 @@ export class MmsProfileServices {
       pause: (id, reason) => { this.scheduled.pauseJob(id, reason) },
       resume: (id) => { this.scheduled.resumeJob(id) },
       remove: (id) => this.scheduled.deleteJob(id),
-      keepHistory: (entry) => this.movedAutomations.add(entry)
+      keepHistory: (entry) => this.movedAutomations.add(entry),
+      transfers: {
+        get: (id) => this.movedAutomations.transfer(id),
+        begin: (entry) => this.movedAutomations.begin(entry),
+        end: (id) => this.movedAutomations.end(id)
+      },
+      defaultMode: () => this.orchestrator.scheduledCreatorCeiling()
     }, jobIds, node, signal).finally(() => {
       this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
     })

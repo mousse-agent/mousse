@@ -25,8 +25,8 @@ export interface RemoteAutomationsPort {
    * same request reach the same execution. Returns the job as that computer stored it (its own, plain ids).
    */
   create(node: string, input: CreateScheduledJobInput, options?: { idem?: string; signal?: AbortSignal }): Promise<ScheduledJob>
-  /** Pauses an automation of `node` by its own id (a moved automation keeps its pause). */
-  pause(node: string, jobId: string, until?: string, options?: { idem?: string; signal?: AbortSignal }): Promise<void>
+  /** Resumes an automation of `node` by its own id (a moved automation that was on here, once its move is confirmed). */
+  resume(node: string, jobId: string, options?: { idem?: string; signal?: AbortSignal }): Promise<void>
   /** The project of `node` that is the same Git repository as the folder `projectPath` here; null when it has none. */
   matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null>
 }

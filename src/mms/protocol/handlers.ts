@@ -2869,6 +2869,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A call for another computer that reached this one's store (routing is off) is refused: it never falls back here.
       if (p.node !== undefined) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { node: p.node })
       const parsed = asCreateScheduledJobInput(p.input)
+      // `mousse-cli automation run <name>` starts one automation: a CLI name is a manual job's, and unique here.
+      if (parsed.cliName) {
+        if (parsed.schedule.kind !== 'manual') throw jobRefused('Only an automation started by hand has a CLI name.')
+        if (ctx.mms.scheduled.listJobs().some((job) => job.cliName === parsed.cliName)) throw jobRefused(`Another automation here is already started by "mousse-cli automation run ${parsed.cliName}".`)
+      }
       // A thread-event job runs on the pull request's thread unless another one is chosen.
       const threadEvent = parsed.threadEvent ? threadEventTrigger(ctx, parsed.threadEvent, parsed.schedule) : undefined
       const input = { ...parsed, threadEvent, ...(threadEvent && !parsed.threadId && !parsed.createThread ? { threadId: threadEvent.threadId } : {}) }

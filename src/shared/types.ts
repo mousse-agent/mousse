@@ -422,8 +422,10 @@ export interface CreateScheduledJobInput {
   keys?: string[]
   /** Daemon-only: a draft (`automation_draft_save`). The protocol refuses it. */
   draft?: AutomationDraftState
-  /** Daemon-only: the CLI name of a CLI trigger. */
+  /** The CLI name of a CLI trigger (a manual job): unique on the computer that keeps it. */
   cliName?: string
+  /** Made paused, with this reason and end (Move to computer makes its copy paused until the move is confirmed). */
+  paused?: { reason?: string; until?: string }
 }
 
 /** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */

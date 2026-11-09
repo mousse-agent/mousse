@@ -231,7 +231,7 @@ describe('Move to computer', () => {
     ])
     // Made there, in its project there, paused as it was here.
     const there = t.owner.scheduled.getJob(result.moved[0].to.split(':')[1])!
-    expect(there).toMatchObject({ name: 'Movable', projectId: theirs.id, state: 'paused' })
+    expect(there).toMatchObject({ name: 'Movable', projectId: theirs.id, state: 'paused', enabled: false })
     // Removed here; what did not move is as it was (not left paused by the attempt).
     expect(t.caller.scheduled.getJob(movable.id)).toBeUndefined()
     expect(t.caller.scheduled.getJob(bound.id)).toBeDefined()
@@ -241,6 +241,19 @@ describe('Move to computer', () => {
     const moved = index.items.find((item: { key: string }) => item.key === `moved:${movable.id}`)
     expect(moved).toMatchObject({ kind: 'moved', whenText: expect.stringMatching(/^moved to /), runs: [{ state: 'done' }] })
     expect(index.items.some((item: { id: string }) => item.id === result.moved[0].to)).toBe(true)
+  }, 60_000)
+
+  it('turns the copy on there only if it was on here, with its keys and CLI name, and never wider than it ran here', async () => {
+    const on = t.caller.scheduled.createJob({ name: 'On here', prompt: 'x', schedule: { kind: 'manual' }, keys: ['GITHUB_TOKEN'], cliName: 'on-here', permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+    // Full access here; the owner lets this computer have Auto-accept edits at most, so it stays here, still on.
+    const full = t.caller.scheduled.createJob({ name: 'Full here', prompt: 'x', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'full' })
+    const result = await t.dispatch('automations.move', { jobIds: [on.id, full.id], node: t.node })
+    expect(result.moved).toEqual([{ id: on.id, to: expect.stringMatching(new RegExp(`^${t.node}:`)) }])
+    expect(result.failed).toEqual([{ id: full.id, name: 'Full here', error: expect.stringMatching(/cannot run above/) }])
+    const there = t.owner.scheduled.getJob(result.moved[0].to.split(':')[1])!
+    expect(there).toMatchObject({ name: 'On here', enabled: true, state: 'scheduled', keys: ['GITHUB_TOKEN'], cliName: 'on-here', permissionMode: 'ask' })
+    expect(there.pausedReason).toBeUndefined()
+    expect(t.caller.scheduled.getJob(full.id)).toMatchObject({ enabled: true, state: 'scheduled', permissionMode: 'full' })
   }, 60_000)
 
   it('refuses while the other computer is offline, and changes nothing', async () => {

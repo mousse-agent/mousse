@@ -21,9 +21,25 @@ export interface MovedAutomation {
   runHistory: ScheduledJobRunRecord[]
 }
 
+/**
+ * A move that started and is not finished: the automation is held paused here until the other computer confirms its
+ * copy. It says whether the automation was on before, so the move that finishes it (a retry, after a lost answer or a
+ * restart) turns the copy on only then. It holds while the automation is still paused by that move (`pausedAt`).
+ */
+export interface MoveTransfer {
+  id: string
+  node: string
+  /** The other computer's name, for "Check <computer>". */
+  name: string
+  wasEnabled: boolean
+  pausedAt?: string
+  startedAt: string
+}
+
 interface MovedFile {
   version: 1
   moved: MovedAutomation[]
+  transfers?: MoveTransfer[]
 }
 
 /** Moved automations kept for their history, newest last. */
@@ -39,20 +55,47 @@ export class MovedAutomationStore {
   }
 
   list(): MovedAutomation[] {
-    if (!existsSync(this.path)) return []
+    const parsed = this.read()
+    return Array.isArray(parsed.moved) ? parsed.moved.filter((entry) => entry && typeof entry.id === 'string' && Array.isArray(entry.runHistory)) : []
+  }
+
+  /** The move of automation `id` that is not finished, if any. */
+  transfer(id: string): MoveTransfer | undefined {
+    const parsed = this.read()
+    return Array.isArray(parsed.transfers) ? parsed.transfers.find((entry) => entry && entry.id === id) : undefined
+  }
+
+  /** Records (or replaces) the unfinished move of `entry.id`, before the other computer is asked. */
+  begin(entry: MoveTransfer): void {
+    this.write((file) => ({ ...file, transfers: [...(file.transfers ?? []).filter((known) => known.id !== entry.id), entry] }))
+  }
+
+  /** The move of `id` is over: done, or refused there so nothing was made. */
+  end(id: string): void {
+    this.write((file) => ({ ...file, transfers: (file.transfers ?? []).filter((known) => known.id !== id) }))
+  }
+
+  /** The move is confirmed: its history is kept. */
+  add(entry: MovedAutomation): void {
+    this.write((file) => ({ ...file, moved: [...file.moved.filter((known) => known.id !== entry.id), entry].slice(-KEPT) }))
+  }
+
+  private read(): Partial<MovedFile> {
+    if (!existsSync(this.path)) return {}
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<MovedFile>
-      return Array.isArray(parsed.moved) ? parsed.moved.filter((entry) => entry && typeof entry.id === 'string' && Array.isArray(entry.runHistory)) : []
+      return parsed && typeof parsed === 'object' ? parsed : {}
     } catch {
-      return []
+      return {}
     }
   }
 
-  add(entry: MovedAutomation): void {
+  private write(change: (file: MovedFile) => MovedFile): void {
     mkdirSync(this.dir, { recursive: true })
     withFileLock(join(this.dir, '.moved.lock'), () => {
-      const moved = [...this.list().filter((known) => known.id !== entry.id), entry].slice(-KEPT)
-      atomicWriteJsonSync(this.path, { version: 1, moved } satisfies MovedFile)
+      const current = this.read()
+      const next = change({ version: 1, moved: this.list(), ...(Array.isArray(current.transfers) ? { transfers: current.transfers } : {}) })
+      atomicWriteJsonSync(this.path, { version: 1, moved: next.moved, ...(next.transfers?.length ? { transfers: next.transfers } : {}) } satisfies MovedFile)
     })
   }
 }
