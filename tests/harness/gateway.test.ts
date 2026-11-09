@@ -767,6 +767,39 @@ describe('harness gateway: a driver whose home depends on its setup (managed Cod
     const completed = events.find((event) => event.type === 'operation' && event.data.phase === 'completed')
     expect(completed?.type === 'operation' ? completed.data : undefined).toMatchObject({ phase: 'completed', warning: 'Your previous sign-in is still waiting to be revoked.' })
   })
+
+  it('a completed sign-in, and a sign-out, reach clients as a snapshots event with the new sign-in, without a recheck', async () => {
+    let signedIn = false
+    const harness = testHarness({
+      drivers: [adapterDriver(pi()), setupDriver({
+        auth: async () => (signedIn ? { state: 'signed_in', account: { id: 'acct-1', label: 'Connection 1' } } : { state: 'signed_out' }),
+        signIn: async () => {
+          signedIn = true
+          return { success: true }
+        },
+        signOut: async () => {
+          signedIn = false
+        }
+      })],
+      instances: empty(),
+      profileHome: home()
+    })
+    const { instanceId } = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    const authIn = (event: HarnessGatewayEvent) => (event.type === 'snapshots' ? event.data.snapshots.find((entry) => entry.instanceId === instanceId)?.auth : undefined)
+    await waitFor(() => events.some((event) => authIn(event)?.state === 'signed_out'))
+    await harness.instances.signIn(instanceId)
+    await waitFor(() => events.some((event) => authIn(event)?.state === 'signed_in'))
+    const completedAt = events.findIndex((event) => event.type === 'operation' && event.data.phase === 'completed')
+    const signedInAt = events.findIndex((event) => authIn(event)?.state === 'signed_in')
+    expect(completedAt).toBeGreaterThanOrEqual(0)
+    expect(authIn(events[signedInAt]!)).toMatchObject({ state: 'signed_in', account: { label: 'Connection 1' } })
+    events.length = 0
+    await harness.instances.signOut(instanceId)
+    await waitFor(() => events.some((event) => authIn(event)?.state === 'signed_out'))
+    harness.stop()
+  })
 })
 
 describe('harness gateway: the removed Pi engine setting', () => {

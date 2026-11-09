@@ -120,7 +120,7 @@ export function BrowseButton({
 }
 
 /** A command to run in a terminal, with a copy button: the advisory update, a terminal sign-in. */
-export function CommandBox({ command, label = 'Copy command' }: { command: string; label?: string }) {
+export function CommandBox({ command, label = 'Copy command', onCopy }: { command: string; label?: string; onCopy?: () => void }) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
@@ -137,7 +137,7 @@ export function CommandBox({ command, label = 'Copy command' }: { command: strin
         className="settings-icon-btn prov-micro"
         title={copied ? 'Copied' : label}
         aria-label={label}
-        onClick={() => void navigator.clipboard.writeText(command).then(() => setCopied(true))}
+        onClick={() => void navigator.clipboard.writeText(command).then(() => { setCopied(true); onCopy?.() })}
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
       </button>
