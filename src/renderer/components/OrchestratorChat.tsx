@@ -27,7 +27,8 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
-import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
+import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { contextTokens } from '../lib/promptCache'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -341,12 +342,17 @@ export function OrchestratorChat() {
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
   const historyTokens = contextTokens(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
-  // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not),
-  // after what it has.
+  // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not) with the
+  // message's images, browser elements and references. Files are kept by thread here, like a paste.
+  const addComposerFiles = useCallback((threadId: string, files: AttachedFile[]) => {
+    const key = composerMediaKey(threadId)
+    if (key === activeMediaKeyRef.current) { setAttachedFiles((current) => [...current, ...files]); return }
+    const current = mediaByThreadRef.current[key] ?? EMPTY_COMPOSER_MEDIA
+    mediaByThreadRef.current[key] = { files: [...current.files, ...files], voice: current.voice }
+  }, [setAttachedFiles])
   const onQueueDraftToComposer = useCallback((threadId: string, recovered: RecoveredQueueDraft) => {
-    const store = useAppStore.getState()
-    store.setComposerDraft(threadId, withDraftAppended(store.composerDrafts[threadId] ?? '', recovered.text))
-  }, [])
+    restoreQueuedDraft(threadId, recovered, addComposerFiles)
+  }, [addComposerFiles])
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,

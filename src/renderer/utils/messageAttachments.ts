@@ -180,6 +180,22 @@ export function browserElementLabel(element: Pick<ParsedBrowserElement, 'text' |
   return element.text?.trim() || element.ariaLabel?.trim() || `<${element.tagName}>`
 }
 
+/**
+ * A message's composer markers as the composer holds them again: its browser elements and references as
+ * attachments, and the markers the composer cannot rebuild (attached file names, voice messages) as text.
+ */
+export function composerPartsFromMarkers(markers: string): { text: string; browserElements: ParsedBrowserElement[]; references: ChatReference[] } {
+  const extracted = extractChatReferences(markers)
+  const browserElements: ParsedBrowserElement[] = []
+  const text = extracted.text.replace(BROWSER_ELEMENT_BLOCK_RE, (block, body: string) => {
+    const parsed = parseBrowserElementBody(body)
+    if (!parsed) return block
+    browserElements.push(parsed)
+    return ''
+  }).replace(/\n{3,}/g, '\n\n').trim()
+  return { text, browserElements, references: extracted.references }
+}
+
 export function parseUserMessageContent(content: string): ParsedUserMessageContent {
   const attachedFiles: string[] = []
   const browserElements: ParsedBrowserElement[] = []
