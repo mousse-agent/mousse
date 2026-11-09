@@ -100,12 +100,15 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   const openRunRecord = runs.find((run) => run.id === openRunId)
   const metaOf = (jobId: string) => inbox?.meta.find((entry) => entry.jobId === jobId)
 
-  // A run opens beside the list as soon as there is one: the first that needs the person, else the newest.
+  // A run opens beside the list as soon as there is one (the first that needs the person, else the newest), and a
+  // filter that hides the open run opens its own first run.
   useEffect(() => {
-    if (!active || openRunId || pane !== 'run' || !inbox) return
+    if (!active || pane !== 'run' || !inbox) return
+    if (openRunId && rows.some((row) => row.kind === 'run' && row.run.id === openRunId)) return
+    if (openRunId && !filter.automationId && !filter.project && !filter.text) return
     const first = rows.find((row) => row.kind === 'run')
     if (first?.kind === 'run') { openRun(first.run); setCursor(first.run.id) }
-  }, [active, openRunId, pane, inbox, rows])
+  }, [active, openRunId, pane, inbox, rows, filter])
 
   useCommand('thread.new', () => composerRef.current?.focus(), () => active && pageHasFocus(), { keysOnly: true })
 
@@ -198,7 +201,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
         {actionError ? <p className="inbox-note" role="alert">{actionError}</p> : null}
 
         <div className="inbox-scroll" ref={listRef} role="listbox" aria-label="Runs" data-testid="inbox-runs">
-          {drafts.length ? (
+          {drafts.length && !filter.automationId ? (
             <button type="button" className="inbox-fold inbox-drafts-row" data-testid="inbox-drafts-row" aria-pressed={pane === 'drafts'} onClick={() => (pane === 'drafts' ? closePane() : openDrafts())}>
               <FileText size={13} strokeWidth={1.8} aria-hidden="true" /><span>Drafts · {drafts.length}</span>
             </button>
@@ -220,6 +223,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
             </div>
           ))}
           {inbox && runs.length > 0 && rows.length === 0 ? <p className="inbox-note">No run matches.</p> : null}
+          {empty ? <p className="inbox-list-empty" data-testid="inbox-no-runs">No runs yet.</p> : null}
         </div>
 
         {lastResolved ? (
@@ -365,8 +369,8 @@ function FilterHeader({ filter, automation, now, viewerZone }: { filter: InboxFi
             <span title="When"><Repeat size={12} strokeWidth={1.8} aria-hidden="true" />{whenColumn(automation, now)}</span>
             <span title="Next run"><Clock size={12} strokeWidth={1.8} aria-hidden="true" />{automation.paused ? 'Paused' : automation.next ? ownedWhenText(automation.next.at, now, automation.computer, viewerZone) : 'Not scheduled'}</span>
             <span title={`Who: ${automation.who.name}`}>{automation.who.kind === 'bot' ? <Bot size={12} strokeWidth={1.8} aria-hidden="true" /> : <User size={12} strokeWidth={1.8} aria-hidden="true" />}{automation.who.kind === 'bot' ? automation.who.name : 'Default agent'}</span>
-            <span data-testid="inbox-filter-cost" title={`This month · ${month?.label ?? ''}. Cost counts only runs whose price is known (API keys); subscription runs count tokens.`}>
-              <Coins size={12} strokeWidth={1.8} aria-hidden="true" />{usage?.costUsd ? costText(usage.costUsd) : `${tokensText(usage?.tokens ?? 0)} tokens`}<small>{month?.label}</small>
+            <span className="inbox-filter-cost" data-testid="inbox-filter-cost" title={`This month · ${month?.label ?? ''}. Cost counts only runs whose price is known (API keys); subscription runs count tokens.`}>
+              <Coins size={12} strokeWidth={1.8} aria-hidden="true" />{usage?.costUsd ? costText(usage.costUsd) : usage?.tokens ? `${tokensText(usage.tokens)} tokens` : 'Nothing used'}<small>{month?.label}</small>
             </span>
           </div>
         ) : null}

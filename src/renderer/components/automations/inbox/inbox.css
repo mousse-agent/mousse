@@ -190,6 +190,7 @@
 
 .inbox-filter-meta svg { flex-shrink: 0; opacity: 0.8; }
 .inbox-filter-meta small { margin-left: 2px; font-size: 10.5px; opacity: 0.7; }
+.inbox-filter-meta .inbox-filter-cost { grid-column: 1 / -1; }
 
 .inbox-scroll {
   flex: 1;
@@ -852,3 +853,24 @@
   font-size: 12.5px;
   color: var(--text-secondary);
 }
+
+/* An automation run's run_report, in its thread. */
+.inbox-run-report {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.inbox-run-report[data-level='needs_you'] { color: var(--status-input); }
+.inbox-run-report[data-level='look'] { color: var(--warning); }
+.inbox-run-report-level { font-weight: 600; white-space: nowrap; }
+.inbox-run-report-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.inbox-draft-head + .inbox-draft-fields { margin-top: 10px; }
+.inbox-list-empty { margin: 10px 8px; font-size: 12.5px; color: var(--text-secondary); }

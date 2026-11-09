@@ -97,9 +97,16 @@ export const ToolRenderer = memo(function ToolRenderer({
   // Custom renderers: user-defined tools, and the host's own cards for its app tools (keyed by the bare tool name,
   // whatever server prefix the runtime gave it, e.g. `mcp__mousse__automation_draft_save`).
   const mcpInfo = parseMcpToolType(partType);
-  const bareName = (mcpInfo?.toolName ?? (partType.startsWith("tool-") ? partType.slice(5) : partType)).split("__").pop() ?? "";
+  // A runtime that names its calls only by title (an ACP agent) leaves the name in the row's summary.
+  const summaryName = typeof (part.input as { summary?: unknown } | undefined)?.summary === "string" ? ((part.input as { summary: string }).summary.trim()) : "";
+  const names = [
+    (mcpInfo?.toolName ?? (partType.startsWith("tool-") ? partType.slice(5) : partType)).split("__").pop() ?? "",
+    ...(/^[a-z][a-z0-9_]*$/.test(summaryName) ? [summaryName.split("__").pop() ?? ""] : []),
+  ];
+  const own = (key: string) => (toolRenderers && Object.prototype.hasOwnProperty.call(toolRenderers, key) ? toolRenderers[key] : undefined);
+  const bareName = names.find((name) => own(name)) ?? names[0] ?? "";
   const CustomRenderer = toolRenderers
-    ? (mcpInfo?.serverName === "user-tools" ? toolRenderers[mcpInfo.toolName] : undefined) ?? (Object.prototype.hasOwnProperty.call(toolRenderers, bareName) ? toolRenderers[bareName] : undefined)
+    ? (mcpInfo?.serverName === "user-tools" ? toolRenderers[mcpInfo.toolName] : undefined) ?? own(bareName)
     : undefined;
   if (CustomRenderer) {
     return (

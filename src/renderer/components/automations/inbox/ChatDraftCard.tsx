@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CustomToolRendererProps } from '../../../chat/components/agent-elements/types'
 import { Loader2 } from '../../../lib/icons'
+import { isRunLevel, type RunLevel } from '../../../../shared/automationInbox'
+import { LEVEL_VIEW } from './RunParts'
 import { useAppStore } from '../../../stores/appStore'
 import { NewBotDialog } from '../../bots/NewBotDialog'
 import { DraftCard, DraftOnLine, NEW_BOT_KEY } from '../DraftCard'
@@ -48,13 +50,16 @@ export function ChatDraftCard({ input, output, status }: CustomToolRendererProps
   if (status === 'pending' || status === 'streaming') {
     return <p className="inbox-draft-writing" data-testid="chat-draft-writing"><Loader2 size={13} strokeWidth={1.8} className="inbox-spin" aria-hidden="true" />Writing a draft…</p>
   }
-  if (!draftId) return status === 'error' ? <p className="inbox-draft-writing" data-testid="chat-draft-failed">The draft was not saved.</p> : null
+  if (status === 'error') return <p className="inbox-draft-writing" data-testid="chat-draft-failed">The draft was not saved.</p>
 
   const items = index?.items ?? []
   const name = typeof input.name === 'string' ? input.name : undefined
-  // A draft turned on with a bot as Who became that bot's automation: it is found by the chat it came from.
-  const item = items.find((entry) => entry.id === draftId)
-    ?? items.find((entry) => entry.kind === 'job' && entry.name === name && inbox?.meta.some((meta) => meta.jobId === entry.id && meta.originThreadId === threadId))
+  const fromThisChat = (id: string) => items.some((entry) => entry.id === id && entry.draft?.originThreadId === threadId) || Boolean(inbox?.meta.some((meta) => meta.jobId === id && meta.originThreadId === threadId))
+  // The call's draft by id. A draft turned on with a bot as Who became that bot's automation: it is found by the chat
+  // it came from. A runtime that keeps neither the call's arguments nor its result (an ACP agent): the chat's newest.
+  const item = (draftId ? items.find((entry) => entry.id === draftId) : undefined)
+    ?? items.find((entry) => entry.kind === 'job' && name !== undefined && entry.name === name && fromThisChat(entry.id))
+    ?? (!draftId && !name ? [...items].reverse().find((entry) => entry.kind === 'job' && fromThisChat(entry.id)) : undefined)
   const now = new Date()
   if (!index) return <p className="inbox-draft-writing" data-testid="chat-draft-loading">Reading the draft…</p>
   if (!item) return <p className="inbox-draft-gone" data-testid="chat-draft-gone">{name ? `“${name}” was discarded.` : 'This draft was discarded.'}</p>
@@ -87,5 +92,36 @@ export function ChatDraftCard({ input, output, status }: CustomToolRendererProps
   )
 }
 
+/** What a run reported, from the call's arguments or its result (a runtime may give only one of them). */
+export function reportOf(input: Record<string, unknown>, output: unknown): { level?: RunLevel; summary?: string } {
+  const read = (value: unknown): Record<string, unknown> | undefined => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+    if (typeof value === 'string') { try { return read(JSON.parse(value)) } catch { return undefined } }
+    if (Array.isArray(value)) for (const entry of value) { const found = read((entry as { text?: unknown })?.text ?? entry); if (found) return found }
+    return undefined
+  }
+  const source = isRunLevel(input.level) ? input : read(output) ?? {}
+  return { ...(isRunLevel(source.level) ? { level: source.level } : {}), ...(typeof source.summary === 'string' ? { summary: source.summary } : {}) }
+}
+
+/** An automation run's `run_report`, in its thread: the level it reported and its one line. */
+export function RunReportCard({ input, output, status }: CustomToolRendererProps) {
+  const threadId = useAppStore((s) => s.activeThreadId)
+  // A runtime that keeps neither the call's arguments nor its result (an ACP agent): the report the inbox holds for
+  // this thread's newest reported run.
+  const held = useInboxStore((s) => s.inbox?.runs.find((run) => run.threadId === threadId && run.level))
+  const given = reportOf(input, output)
+  const report = given.level ? given : held ? { level: held.level, ...(held.summary ? { summary: held.summary } : {}) } : given
+  const view = report.level ? LEVEL_VIEW[report.level] : undefined
+  if (status === 'error') return <p className="inbox-draft-writing" data-testid="run-report-failed">The report was not taken.</p>
+  return (
+    <p className="inbox-run-report" data-testid="run-report" data-level={report.level}>
+      {view?.icon}
+      <span className="inbox-run-report-level">{view ? `Reported ${view.label}` : 'Reporting…'}</span>
+      {report.summary ? <span className="inbox-run-report-summary" title={report.summary}>{report.summary}</span> : null}
+    </p>
+  )
+}
+
 /** The chat's custom tool cards. */
-export const CHAT_TOOL_RENDERERS = { [DRAFT_TOOL]: ChatDraftCard }
+export const CHAT_TOOL_RENDERERS = { [DRAFT_TOOL]: ChatDraftCard, run_report: RunReportCard }

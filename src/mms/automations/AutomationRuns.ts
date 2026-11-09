@@ -105,6 +105,12 @@ function assigneeOf(key: string): InboxAssignee {
   return key.startsWith('bot:') ? { kind: 'bot', botId: key.slice('bot:'.length) } : { kind: 'person' }
 }
 
+/** A bot activation's end reason in words: `bot_no_provider` → "No provider". */
+function reasonText(reason: string): string {
+  const text = reason.replace(/^bot_/, '').replace(/_/g, ' ').trim()
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Failed'
+}
+
 function usageOf(raw: unknown): RunModelUsage[] {
   try {
     const parsed = JSON.parse(String(raw ?? '[]')) as unknown
@@ -285,7 +291,7 @@ export class AutomationRuns {
       const status = activation.status
       if (status === 'done' || status === 'failed' || status === 'cancelled' || status === 'blocked') {
         const failed = status !== 'done'
-        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(failed ? { error: activation.endReason ? activation.endReason.replace(/_/g, ' ') : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
+        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
         continue
       }
       const state: InboxRunState = status === 'queued' ? 'queued' : status === 'paused' ? 'paused_usage' : 'running'

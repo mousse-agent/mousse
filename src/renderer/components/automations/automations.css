@@ -1,10 +1,6 @@
 /* Shared by the Automations editors and libraries: the draft state, the publish issue link,
    28px icon buttons, and the library filters. */
 
-.agents-workspace {
-  --settings-control-h: 28px;
-}
-
 .automation-save-state {
   display: inline-flex;
   align-items: center;

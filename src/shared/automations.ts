@@ -278,6 +278,8 @@ export interface AutomationItem {
     draftId: string
     managerThreadId?: string
     botId?: string
+    /** An agent wrote it in this ordinary chat; its card shows there. */
+    originThreadId?: string
     /** Who does it, as the person picked: a bot; absent: the default agent. */
     who?: { kind: 'bot'; botId: string }
     problems: string[]

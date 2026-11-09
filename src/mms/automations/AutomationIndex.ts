@@ -228,6 +228,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
         draftId: job.draft.draftId || job.id,
         ...(job.draft.managerThreadId ? { managerThreadId: job.draft.managerThreadId } : {}),
         ...(job.draft.botId ? { botId: job.draft.botId } : {}),
+        ...(job.draft.originThreadId ? { originThreadId: job.draft.originThreadId } : {}),
         ...(job.draft.who ? { who: { ...job.draft.who } } : {}),
         problems: job.draft.problems,
         ...(job.draft.ask ? { ask: { question: job.draft.ask.question, options: job.draft.ask.options } } : {})

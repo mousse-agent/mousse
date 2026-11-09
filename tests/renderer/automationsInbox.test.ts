@@ -376,6 +376,18 @@ describe('the draft card in a chat', () => {
     expect(calls(mousse, 'automations.drafts.turnOn')).toEqual([['automations.drafts.turnOn', { draftId: 'd1' }]])
   })
 
+  it('finds the chat\'s draft when the runtime kept neither the call\'s arguments nor its result (an ACP agent)', async () => {
+    const mousse = api({ items: [automation({ id: 'other' }), draft], computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }, inboxOf([]))
+    ;(window as unknown as { mousse: unknown }).mousse = mousse
+    setInboxClient(null)
+    useInboxStore.setState({ index: null, inbox: null, loadedAt: 0 })
+    useAppStore.setState({ activeThreadId: 'chat', projects: [] })
+    const { ChatDraftCard } = await import('../../src/renderer/components/automations/inbox/ChatDraftCard')
+    await act(async () => root.render(createElement(ChatDraftCard, { name: 'automation_draft_save', input: { summary: 'automation_draft_save', details: [] }, output: undefined, status: 'success' })))
+    await act(async () => {})
+    expect($('[data-testid="chat-draft-card"]')?.getAttribute('data-key')).toBe('job:d1')
+  })
+
   it('folds to the automation\'s current state once it is on, and says when it was discarded', async () => {
     const next = new Date(NOW.getTime() + 3_600_000).toISOString()
     await card([automation({ id: 'd1', name: 'Flaky checkout check', next: { at: next, timeZone: ZONE } })], { draftId: 'd1' })
