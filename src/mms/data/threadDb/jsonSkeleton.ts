@@ -11,16 +11,31 @@
 
 export type Skeleton = null | boolean | number | string | Skeleton[] | { [key: string]: Skeleton }
 
-/** What `JSON.stringify` serializes in place of `value` found under `key`: `toJSON`'s result, unwrapped. */
-function serialized(value: unknown, key: string): unknown {
-  if (value !== null && typeof value === 'object' && typeof (value as { toJSON?: unknown }).toJSON === 'function') {
-    value = (value as { toJSON: (key: string) => unknown }).toJSON(key)
-  } else if (typeof value === 'bigint' && typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === 'function') {
-    value = (value as unknown as { toJSON: (key: string) => unknown }).toJSON(key)
+/** True when `value` has the internal slot `valueOf` of `proto` reads (a boxed primitive of that type). */
+function boxed(value: object, proto: { valueOf: () => unknown }): boolean {
+  try {
+    proto.valueOf.call(value)
+    return true
+  } catch {
+    return false
   }
-  if (value instanceof Number) return Number(value)
-  if (value instanceof String) return String(value)
-  if (value instanceof Boolean) return value.valueOf()
+}
+
+/**
+ * What `JSON.stringify` serializes in place of `value` found under `key` (SerializeJSONProperty): `toJSON` read once
+ * and called with the key (also on functions and BigInts), then boxed primitives unwrapped as the spec does.
+ */
+function serialized(value: unknown, key: string): unknown {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function' || typeof value === 'bigint')) {
+    const toJSON = (value as { toJSON?: unknown }).toJSON
+    if (typeof toJSON === 'function') value = toJSON.call(value, key)
+  }
+  if (value !== null && typeof value === 'object') {
+    if (boxed(value, Number.prototype)) return Number(value)
+    if (boxed(value, String.prototype)) return String(value)
+    if (boxed(value, Boolean.prototype)) return Boolean.prototype.valueOf.call(value)
+    if (boxed(value, BigInt.prototype)) throw new TypeError('Do not know how to serialize a BigInt')
+  }
   return value
 }
 
@@ -34,7 +49,7 @@ function setOwn(target: Record<string, unknown>, key: string, value: unknown): v
   else target[key] = value
 }
 
-function convert(raw: unknown, key: string): Skeleton | undefined {
+function convert(raw: unknown, key: string, stack: Set<object> = new Set()): Skeleton | undefined {
   const value = serialized(raw, key)
   if (value === null) return null
   switch (typeof value) {
@@ -50,20 +65,27 @@ function convert(raw: unknown, key: string): Skeleton | undefined {
     case 'symbol':
       return undefined
   }
-  if (Array.isArray(value)) {
-    const out: Skeleton[] = new Array(value.length)
-    for (let i = 0; i < value.length; i++) {
-      const item = convert(value[i], String(i))
-      out[i] = item === undefined ? null : item
+  if (stack.has(value as object)) throw new TypeError('Converting circular structure to JSON')
+  stack.add(value as object)
+  try {
+    if (Array.isArray(value)) {
+      const length = value.length
+      const out: Skeleton[] = new Array(length)
+      for (let i = 0; i < length; i++) {
+        const item = convert(value[i], String(i), stack)
+        out[i] = item === undefined ? null : item
+      }
+      return out
+    }
+    const out: Record<string, Skeleton> = {}
+    for (const name of Object.keys(value as object)) {
+      const item = convert((value as Record<string, unknown>)[name], name, stack)
+      if (item !== undefined) setOwn(out, name, item)
     }
     return out
+  } finally {
+    stack.delete(value as object)
   }
-  const out: Record<string, Skeleton> = {}
-  for (const name of Object.keys(value as object)) {
-    const item = convert((value as Record<string, unknown>)[name], name)
-    if (item !== undefined) setOwn(out, name, item)
-  }
-  return out
 }
 
 /** The value `JSON.parse(JSON.stringify(value))` would give, without serializing; `undefined` when JSON drops it. */
@@ -76,7 +98,7 @@ function same(raw: unknown, key: string, skeleton: Skeleton | undefined): boolea
 }
 
 /** `same` for a value `serialized` already ran on (`toJSON` is called once, as JSON does). */
-function sameValue(value: unknown, skeleton: Skeleton | undefined): boolean {
+function sameValue(value: unknown, skeleton: Skeleton | undefined, stack: Set<object> = new Set()): boolean {
   if (value === null) return skeleton === null
   switch (typeof value) {
     case 'string':
@@ -91,24 +113,44 @@ function sameValue(value: unknown, skeleton: Skeleton | undefined): boolean {
     case 'bigint':
       return false
   }
-  if (Array.isArray(value)) {
-    if (!Array.isArray(skeleton) || skeleton.length !== value.length) return false
-    for (let i = 0; i < value.length; i++) {
-      const item = serialized(value[i], String(i))
-      if (dropped(item) ? skeleton[i] !== null : !sameValue(item, skeleton[i])) return false
+  if (stack.has(value as object)) throw new TypeError('Converting circular structure to JSON')
+  stack.add(value as object)
+  try {
+    if (Array.isArray(value)) {
+      const length = value.length
+      if (!Array.isArray(skeleton) || skeleton.length !== length) return false
+      for (let i = 0; i < length; i++) {
+        const item = serialized(value[i], String(i))
+        if (dropped(item) ? skeleton[i] !== null : !sameValue(item, skeleton[i], stack)) return false
+      }
+      return true
     }
-    return true
+    if (skeleton === null || typeof skeleton !== 'object' || Array.isArray(skeleton)) return false
+    let seen = 0
+    for (const name of Object.keys(value as object)) {
+      const item = serialized((value as Record<string, unknown>)[name], name)
+      if (dropped(item)) continue
+      if (!Object.prototype.hasOwnProperty.call(skeleton, name)) return false
+      if (!sameValue(item, (skeleton as Record<string, Skeleton>)[name], stack)) return false
+      seen += 1
+    }
+    return seen === Object.keys(skeleton).length
+  } finally {
+    stack.delete(value as object)
   }
-  if (skeleton === null || typeof skeleton !== 'object' || Array.isArray(skeleton)) return false
-  let seen = 0
-  for (const name of Object.keys(value as object)) {
-    const item = serialized((value as Record<string, unknown>)[name], name)
-    if (dropped(item)) continue
-    if (!Object.prototype.hasOwnProperty.call(skeleton, name)) return false
-    if (!sameValue(item, (skeleton as Record<string, Skeleton>)[name])) return false
-    seen += 1
+}
+
+/** True when two skeletons are equal (key order aside); shared strings compare at once. */
+export function sameSkeleton(a: Skeleton | undefined, b: Skeleton | undefined): boolean {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((item, i) => sameSkeleton(item, b[i]))
   }
-  return seen === Object.keys(skeleton).length
+  const keys = Object.keys(a)
+  if (keys.length !== Object.keys(b).length) return false
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && sameSkeleton(a[key], b[key]))
 }
 
 /** True when `value` would serialize to the same JSON as `skeleton` (key order aside). */

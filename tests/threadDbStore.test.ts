@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
+import { sameAsSkeleton, skeletonOf } from '../src/mms/data/threadDb/jsonSkeleton'
 import { legacyFingerprint } from '../src/mms/data/legacyThreadData'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 
@@ -221,6 +222,89 @@ describe('ThreadDbStore keeps rows its caller never saw', () => {
   })
 })
 
+describe('ThreadDbStore removes only rows a caller had', () => {
+  let dir: string
+  let client: ThreadDbClient
+  let store: ThreadDbStore
+  let peer: ThreadDbStore
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-had-')))
+    client = new ThreadDbClient({ script: null })
+    store = new ThreadDbStore(client)
+    peer = new ThreadDbStore(new ThreadDbClient({ script: null }))
+    client.callSync('create', dir)
+  })
+
+  afterEach(async () => {
+    await client.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const ids = (): string[] => new ThreadDbStore(client).load(dir).messages.map((m) => m.id)
+
+  it('saving an old list again does not give it rows it never held', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const held = store.load(dir).messages
+    peer.save(dir, { messages: [...peer.load(dir).messages, message('peer', 'p')] })
+    held.push(message('own', 'o'))
+    store.save(dir, { messages: held })
+    store.save(dir, { messages: held })
+    expect(ids()).toEqual(['a', 'peer', 'own'])
+  })
+
+  it('two lists in one process sharing messages keep each other\'s rows', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const session = store.load(dir).messages
+    store.save(dir, { messages: [...session, message('local', 'l')] })
+    store.save(dir, { messages: session })
+    expect(ids()).toEqual(['a', 'local'])
+  })
+
+  it('a row another process edited is still the caller\'s to remove or edit', () => {
+    store.save(dir, { messages: [message('a', 'a'), message('b', 'b')] })
+    const mine = store.load(dir).messages
+    const theirs = peer.load(dir).messages
+    theirs[0]!.content = 'peer edit'
+    theirs[1]!.content = 'peer edit b'
+    peer.save(dir, { messages: theirs })
+    // Removing `a` removes it; replacing `b` with a new object edits that row, never adds a second `b`.
+    store.save(dir, { messages: [{ ...mine[1]!, content: 'owner edit' }] })
+    expect(new ThreadDbStore(client).load(dir).messages.map((m) => [m.id, m.content])).toEqual([['b', 'owner edit']])
+  })
+
+  it('copies saved after the thread left the cache keep a later append', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const copies = store.load(dir).messages.map((m) => structuredClone(m))
+    peer.save(dir, { messages: [...peer.load(dir).messages, message('peer', 'p')] })
+    store.forget(dir)
+    store.save(dir, { messages: [...copies, message('own', 'o')] })
+    expect(ids()).toEqual(['a', 'peer', 'own'])
+  })
+
+  it('data from a database that was replaced removes nothing from the new one', () => {
+    store.save(dir, { messages: [message('old', 'o')] })
+    const old = store.load(dir).messages
+    client.quiesce(dir)
+    rmSync(join(dir, 'thread.db'))
+    client.callSync('create', dir)
+    peer.save(dir, { messages: [message('new', 'n')] })
+    store.save(dir, { messages: old })
+    expect(ids()).toContain('new')
+  })
+
+  it('an empty session list is known too', () => {
+    const session = { version: 2, agentId: 'x', worktreePath: '/w', task: 't', assignment: {}, runState: 'idle', updatedAt: 'u', messages: [] }
+    store.save(dir, { mousseAgentSessions: [session] as never })
+    const first = store.load(dir).mousseAgentSessions!
+    const second = store.load(dir).mousseAgentSessions!
+    first[0]!.messages.push(message('local', 'l'))
+    store.save(dir, { mousseAgentSessions: first })
+    store.save(dir, { mousseAgentSessions: second })
+    expect(new ThreadDbStore(client).load(dir).mousseAgentSessions![0]!.messages.map((m) => m.id)).toEqual(['local'])
+  })
+})
+
 describe('JSON fidelity of saved rows', () => {
   let dir: string
   let client: ThreadDbClient
@@ -268,5 +352,25 @@ describe('JSON fidelity of saved rows', () => {
     ;(loaded[0] as unknown as { extra: { x: unknown } }).extra.x = { toJSON: (key: string) => (key === 'x' ? 2 : 1) }
     expect(store.save(dir, { messages: loaded }).updated).toBe(1)
     expect(new ThreadDbStore(client).load(dir).messages[0]).toMatchObject({ extra: { x: 2 } })
+  })
+
+  it('remembers exactly what it wrote for a value whose toJSON changes each time', () => {
+    const store = new ThreadDbStore(client)
+    let counter = 0
+    store.save(dir, { agents: [{ toJSON: () => ({ n: ++counter }) }] as never })
+    expect(store.load(dir).agents).toEqual(new ThreadDbStore(client).load(dir).agents)
+  })
+
+  it('follows JSON.stringify for functions with toJSON, boxed values, BigInt objects and cycles', () => {
+    const fn = Object.assign(() => 1, { toJSON: () => 'from fn' })
+    const flag = new Boolean(true)
+    ;(flag as unknown as { valueOf: () => boolean }).valueOf = () => false
+    expect(skeletonOf({ fn, flag })).toEqual(JSON.parse(JSON.stringify({ fn, flag })))
+    expect(() => JSON.stringify(Object(1n))).toThrow(TypeError)
+    expect(() => skeletonOf(Object(1n))).toThrow(TypeError)
+    const cycle: Record<string, unknown> = {}
+    cycle.self = cycle
+    expect(() => skeletonOf(cycle)).toThrow(TypeError)
+    expect(() => sameAsSkeleton(cycle, { self: {} })).toThrow(TypeError)
   })
 })

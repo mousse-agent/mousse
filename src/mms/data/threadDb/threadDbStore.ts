@@ -12,16 +12,19 @@
  * claims a row with its message id (the n-th occurrence of an id claims the n-th row with it); context messages,
  * which have no id, claim the row at their position.
  *
- * A save removes only rows its caller could have seen. Every object and array this store hands out (or is given in
- * a save) remembers the thread's sequence at that moment, and every row the sequence it last changed at; a row that
- * changed after the newest view the caller's data came from is kept, and is never claimed by a new message in its
- * place. Data with no remembered view (cloned objects) may remove only rows this process has handed out or saved.
- * What is remembered is kept by object, not by cached thread, so it holds after the thread leaves the cache.
+ * A save removes only rows its caller had. Every list this store hands out remembers exactly which rows it held,
+ * and every object its row and the rows of the list it first came in (kept by object, so it holds after the
+ * thread leaves the cache; a copy of a list, as the orchestrator saves, still knows through its objects). A save
+ * may remove, or give to a new message, only rows its lists or objects held. A save does not widen that: a list is
+ * then known to hold just the rows it was saved with, objects that were already known keep what they knew, and
+ * only objects new to the store learn the saved list. Data with nothing remembered (fully copied) may remove only rows this process has handed out;
+ * after the cache lost a thread, rows newer than anything this process saw of it count as never handed out. Data
+ * remembered from another database (one since replaced) removes nothing.
  */
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { compose, decompose, TRANSCRIPT, type StoredThreadData } from './collections'
-import { fromSkeleton, sameAsSkeleton, skeletonOf, type Skeleton } from './jsonSkeleton'
+import { fromSkeleton, sameAsSkeleton, sameSkeleton, skeletonOf, type Skeleton } from './jsonSkeleton'
 import { ORD_STEP, THREAD_DB_FILE, type DbChanges, type DbInfo, type DbLoad, type SaveRequest } from './threadDbEngine'
 import type { ThreadDbClient } from './threadDbClient'
 
@@ -32,12 +35,16 @@ interface Row {
   skel: Skeleton
   /** The thread's sequence when the row last changed. */
   seq: number
-  /** Written by another process and never handed out or saved here since. */
+  /** Added by another process and never handed out or saved here since. */
   unseen?: boolean
 }
 
 /** What this store remembers about an object or array it handed out or saved. */
-interface Known { dbId: string; rid?: number; view: number }
+/**
+ * What this store remembers about a list it handed out or saved (the rows it held), or about an object (its row, and
+ * the rows of the list it first came in, so a copy of that list still knows what it held).
+ */
+interface Known { dbId: string; rid?: number; rids?: Set<number> }
 
 interface Entry {
   info: DbInfo
@@ -74,6 +81,8 @@ const MAX_CACHED_THREADS = 64
 export class ThreadDbStore {
   private readonly entries = new Map<string, Entry>()
   private readonly known = new WeakMap<object, Known>()
+  /** Per thread folder, the newest sequence this process handed out or saved in full; outlives the cache. */
+  private readonly observed = new Map<string, { dbId: string; seq: number }>()
   /** Loads a save or synchronous read had to do without a warm copy; tests assert entry points never cause one. */
   coldLoads = 0
   lastSave?: SaveStats
@@ -84,13 +93,16 @@ export class ThreadDbStore {
     return existsSync(join(dir, THREAD_DB_FILE))
   }
 
-  private entryFrom(load: DbLoad): Entry {
+  /** A thread's rows from a load. Rows newer than anything this process saw of it (it left the cache) are unseen. */
+  private entryFrom(dir: string, load: DbLoad): Entry {
+    const seen = this.observed.get(dir)
+    const horizon = seen && seen.dbId === load.info.dbId ? seen.seq : undefined
     const collections = new Map<string, Row[]>()
     for (const row of load.rows) {
       const value = JSON.parse(row.payload) as unknown
       let rows = collections.get(row.coll)
       if (!rows) collections.set(row.coll, (rows = []))
-      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq })
+      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: horizon !== undefined && row.seq > horizon })
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
@@ -116,8 +128,9 @@ export class ThreadDbStore {
       const value = JSON.parse(row.payload) as unknown
       let rows = entry.collections.get(row.coll)
       if (!rows) entry.collections.set(row.coll, (rows = []))
-      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: true }
       const index = rows.findIndex((existing) => existing.rid === row.rid)
+      // An edit by another process changes a row this process may well know; only a new row is unseen.
+      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: index >= 0 ? rows[index]!.unseen : true }
       if (index >= 0) rows[index] = next
       else rows.push(next)
       touched.add(row.coll)
@@ -133,13 +146,13 @@ export class ThreadDbStore {
     const entry = this.entries.get(dir)
     if (!entry) {
       this.coldLoads += 1
-      return this.remember(dir, this.entryFrom(this.client.callSync('load', dir)))
+      return this.remember(dir, this.entryFrom(dir, this.client.callSync('load', dir)))
     }
     const info = this.client.callSync('info', dir)
-    if (info.dbId !== entry.info.dbId) return this.remember(dir, this.entryFrom(this.client.callSync('load', dir)))
+    if (info.dbId !== entry.info.dbId) return this.remember(dir, this.entryFrom(dir, this.client.callSync('load', dir)))
     if (info.seq !== entry.info.seq || info.epoch !== entry.info.epoch) {
       const changes = this.client.callSync('changes', dir, entry.info.seq, entry.info.epoch)
-      if (changes.reset) return this.remember(dir, this.entryFrom(changes))
+      if (changes.reset) return this.remember(dir, this.entryFrom(dir, changes))
       this.applyChanges(entry, changes)
     }
     entry.usedAt = Date.now()
@@ -156,7 +169,7 @@ export class ThreadDbStore {
     const load = await this.client.call('load', dir)
     const current = this.entries.get(dir)
     if (current && current.info.dbId === load.info.dbId && current.info.seq >= load.info.seq) return
-    this.remember(dir, this.entryFrom(load))
+    this.remember(dir, this.entryFrom(dir, load))
   }
 
   forget(dir: string): void {
@@ -169,7 +182,7 @@ export class ThreadDbStore {
 
   /** What `loadThreadData` returns: new objects every time, each known by its row. */
   load(dir: string): StoredThreadData {
-    return this.materialize(this.fresh(dir))
+    return this.materialize(dir, this.fresh(dir))
   }
 
   /**
@@ -179,7 +192,7 @@ export class ThreadDbStore {
   loadLazy(dir: string): StoredThreadData {
     const entry = this.fresh(dir)
     let data: StoredThreadData | undefined
-    const get = (): StoredThreadData => (data ??= this.materialize(entry))
+    const get = (): StoredThreadData => (data ??= this.materialize(dir, entry))
     const lazy = {} as StoredThreadData
     for (const key of ['messages', 'agents', 'tasks', 'llmContext', 'mousseAgentSessions'] as const) {
       Object.defineProperty(lazy, key, { enumerable: true, configurable: true, get: () => get()[key] })
@@ -197,30 +210,31 @@ export class ThreadDbStore {
     return { agents: list('agents'), tasks: list('tasks'), sessions: list('sessions').length }
   }
 
-  private materialize(entry: Entry): StoredThreadData {
-    const { dbId, seq: view } = entry.info
+  private materialize(dir: string, entry: Entry): StoredThreadData {
+    const { dbId } = entry.info
     const collections = new Map<string, unknown[]>()
     for (const [coll, rows] of entry.collections) {
       const items = rows.map((row) => {
         row.unseen = false
         const value = fromSkeleton<unknown>(row.skel)
-        if (value && typeof value === 'object') this.known.set(value, { dbId, rid: row.rid, view })
         return value
       })
-      this.known.set(items, { dbId, view })
+      const rids = new Set(rows.map((row) => row.rid))
+      items.forEach((value, index) => {
+        if (value && typeof value === 'object') this.known.set(value, { dbId, rid: rows[index]!.rid, rids })
+      })
+      this.known.set(items, { dbId, rids })
       collections.set(coll, items)
-    }
-    // An empty collection the caller fills in is still known to come from this view.
-    for (const coll of [TRANSCRIPT, 'c:a']) {
-      if (!collections.has(coll)) {
-        const items: unknown[] = []
-        this.known.set(items, { dbId, view })
-        collections.set(coll, items)
-      }
     }
     const state = new Map<string, unknown>()
     for (const [key, skel] of entry.state) state.set(key, fromSkeleton(skel))
-    return compose(collections, state)
+    const data = compose(collections, state)
+    // Every list the data holds is known, the empty ones `compose` made too (a session with no messages yet).
+    for (const items of decompose(data).collections.values()) {
+      if (!this.known.has(items)) this.known.set(items, { dbId, rids: new Set() })
+    }
+    this.observed.set(dir, { dbId, seq: entry.info.seq })
+    return data
   }
 
   info(dir: string): DbInfo {
@@ -242,7 +256,7 @@ export class ThreadDbStore {
       const entry = this.fresh(dir)
       const plan = this.plan(entry, change)
       if (!plan.request.inserts.length && !plan.request.updates.length && !plan.request.deletes.length && !plan.request.state.length && !info) {
-        this.registerObjects(entry, plan, [], entry.info.seq)
+        this.registerObjects(entry, plan, [])
         return (this.lastSave = { inserted: 0, updated: 0, deleted: 0, state: 0, bytes: 0 })
       }
       if (info) plan.request.info = info
@@ -252,7 +266,7 @@ export class ThreadDbStore {
         if (attempt >= 3) throw new Error('Thread data kept changing during the save')
         continue
       }
-      this.commit(entry, plan, result.rids, result.info)
+      this.commit(dir, entry, plan, result.rids, result.info)
       const stats: SaveStats = {
         inserted: plan.request.inserts.length,
         updated: plan.request.updates.length,
@@ -312,11 +326,13 @@ export class ThreadDbStore {
         }
         continue
       }
-      if (current !== undefined && sameAsSkeleton(value, current)) continue
-      const payload = JSON.stringify(value)
+      // One conversion gives both what is written and what is remembered.
+      const skel = skeletonOf(value) ?? null
+      if (current !== undefined && sameSkeleton(skel, current)) continue
+      const payload = JSON.stringify(skel)
       plan.bytes += payload.length
       plan.request.state.push({ key, payload })
-      plan.state.set(key, skeletonOf(value) ?? null)
+      plan.state.set(key, skel)
     }
     return plan
   }
@@ -324,18 +340,26 @@ export class ThreadDbStore {
   private planCollection(entry: Entry, coll: string, items: unknown[], plan: Plan): void {
     const old = entry.collections.get(coll) ?? []
     const dbId = entry.info.dbId
-    const knownOf = (value: unknown): Known | undefined => {
+    // What the caller's data held: the rows of the lists it came from and of the objects it holds.
+    let tracked = false
+    let stale = false
+    const held = new Set<number>()
+    const note = (value: unknown): Known | undefined => {
       const found = value && typeof value === 'object' ? this.known.get(value) : undefined
-      return found && found.dbId === dbId ? found : undefined
+      if (!found) return undefined
+      if (found.dbId !== dbId) {
+        stale = true
+        return undefined
+      }
+      tracked = true
+      if (found.rid !== undefined) held.add(found.rid)
+      for (const rid of found.rids ?? []) held.add(rid)
+      return found
     }
-    // The newest view the caller's data came from: the array's own, or any of its elements'.
-    let view = knownOf(items)?.view
-    for (const item of items) {
-      const found = knownOf(item)
-      if (found && (view === undefined || found.view > view)) view = found.view
-    }
-    /** Rows the caller could have seen: those it may remove, and the only ones a new message may claim. */
-    const seen = (row: Row): boolean => (view === undefined ? !row.unseen : row.seq <= view)
+    note(items)
+    const ridOf = items.map((item) => note(item)?.rid)
+    /** Rows the caller had: those it may remove, and the only ones a new message may take the place of. */
+    const seen = (row: Row): boolean => (stale ? false : tracked ? held.has(row.rid) : !row.unseen)
     const byRid = new Map<number, Row>(old.map((row) => [row.rid, row]))
     const visible = old.filter(seen)
     const byId = new Map<string, Row[]>()
@@ -351,7 +375,7 @@ export class ThreadDbStore {
     for (let j = 0; j < items.length; j++) {
       const item = items[j]
       let row: Row | undefined
-      const rid = knownOf(item)?.rid
+      const rid = ridOf[j]
       if (rid !== undefined) {
         const candidate = byRid.get(rid)
         if (candidate && !claimed.has(candidate.rid)) row = candidate
@@ -462,19 +486,28 @@ export class ThreadDbStore {
     plan.collections.set(coll, { planned, survivors, items })
   }
 
-  /** After a save, what the caller gave is known to reflect the thread at `view`. */
-  private registerObjects(entry: Entry, plan: Plan, rids: number[], view: number): void {
+  /** After a save, each list is known to hold exactly the rows it was saved with, and each object its row. */
+  private registerObjects(entry: Entry, plan: Plan, rids: number[]): void {
     const dbId = entry.info.dbId
     for (const { planned, items } of plan.collections.values()) {
-      this.known.set(items, { dbId, view })
+      const saved = new Set<number>()
       for (const slot of planned) {
         const rid = slot.rid ?? rids[slot.tmp!]
-        if (rid !== undefined && slot.item && typeof slot.item === 'object') this.known.set(slot.item, { dbId, rid, view })
+        if (rid !== undefined) saved.add(rid)
       }
+      for (const slot of planned) {
+        const rid = slot.rid ?? rids[slot.tmp!]
+        if (rid === undefined || !slot.item || typeof slot.item !== 'object') continue
+        const before = this.known.get(slot.item)
+        // An object already known keeps the list it knew; a new one learns the list it was saved in.
+        if (before && before.dbId === dbId && before.rid === rid) continue
+        this.known.set(slot.item, { dbId, rid, rids: saved })
+      }
+      this.known.set(items, { dbId, rids: saved })
     }
   }
 
-  private commit(entry: Entry, plan: Plan, rids: number[], info: DbInfo): void {
+  private commit(dir: string, entry: Entry, plan: Plan, rids: number[], info: DbInfo): void {
     for (const [coll, { planned, survivors }] of plan.collections) {
       const rows: Row[] = planned.map((slot) => {
         const rid = slot.rid ?? rids[slot.tmp!]!
@@ -494,7 +527,10 @@ export class ThreadDbStore {
       else entry.state.set(key, skel)
     }
     entry.info = info
-    this.registerObjects(entry, plan, rids, info.seq)
+    this.registerObjects(entry, plan, rids)
+    // A save that left nothing unseen in place means this process has seen the thread up to here.
+    const unseenLeft = [...plan.collections.values()].some(({ survivors }) => survivors.some((row) => row.unseen))
+    if (!unseenLeft && entry.info.dbId === this.observed.get(dir)?.dbId) this.observed.set(dir, { dbId: entry.info.dbId, seq: info.seq })
   }
 }
 
