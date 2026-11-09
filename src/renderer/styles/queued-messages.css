@@ -94,6 +94,13 @@
   padding: 0 2px;
 }
 
+/* Held by a compaction: a small spinner before "Queued"; the tooltip says it sends after compacting. */
+.queued-message-state.is-held {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* Reordering: the dragged prompt is lifted (full strength, the specular light, a soft shadow) while the
    others make room under the pointer. */
 .queued-message.is-dragging .queued-message-bubble {

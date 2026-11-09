@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
-import { useThreadQueue } from '../../src/renderer/hooks/useThreadQueue'
+import { useThreadQueue, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import type { QueuedMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -21,8 +21,8 @@ let listed: QueuedMessage[]
 let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reorder: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn>; promoteToSteer: ReturnType<typeof vi.fn> }
 
 /** The queue as the chat renders it: in the conversation, with its errors in the composer's notice slot. */
-function Chat() {
-  const thread = useThreadQueue({ threadId: 't1' })
+function Chat({ hold = null }: { hold?: QueueHold | null }) {
+  const thread = useThreadQueue({ threadId: 't1', hold })
   return createElement(Fragment, null,
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
     createElement(ComposerNoticeSlot),
@@ -52,9 +52,9 @@ afterEach(() => {
   host.remove()
 })
 
-const show = async (items: QueuedMessage[]) => {
+const show = async (items: QueuedMessage[], hold: QueueHold | null = null) => {
   listed = items
-  act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat))))
+  act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { hold }))))
   await act(async () => { push!({ threadId: 't1', items }) })
 }
 const rows = () => [...host.querySelectorAll<HTMLElement>('.queued-message')]
@@ -182,5 +182,41 @@ describe('queued messages in the conversation', () => {
   it('leaves internal items out', async () => {
     await show([queued('a', 'one'), queued('i', 'wake up', { internal: true })])
     expect(rows().map((entry) => entry.dataset.queuedId)).toEqual(['a'])
+  })
+})
+
+describe('queued messages while a compaction runs', () => {
+  const state = () => host.querySelector<HTMLElement>('.queued-message-state')!
+
+  it('puts a spinner on the one "Queued", which says the messages send after compacting', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')], { historyTokens: 182_000 })
+    expect(host.querySelectorAll('.queued-message-state')).toHaveLength(1)
+    expect(state().textContent).toBe('Queued')
+    expect(state().title).toBe('Sends after compacting')
+    expect(state().querySelector('svg.animate-spin')).not.toBeNull()
+  })
+
+  it('has no spinner once nothing holds the queue', async () => {
+    await show([queued('a', 'one')])
+    expect(state().title).toBe('Sends when the current reply ends')
+    expect(state().querySelector('svg')).toBeNull()
+  })
+
+  it('offers to skip compacting on the first message, keeping the full history it names', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')], { historyTokens: 182_000 })
+    const skip = button('a', 'Send now: skip compacting')!
+    expect(skip.title).toBe('Send now: skip compacting and keep the full 182K history')
+    expect(skip.getAttribute('aria-label')).toBe(skip.title)
+    // The others keep their usual actions.
+    expect(button('b', 'Send the queued message now')?.title).toBe('Send now')
+    expect(button('b', 'Edit')).not.toBeNull()
+    expect(button('b', 'Remove')).not.toBeNull()
+    await click(skip)
+    expect(api.promoteToSteer).toHaveBeenCalledWith('t1', 'a')
+  })
+
+  it('leaves the size out when the context is not known', async () => {
+    await show([queued('a', 'one')], {})
+    expect(button('a', 'Send now: skip compacting')?.title).toBe('Send now: skip compacting and keep the full history')
   })
 })
