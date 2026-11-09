@@ -304,6 +304,8 @@ Rollback before any v2 writes restores the legacy manifest and roots. After v2 w
 
 ### 5.1 Information architecture
 
+> **Status (November 2026):** the Automations page is now the runs inbox and no longer has Agents, Workflows or Schedule tabs, so the library and editors below are not shown in the app. Their engines stay: a published workflow still runs from chat by its slash command and from `mousse-cli workflow`. The rest of this section is the original design.
+
 The **Agents** tab of the Automations workspace opens a workspace with **Agents** and **Workflows** subtabs. The Agents library includes a prominent **New agent** button, search, tags, provider/model filter, favorites, and sort by name/recently edited/last run. Cards show orb thumbnail, name, short purpose, model, enabled state, and any missing dependencies.
 
 Selecting a card opens the Agent Editor. Back returns to the same filter and scroll position. Built-in templates can be duplicated into editable definitions. Runtime sessions are reached from thread tool cards and the thread's Lineage section; the former AgentsPanel and AgentsTasksView were removed. A definition's run history links to the thread of each run.

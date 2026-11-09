@@ -185,38 +185,39 @@ mousse-cli -c -p "Continue where we left off"
 mousse-cli --session abc123 -p "Follow up on the plan"
 ```
 
-## schedule
+## automation
 
-Manage scheduled orchestrator jobs (stored in `mousse.conf` → `scheduled.jobs`).
+Manage the profile's automations (stored in `mousse.conf` → `scheduled.jobs`; the code calls each one a job). `schedule` is an alias: `mousse-cli schedule …` works the same.
 
 ```bash
-mousse-cli schedule list
-mousse-cli schedule add --name "Daily standup" --prompt "Summarize overnight activity" --every 1440
-mousse-cli schedule add --name "Cron job" --prompt "Check CI" --cron "0 9 * * 1-5"
-mousse-cli schedule add --name "Once" --prompt "Run audit" --at "2026-07-03T09:00:00Z"
-mousse-cli schedule add --name "Check CI" --prompt "Check CI in repo X" --manual \
-  --project <project-id> --instance <instance-id> --model <model> --mode agent --workspace new-worktree
-mousse-cli schedule run <job-id>
-mousse-cli schedule enable <job-id>
-mousse-cli schedule disable <job-id>
-mousse-cli schedule remove <job-id>
+mousse-cli automation list
+mousse-cli automation add --name "Daily standup" --prompt "Summarize overnight activity" --every 1440
+mousse-cli automation add --name "Cron job" --prompt "Check CI" --cron "0 9 * * 1-5"
+mousse-cli automation add --name "Once" --prompt "Run audit" --at "2026-07-03T09:00:00Z"
+mousse-cli automation add --name "Check CI" --prompt "Check CI in repo X" --manual \
+  --project <project-id> --instance <instance-id> --model <model> --mode agent --workspace new-worktree \
+  --tell-me needs_you
+mousse-cli automation run <job-id|name>
+mousse-cli automation enable <job-id>
+mousse-cli automation disable <job-id>
+mousse-cli automation remove <job-id>
 ```
 
-A job runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `schedule run`. `schedule list` shows the job's model, and `queued` while a run waits behind a busy thread. `--permission ask|accept_edits|auto|full` sets how much the run may do without asking, never above the mode you hold for the job (the run follows its thread otherwise, up to that limit). A workflow job (a prompt starting with `/`) takes one too: its workflow runs under it, held to the strictest of it, the job's limit and the thread's mode. See "Permission mode and ceiling" in `docs/CONFIGURATION.md`.
+An automation runs as a turn on a thread. `--instance` and `--model` choose the provider instance and model, `--mode agent|plan` the mode, and `--workspace project|new-worktree|<path>` where it works (`project`, the default, is the project's own checkout: an agent-mode job there edits the folder you work in, unattended, with no checkpoints or undo. For a Git project, prefer `new-worktree`). `--thread <id>` runs the job on an existing thread with its history and its own workspace. `--manual` makes a job with no clock that runs only with `automation run` (On demand). `automation run` also takes the name of an automation with a CLI trigger, which the Automation manager makes when you ask for one you start from a script. `--tell-me needs_you|look|fyi|every` sets the lowest run level you are notified about (default `look`, Worth a look; a failed run always notifies). `automation list` shows the job's model, and `queued` while a run waits behind a busy thread. `--permission ask|accept_edits|auto|full` sets how much the run may do without asking, never above the mode you hold for the job (the run follows its thread otherwise, up to that limit). A workflow job (a prompt starting with `/`) takes one too: its workflow runs under it, held to the strictest of it, the job's limit and the thread's mode. See "Permission mode and ceiling" in `docs/CONFIGURATION.md`.
 
 ### Jobs agents create
 
-Agents can manage the jobs their own thread made through Mousse's tools (`schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run`) when the profile gives agents the `manage` access level. The first job a thread's agent creates is not made at once: you are asked in Automations, Needs you, and Allow adds it and lets that thread add more; Not now drops it. Only a turn you started can create or start a job. A job an agent creates runs no wider than that agent, runs at most every 15 minutes, ends after 7 days unless you keep it (Keep in its detail removes only that end) or extend it (`mousse-cli schedule extend <id> [--days 7]`), counts against 10 active agent-made jobs in the profile (these three numbers are defaults: Settings, Agent access changes them, for new creates and changes only), shows "added by" its thread, and takes a webhook only after you keep it. The rules are in `docs/CONFIGURATION.md` (scheduled jobs). These limits bind the Mousse tools. An agent that can run shell commands can reach the daemon's local protocol as you do (`mousse-cli schedule ...`), which is what the permission mode of that thread governs.
+Agents can manage the jobs their own thread made through Mousse's tools (`schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run`) when the profile gives agents the `manage` access level. The first job a thread's agent creates is not made at once: you are asked at the top of the Automations inbox, under Needs you, and Allow adds it and lets that thread add more; Not now drops it. Only a turn you started can create or start a job. A job an agent creates runs no wider than that agent, runs at most every 15 minutes, ends after 7 days unless you keep it (Keep, in its Edit details, removes only that end) or extend it (`mousse-cli automation extend <id> [--days 7]`), counts against 10 active agent-made jobs in the profile (these three numbers are defaults: Settings, Agent access changes them, for new creates and changes only), shows "added by" its thread, and takes a webhook only after you keep it. The rules are in `docs/CONFIGURATION.md` (scheduled jobs). These limits bind the Mousse tools. An agent that can run shell commands can reach the daemon's local protocol as you do (`mousse-cli automation ...`), which is what the permission mode of that thread governs.
 
 ### Webhook trigger
 
 A job can also be started by a signed HTTP request, for example from a CI system or a script on this machine.
 
 ```bash
-mousse-cli schedule webhook enable <job-id> [--port 18790]   # prints the URL and the secret, once; on a job that has one, --port moves the listener
-mousse-cli schedule webhook rotate <job-id>                  # new secret; the old one stops working at once
-mousse-cli schedule webhook disable <job-id>
-mousse-cli schedule webhook deliveries <job-id>              # recent requests and what became of each
+mousse-cli automation webhook enable <job-id> [--port 18790]   # prints the URL and the secret, once; on a job that has one, --port moves the listener
+mousse-cli automation webhook rotate <job-id>                  # new secret; the old one stops working at once
+mousse-cli automation webhook disable <job-id>
+mousse-cli automation webhook deliveries <job-id>              # recent requests and what became of each
 ```
 
 Sending a request (the signature covers the timestamp and the exact body bytes):
@@ -245,7 +246,7 @@ Things to know:
 
 - **A request that is answered `409` or `429` is used up.** Its signature is remembered until its timestamp can no longer pass the 5-minute check (up to 6 minutes after it arrived), so it can never be delivered later. To retry, sign again with a fresh timestamp (two requests with the same body in the same second share a signature). If a job's record fills with requests that could still be replayed, it refuses every request for a few minutes (`429`) instead of forgetting any.
 - **One delivery at a time per job.** While a run is going or waiting, further requests get `409`; none is queued.
-- **The body reaches the prompt only through placeholders** (next section). The stored copy is kept after the run so you can resend it (Resend in the automation's detail or in Recent): a job keeps the bodies of its 20 newest accepted requests, and disabling the webhook deletes them all. They sit in a folder only your account can read (owner-only permissions on macOS and Linux; on Windows the folder's access list is reduced to your account and SYSTEM, and a webhook cannot be enabled if that fails). The request's headers are never stored. A value a placeholder fills in is different: it becomes part of the run's message, so it stays in the thread's history, in the queue while the run waits, and in the run's records, with no time limit. Do not name a body field that can hold a secret.
+- **The body reaches the prompt only through placeholders** (next section). The stored copy is kept after the run so you can resend it (Resend in the automation's Edit details): a job keeps the bodies of its 20 newest accepted requests, and disabling the webhook deletes them all. They sit in a folder only your account can read (owner-only permissions on macOS and Linux; on Windows the folder's access list is reduced to your account and SYSTEM, and a webhook cannot be enabled if that fails). The request's headers are never stored. A value a placeholder fills in is different: it becomes part of the run's message, so it stays in the thread's history, in the queue while the run waits, and in the run's records, with no time limit. Do not name a body field that can hold a secret.
 - **Local only.** The listener binds `127.0.0.1` and refuses browser requests; it is not meant to be exposed. It runs only while some job has a webhook, and a port that a net transport of this profile uses (for example one Tailscale Serve forwards to) is refused. A tunnel makes the unauthenticated surface remote: anyone who can reach the tunnel can send requests (every one that is not correctly signed gets `401`). An HTTP tunnel must rewrite `Host` to `127.0.0.1:<port>`, or every request gets `403`.
 - **The secret** is stored in the profile's secret file and is never logged or returned again after `enable` or `rotate`. The daemon's own protocol belongs to processes running as you (they hold its owner token), and any of them can rotate a job's secret or read the secret file; the signature keeps other senders out, not the rest of your own account.
 - A one-time job cannot have a webhook (it would finish after one run); use a `--manual` job. A job an agent created takes one only after you keep it (Keep removes its end).
@@ -332,8 +333,8 @@ mousse-cli service install
 | Config | `~/.mousse/mousse.conf` | Same file |
 | Secrets | `~/.mousse/auth.json` | Same file |
 | Orchestrator chat | Renderer UI | Interactive TUI (TTY) or `-p` one-shot |
-| Scheduler | Automations page | `schedule` subcommands |
-| Agents | Try Agent in Automations, terminals | `agents` subcommands |
+| Automations | Automations page (the inbox) | `automation` subcommands (alias `schedule`) |
+| Agents | Delegated from a turn, terminals | `agents` subcommands |
 | Startup | Optional MMS autostart | `service install` |
 
 Run both on the same machine by pointing them at the same `MOUSSE_HOME`. Avoid running two MMS daemons (`service run`) against one home directory.

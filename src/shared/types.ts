@@ -277,7 +277,7 @@ export interface ScheduledJob {
   threadId?: string
   projectId?: string
   createThread?: boolean
-  /** When the person hears about a run (absent reads as Only news). */
+  /** The lowest run level the person hears about (absent reads as Worth a look; `tellMeOf`). */
   tellMe?: TellMe
   /**
    * Set while a due occurrence waits for its bound thread's running turn to end: it keeps its place and its repeat,
