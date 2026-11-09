@@ -197,7 +197,18 @@ export interface RateLimitSnapshot {
 /** Rate-limit reset credits as `account/rateLimits/read` reports them (only the fields Mousse keeps). */
 export interface RateLimitResetCredits {
   availableCount: number
-  credits?: Array<{ resetType?: string; status?: string; title?: string; expiresAt?: number }>
+  credits?: Array<{ id?: string; resetType?: string; status?: string; title?: string; expiresAt?: number }>
+}
+/**
+ * `account/rateLimitResetCredit/consume`: uses one reset credit. `idempotencyKey` names the attempt
+ * (the same key on a retry); without `creditId` the server picks the next available credit.
+ */
+export interface ConsumeResetCreditParams {
+  idempotencyKey: string
+  creditId?: string | null
+}
+export interface ConsumeResetCreditResponse {
+  outcome: 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed'
 }
 export interface RateLimitsReadResponse {
   rateLimits: RateLimitSnapshot
@@ -281,6 +292,7 @@ export interface CodexRequestMap {
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
   'account/rateLimits/read': { params: undefined; result: RateLimitsReadResponse }
+  'account/rateLimitResetCredit/consume': { params: ConsumeResetCreditParams; result: ConsumeResetCreditResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse }
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse }

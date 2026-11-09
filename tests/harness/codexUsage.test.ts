@@ -6,7 +6,7 @@ import { USAGE_READ_MS, type Harness } from '../../src/mms/harness/gateway'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import type { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { reportedUsageWindows, snapshotPlan, snapshotResets, trimResetCredits, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
-import { managedCodexUsage, userCodexLimits } from '../../src/mms/harness/vendors/codex/managedRuntime'
+import { managedCodexUsage, useUserCodexReset, userCodexLimits } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { usageText } from '../../src/mms/providers/usageText'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
@@ -36,12 +36,12 @@ describe('reset credits', () => {
     ]
   })
 
-  it('keeps the count and, per credit, its type, status, title and expiry: no ids or descriptions', () => {
+  it('keeps the count and, per credit, its id (to use it), type, status, title and expiry: no descriptions', () => {
     expect(trimResetCredits(reply(2))).toEqual({
       availableCount: 2,
       credits: [
-        { resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 },
-        { resetType: 'five_hour', status: 'available', title: '5-hour reset', expiresAt: 1_900_086_400 }
+        { id: 'rc_1', resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 },
+        { id: 'rc_2', resetType: 'five_hour', status: 'available', title: '5-hour reset', expiresAt: 1_900_086_400 }
       ]
     })
     expect(trimResetCredits({ availableCount: 0, credits: [] })).toEqual({ availableCount: 0 })
@@ -53,8 +53,8 @@ describe('reset credits', () => {
     expect(snapshotResets(snapshot)).toEqual({
       available: 2,
       credits: [
-        { title: 'Weekly limit reset', type: 'weekly', status: 'available', expiresAt: new Date(1_900_432_000_000).toISOString() },
-        { title: '5-hour reset', type: 'five_hour', status: 'available', expiresAt: new Date(1_900_086_400_000).toISOString() }
+        { id: 'rc_1', title: 'Weekly limit reset', type: 'weekly', status: 'available', expiresAt: new Date(1_900_432_000_000).toISOString() },
+        { id: 'rc_2', title: '5-hour reset', type: 'five_hour', status: 'available', expiresAt: new Date(1_900_086_400_000).toISOString() }
       ]
     })
     expect(snapshotResets({ primary: null, secondary: null })).toBeUndefined()
@@ -126,6 +126,26 @@ describe('a ChatGPT subscription shows the limits Codex reported on its last tur
     expect(managedCodexUsage(false, reported, now)).toEqual({ status: 'unavailable', windows: [], message: 'Sign in with ChatGPT to see limits.', manageUrl: CHATGPT_USAGE_URL })
     expect(managedCodexUsage(true, undefined, now)).toEqual({ status: 'unavailable', windows: [], message: 'Limits show after the next turn.', manageUrl: CHATGPT_USAGE_URL })
     expect(managedCodexUsage(true, { snapshot: { primary: null, secondary: null }, at: now }, now)).toMatchObject({ status: 'unavailable', message: 'No limits reported for this plan.' })
+  })
+})
+
+describe("using a limit reset through the user's own Codex CLI", () => {
+  const cli = (subject: string | undefined) => ({
+    status: vi.fn(async () => ({}) as never),
+    account: () => (subject ? { subject } : undefined),
+    rateLimits: vi.fn(),
+    consumeResetCredit: vi.fn(async () => ({ outcome: 'reset' as const }))
+  })
+
+  it('only for the same ChatGPT account: another account\'s credit is never used', async () => {
+    const same = cli('chatgpt:me@example.com')
+    expect(await useUserCodexReset(same, 'Me@Example.com', 'rc_1')).toEqual({ outcome: 'reset' })
+    expect(same.consumeResetCredit).toHaveBeenCalledWith('rc_1', undefined)
+    const other = cli('chatgpt:other@example.com')
+    await expect(useUserCodexReset(other, 'me@example.com', 'rc_1')).rejects.toThrow('another account')
+    expect(other.consumeResetCredit).not.toHaveBeenCalled()
+    await expect(useUserCodexReset(undefined, 'me@example.com', undefined)).rejects.toThrow()
+    await expect(useUserCodexReset(cli(undefined), null, undefined)).rejects.toThrow()
   })
 })
 

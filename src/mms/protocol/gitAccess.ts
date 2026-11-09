@@ -161,6 +161,7 @@ export const GIT_ACCESS = {
   'providers.getSubscriptionUsage': 'none',
   'providers.usageSlots': 'none',
   'providers.getUsageFor': 'none',
+  'providers.useLimitReset': 'none',
   'providers.setUsageProxyKey': 'none',
   'providers.clearUsageProxyKey': 'none',
   'providers.synthesizeSpeech': 'none',

@@ -39,6 +39,8 @@ export function trimResetCredits(value: unknown): RateLimitResetCredits | undefi
     const credit = item as Record<string, unknown>
     const expires = credit.expiresAt
     const kept = {
+      // The opaque id is kept only so this credit can be used; it is never shown.
+      ...(text(credit.id) ? { id: text(credit.id) } : {}),
       ...(text(credit.resetType) ? { resetType: text(credit.resetType) } : {}),
       ...(text(credit.status) ? { status: text(credit.status) } : {}),
       ...(text(credit.title) ? { title: text(credit.title) } : {}),
@@ -59,6 +61,7 @@ export function snapshotResets(snapshot: RateLimitSnapshot | null | undefined): 
     available: credits.availableCount,
     ...(credits.credits?.length ? {
       credits: credits.credits.map((credit) => ({
+        ...(credit.id ? { id: credit.id } : {}),
         ...(credit.title ? { title: credit.title } : {}),
         ...(credit.resetType ? { type: credit.resetType } : {}),
         ...(credit.status ? { status: credit.status } : {}),

@@ -1135,11 +1135,30 @@ describe('plan usage limits for the usage page', () => {
     const service = create(server)
     await service.status({ force: true })
     const read = await service.rateLimits()
-    expect(read.snapshot.rateLimitResetCredits).toEqual({ availableCount: 2, credits: [{ resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 }] })
-    expect(readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')).not.toContain('rc_secret_id')
+    expect(read.snapshot.rateLimitResetCredits).toEqual({ availableCount: 2, credits: [{ id: 'rc_secret_id', resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 }] })
+    // The description is not kept; the opaque id is, so this credit can be used.
+    expect(readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')).not.toContain('"description"')
     server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: limits(55) } }) + '\n')
     await vi.waitFor(() => expect(service.reportedRateLimits()?.snapshot.primary?.usedPercent).toBe(55))
     expect(service.reportedRateLimits()?.snapshot.rateLimitResetCredits?.availableCount).toBe(2)
+  })
+
+  it('uses a reset credit with Codex\'s own method, a fresh idempotency key each time, then reads the limits again', async () => {
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/rateLimitResetCredit/consume') return { result: { outcome: 'reset' } }
+      if (message.method === 'account/rateLimits/read') return { result: { rateLimits: limits(0) } }
+      return chatgpt
+    })
+    const service = create(server)
+    await service.status({ force: true })
+    expect(await service.consumeResetCredit('rc_1')).toEqual({ outcome: 'reset' })
+    expect(await service.consumeResetCredit(undefined)).toEqual({ outcome: 'reset' })
+    const consumes = server.messages.filter((message) => message.method === 'account/rateLimitResetCredit/consume').map((message) => message.params as { idempotencyKey: string; creditId?: string })
+    expect(consumes[0]).toMatchObject({ creditId: 'rc_1', idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+    expect(consumes[1]!.creditId).toBeUndefined()
+    expect(consumes[0]!.idempotencyKey).not.toBe(consumes[1]!.idempotencyKey)
+    const methods = server.methods()
+    expect(methods.lastIndexOf('account/rateLimits/read')).toBeGreaterThan(methods.lastIndexOf('account/rateLimitResetCredit/consume'))
   })
 
   it('with nothing to fall back on, a failed read is thrown', async () => {

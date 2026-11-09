@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
@@ -59,6 +59,7 @@ import {
   type CodexModel,
   type CodexTurn,
   type ModelListResponse,
+  type ConsumeResetCreditResponse,
   type RateLimitSnapshot,
   type RateLimitWindow,
   type SandboxPolicy,
@@ -1467,6 +1468,24 @@ export class CodexProviderService {
       return await readCodexUserSetup(await this.connection(), cwd ? resolve(cwd) : null)
     } catch {
       return { mcpServers: null }
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
+   * Uses one of the account's limit-reset credits (`account/rateLimitResetCredit/consume`), the one
+   * named or else the next the server picks, then reads the limits again so the page shows them.
+   * Each call is its own attempt (a fresh idempotency key); it is never retried here.
+   */
+  async consumeResetCredit(creditId: string | undefined, signal?: AbortSignal): Promise<{ outcome: ConsumeResetCreditResponse['outcome'] }> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const { outcome } = await conn.request('account/rateLimitResetCredit/consume', { idempotencyKey: randomUUID(), ...(creditId ? { creditId } : {}) }, { timeoutMs: 20_000, signal })
+      await this.rateLimits(signal).catch(() => undefined)
+      return { outcome }
     } finally {
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)

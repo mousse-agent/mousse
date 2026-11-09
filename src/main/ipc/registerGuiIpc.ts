@@ -2675,6 +2675,9 @@ export function registerGuiIpc(
     guiMms.request('providers.getUsage')
   )
   registerHandler('providers:usageSlots', async () => guiMms.request('providers.usageSlots'))
+  registerHandler('providers:useLimitReset', async (_e, request: { providerId: string; creditId?: string }) =>
+    guiMms.request('providers.useLimitReset', request)
+  )
   registerHandler('providers:getUsageFor', async (_e, request: { providerId: string; accountId?: string; preview?: boolean }) =>
     guiMms.request('providers.getUsageFor', request)
   )

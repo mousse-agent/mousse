@@ -113,7 +113,7 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse } from '../shared/providerAuth'
+import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
@@ -987,6 +987,9 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     /** Every provider the usage page shows, with its last reading, before any is read. */
     usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** Uses one of a provider's limit-reset credits (the one named, or the next); it asks nothing itself. */
+    useLimitReset: (request: { providerId: string; creditId?: string }): Promise<UseLimitResetResponse> =>
+      ipcRenderer.invoke('providers:useLimitReset', request),
     /** One provider's usage (or one proxy sign-in's, or its sign-ins before their usage). */
     getUsageFor: (request: { providerId: string; accountId?: string; preview?: boolean }): Promise<UsageForResponse> =>
       ipcRenderer.invoke('providers:getUsageFor', request),

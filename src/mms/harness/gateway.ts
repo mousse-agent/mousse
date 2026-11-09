@@ -46,7 +46,7 @@ import { join } from 'node:path'
 import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
-import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
+import type { ProviderLoginEvent, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import {
   legacyProviderForInstance,
   piProviderIdOf,
@@ -374,6 +374,8 @@ export interface HarnessInstances {
   usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true }>
   /** One listed instance's usage, as `usage` reads it; undefined for an instance the page does not list. */
   usageFor(scope: ProviderScope, instanceId: string): Promise<ProviderUsage | undefined>
+  /** Uses one limit-reset credit of a listed, signed-in instance whose runtime has them. */
+  useLimitReset(scope: ProviderScope, instanceId: string, creditId: string | undefined): Promise<UseLimitResetResponse>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
   /** `add`, telling whether the entry existed already (a fixed-id entry is then returned unchanged). */
   addInstance(input: AddInstanceInput): Promise<{ snapshot: InstanceSnapshot; existed: boolean }>
@@ -890,6 +892,18 @@ export class Harness implements HarnessGateway {
       snapshots: (scope) => this.snapshots(scope),
       usage: (scope, options) => this.usage(scope, options),
       usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
+      useLimitReset: async (scope, instanceId, creditId) => {
+        const listed = this.usageIds(scope, false).find((entry) => entry.instanceId === instanceId)
+        const record = listed && this.recordOrUndefined(instanceId)
+        if (!record?.runtime.useLimitReset) throw new Error('This provider has no limit resets to use.')
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), USAGE_READ_MS * 2)
+        try {
+          return await record.runtime.useLimitReset(creditId, controller.signal)
+        } finally {
+          clearTimeout(timer)
+        }
+      },
       usageFor: async (scope, instanceId) => {
         const listed = this.usageIds(scope, true).find((entry) => entry.instanceId === instanceId)
         return listed ? this.readUsage(listed.instanceId, listed.signedOut) : undefined

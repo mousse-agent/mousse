@@ -8,6 +8,7 @@ import { CodexAdapter } from '../../drivers/codex/adapter'
 import { ChatGptAuth, type ChatGptAuthOptions, type ChatGptStatus } from '../../chatgpt/chatgptAuth'
 import type { ChatGptModel } from '../../chatgpt/models'
 import type { AuthReading, DriverContext, DriverRuntime, RuntimeUsage } from '../../driver'
+import type { UseLimitResetResponse } from '../../../../shared/providerAuth'
 import type { RateLimitSnapshot } from './protocol'
 import { reportedUsageWindows, snapshotPlan, snapshotResets } from './rateLimits'
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
@@ -113,7 +114,19 @@ export function managedCodexUsage(signedIn: boolean, reported: { snapshot: RateL
 export const REPORTED_LIMITS_FRESH_MS = 5 * 60_000
 
 /** The user's own Codex CLI (the profile's built-in Codex service), as far as reading limits goes. */
-export type UserCodexLimits = Pick<CodexProviderService, 'status' | 'account' | 'rateLimits'>
+export type UserCodexLimits = Pick<CodexProviderService, 'status' | 'account' | 'rateLimits' | 'consumeResetCredit'>
+
+/**
+ * Uses a limit reset through the user's own Codex CLI, only when it is signed in to the same ChatGPT
+ * account as the managed entry: never another account's credit. Throws when it is not.
+ */
+export async function useUserCodexReset(userCodex: UserCodexLimits | undefined, email: string | null | undefined, creditId: string | undefined, signal?: AbortSignal): Promise<UseLimitResetResponse> {
+  const wanted = email?.trim().toLowerCase()
+  if (!userCodex || !wanted) throw new Error('Codex CLI is not available to use a reset.')
+  await userCodex.status()
+  if (userCodex.account()?.subject !== `chatgpt:${wanted}`) throw new Error('Codex CLI is signed in to another account.')
+  return userCodex.consumeResetCredit(creditId, signal)
+}
 
 /**
  * The plan's limits read now through the user's own Codex CLI and its stored sign-in
@@ -337,6 +350,16 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
       if (!live) return managedCodexUsage(true, reported, Date.now())
       codex.keepRateLimits(live.snapshot, identity)
       return managedCodexUsage(true, live, Date.now(), { live: true })
+    },
+    // A reset is used through the user's own Codex CLI for the same account, then the limits are kept.
+    useLimitReset: async (creditId, signal) => {
+      const status = auth.status()
+      if (status.state !== 'signed_in') throw new Error('Sign in with ChatGPT first.')
+      const userCodex = deps.userCodex?.()
+      const result = await useUserCodexReset(userCodex, status.email, creditId, signal)
+      const live = await userCodexLimits(userCodex, status.email, signal)
+      if (live) codex.keepRateLimits(live.snapshot, auth.identity())
+      return result
     },
     refreshModels: async () => void (await codex.refreshModels()),
     signIn: (session, _cwd, method) => auth.signIn(session, method),

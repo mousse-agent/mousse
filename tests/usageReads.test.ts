@@ -105,6 +105,16 @@ describe('the protocol methods', () => {
     expect((await call(mms, 'providers.usageSlots') as { slots: Array<{ id: string }> }).slots.map((slot) => slot.id)).not.toContain('made-up')
   })
 
+  it('uses a limit reset for this computer only, passing the credit on', async () => {
+    const useLimitReset = vi.fn(async () => ({ outcome: 'reset' as const }))
+    const mms = { ...services(), harness: { instances: { ...services().harness.instances, useLimitReset } } }
+    expect(await call(mms, 'providers.useLimitReset', { providerId: 'codex:chatgpt-subscription', creditId: 'rc_1' })).toEqual({ outcome: 'reset' })
+    expect(useLimitReset).toHaveBeenCalledWith({ kind: 'device' }, 'codex:chatgpt-subscription', 'rc_1')
+    const remote = dispatchMethod({ mms: mms as never, globalSequence: () => 0, connection: { clientType: 'bridge' } as never }, 'providers.useLimitReset', { providerId: 'codex:chatgpt-subscription' })
+    await expect(remote).rejects.toMatchObject({ code: 'forbidden' })
+    expect(useLimitReset).toHaveBeenCalledTimes(1)
+  })
+
   it('answers only a window or the CLI on this computer', async () => {
     const mms = services()
     const remote = (method: string, params?: unknown) => dispatchMethod({ mms: mms as never, globalSequence: () => 0, connection: { clientType: 'bridge' } as never }, method, params)
