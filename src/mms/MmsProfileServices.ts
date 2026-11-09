@@ -472,7 +472,6 @@ export class MmsProfileServices {
       profileId: this.profileId,
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
-    this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
     // The feature turns the store on; when it is off, MOUSSE_SQLITE_THREAD_STORE still can (development and tests).
     if (this.config.get().features.sqliteThreadStore) this.threads.setSqliteStoreEnabled(true)
     this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
@@ -1974,6 +1973,8 @@ export class MmsProfileServices {
     this.threadRuntimes.restoreOnStartup()
     // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute.
     this.threads.startSearchIndexSweep()
+    // Threads still on JSON files move to thread.db in the background, one at a time.
+    this.threads.startBackgroundImport()
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()

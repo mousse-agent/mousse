@@ -18,6 +18,8 @@ function git(cwd: string, ...args: string[]): string {
 describe('public inventory and request identity', () => {
   it('reports an unverifiable legacy child location without treating a user directory as owned cleanup material', async () => {
     const f = await lifecycleHarness()
+    // Legacy ownership records are JSON files: this thread is made on JSON storage.
+    f.services.threads.setSqliteStoreEnabled(false)
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'legacy unknown child' })
       const path = f.services.threads.getThreadDir(thread.id)

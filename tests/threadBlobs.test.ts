@@ -296,7 +296,7 @@ describe('importing a thread with images', () => {
       const messages = [message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })]
       writeFileSync(join(dir, 'messages.json'), JSON.stringify(messages))
       const engine = new ThreadDbEngine({ idleCloseMs: 0 })
-      expect(engine.build(dir, { tmpName: 'thread.db.import-x', transactional: false, fingerprint: legacyFingerprint(dir) })).toMatchObject({ ok: true })
+      expect(engine.build(dir, { tmpName: 'thread.db.import-x', fingerprint: legacyFingerprint(dir) })).toMatchObject({ ok: true })
       // Nothing reaches the thread's blobs until the import is published.
       expect(blobFiles(dir)).toEqual([])
       publishStagedBlobs(dir, join(dir, 'thread.db.import-x.stage'))
@@ -316,9 +316,9 @@ describe('importing a thread with images', () => {
       const first = new ThreadDbEngine({ idleCloseMs: 0 })
       const second = new ThreadDbEngine({ idleCloseMs: 0 })
       // B builds and publishes; A finds the source changed (here: a fingerprint that never matched) and gives up.
-      expect(second.build(dir, { tmpName: 'thread.db.import-b', transactional: false, fingerprint })).toMatchObject({ ok: true })
+      expect(second.build(dir, { tmpName: 'thread.db.import-b', fingerprint })).toMatchObject({ ok: true })
       publishStagedBlobs(dir, join(dir, 'thread.db.import-b.stage'))
-      expect(first.build(dir, { tmpName: 'thread.db.import-a', transactional: false, fingerprint: [] })).toEqual({ ok: false, stale: true })
+      expect(first.build(dir, { tmpName: 'thread.db.import-a', fingerprint: [] })).toEqual({ ok: false, stale: true })
       expect(blobFiles(dir)).toHaveLength(1)
       expect(readdirSync(dir).filter((name) => name.includes('import-a'))).toEqual([])
     } finally {

@@ -6,7 +6,8 @@
  *   on disk, and a failure throws. A save writes only the rows that changed, so the wait does not grow with the
  *   thread.
  * - The read worker runs everything whose cost grows with a thread or the profile (`call`): loading a thread, pages,
- *   imports, checks and exports. Nothing waits for it synchronously, and it never delays a save.
+ *   checks and exports. Nothing waits for it synchronously, and it never delays a save.
+ * - Search index work and imports each have a worker of their own, started on first use, so neither delays a page.
  *
  * When the built worker script is not beside this bundle (tests running from source), both run in-process.
  */
@@ -69,7 +70,7 @@ class AsyncWorker {
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
 
-  constructor(script: string, role: 'read' | 'index') {
+  constructor(script: string, role: 'read' | 'index' | 'import') {
     this.worker = new Worker(script, { workerData: { role }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.worker.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
       const entry = this.pending.get(message.id)
@@ -110,6 +111,7 @@ export class ThreadDbClient {
   private writer?: Worker
   private reader?: AsyncWorker
   private indexer?: AsyncWorker
+  private importer?: AsyncWorker
   private script?: string
   private syncPort?: MessagePort
   private syncFlag?: Int32Array
@@ -199,6 +201,18 @@ export class ThreadDbClient {
     return this.indexer.call(op, args) as Promise<Result<K>>
   }
 
+  /**
+   * Building a thread's database from its JSON files, in a worker of its own (started on first use): an import reads
+   * and checks the whole thread, and must never hold up a page or a search. In-process mode runs it on the read
+   * engine.
+   */
+  callImport<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
+    if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
+    if (this.inlineRead) return this.call(op, ...args)
+    this.importer ??= new AsyncWorker(this.script!, 'import')
+    return this.importer.call(op, args) as Promise<Result<K>>
+  }
+
   /** Closes the write worker's connection to a thread's database (checkpointing it) before its folder moves. */
   quiesce(dir: string): void {
     if (this.closed) return
@@ -221,7 +235,7 @@ export class ThreadDbClient {
     }
     this.closed = true
     this.inlineRead?.closeEverything()
-    await Promise.all([this.writer?.terminate(), this.reader?.terminate(), this.indexer?.terminate()])
+    await Promise.all([this.writer?.terminate(), this.reader?.terminate(), this.indexer?.terminate(), this.importer?.terminate()])
   }
 }
 

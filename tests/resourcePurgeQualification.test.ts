@@ -15,6 +15,8 @@ import { archived } from './support/archived'
 it('preserves a shared artifact across its first owner purge and reclaims its bytes after the final owner in repeated public-protocol cycles', async () => {
   const f = await lifecycleHarness()
   try {
+    // The conversation that keeps the artifact is written as a JSON transcript: these threads use JSON storage.
+    f.services.threads.setSqliteStoreEnabled(false)
     const artifactRoot = join(f.home, 'profiles', f.alice.id, 'artifacts')
     const baseline = measureTree(artifactRoot)
     for (let cycle = 0; cycle < 3; cycle++) {

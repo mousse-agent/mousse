@@ -217,7 +217,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Search dialog and startup slow with many threads/projects. |
-| **Root cause** | `listAllThreads` sync directory walk (`ThreadDataStore.ts:73–78`). `searchThreads` reads every `messages.json` (`383–414`). |
+| **Root cause** | `listAllThreads` sync directory walk (`ThreadDataStore.ts:73–78`). `searchThreads` reads every `messages.json` (`383–414`); threads kept in `thread.db` are searched through the profile index instead ([thread storage](thread-storage.md)). |
 | **Fix** | Background index (SQLite or JSON index file) built incrementally. Search via ripgrep child process or pre-tokenized index. |
 | **Impact** | Medium |
 | **Effort** | High |

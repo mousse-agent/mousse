@@ -49,6 +49,27 @@ describe('thread database workers', () => {
     expect(warmed.coldLoads).toBe(0)
   })
 
+  it('answers a page while a large import is being built', async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs')
+    const { legacyFingerprint } = await import('../src/mms/data/legacyThreadData')
+    const source = join(out, 'big-json-thread')
+    mkdirSync(source)
+    const big = Array.from({ length: 4_000 }, (_, i) => ({ id: `b${i}`, role: 'user', content: `${i} `.repeat(2_000), timestamp: 't' }))
+    writeFileSync(join(source, 'messages.json'), JSON.stringify(big))
+    const importing = client.callImport('build', source, { tmpName: 'thread.db.import-test', fingerprint: legacyFingerprint(source) })
+    // Let the import start before asking for the page.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const started = performance.now()
+    let pageAt = 0
+    const page = client.call('page', dir, { limit: 5, maxBytes: 1_000_000 }).then((value) => { pageAt = performance.now(); return value })
+    const [built] = await Promise.all([importing.then((value) => ({ value, at: performance.now() })), page])
+    expect(built.value).toMatchObject({ ok: true })
+    expect((await page).messages).toHaveLength(5)
+    // The page came back before the import finished: they run in different workers.
+    expect(pageAt).toBeLessThan(built.at)
+    expect(pageAt - started).toBeLessThan(500)
+  }, 60_000)
+
   it('returns errors from the worker as errors', async () => {
     expect(() => client.callSync('load', join(out, 'missing'))).toThrow(/No thread database/)
     await expect(client.call('load', join(out, 'missing'))).rejects.toThrow(/No thread database/)
