@@ -70,8 +70,9 @@ export function OpenInEditor({ compact = false }: { compact?: boolean } = {}) {
   // Keyed by thread: an open or ask still under way for the previous thread reports nothing in this one.
   if (node) return projectId && thread ? <OpenInRemoteEditor key={thread.id} threadId={thread.id} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
   if (!projectId || !path || !editors) return null
-  const open = async (editor: EditorInfo) => {
+  const open = async (editor: EditorInfo, options: { remember?: boolean } = {}) => {
     await window.mousse.editors.open(editor.id, path)
+    if (options.remember === false) return
     saveLastEditorId(profileId, editor.id)
     setLastId(editor.id)
   }
@@ -237,7 +238,8 @@ interface OpenInEditorViewProps {
   editors: readonly EditorInfo[]
   lastId: string | null
   /** Rejects when the folder cannot be opened. */
-  onOpen: (editor: EditorInfo) => Promise<void>
+  /** `remember: false` opens without making it the editor the main button opens next (the header's file manager button). */
+  onOpen: (editor: EditorInfo, options?: { remember?: boolean }) => Promise<void>
   /** Called each time the menu opens. */
   onMenuOpen?: () => void
   /** Why the main button cannot open anything yet, with what to do about it. Shown under the button. Clicking it, or picking an editor, still tries. */
@@ -279,12 +281,12 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
 
   if (!path || !current) return null
 
-  const openEditor = async (editor: EditorInfo) => {
+  const openEditor = async (editor: EditorInfo, options?: { remember?: boolean }) => {
     if (busyRef.current) return
     busyRef.current = true
     setError(null)
     try {
-      await onOpen(editor)
+      await onOpen(editor, options)
     } catch (failure) {
       setError(openErrorMessage(failure))
     } finally {
@@ -337,7 +339,7 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
           className="side-card-open-editor-files"
           title={openLabel(fileManager)}
           aria-label={openLabel(fileManager)}
-          onClick={() => void openEditor(fileManager)}
+          onClick={() => void openEditor(fileManager, { remember: false })}
         >
           <Folder size={14} aria-hidden="true" />
         </button>

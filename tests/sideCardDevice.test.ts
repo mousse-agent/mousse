@@ -348,6 +348,21 @@ describe('DeviceSection rendering', () => {
   })
 
 
+  it('tags another computer that is offline or not sharing, and says why under the row', () => {
+    const remote = (patch: Partial<Thread>) => {
+      seed({
+        activeThreadId: 'nod_studio:t1',
+        threads: [thread({ id: 'nod_studio:t1', node: 'nod_studio', startedAt: '2026-01-01T00:00:01Z', ...patch } as Partial<Thread>)],
+        appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
+      })
+      return renderToStaticMarkup(createElement(DeviceSection, { threadId: 'nod_studio:t1', projectId: null }))
+    }
+    expect(remote({ offline: true } as Partial<Thread>)).toContain('side-card-header-tag">offline<')
+    const notShared = remote({ notShared: true, offline: true } as Partial<Thread>)
+    expect(notShared).toContain('side-card-header-tag">not sharing<')
+    expect(notShared).toContain('is not sharing its threads with this computer right now.')
+  })
+
   it('names the other computer, and offers no editor, for a thread that runs there', () => {
     seed({
       activeThreadId: 'nod_studio:t1',

@@ -56,7 +56,7 @@ export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
         {isNew
           ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
           : <HeaderName project={project} computer={computerName} remote={remote} />}
-        {state === 'offline' && <span className="side-card-header-tag">offline</span>}
+        {state !== 'online' && <span className="side-card-header-tag">{state === 'offline' ? 'offline' : 'not sharing'}</span>}
         {!remote && <OpenInEditor compact />}
       </div>
       {state === 'offline' && <p className="side-card-computer-note">{offlineLabel(computer, Date.now())}</p>}
