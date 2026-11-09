@@ -1554,9 +1554,9 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
 }
 
 /**
- * Run now and Resume from another computer: the job's runs may not be wider than what this computer lets that
- * device run (its limit may have been lowered since the job was made, or the job may be one a person made here).
- * A run asks for the job's mode, else its thread's. A person here is not limited by it.
+ * Run now and Resume from another computer (also an update that turns it on): the job's runs may not be wider than
+ * what this computer lets that device run (its limit may have been lowered since the job was made, or the job may be
+ * one a person made here). A run asks for the job's mode, else its thread's. A person here is not limited by it.
  */
 function refuseAboveDeviceLimit(ctx: HandlerContext, job: ScheduledJob | undefined): void {
   const limit = deviceLimit(ctx)
@@ -2931,6 +2931,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // to their own mode by choosing a mode on purpose (see `permissionsAfterEdit`). It is worked out inside the store's
       // lock, against the job as stored at that moment, so two edits at once cannot undo each other's lowering.
       const executable = isExecutableJobEdit(patch)
+      const threadAfter = (current: ScheduledJob) => checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)
+      const permissions = (current: ScheduledJob) => permissionsAfterEdit({
+        stored: current,
+        editor: narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(threadAfter(current)), deviceLimit(ctx)),
+        patchMode: patch.permissionMode,
+        executable,
+        canRaise: true
+      })
+      // Turning it on (or giving a finished one a clock again) is a Resume: from another computer, never above that
+      // device's limit, with the mode and thread it will have after this edit.
+      if ((patch.enabled === true && !existing.enabled) || (patch.schedule && existing.state === 'completed')) {
+        const after = permissions(existing)
+        refuseAboveDeviceLimit(ctx, {
+          ...existing,
+          threadId: threadAfter(existing),
+          ...(after.ok && after.changed ? { permissionMode: after.permissionMode, permissionCeiling: after.permissionCeiling } : {})
+        })
+      }
       const job = withPermissionRefusals(() => ctx.mms.scheduled.updateJob(id, {
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
@@ -2956,15 +2974,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
                 }
               }
             : {})
-      }, {
-        permissions: (current) => permissionsAfterEdit({
-          stored: current,
-          editor: narrowPermissionMode(ctx.mms.orchestrator.scheduledCreatorCeiling(checked.threadId ?? (patch.threadId === undefined ? current.threadId : patch.threadId ?? undefined)), deviceLimit(ctx)),
-          patchMode: patch.permissionMode,
-          executable,
-          canRaise: true
-        })
-      }))
+      }, { permissions }))
       // A draft edited by hand: Turn on reads its problems again.
       if (job?.draft) ctx.mms.automationDrafts?.recheck(id)
       return { job: job?.draft ? ctx.mms.scheduled.getJob(id) ?? job : job, jobs: ctx.mms.scheduled.listJobs() }

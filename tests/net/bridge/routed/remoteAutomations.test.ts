@@ -78,7 +78,10 @@ describe('one owning computer per automation', () => {
     expect(run).toMatchObject({ code: 'permission_mode_above_ceiling', message: expect.stringMatching(/Full access/) })
     t.owner.scheduled.pauseJob(full.id)
     expect((await t.refused(t.dispatch('scheduled.resume', { id: t.qualified(full.id) }))).code).toBe('permission_mode_above_ceiling')
-    expect(t.owner.scheduled.getJob(full.id)).toMatchObject({ state: 'paused' })
+    // Turning it on through an edit is a Resume too.
+    expect((await t.refused(t.dispatch('scheduled.update', { id: t.qualified(full.id), patch: { enabled: true } }))).code).toBe('permission_mode_above_ceiling')
+    expect((await t.refused(t.dispatch('scheduled.update', { id: t.qualified(full.id), patch: { name: 'Renamed', enabled: true } }))).code).toBe('permission_mode_above_ceiling')
+    expect(t.owner.scheduled.getJob(full.id)).toMatchObject({ name: 'Owner full', enabled: false, state: 'paused' })
     expect(t.owner.scheduled.getJob(full.id)?.runHistory ?? []).toHaveLength(0)
     // Made while this computer could run Full access (in a Full access thread), then its limit was lowered.
     const fullThread = t.thread('Full here')
@@ -97,6 +100,11 @@ describe('one owning computer per automation', () => {
     const { job: held } = await t.dispatch('scheduled.create', { node: t.node, input: manual('Within') })
     await t.dispatch('scheduled.pause', { id: held.id })
     expect((await t.dispatch('scheduled.resume', { id: held.id })).job).toMatchObject({ enabled: true })
+    await t.dispatch('scheduled.pause', { id: held.id })
+    expect((await t.dispatch('scheduled.update', { id: held.id, patch: { enabled: true } })).job).toMatchObject({ enabled: true, state: 'scheduled' })
+    // An edit that lowers the mode within the limit may turn it on in the same change.
+    const lowered = (await t.dispatch('scheduled.update', { id: t.qualified(full.id), patch: { enabled: true, permissionMode: 'ask' } })).job
+    expect(lowered).toMatchObject({ enabled: true, permissionMode: 'ask' })
   }, 60_000)
 
   it('never reaches a private thread through the pull request an automation wakes on', async () => {
