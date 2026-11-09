@@ -285,14 +285,19 @@ export class ThreadDbStore {
     for (let attempt = 0; ; attempt++) {
       const entry = this.fresh(dir)
       const plan = this.plan(entry, change)
+      const collectDue = Date.now() - (this.collectedAt.get(dir) ?? 0) > COLLECT_INTERVAL_MS
       if (!plan.request.inserts.length && !plan.request.updates.length && !plan.request.deletes.length && !plan.request.state.length && !info) {
+        // Nothing to write; unused blobs are still collected when that is due.
+        if (collectDue) {
+          this.client.callSync('collectBlobs', dir)
+          this.collectedAt.set(dir, Date.now())
+        }
         this.registerObjects(entry, plan, [])
         return (this.lastSave = { inserted: 0, updated: 0, deleted: 0, state: 0, bytes: 0 })
       }
       if (info) plan.request.info = info
       // Blobs no row needs any more are collected at least hourly, also when no blob-bearing row changed now
       // (an attachment removed while its blob was still too new to collect).
-      const collectDue = Date.now() - (this.collectedAt.get(dir) ?? 0) > COLLECT_INTERVAL_MS
       if (collectDue) plan.request.collectBlobs = true
       const result = this.client.callSync('save', dir, plan.request)
       if (result.ok && plan.request.collectBlobs) this.collectedAt.set(dir, Date.now())

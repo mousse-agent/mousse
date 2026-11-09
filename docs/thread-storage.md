@@ -41,7 +41,7 @@ A row that refers to blobs lists them in its `blob_paths` column: for each, the 
 - Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as `[attachment unavailable: blob <kind>:<hash>]` and the thread still opens. The placeholder names its blob, so a later save that still holds it, wherever the value moved to (the row too), writes the reference back instead of the placeholder. An image whose bytes are missing is sent to the model as the note `[image unavailable]`, never as image data.
 - Writing a blob that is already there checks the copy's hash and replaces a damaged one, and fsyncs it and its folders either way, so a copy another writer has just made is durable before a row that refers to it commits.
 - Text that UTF-8 cannot hold exactly (a lone surrogate) stays in its row. New blob folders are fsynced into their parents before rows that refer to them commit, and collection never removes a folder that is not empty.
-- When a save removes or rewrites a row that had blobs, and on a thread's first save each hour, blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet. An import that fails or finds its source changed removes the blobs it wrote.
+- When a save removes or rewrites a row that had blobs, and on a thread's first save each hour (a save that changes nothing included), blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet. An import writes its blobs into a staging folder of its own, `thread.db.import-<pid>-<id>.stage`, never into `blobs/`; they move into `blobs/` under the lock just before the database is linked into place, and an import that fails or finds its source changed removes its staging folder.
 
 ## Saving only what changed
 
@@ -71,10 +71,10 @@ The worker is built as one self-contained file beside each bundle (`out/cli/thre
 With the feature on, a JSON thread is imported the first time it is read, in the background:
 
 1. Under the thread's lock, unfinished generations are reconciled and the JSON files are fingerprinted: every data file, the root `manifest.json` and the files of the generation it selects, with whether each exists.
-2. The read worker builds `thread.db.import-<pid>-<id>` from the files, chosen exactly as the app chooses them, and reads it back to check every row against them.
-3. Under the lock again, the fingerprint is checked unchanged and the file is linked into place as `thread.db`, never over an existing one.
+2. The read worker builds `thread.db.import-<pid>-<id>` (and its blobs, in a staging folder beside it) from the files, chosen exactly as the app chooses them, and reads it back to check every row against them.
+3. Under the lock again, the fingerprint is checked unchanged, the staged blobs are moved into `blobs/`, and the file is linked into place as `thread.db`, never over an existing one.
 
-A crash at any step leaves either no `thread.db` (an abandoned import file is removed an hour later) or a complete, checked one. An import that fails leaves the thread on JSON, writes the reason to `thread-db-import-error.json` and is tried again later.
+A crash at any step leaves either no `thread.db` (an abandoned import file and its staging folder are removed an hour later) or a complete, checked one. An import that fails leaves the thread on JSON, writes the reason to `thread-db-import-error.json` and is tried again later.
 
 The JSON files are left exactly as they were, as a frozen backup, and are never written again.
 

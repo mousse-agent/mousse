@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
-import { blobPath, collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
+import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
 export const THREAD_DB_FORMAT = 1
@@ -103,7 +103,7 @@ function createSchema(db: DatabaseSync): void {
   db.exec(`PRAGMA user_version=${THREAD_DB_FORMAT}`)
 }
 
-function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: Record<string, string>, created: string[] = []): number {
+function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: Record<string, string>): number {
   const { collections, state } = decompose(data)
   const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
   let rows = 0
@@ -111,7 +111,7 @@ function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: 
     items.forEach((item, index) => {
       const fields = rowFields(coll, item)
       const encoded = encodeRow(skeletonOf(item) ?? null)
-      for (const blob of encoded.blobs) if (writeBlob(dir, blob)) created.push(blob.sha256)
+      for (const blob of encoded.blobs) writeBlob(dir, blob)
       insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
       rows += 1
     })
@@ -446,9 +446,15 @@ export class ThreadDbEngine {
     if (!/^thread\.db\.import-[\w.-]+$/.test(request.tmpName)) throw new Error('Invalid import file name')
     const tmp = join(dir, request.tmpName)
     rmSync(tmp, { force: true })
-    // Blobs this import wrote; a failed or stale import removes them (the thread is still on JSON, nothing else uses them).
-    const created: string[] = []
-    const discardCreated = (): void => { for (const hash of created) rmSync(blobPath(dir, hash), { force: true }) }
+    // The import's blobs go to a staging folder of its own (`<tmpName>.stage/blobs`), moved into the thread's
+    // `blobs/` only when the database is published, under the thread's lock (`publishStagedBlobs`). A failed or stale
+    // import removes just its staging folder, so it never touches a blob another import or save has published.
+    const stage = join(dir, `${request.tmpName}.stage`)
+    rmSync(stage, { recursive: true, force: true })
+    const discard = (): void => {
+      rmSync(tmp, { force: true })
+      rmSync(stage, { recursive: true, force: true })
+    }
     try {
       const source = readLegacyThreadData(dir, { transactional: request.transactional })
       const db = new DatabaseSync(tmp)
@@ -457,13 +463,13 @@ export class ThreadDbEngine {
         db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;')
         createSchema(db)
         db.exec('BEGIN')
-        rows = insertAll(db, dir, source, {
+        rows = insertAll(db, stage, source, {
           importedFrom: JSON.stringify(request.fingerprint),
           importedAt: new Date().toISOString(),
           jsonFingerprint: JSON.stringify(request.fingerprint)
-        }, created)
+        })
         db.exec('COMMIT')
-        const back = dataFromLoad(loadFrom(db, dir))
+        const back = dataFromLoad(loadFrom(db, stage))
         if (back.messages.length !== source.messages.length) throw new Error(`Import kept ${back.messages.length} of ${source.messages.length} messages`)
         if (normalizedForCompare(back) !== normalizedForCompare(source)) throw new Error('Imported rows differ from the JSON files')
         const check = db.prepare('PRAGMA quick_check').get() as Record<string, unknown>
@@ -473,14 +479,12 @@ export class ThreadDbEngine {
       }
       fsyncFile(tmp)
       if (!sameFingerprint(legacyFingerprint(dir), request.fingerprint)) {
-        rmSync(tmp, { force: true })
-        discardCreated()
+        discard()
         return { ok: false, stale: true }
       }
       return { ok: true, tmpName: request.tmpName, messages: source.messages.length, rows }
     } catch (error) {
-      rmSync(tmp, { force: true })
-      discardCreated()
+      discard()
       throw error
     }
   }

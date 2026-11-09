@@ -229,3 +229,33 @@ export function collectBlobs(dir: string, referenced: Set<string>, minAgeMs: num
   }
   return removed
 }
+
+/**
+ * Moves the blobs an import staged (`<stage>/blobs/<aa>/<hash>`) into the thread's `blobs/`, keeping a copy that is
+ * already there, then removes the staging folder. Each new file and folder is fsynced into its parent. The caller
+ * holds the thread's lock and publishes the database only after this returns.
+ */
+export function publishStagedBlobs(dir: string, stage: string): number {
+  const staged = join(stage, BLOBS_DIR)
+  let moved = 0
+  if (existsSync(staged)) {
+    for (const prefix of readdirSync(staged)) {
+      for (const name of readdirSync(join(staged, prefix))) {
+        if (!/^[a-f0-9]{64}$/.test(name)) continue
+        const target = blobPath(dir, name)
+        const root = join(dir, BLOBS_DIR)
+        const folder = join(root, prefix)
+        mkdirSync(folder, { recursive: true })
+        if (!existsSync(target)) {
+          renameSync(join(staged, prefix, name), target)
+          moved += 1
+        }
+        fsyncPath(folder)
+        fsyncPath(root)
+      }
+    }
+    fsyncPath(dir)
+  }
+  rmSync(stage, { recursive: true, force: true })
+  return moved
+}

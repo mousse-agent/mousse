@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
-import { BLOB_TEXT_THRESHOLD, blobPath, collectBlobs, encodeRow, missingPlaceholder, writeBlob } from '../src/mms/data/threadDb/threadBlobs'
+import { BLOB_TEXT_THRESHOLD, blobPath, collectBlobs, encodeRow, missingPlaceholder, publishStagedBlobs, writeBlob } from '../src/mms/data/threadDb/threadBlobs'
 import { legacyFingerprint } from '../src/mms/data/legacyThreadData'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 import { getActiveMessages } from '../src/mms/orchestrator/nativeContext'
@@ -259,6 +259,17 @@ describe('thread blobs, second look', () => {
     expect(blobFiles(dir)).toEqual([])
   })
 
+  it('collects an overdue orphan even when the save changes nothing', () => {
+    const data = image()
+    store.save(dir, { messages: [message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })] })
+    store.save(dir, { messages: [] })
+    for (const hash of blobFiles(dir)) makeOld(blobPath(dir, hash))
+    const later = new ThreadDbStore(client)
+    later.load(dir)
+    expect(later.save(dir, { messages: [] })).toMatchObject({ inserted: 0, updated: 0, deleted: 0 })
+    expect(blobFiles(dir)).toEqual([])
+  })
+
   it('repairs a damaged blob when the same content is saved again', () => {
     const data = image()
     store.save(dir, { messages: [message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })] })
@@ -278,7 +289,7 @@ describe('thread blobs, second look', () => {
 })
 
 describe('importing a thread with images', () => {
-  it('moves the images to blobs and checks the import against the JSON', () => {
+  it('stages the images, checks the import against the JSON, and publishes the blobs with the database', () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-blob-import-')))
     try {
       const data = image()
@@ -286,14 +297,57 @@ describe('importing a thread with images', () => {
       writeFileSync(join(dir, 'messages.json'), JSON.stringify(messages))
       const engine = new ThreadDbEngine({ idleCloseMs: 0 })
       expect(engine.build(dir, { tmpName: 'thread.db.import-x', transactional: false, fingerprint: legacyFingerprint(dir) })).toMatchObject({ ok: true })
-      expect(blobFiles(dir)).toHaveLength(1)
-      // An import whose source changed meanwhile removes the blobs it wrote.
-      rmSync(join(dir, 'blobs'), { recursive: true, force: true })
-      const stale = engine.build(dir, { tmpName: 'thread.db.import-y', transactional: false, fingerprint: [] })
-      expect(stale).toEqual({ ok: false, stale: true })
+      // Nothing reaches the thread's blobs until the import is published.
       expect(blobFiles(dir)).toEqual([])
+      publishStagedBlobs(dir, join(dir, 'thread.db.import-x.stage'))
+      expect(blobFiles(dir)).toHaveLength(1)
+      expect(existsSync(join(dir, 'thread.db.import-x.stage'))).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a stale import never removes a blob another import has published', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-blob-race-')))
+    try {
+      const data = image()
+      writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })]))
+      const fingerprint = legacyFingerprint(dir)
+      const first = new ThreadDbEngine({ idleCloseMs: 0 })
+      const second = new ThreadDbEngine({ idleCloseMs: 0 })
+      // B builds and publishes; A finds the source changed (here: a fingerprint that never matched) and gives up.
+      expect(second.build(dir, { tmpName: 'thread.db.import-b', transactional: false, fingerprint })).toMatchObject({ ok: true })
+      publishStagedBlobs(dir, join(dir, 'thread.db.import-b.stage'))
+      expect(first.build(dir, { tmpName: 'thread.db.import-a', transactional: false, fingerprint: [] })).toEqual({ ok: false, stale: true })
+      expect(blobFiles(dir)).toHaveLength(1)
+      expect(readdirSync(dir).filter((name) => name.includes('import-a'))).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('importing through the store', () => {
+  it('publishes an imported thread\'s images with its database', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-blob-store-import-')))
+    try {
+      const { ProjectManager } = await import('../src/mms/data/ProjectManager')
+      const { ThreadDataStore } = await import('../src/mms/data/ThreadDataStore')
+      const json = new ThreadDataStore(new ProjectManager(home), home, { allowLegacyProjectData: false })
+      json.setSqliteStoreEnabled(false)
+      const data = image()
+      const thread = json.createThread('With image', undefined, undefined, { started: true })
+      json.mutateThreadData(thread.id, () => ({ messages: [message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })] }))
+      const store = new ThreadDataStore(new ProjectManager(home), home, { allowLegacyProjectData: false })
+      store.setSqliteStoreEnabled(true)
+      expect(await store.importThreadStorage(thread.id)).toMatchObject({ status: 'imported' })
+      const dir = store.getThreadDir(thread.id)
+      expect(blobFiles(dir)).toHaveLength(1)
+      expect(readdirSync(dir).filter((name) => name.endsWith('.stage'))).toEqual([])
+      expect(store.loadThreadData(thread.id).messages[0]!.images![0]!.data).toBe(data)
+      store.closeThreadStorage()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
     }
   })
 })
