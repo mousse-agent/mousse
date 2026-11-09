@@ -27,11 +27,22 @@ export function ensureElectron() {
     throw new Error('node_modules/electron is missing — run npm install')
   }
   console.log('[electron] binary missing — downloading Electron…')
-  const result = spawnSync(process.execPath, [installJs], {
-    cwd: electronDir,
-    stdio: 'inherit',
-    env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: '' }
-  })
+  // GitHub release downloads sometimes fail with a 5xx; retry before giving up.
+  const attempts = 3
+  let result
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    result = spawnSync(process.execPath, [installJs], {
+      cwd: electronDir,
+      stdio: 'inherit',
+      env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: '' }
+    })
+    if (result.status === 0) break
+    if (attempt < attempts) {
+      const delaySeconds = attempt * 5
+      console.log(`[electron] download failed — retrying in ${delaySeconds}s (${attempt}/${attempts - 1})…`)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delaySeconds * 1000)
+    }
+  }
   if (result.status !== 0) {
     throw new Error(
       `Electron install failed (exit ${result.status ?? 'unknown'}). ` +
