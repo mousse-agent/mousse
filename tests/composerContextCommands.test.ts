@@ -326,6 +326,20 @@ describe('a message sent while the context compacts', () => {
     }
   }, 60_000)
 
+  it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
+    const { orch, thread, harness, engine, prompts, store } = await setup()
+    longThread(orch, thread.id)
+    controlled(harness as never)
+    vi.spyOn(orch as unknown as { persist: (immediate?: boolean) => void }, 'persist').mockImplementationOnce(() => { throw new Error('disk full') })
+    await expect(compactNow(orch, engine, thread.id)).rejects.toThrow('disk full')
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+    // No compaction is left to stop, and a new one may start.
+    expect(orch.stopCompaction(thread.id)).toBe(false)
+    vi.restoreAllMocks()
+    await orch.send('after the failed start', false, { threadId: thread.id, clientRequestId: 'after-failed-start' })
+    await until(() => Boolean(sentWith(prompts, 'after the failed start')))
+  }, 30_000)
+
   it('Send now on the first held message stops the compaction, cuts nothing, and sends that message first with the full history', async () => {
     const { orch, thread, harness, engine, prompts } = await setup()
     const before = longThread(orch, thread.id)

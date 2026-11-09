@@ -12062,12 +12062,13 @@ export class OrchestratorService extends EventEmitter {
       clearTimeout(timeout)
       throw error
     }
-    this.sessionAls.run(session, () => {
-      session.messages.push(note)
-      this.emitMessageAdded(note)
-      this.persist(true)
-    })
+    // From here on the hold and the Stop are released however this ends, a failed write of the row included.
     try {
+      this.sessionAls.run(session, () => {
+        session.messages.push(note)
+        this.emitMessageAdded(note)
+        this.persist(true)
+      })
       let native = false
       const instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
       if (instanceId) {
@@ -12111,7 +12112,12 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       // The row says why; the queue then goes on with the full history.
       const reason = error instanceof Error ? error.message : String(error)
-      finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')
+      try {
+        finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')
+      } catch (finishError) {
+        // The write that failed first may fail again; the caller gets the first error.
+        logDebug('OrchestratorService', 'the row of a failed compaction could not be saved', finishError, { threadId })
+      }
       throw error
     } finally {
       clearTimeout(timeout)
