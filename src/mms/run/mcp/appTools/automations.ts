@@ -1,4 +1,4 @@
-import { AutomationDraftError, type AutomationDrafts, type DraftAuthor } from '../../../automations/AutomationDrafts'
+import { AutomationDraftError, type AutomationDrafts, type AutomationEditor, type DraftAuthor } from '../../../automations/AutomationDrafts'
 import { RunReportError } from '../../../automations/AutomationRuns'
 import type { InboxRun } from '../../../../shared/automationInbox'
 import type { AppToolHost } from './host'
@@ -13,6 +13,8 @@ export interface AutomationToolHost {
   managerWorkspace?(): string
   /** The bot whose thread this is, on a bot's turn. */
   botOf(threadId: string): string | undefined
+  /** The person's latest message on a thread (the manager's): the request an automation must be named in to change. */
+  personRequest?(threadId: string): string | undefined
   /** The bot activation a thread belongs to, for a bot's scheduled run. */
   activationOf?(threadId: string): string | undefined
   /**
@@ -77,6 +79,18 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     const botId = tools.botOf(ctx.caller.threadId)
     if (botId) return { botId }
     return tools.isManagerThread(ctx.caller.threadId) ? { managerThreadId: ctx.caller.threadId } : { originThreadId: ctx.caller.threadId }
+  }
+  /** Who edits: a bot, or the manager with the person's current request. */
+  const editor = (tools: AutomationToolHost, ctx: ToolCallContext): AutomationEditor => {
+    const botId = tools.botOf(ctx.caller.threadId)
+    if (botId) return { botId }
+    let request: string | undefined
+    try {
+      request = tools.personRequest?.(ctx.caller.threadId)
+    } catch {
+      request = undefined
+    }
+    return { managerThreadId: ctx.caller.threadId, ...(request ? { request } : {}) }
   }
   const run = (ctx: ToolCallContext, act: (tools: AutomationToolHost) => unknown, find: (threadId: string) => AutomationToolHost | undefined = reach): ToolOutcome => {
     const tools = find(ctx.caller.threadId)
@@ -146,10 +160,10 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       ...common,
       name: 'automation_update',
       description:
-        'Change an automation (or a draft) by id: pass only the fields to change (not who does it: the person picks that). A change to an automation takes effect at once and must leave it with no problems. Its permission mode can only be lowered here.',
+        'Change an automation (or a draft) by id: pass only the fields to change (not who does it: the person picks that). You may change your own drafts, and an automation only when the person\'s message names it. A change to what it does, when or where pauses it until the person resumes it, and must leave it with no problems. Its permission mode can only be lowered here.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' }, ...FIELDS }, required: ['id'] },
       class: 'mutation',
-      handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.update(args) }))
+      handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.update(args, editor(tools, ctx)) }))
     },
     {
       ...common,
@@ -157,7 +171,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       description: 'Pause an automation by id, until an ISO time ("until") or until the person resumes it. A run in progress finishes.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' }, until: { type: 'string' }, reason: { type: 'string' } }, required: ['id'] },
       class: 'mutation',
-      handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.pause(args) }))
+      handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.pause(args, editor(tools, ctx)) }))
     },
     {
       access: 'actsAsCaller' as const,

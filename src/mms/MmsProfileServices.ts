@@ -961,6 +961,7 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
+      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => message.role === 'user')?.content,
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,

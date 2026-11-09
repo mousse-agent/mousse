@@ -60,6 +60,15 @@ export interface DraftAuthor {
   originThreadId?: string
 }
 
+/**
+ * Who calls `automation_update` or `automation_pause`: a bot, or the manager with the person's current request (their
+ * latest message on its thread), which names the automation it may change ("Change automation: <id>", or its name).
+ */
+export type AutomationEditor = { botId: string } | { managerThreadId: string; request?: string }
+
+/** What an agent's edit pauses an automation with: the person checks the change, then resumes it. */
+export const AGENT_EDIT_PAUSE = 'Changed by an agent. Check it, then resume it.'
+
 /** What the drafts keep beside a job: the chat it was made from and what "this" meant there (`AutomationRuns`). */
 export interface DraftMetaPort {
   get(jobId: string): { originThreadId?: string; context?: string } | undefined
@@ -99,6 +108,14 @@ const MAX_OPTION = 60
 const EVENT_KINDS: readonly ThreadEventKind[] = ['checks_failed', 'checks_passed', 'review', 'comment']
 
 export class AutomationDraftError extends Error {}
+
+/** Whether the person's request names the automation: its id, or its whole name (three letters or more), in any case. */
+function namedIn(request: string | undefined, job: ScheduledJob): boolean {
+  if (!request) return false
+  if (request.includes(job.id)) return true
+  const name = job.name.trim().toLowerCase()
+  return name.length >= 3 && request.toLowerCase().includes(name)
+}
 
 function fail(message: string): never {
   throw new AutomationDraftError(message)
@@ -422,6 +439,13 @@ export class AutomationDrafts {
     return narrowPermissionMode(this.deps.personCeiling(threadId), originThreadId ? this.deps.personCeiling(originThreadId) : undefined)
   }
 
+  /** Why `editor` may not change or pause `job`, or undefined when it may. */
+  private editRefusal(job: ScheduledJob, editor: AutomationEditor): string | undefined {
+    if ('botId' in editor) return job.draft?.botId === editor.botId ? undefined : 'A bot changes only the drafts it wrote; its own schedules change with its schedule tools.'
+    if (job.draft && job.draft.managerThreadId === editor.managerThreadId) return undefined
+    return namedIn(editor.request, job) ? undefined : `Ask the person to name it first: use "Change it…" on ${job.name}, or have them say its name.`
+  }
+
   /** The person picked Who in the composer: the next drafts this manager writes take it. */
   nextWho(author: DraftAuthor, who: DraftWho): void {
     this.pendingWho.set(this.authorKey(author), who.kind === 'bot' ? { kind: 'bot', botId: who.botId } : { kind: 'default' })
@@ -476,10 +500,12 @@ export class AutomationDrafts {
    * `automation_update`: changes an automation or a draft. An automation keeps running; a change that would leave it
    * with a problem is refused. Its May can only be lowered here; raising it is for the person, in Edit details.
    */
-  update(args: Record<string, unknown>): AutomationContract {
+  update(args: Record<string, unknown>, editor: AutomationEditor): AutomationContract {
     const id = text(args.id, 'id', 256)
     const job = this.deps.get(id)
     if (!job || job.bot) fail(`No automation ${id}.`)
+    const refusal = this.editRefusal(job, editor)
+    if (refusal) fail(refusal)
     const fields = parseFields(args)
     if (!Object.keys(fields).length) fail('Pass at least one field to change.')
     if (job.draft) {
@@ -497,16 +523,21 @@ export class AutomationDrafts {
     const updated = this.deps.update(job.id, { ...next, ...nextRun, permissionMode, threadId, ...(reuseThread ? { createThread: undefined } : {}) })
     if (!updated) fail(`No automation ${id}.`)
     this.keepMeta(job.id, fields, {})
+    // What it does, when, or where it runs changed at an agent's hand: it waits for the person to look and resume it.
+    const executable = (['prompt', 'schedule', 'trigger', 'threadId', 'projectId', 'createThread'] as const).some((key) => JSON.stringify(updated[key] ?? null) !== JSON.stringify(job[key] ?? null))
+    const paused = executable && job.enabled && job.state !== 'paused' ? this.deps.pause(job.id, AGENT_EDIT_PAUSE) : null
     this.deps.changed?.()
-    return this.contract(updated)
+    return this.contract(paused ?? updated)
   }
 
   /** `automation_pause`: pauses an automation, until a time or until the person resumes it. */
-  pause(args: Record<string, unknown>): AutomationContract {
+  pause(args: Record<string, unknown>, editor: AutomationEditor): AutomationContract {
     const id = text(args.id, 'id', 256)
     const job = this.deps.get(id)
     if (!job || job.bot) fail(`No automation ${id}.`)
     if (job.draft) fail('A draft does not run; there is nothing to pause.')
+    // Pausing only lowers what runs: the manager may pause any of the person's automations; a bot none of them.
+    if ('botId' in editor) fail('A bot pauses only its own schedules, with its schedule tools.')
     let until: string | undefined
     if (args.until !== undefined) {
       const at = Date.parse(text(args.until, 'until', 64))
