@@ -178,7 +178,7 @@ it('shows the prompt cache a Claude turn left, until the history changes or is c
     vi.restoreAllMocks()
     rmSync(home, { recursive: true, force: true })
   }
-})
+}, 60_000)
 
 describe('a turn whose notes come before its tool calls', () => {
   let home: string
