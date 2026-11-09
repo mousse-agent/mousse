@@ -77,13 +77,13 @@ Keep the issue body current like a PR description. Decisions, blockers, and hand
 
 ## Testing scope
 
-While working, default to focused tests for the changed behavior and directly affected areas. `npm run test:changed` runs the tests related to the working tree and `npm run test:plan` shows that selection without running it; see `docs/testing.md` for how related tests are chosen and which tests must stay. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
+The work skill's change tiers ("Size the change") set how much to search, test and show for each kind of change, from a copy fix to a core change. While working, default to focused tests for the changed behavior and directly affected areas. `npm run test:changed` runs the tests related to the working tree and `npm run test:plan` shows that selection without running it; see `docs/testing.md` for how related tests are chosen and which tests must stay. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
 
 Before a PR is opened, run only the named test files that cover the changed code, for example `npx vitest run tests/foo.test.ts tests/bar.test.ts` (find them with `rg -l <module> tests`), on the commit you will publish, and open the PR when they pass. `npm run test:branch` and `test:related` are not the pre-PR check: they follow imports, so a change to main, preload, CLI or build inputs selects most of the suite. Run the full suite (`npm test`) only for very large changes that affect multiple modules, such as shared infrastructure or cross-cutting refactors. If the tests fail, fix them or keep the work on its pushed task branch without a PR. A failure that looks unrelated or flaky still blocks the PR until it is shown to fail on the default branch too; the PR then names it. Rerun the relevant tests after later commits that change code, and state what ran and the result in the PR's Verification section.
 
-Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Reuse passing evidence for unchanged code and state what was tested. Documentation-only changes normally need diff and consistency review, not application tests.
+Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Record the tested commit, commands and results once; checkpoints, the PR, the merge and session end reuse that record while the code is unchanged. Do not run typecheck, lint or build as a routine precaution beyond what the change's tier lists. Documentation-only changes normally need diff and consistency review, not application tests.
 
-Hosted CI runs basic checks on every PR and push to the default branch: the workflow tools test, typecheck and lint, a build, and the Windows-relevant tests. It does not run the full suite. The full suite can be started by hand from the CI workflow's `workflow_dispatch` trigger, and the nightly and stable release builds run it before publishing (`docs/releases.md`); do not start or wait for it as an extra completion or merge gate unless explicitly requested. Actual GitHub-enforced checks still apply.
+Hosted CI runs basic checks on every PR and push to the default branch: the workflow tools test, typecheck and lint, a build, and the Windows-relevant tests. It does not run the full suite. The full suite can be started by hand from the CI workflow's `workflow_dispatch` trigger, and the nightly and stable release builds run it before publishing (`docs/releases.md`); do not start or wait for it as an extra completion or merge gate unless explicitly requested. Do not wait for the basic checks either unless GitHub requires them; actual GitHub-enforced checks still apply.
 
 ## Review and merge
 
@@ -111,7 +111,7 @@ A merge is not finished until the change is available in the user's primary work
 
 After the sync, remove the merged task's branch and worktree so they do not pile up. From the primary checkout, run `node scripts/team-cleanup.mjs --apply --branch <task-branch>`. It deletes the branch locally and on origin, and removes its worktree when that worktree has no uncommitted changes. It refuses the checkout it runs in, so leave the task worktree first. If it keeps something, report the reason instead of forcing it.
 
-The same helper also runs at the start of work without `--branch` (see "Cleanup helper"), which catches branches merged elsewhere or by teammates.
+Run the same helper without `--branch` (see "Cleanup helper") when worktrees or branches pile up; it catches branches merged elsewhere or by teammates. It is not a step at the start of every task.
 
 ## Failures and interruptions
 

@@ -7,12 +7,30 @@ description: Start or resume authorized implementation or local testing in this 
 
 Read [the shared team policy](../../../docs/team-workflow.md) before acting. Use Git and authenticated GitHub CLI (`gh`); an available GitHub connector may perform equivalent operations.
 
+## Size the change
+
+Pick the tier from what the change touches, not from how many files it has. Use the highest tier any part of the change reaches, and name the tier in the PR's Verification section.
+
+| Tier | Examples | Related-work check | Tests before the PR | Evidence |
+|---|---|---|---|---|
+| 1. Trivial | Copy, docs, comments, one CSS value | The task's known issue or PR, if any | None; review the diff | The diff, plus a screenshot when it is visible in the app |
+| 2. Small UI | Layout, styling, one component's look or a small interaction; no data, IPC or protocol change | One search of issues and PRs in all states with two or three terms | Named test files for the touched component, if any. No typecheck, lint or build | Before/after screenshots |
+| 3. Feature | New behavior in one area, such as a renderer view and its store, or one service | "Coordinate shared work" below | Named test files covering the changed code, plus a typecheck of the touched project (`npx tsc --noEmit -p tsconfig.web.json` or `tsconfig.node.json`) | Tests and a direct check of the behavior |
+| 4. Cross-area | Several modules, shared types, or renderer-to-main IPC | [check-related-work](../check-related-work/SKILL.md) | Named test files in each affected area, plus `npm run typecheck` | Tests and a direct check of the behavior |
+| 5. Core | Run engine, persistence and migrations, auth and permissions, daemon protocol, networking and security, anything that deletes data | [check-related-work](../check-related-work/SKILL.md) | Named test files across the boundaries it crosses; the full suite only when the change spans multiple modules | Tests, a direct check, and teammate review for the sensitive changes listed in the shared policy |
+
+In every tier:
+
+- Run the tier's checks once. Record the tested commit, the commands and the results. Checkpoints, the PR, the merge and session end reuse that record while the code is unchanged; after a later code commit, rerun only the tests that commit affects.
+- Do not run hosted CI's checks locally as a precaution, and do not wait for hosted CI. A build needed to launch the app for a direct check is fine.
+- Interactive UI logic still runs its tests; screenshots show appearance, not behavior.
+
 ## Establish the scope
 
 1. Confirm the requested outcome from the conversation. Preserve the distinction between discussing a change and implementing it.
 2. Decide whether the outcome is local-only testing or a change intended for the shared codebase, using the shared policy's scope rules. Testing or combining existing PRs, local conflict resolution, and experiments do not automatically authorize issues, PRs, pushes, or GitHub status updates.
-3. Run `node scripts/team-status.mjs --fetch` from the repository root. Inspect dirty files, current branch, remote default, unpublished commits, and merge/rebase state. Do not switch, stash, or commit unrelated work. Use an isolated worktree when needed; respect a request to make the result available in the primary checkout.
-4. Run `node scripts/team-cleanup.mjs --apply`. It removes local branches, clean worktrees, and remote branches whose work already landed on the default branch, and keeps anything with uncommitted changes, open PRs, unmerged commits, recent use, or app ownership. Mention what it removed or kept only when it bears on the task. Before creating a worktree, check `git worktree list` and reuse the task's existing one.
+3. Run `node scripts/team-status.mjs --fetch` from the repository root once per task, and again only when resuming the task later. Inspect dirty files, current branch, remote default, unpublished commits, and merge/rebase state. Do not switch, stash, or commit unrelated work. Use an isolated worktree when needed; respect a request to make the result available in the primary checkout.
+4. Before creating a worktree, check `git worktree list` and reuse the task's existing one. Cleanup of merged branches runs after the merge (see "Cleanup after merge" in the shared policy), not at the start of every task.
 
 For local-only work, inspect the relevant source PR and target commits, perform the requested integration or experiment, run focused verification, and report the local result. Use local branches or commits when useful for recovery. Keep publication and GitHub updates limited to what was explicitly requested; a backup push or comment on the source PR does not require a new issue or PR. Stop here when the local outcome is complete.
 
@@ -29,7 +47,7 @@ The user's installed Mousse (stable or nightly) is in daily use. It owns `~/.mou
 
 ## Coordinate shared work
 
-For changes intended to ship:
+For changes intended to ship. Tiers 1 and 2 use the lighter related-work check from "Size the change" in place of steps 1 and 2, and widen it to these steps only when the search finds possible overlap.
 
 1. Verify the repository and authenticated identity with `gh repo view --json nameWithOwner,defaultBranchRef` and `gh api user --jq .login`. Search issues and PRs in all states using several relevant terms; inspect recent open work and remote branches too. A failed or truncated search is not evidence of no related work.
 2. Read candidate issue discussions and PR diffs, not just titles. If already merged, verify the requested behavior on the current default branch. If another person is working on the same task, reconcile ownership before editing their branch or creating duplicate work. Shared files alone do not prove duplicate scope.
@@ -46,23 +64,17 @@ For changes intended to ship:
 
 ## Write it up
 
-Follow "Writing PRs and issues" in the shared policy whenever you create or edit an issue, PR, or comment:
-
-- Title: Conventional Commit prefix plus the outcome in plain words for PRs; the problem or goal for issues.
-- PR body: Problem, Change, Verification, plus How to review for large PRs and an optional Notes line. Issue body: Problem, Goal, Done when, and optionally Out of scope. Use the templates in `.github/`.
-- Rewrite the body when scope or approach changes. Never append a running log of follow-ups.
-- Use plain words and the terms in `docs/GLOSSARY.md`. Keep build, install, and stacking details in Notes or a comment.
-- One goal per PR, at any size. Split out unrelated fixes and cleanups, not large work that belongs together.
+Follow "Writing PRs and issues" in the shared policy whenever you create or edit an issue, PR, or comment, and use the templates in `.github/`. Rewrite the body when scope or approach changes; never append a running log of follow-ups.
 
 ## Finish shared work
 
-When implementation is ready, run focused checks for the changed behavior and directly affected areas, verify the requested outcome, and commit and push the task's changes.
+When implementation is ready, run the tier's checks from "Size the change", verify the requested outcome, and commit and push the task's changes.
 
-Before opening a PR for a code change, run only the named test files that cover the changed code (for example `npx vitest run tests/foo.test.ts`; find them with `rg -l <module> tests`) on the commit you will publish. Do not use `npm run test:branch` or `test:related` as the pre-PR check: a change to main, preload, CLI or build inputs makes them select most of the suite. Open the PR when they pass. Run the full suite (`npm test`) only for very large changes that affect multiple modules. If tests fail, fix the failure or leave the work on its pushed task branch without a PR, and report the failing tests; a failure you believe is unrelated or flaky still blocks the PR until you have shown it also fails on the default branch, and the PR must then name it. Hosted CI runs only basic checks, because local hardware is faster than the hosted runners, so the local run is the real gate. Rerun the relevant tests after later commits that change code. Documentation-only changes normally need diff and consistency review, not application tests.
+Before opening a PR for a code change, run only the named test files that cover the changed code (for example `npx vitest run tests/foo.test.ts`; find them with `rg -l <module> tests`) on the commit you will publish. When no test file covers it, say so in Verification rather than running a broader selection. Do not use `npm run test:branch` or `test:related` as the pre-PR check: a change to main, preload, CLI or build inputs makes them select most of the suite. Open the PR when they pass. Run the full suite (`npm test`) only for tier 5 changes that span multiple modules. If tests fail, fix the failure or leave the work on its pushed task branch without a PR, and report the failing tests; a failure you believe is unrelated or flaky still blocks the PR until you have shown it also fails on the default branch, and the PR must then name it. Hosted CI runs only basic checks, because local hardware is faster than the hosted runners, so the local run is the real gate. Rerun the relevant tests after later commits that change code. Documentation-only changes normally need diff and consistency review, not application tests.
 
 Then open or update the PR with verification evidence, written as described in "Write it up", including which tests ran locally and their result. Once checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. When an issue exists, use `Closes #123` for full completion or `Refs #123` for partial delivery and keep it open until completion lands. Keep unfinished shared work that passes its relevant tests in a draft PR, and work that does not on its pushed task branch. Report the published commit and links. This is ordinary task completion; do not start a session-end menu.
 
-When explicitly asked to merge, or when a small, low-risk documentation or communication-guidance change falls under the shared policy's standing authorization, review and merge promptly: verify the current head's relevant local test results, and actual GitHub-required checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up the merged task as described in "Cleanup after merge" in the shared policy. Do not trigger or wait for the optional full-suite CI run as an extra merge gate unless explicitly requested. Do not ask for another confirmation or add an arbitrary wait for changes covered by standing authorization. A request to commit and push alone does not authorize merging other changes.
+When explicitly asked to merge, or when a small, low-risk documentation or communication-guidance change falls under the shared policy's standing authorization, review and merge promptly: confirm the PR head is the commit the recorded checks ran on, check actual GitHub-required checks/reviews/conversations, and merge with `gh pr merge --match-head-commit <tested SHA>` using an enabled method. Do not wait for hosted CI that GitHub does not require; if GitHub blocks the merge on a required check, report it. Then confirm issue completion and clean up the merged task as described in "Cleanup after merge" in the shared policy. Do not trigger the optional full-suite CI run unless explicitly requested. Do not ask for another confirmation or add an arbitrary wait for changes covered by standing authorization. A request to commit and push alone does not authorize merging other changes.
 
 After any merge or push to the default branch, sync the primary worktree as described in "Local availability after merge" in the shared policy: fetch, fast-forward it when it is on the default branch, and verify it contains the merge commit. Never switch its branch, stash, or discard unrelated work to do this. If it cannot be synced, tell the user which branch it is on and the exact command to run; do not say the change is merged and available until it is.
 

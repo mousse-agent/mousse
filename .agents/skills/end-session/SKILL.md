@@ -22,7 +22,7 @@ For shared work, if the user only says "end session," briefly offer WIP handoff,
 
 ### WIP handoff
 
-Open or update a draft PR. Keep the issue open, record the handoff below, and identify the next action and its owner. This is the outcome for unfinished work, including failing checks.
+Open or update a draft PR when its relevant tests pass. Work that fails them stays on its pushed task branch without a PR. Keep the issue open, record the handoff below, and identify the next action and its owner. This is the outcome for unfinished work.
 
 ### Ready for review
 
