@@ -33,7 +33,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
-import type { ScheduledJob, Thread } from '../shared/types'
+import type { ChatMessage, ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -473,6 +473,8 @@ export class MmsProfileServices {
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
+    // The feature turns the store on; when it is off, MOUSSE_SQLITE_THREAD_STORE still can (development and tests).
+    if (this.config.get().features.sqliteThreadStore) this.threads.setSqliteStoreEnabled(true)
     this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
     this.projects.setThreadStore(this.threads)
     this.platform = new MmsProfilePlatform(this)
@@ -1118,7 +1120,7 @@ export class MmsProfileServices {
           try { this.personalBots?.afterTrash(this.lifecycleOwnedTasks(record.taskId).map((task) => task.taskId)) } catch (error) { console.warn('bot activations could not be ended after the trash', { error: error instanceof Error ? error.message : String(error) }) }
         }
       },
-      quiesceDisk: () => this.storageUsage.pause(),
+      quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() },
       beforePurgeRemoval: async (record) => {
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
@@ -1214,7 +1216,7 @@ export class MmsProfileServices {
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
       // A run that freed space has made the cached numbers wrong.
       onRunComplete: (report) => { if (report.counts.removed > 0) this.storageUsage.rescanSoon() },
-      quiesceDisk: () => this.storageUsage.pause()
+      quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() }
     })
     this.storageUsage = new StorageUsageService({
       store: this.threads.lifecycleStore,
@@ -2017,7 +2019,7 @@ export class MmsProfileServices {
         /* keep current */
       }
       return {
-        messages: this.orchestrator.getMessagesForPersistence(id),
+        messages: this.orchestrator.liveMessagesForSave(id) as ChatMessage[],
         agents,
         tasks,
         llmContext: this.orchestrator.getNativeContext(id)
@@ -2245,7 +2247,8 @@ export class MmsProfileServices {
       ['personal bots close', () => this.personalBots?.close()],
       ['bots database close', () => this.botStore?.close()],
       ['automations database close', () => this.automationRuns?.close()],
-      ['run engine database close', () => this.runEngine.store.db.close()]
+      ['run engine database close', () => this.runEngine.store.db.close()],
+      ['thread databases close', () => this.threads.closeThreadStorage()]
     ]
     for (const [what, close] of closes) {
       try {

@@ -91,9 +91,9 @@ export class ThreadRuntimeManager extends EventEmitter {
       this.attachRegistryListeners(threadId, rt)
     }
     if (this.threadStore?.getThread(threadId)) {
-      const data = this.threadStore.loadThreadData(threadId)
-      rt.loadAgents(data.agents ?? [])
-      rt.loadTasks(data.tasks ?? [])
+      const data = this.threadStore.loadThreadWorkState(threadId)
+      rt.loadAgents(data.agents)
+      rt.loadTasks(data.tasks)
     }
     // Sync into an existing orchestrator session only (no create — that would re-enter).
     this.orchestrator?.bindRuntimeRegistries?.(threadId, rt.agents, rt.tasks)
@@ -151,12 +151,10 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (!this.threadStore?.getThread(threadId)) return
     const rt = this.runtimes.get(threadId)
     if (!rt) return
-    this.threadStore.mutateThreadData(threadId, (current) => ({
+    // Fields left out keep what is stored; only agents and tasks are written.
+    this.threadStore.mutateThreadData(threadId, () => ({
       agents: rt.agents.list(),
-      tasks: rt.tasks.list(),
-      messages: current.messages,
-      llmContext: current.llmContext,
-      mousseAgentSessions: current.mousseAgentSessions
+      tasks: rt.tasks.list()
     }))
   }
 
@@ -311,12 +309,8 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (!this.threadStore) return
     for (const thread of this.threadStore.listAllThreads()) {
       if (thread.settledAt) continue
-      const data = this.threadStore.loadThreadData(thread.id)
-      const hasWork =
-        (data.agents?.length ?? 0) > 0 ||
-        (data.tasks?.length ?? 0) > 0 ||
-        (data.messageQueue?.length ?? 0) > 0 ||
-        (data.mousseAgentSessions?.length ?? 0) > 0
+      const data = this.threadStore.loadThreadWorkState(thread.id)
+      const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
       if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {

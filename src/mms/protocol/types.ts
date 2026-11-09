@@ -411,6 +411,7 @@ export const PROTOCOL_METHODS = [
   'storage.cleanup.plan',
   'storage.cleanup.lastReport',
   'storage.usage',
+  'storage.exportThreadJson',
   'files.list',
   'files.read',
   'files.write',

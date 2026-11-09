@@ -47,6 +47,8 @@ asarUnpack:
   - node_modules/@node-datachannel/**
   - node_modules/@cursor/sdk-*/**
   - out/main/cursorHost.js
+  - out/main/threadDbWorker.js
+  - out/cli/threadDbWorker.js
 npmRebuild: false
 win:
   target:

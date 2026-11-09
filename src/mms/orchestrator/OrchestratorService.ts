@@ -7231,6 +7231,14 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Full durable transcript, including hidden internal queue inputs used for claim provenance. */
+  /**
+   * The session's own transcript list, not a copy, for the thread store's save: the store remembers which rows this
+   * list held, so a message removed from it (or replaced in it) is removed or updated on disk. Read only.
+   */
+  liveMessagesForSave(threadId: string): readonly ChatMessage[] {
+    return threadId === this.boundSession.threadId ? this.boundSession.messages : this.getOrCreateSession(threadId).messages
+  }
+
   getMessagesForPersistence(threadId?: string): ChatMessage[] {
     const messages =
       !threadId || threadId === this.boundSession.threadId

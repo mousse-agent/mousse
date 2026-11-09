@@ -14,6 +14,7 @@ import { runBrowser } from './commands/browser'
 import { runAgents } from './commands/agents'
 import { runEngine } from './commands/engine'
 import { runConfig } from './commands/config'
+import { runStorage } from './commands/storage'
 import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
 import { runRelay } from './commands/relay'
@@ -98,6 +99,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'config':
         await runConfig(args)
+        break
+      case 'storage':
+        await runStorage(args)
         break
       case 'service':
         await runService(args)

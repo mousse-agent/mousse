@@ -44,7 +44,7 @@ const COMMANDS = new Set([
   'automation', 'schedule', 'agents', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
   'relay', 'net', 'bridge', 'spaces', 'bots', 'login', 'logout', 'control',
-  'connections', 'workflow', 'workflows', 'chat', 'browser', 'engine', 'approvals'
+  'connections', 'workflow', 'workflows', 'chat', 'browser', 'engine', 'approvals', 'storage'
 ])
 
 // These switches never consume a following workflow name or run ID.

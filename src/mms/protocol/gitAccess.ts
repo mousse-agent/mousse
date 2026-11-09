@@ -201,6 +201,7 @@ export const GIT_ACCESS = {
   'storage.cleanup.plan': 'read',
   'storage.cleanup.lastReport': 'none',
   'storage.usage': 'read',
+  'storage.exportThreadJson': 'none',
   'files.list': 'owned',
   'files.read': 'owned',
   'files.write': 'owned',

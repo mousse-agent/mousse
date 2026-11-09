@@ -4,10 +4,13 @@ import type { PermissionMode } from '../../shared/permissionMode'
 import { createErrorProvider } from '../../shared/errors'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import {
+  copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync
@@ -33,13 +36,12 @@ import type {
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
-import { parseMousseAgentSessions } from '../agents/legacyAgentSessions'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
 import type { QueueJournal } from '../queue/queueJournal'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
 import { getMousseHomeDir } from './paths'
-import { atomicWriteJsonSync } from './AtomicFs'
+import { atomicWriteJsonSync, fsyncDirectorySync } from './AtomicFs'
 import { ThreadGenerationStore } from './ThreadGenerationStore'
 import { ThreadJournal } from './ThreadJournal'
 import { ThreadRecoveryService } from './ThreadRecoveryService'
@@ -52,6 +54,20 @@ import type { ThreadPullRequestLink } from '../../shared/pullRequests'
 import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { withFileLock } from '../scheduled/fileLock'
 import { pathsEqual } from '../profiles/pathSafety'
+import {
+  legacyFingerprint,
+  readJsonFile,
+  readLegacyThreadData,
+  sameFingerprint,
+  ThreadDataCorruptionError,
+  validateArray,
+  type FileStamp
+} from './legacyThreadData'
+import { sharedThreadDbClient } from './threadDb/threadDbClient'
+import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
+import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
+
+export { ThreadDataCorruptionError } from './legacyThreadData'
 
 interface ThreadMeta {
   id: string
@@ -103,12 +119,10 @@ const threadErrors = createErrorProvider({
   thread_worktree_locked: { category: 'conflict', retryable: false, message: 'Worktree mode can only be changed before the first message.' }
 })
 
-export class ThreadDataCorruptionError extends Error {
-  constructor(readonly filePath: string, cause?: unknown) {
-    super(`Corrupt thread data: ${filePath}${cause instanceof Error ? ` (${cause.message})` : ''}`)
-    this.name = 'ThreadDataCorruptionError'
-  }
-}
+export type ThreadImportOutcome =
+  | { status: 'imported'; messages: number }
+  | { status: 'already' }
+  | { status: 'failed'; reason: string }
 
 export interface ThreadDataPatch {
   messages?: ChatMessage[]
@@ -120,61 +134,23 @@ export interface ThreadDataPatch {
   mousseAgentSessions?: MousseAgentSessionSnapshot[] | null
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+/** How often a thread in `thread.db` rewrites `meta.json` just to move `updatedAt` (`touchAfterSave`). */
+const META_TOUCH_INTERVAL_MS = 30_000
 
-function validateNativeContext(value: unknown, filePath: string): NativeLlmContext | undefined {
-  if (value === undefined) return undefined
-  if (!isRecord(value)) throw new ThreadDataCorruptionError(filePath, new Error('expected an object'))
-  if (value.version !== 1 && value.version !== 2) {
-    throw new ThreadDataCorruptionError(filePath, new Error(`unsupported version ${String(value.version)}`))
-  }
-  if (!Array.isArray(value.messages)) {
-    throw new ThreadDataCorruptionError(filePath, new Error('messages must be an array'))
-  }
-  if (value.retiredMessages !== undefined && !Array.isArray(value.retiredMessages)) {
-    throw new ThreadDataCorruptionError(filePath, new Error('retiredMessages must be an array'))
-  }
-  if (
-    !Number.isSafeInteger(value.activeStartIndex) ||
-    (value.activeStartIndex as number) < 0 ||
-    (value.activeStartIndex as number) > value.messages.length
-  ) {
-    throw new ThreadDataCorruptionError(filePath, new Error('activeStartIndex is outside the archive'))
-  }
-  if (value.fidelity !== 'native' && value.fidelity !== 'legacy-estimated') {
-    throw new ThreadDataCorruptionError(filePath, new Error('unsupported fidelity'))
-  }
-  if (
-    value.acceptedQueueItemIds !== undefined &&
-    (!Array.isArray(value.acceptedQueueItemIds) ||
-      value.acceptedQueueItemIds.some((id) => typeof id !== 'string' || id.length === 0))
-  ) {
-    throw new ThreadDataCorruptionError(filePath, new Error('acceptedQueueItemIds must be non-empty strings'))
-  }
-  if (
-    value.acceptedSteerItemIds !== undefined &&
-    (!Array.isArray(value.acceptedSteerItemIds) ||
-      value.acceptedSteerItemIds.some((id) => typeof id !== 'string' || id.length === 0))
-  ) {
-    throw new ThreadDataCorruptionError(filePath, new Error('acceptedSteerItemIds must be non-empty strings'))
-  }
-  if (value.compaction !== undefined) {
-    if (!isRecord(value.compaction)) {
-      throw new ThreadDataCorruptionError(filePath, new Error('compaction must be an object'))
-    }
-    for (const field of ['generation', 'tokensBefore', 'createdAt'] as const) {
-      const number = value.compaction[field]
-      if (typeof number !== 'number' || !Number.isFinite(number) || number < 0) {
-        throw new ThreadDataCorruptionError(filePath, new Error(`invalid compaction.${field}`))
-      }
-    }
-    if (typeof value.compaction.summary !== 'string') {
-      throw new ThreadDataCorruptionError(filePath, new Error('invalid compaction.summary'))
+/** Marks a thread exported back to JSON (`exportThreadToJson`); it is not imported again by itself. */
+const EXPORTED_MARKER = 'thread-db-exported.json'
+
+/** Import and create files a crashed process left behind; an hour old, so none belongs to an import still running. */
+function removeAbandonedImports(threadDir: string): void {
+  const cutoff = Date.now() - 60 * 60_000
+  for (const name of readdirSync(threadDir)) {
+    if (!/^thread\.db\.(import|create)-/.test(name)) continue
+    try {
+      if (statSync(join(threadDir, name)).mtimeMs < cutoff) rmSync(join(threadDir, name), { force: true })
+    } catch {
+      // Gone already.
     }
   }
-  return value as unknown as NativeLlmContext
 }
 
 export function executionThreadId(executionKey: string): string {
@@ -248,6 +224,215 @@ export class ThreadDataStore extends EventEmitter {
   assertLifecycleMutationAvailable(): void {
     const diagnostics = this.refreshLegacyTrash()
     if (diagnostics.length) throw new Error(`Lifecycle migration is blocked: ${diagnostics.map((entry) => entry.reason).join('; ')}`)
+  }
+
+  /**
+   * Threads kept in `thread.db` (`docs/thread-storage.md`). When on, new threads start in a database and older
+   * threads are imported from their JSON files when they are first read. A thread that has a database always uses
+   * it, whatever this says.
+   */
+  setSqliteStoreEnabled(enabled: boolean): void {
+    this.sqliteOverride = enabled
+  }
+
+  sqliteStoreEnabled(): boolean {
+    if (this.sqliteOverride !== undefined) return this.sqliteOverride
+    const value = process.env.MOUSSE_SQLITE_THREAD_STORE
+    return value === '1' || value === 'true'
+  }
+
+  private sqliteOverride?: boolean
+  private threadDbStore?: ThreadDbStore
+
+  private threadDb(): ThreadDbStore {
+    if (!this.threadDbStore) this.threadDbStore = new ThreadDbStore(sharedThreadDbClient())
+    return this.threadDbStore
+  }
+
+  /** How many transcript messages a thread folder holds, without loading them. */
+  private messageCountAt(threadDir: string): number {
+    if (ThreadDbStore.usesDb(threadDir)) return this.threadDb().messageCount(threadDir)
+    return this.readJsonFile<unknown[]>(join(threadDir, 'messages.json'), []).length
+  }
+
+  /**
+   * Closes this process's connections to a thread's database (checkpointing it) before its folder is moved or purged,
+   * and forgets what it held. Nothing to do for a JSON thread.
+   */
+  quiesceThreadStorage(location: string): void {
+    if (!existsSync(join(location, THREAD_DB_FILE))) return
+    this.threadDb().client.quiesce(location)
+    this.threadDb().forget(location)
+  }
+
+  /** Closes every connection this process holds to thread databases (before folders move or are purged). */
+  quiesceAllThreadStorage(): void {
+    const store = this.threadDbStore
+    if (!store) return
+    // What each thread holds in memory stays valid: every use checks the database's identity and sequence first.
+    store.client.callSync('closeAll')
+  }
+
+  /** Writes back and closes the thread databases at shutdown; the next use opens them again. */
+  closeThreadStorage(): void {
+    this.flushMetaTouches()
+    const store = this.threadDbStore
+    if (!store) return
+    try { store.client.callSync('closeAll') } catch { /* the workers may be gone */ }
+    store.forgetAll()
+  }
+
+  private readonly importState = new Map<string, { running?: Promise<ThreadImportOutcome>; failures: number; retryAt: number }>()
+
+  /** Starts an import of a JSON thread in the background, unless one ran or failed recently. */
+  private scheduleImport(id: string): void {
+    if (!this.sqliteStoreEnabled()) return
+    const state = this.importState.get(id)
+    // A thread exported for an older version stays on JSON until someone imports it on purpose.
+    if (existsSync(join(this.getThreadDir(id), EXPORTED_MARKER))) return
+    if (state?.running || (state && Date.now() < state.retryAt)) return
+    // Never inside the read that noticed it: that read may hold the thread's lock.
+    this.importState.set(id, { failures: state?.failures ?? 0, retryAt: Date.now() + 1_000 })
+    setImmediate(() => { void this.importThreadStorage(id).catch(() => undefined) })
+  }
+
+  /**
+   * Moves a JSON thread into `thread.db`: the read worker builds the database from the files and checks every row
+   * against them; then, under the thread's lock, the files are checked unchanged and the database is published
+   * (never over an existing one). The JSON files stay as they were, as a frozen backup. A failure leaves the thread
+   * on JSON, writes the reason to `thread-db-import-error.json` and is retried later.
+   */
+  importThreadStorage(id: string): Promise<ThreadImportOutcome> {
+    const state = this.importState.get(id) ?? { failures: 0, retryAt: 0 }
+    if (state.running) return state.running
+    this.importState.set(id, state)
+    const running = this.runImport(id).then(
+      (outcome) => {
+        state.running = undefined
+        if (outcome.status === 'failed') {
+          state.failures += 1
+          state.retryAt = Date.now() + Math.min(60 * 60_000, 60_000 * 2 ** Math.min(state.failures, 6))
+        } else {
+          state.failures = 0
+        }
+        return outcome
+      },
+      (error: unknown) => {
+        state.running = undefined
+        throw error
+      }
+    )
+    state.running = running
+    return running
+  }
+
+  private async runImport(id: string): Promise<ThreadImportOutcome> {
+    const threadDir = this.getThreadDir(id)
+    const errorPath = join(threadDir, 'thread-db-import-error.json')
+    const transactional = this.transactionalStoreEnabled()
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (ThreadDbStore.usesDb(threadDir)) return { status: 'already' }
+        const fingerprint: FileStamp[] = withThreadDataMutationLock(threadDir, () => {
+          removeAbandonedImports(threadDir)
+          if (transactional && existsSync(join(threadDir, 'manifest.json'))) {
+            new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
+          }
+          return legacyFingerprint(threadDir)
+        })
+        const tmpName = `${THREAD_DB_FILE}.import-${process.pid}-${uuidv4()}`
+        const built = await this.threadDb().client.call('build', threadDir, { tmpName, transactional, fingerprint })
+        if (!built.ok) continue
+        const published = withThreadDataMutationLock(threadDir, () => {
+          const tmp = join(threadDir, tmpName)
+          try {
+            if (ThreadDbStore.usesDb(threadDir)) return 'already' as const
+            if (!sameFingerprint(legacyFingerprint(threadDir), fingerprint)) return 'stale' as const
+            linkSync(tmp, join(threadDir, THREAD_DB_FILE))
+            fsyncDirectorySync(threadDir)
+            return 'published' as const
+          } finally {
+            rmSync(tmp, { force: true })
+          }
+        })
+        if (published === 'stale') continue
+        rmSync(errorPath, { force: true })
+        rmSync(join(threadDir, EXPORTED_MARKER), { force: true })
+        if (published === 'already') return { status: 'already' }
+        this.emit('thread-storage-imported', { id, messages: built.messages })
+        return { status: 'imported', messages: built.messages }
+      }
+      throw new Error('The thread kept changing while it was imported')
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      try {
+        atomicWriteJsonSync(errorPath, { failedAt: new Date().toISOString(), reason })
+      } catch {
+        // The folder may be gone (trashed meanwhile); the log line below still says why.
+      }
+      console.warn('thread storage import failed; the thread keeps using its JSON files', { threadId: id, reason })
+      this.emit('thread-storage-import-failed', { id, reason })
+      return { status: 'failed', reason }
+    }
+  }
+
+  private readonly downgradeChecked = new Set<string>()
+
+  /**
+   * An older build that ran after the import wrote only the JSON files. Those writes are not merged (they could bring
+   * back messages removed on purpose): the changed files are kept under `legacy-json/after-downgrade-<time>/` and
+   * reported, and the database stays the thread's record.
+   */
+  private checkForDowngradeWrites(threadDir: string, id: string): void {
+    if (this.downgradeChecked.has(threadDir)) return
+    this.downgradeChecked.add(threadDir)
+    try {
+      const recorded = this.threadDb().client.callSync('getInfoValue', threadDir, 'jsonFingerprint')
+      if (!recorded) return
+      const current = legacyFingerprint(threadDir)
+      if (sameFingerprint(current, JSON.parse(recorded) as FileStamp[])) return
+      const target = join(threadDir, 'legacy-json', `after-downgrade-${new Date().toISOString().replace(/[:.]/g, '-')}`)
+      mkdirSync(target, { recursive: true })
+      for (const stamp of current) {
+        if (!stamp.exists || stamp.file.includes('/') || stamp.file.includes('\\')) continue
+        copyFileSync(join(threadDir, stamp.file), join(target, stamp.file))
+      }
+      withThreadDataMutationLock(threadDir, () => {
+        this.threadDb().save(threadDir, {}, { jsonFingerprint: JSON.stringify(current) })
+      })
+      console.warn('an older Mousse wrote this thread after it moved to thread.db; those writes are kept, not merged', { threadId: id, keptIn: target })
+      this.emit('thread-storage-downgrade-writes', { id, keptIn: target })
+    } catch (error) {
+      console.warn('could not check a thread for writes by an older Mousse', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Writes a thread in `thread.db` back as the JSON files older builds read, for going back to one: the flat files
+   * and `conversation-state.json`, the generation pointer set aside so either store mode reads them, then the
+   * database renamed aside last. A crash before that rename leaves the database in charge, and exporting again
+   * repeats the export.
+   */
+  exportThreadToJson(id: string): { exported: boolean; databaseKeptAs?: string } {
+    const threadDir = this.getThreadDir(id)
+    return withThreadDataMutationLock(threadDir, () => {
+      if (!ThreadDbStore.usesDb(threadDir)) return { exported: false }
+      const data = this.threadDb().load(threadDir)
+      this.writeCompatibilityProjection(threadDir, { ...data, messageQueue: undefined })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const manifest = join(threadDir, 'manifest.json')
+      if (existsSync(manifest)) renameSync(manifest, `${manifest}.before-export-${stamp}`)
+      this.quiesceThreadStorage(threadDir)
+      if (existsSync(join(threadDir, `${THREAD_DB_FILE}-wal`))) {
+        throw new Error('The thread database is still open in another process; try again when it is idle')
+      }
+      const kept = join(threadDir, `${THREAD_DB_FILE}.exported-${stamp}`)
+      atomicWriteJsonSync(join(threadDir, EXPORTED_MARKER), { exportedAt: new Date().toISOString(), database: kept })
+      renameSync(join(threadDir, THREAD_DB_FILE), kept)
+      fsyncDirectorySync(threadDir)
+      this.downgradeChecked.delete(threadDir)
+      return { exported: true, databaseKeptAs: kept }
+    })
   }
 
   setTransactionalStoreEnabled(enabled: boolean): void {
@@ -378,9 +563,13 @@ export class ThreadDataStore extends EventEmitter {
     this.ensureThreadDir(threadDir)
 
     this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
-    this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
-    this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
-    this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
+    if (this.sqliteStoreEnabled()) {
+      this.threadDb().client.callSync('create', threadDir)
+    } else {
+      this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+      this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
+      this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
+    }
     mkdirSync(join(threadDir, 'terminals'), { recursive: true })
 
     if (!projectId) {
@@ -407,8 +596,9 @@ export class ThreadDataStore extends EventEmitter {
     const owner = this.lifecycleStore.get(id)?.parentTaskId
     if (owner && owner !== meta.lineage?.parentThreadId)
       throw new Error(`Thread ${id} is owned by ${owner}; only an unused new subagent can be discarded`)
-    if (this.readJsonFile<unknown[]>(join(threadDir, 'messages.json'), []).length)
+    if (this.messageCountAt(threadDir))
       throw new Error(`Thread ${id} has messages; only an unused new thread can be discarded`)
+    this.quiesceThreadStorage(threadDir)
     // The registration goes first: it is the step that can refuse, and a crash after it leaves an
     // unowned empty thread that `discardOrphanedSubagents` removes at the next start, rather than a
     // registration of a missing directory that would stall its owner's trash.
@@ -465,7 +655,8 @@ export class ThreadDataStore extends EventEmitter {
           // Project threads are listed by scanning their directories, so only a standalone one can miss.
           if (meta.projectId || indexed.has(id)) continue
         }
-        if (this.readJsonFile<unknown[]>(join(record.location, 'messages.json'), []).length) continue
+        if (this.messageCountAt(record.location)) continue
+        this.quiesceThreadStorage(record.location)
         this.lifecycleStore.forgetCreatedTask(id, { ownedBy: record.parentTaskId })
         if (meta && !meta.projectId) this.removeFromStandaloneIndex(id)
         rmSync(record.location, { recursive: true, force: true })
@@ -509,9 +700,13 @@ export class ThreadDataStore extends EventEmitter {
       }
       // A previous process may have died between these writes. Preserve every
       // file already present, including messages produced after admission.
-      for (const file of ['messages.json', 'agents.json', 'tasks.json']) {
-        const path = join(threadDir, file)
-        if (!existsSync(path)) this.writeJsonAtomic(path, [])
+      if (this.sqliteStoreEnabled() && !existsSync(join(threadDir, 'messages.json'))) {
+        if (!ThreadDbStore.usesDb(threadDir)) this.threadDb().client.callSync('create', threadDir)
+      } else if (!ThreadDbStore.usesDb(threadDir)) {
+        for (const file of ['messages.json', 'agents.json', 'tasks.json']) {
+          const path = join(threadDir, file)
+          if (!existsSync(path)) this.writeJsonAtomic(path, [])
+        }
       }
       if (!existsSync(metaPath)) this.writeJsonAtomic(metaPath, meta)
       const indexed = !projectId && this.readStandaloneIndexRaw().some((entry) => entry.id === id)
@@ -703,8 +898,7 @@ export class ThreadDataStore extends EventEmitter {
     // backfilled for merely-named threads with zero messages (see
     // ensureStartedAt), which would otherwise lock the toggle on new chats
     // that never ran a turn.
-    const messages = this.loadThreadData(id).messages
-    if (messages.length > 0) {
+    if (this.messageCountAt(this.getThreadDir(id)) > 0) {
       throw threadErrors.create('thread_worktree_locked')
     }
     const updated: Thread = {
@@ -850,86 +1044,38 @@ export class ThreadDataStore extends EventEmitter {
 
   loadThreadData(id: string): ThreadData {
     const threadDir = this.getThreadDir(id)
+    if (ThreadDbStore.usesDb(threadDir)) return this.loadThreadDataFromDir(threadDir, id)
     if (!this.transactionalStoreEnabled()) return this.loadThreadDataFromDir(threadDir, id)
     return withThreadDataMutationLock(threadDir, () => {
+      if (ThreadDbStore.usesDb(threadDir)) return this.loadThreadDataFromDir(threadDir, id)
       new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
       return this.loadThreadDataFromDir(threadDir, id)
     })
   }
 
+  /**
+   * `loadThreadData` for a caller that can wait: a thread in `thread.db` is read off the event loop first, so the
+   * synchronous read that follows finds it in memory.
+   */
+  async loadThreadDataAsync(id: string): Promise<ThreadData> {
+    await this.warmThread(id)
+    return this.loadThreadData(id)
+  }
+
+  /** Reads a thread in `thread.db` into memory off the event loop; JSON threads need nothing. */
+  async warmThread(id: string): Promise<void> {
+    const threadDir = this.getThreadDir(id)
+    if (ThreadDbStore.usesDb(threadDir)) await this.threadDb().warm(threadDir)
+  }
+
   private loadThreadDataFromDir(threadDir: string, id: string): ThreadData {
-    if (this.transactionalStoreEnabled()) {
-      const current = new ThreadGenerationStore(threadDir).loadCurrent()
-      if (current) {
-        const llmContextPath = join(
-          threadDir,
-          'generations',
-          current.descriptor.generationId,
-          'llm-context.json'
-        )
-        const sessionsPath = join(
-          threadDir,
-          'generations',
-          current.descriptor.generationId,
-          'mousse-agent-sessions.json'
-        )
-        const mousseAgentSessions = this.parseSessionCollection(
-          current.data.mousseAgentSessions,
-          sessionsPath
-        )
-        return {
-          messages: this.validateArray<ChatMessage>(current.data.messages, 'messages', threadDir),
-          agents: this.validateArray<Agent>(current.data.agents, 'agents', threadDir),
-          tasks: this.validateArray<Task>(current.data.tasks, 'tasks', threadDir),
-          llmContext: validateNativeContext(current.data.llmContext, llmContextPath),
-          mousseAgentSessions,
-          // queue.json remains the one live authority. Generation queue data is
-          // only a historical observation used for diagnostics/recovery.
-          messageQueue: this.readMessageQueueFile(threadDir, id)
-        }
-      }
+    if (ThreadDbStore.usesDb(threadDir)) {
+      this.checkForDowngradeWrites(threadDir, id)
+      return { ...this.threadDb().load(threadDir), messageQueue: this.readMessageQueueFile(threadDir, id) }
     }
-    const conversationStatePath = join(threadDir, 'conversation-state.json')
-    const legacyMessagesPath = join(threadDir, 'messages.json')
-    const legacyContextPath = join(threadDir, 'llm-context.json')
-    const conversationStateFresh = existsSync(conversationStatePath) &&
-      statSync(conversationStatePath).mtimeMs >= Math.max(
-        existsSync(legacyMessagesPath) ? statSync(legacyMessagesPath).mtimeMs : 0,
-        existsSync(legacyContextPath) ? statSync(legacyContextPath).mtimeMs : 0
-      )
-    const conversationState = conversationStateFresh
-      ? this.readJsonFile<unknown>(conversationStatePath, undefined)
-      : undefined
-    let conversationMessages: ChatMessage[] | undefined
-    let conversationContext: NativeLlmContext | undefined
-    if (conversationState !== undefined) {
-      if (!isRecord(conversationState) || conversationState.schemaVersion !== 1) {
-        throw new ThreadDataCorruptionError(conversationStatePath, new Error('unsupported conversation-state schema'))
-      }
-      conversationMessages = this.validateArray<ChatMessage>(conversationState.messages, 'messages', threadDir)
-      conversationContext = validateNativeContext(conversationState.llmContext, conversationStatePath)
-    }
-    const llmContextPath = join(threadDir, 'llm-context.json')
-    return {
-      messages: conversationMessages ?? this.validateArray<ChatMessage>(
-        this.readJsonFile<unknown>(legacyMessagesPath, []), 'messages', threadDir),
-      agents: this.validateArray<Agent>(
-        this.readJsonFile<unknown>(join(threadDir, 'agents.json'), []),
-        'agents',
-        threadDir
-      ),
-      tasks: this.validateArray<Task>(
-        this.readJsonFile<unknown>(join(threadDir, 'tasks.json'), []),
-        'tasks',
-        threadDir
-      ),
-      llmContext: conversationContext ?? validateNativeContext(
-        this.readJsonFile<unknown>(llmContextPath, undefined),
-        llmContextPath
-      ),
-      mousseAgentSessions: this.loadMousseAgentSessions(threadDir),
-      messageQueue: this.readMessageQueueFile(threadDir, id)
-    }
+    const data = readLegacyThreadData(threadDir, { transactional: this.transactionalStoreEnabled() })
+    this.scheduleImport(id)
+    return { ...data, mousseAgentSessions: data.mousseAgentSessions, messageQueue: this.readMessageQueueFile(threadDir, id) }
   }
 
   /**
@@ -943,6 +1089,29 @@ export class ThreadDataStore extends EventEmitter {
   ): ThreadData {
     const threadDir = this.getThreadDir(id)
     return withThreadDataMutationLock(threadDir, () => {
+      if (ThreadDbStore.usesDb(threadDir)) {
+        this.checkForDowngradeWrites(threadDir, id)
+        const stored = this.threadDb().loadLazy(threadDir)
+        const queue = this.readMessageQueueFile(threadDir, id)
+        const current = Object.defineProperty(stored, 'messageQueue', { value: queue, enumerable: true }) as ThreadData
+        const patch = mutator(current)
+        const change: ThreadDataChange = {}
+        if (patch.messages !== undefined) change.messages = patch.messages
+        if (patch.agents !== undefined) change.agents = patch.agents
+        if (patch.tasks !== undefined) change.tasks = patch.tasks
+        if (patch.llmContext !== undefined) change.llmContext = patch.llmContext
+        if (patch.mousseAgentSessions !== undefined) change.mousseAgentSessions = patch.mousseAgentSessions
+        this.threadDb().save(threadDir, change)
+        this.touchAfterSave(threadDir, patch.messages ? patch.messages.length > 0 : this.threadDb().messageCount(threadDir) > 0, { throttle: true })
+        return {
+          messages: patch.messages ?? current.messages,
+          agents: patch.agents ?? current.agents,
+          tasks: patch.tasks ?? current.tasks,
+          llmContext: patch.llmContext === null ? undefined : patch.llmContext ?? current.llmContext,
+          mousseAgentSessions: patch.mousseAgentSessions === null ? undefined : patch.mousseAgentSessions ?? current.mousseAgentSessions,
+          messageQueue: current.messageQueue
+        }
+      }
       if (this.transactionalStoreEnabled()) {
         new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
       }
@@ -1025,7 +1194,7 @@ export class ThreadDataStore extends EventEmitter {
   ): void {
     const threadDir = this.getThreadDir(id)
     withThreadDataMutationLock(threadDir, () => {
-      if (this.transactionalStoreEnabled()) {
+      if (this.transactionalStoreEnabled() && !ThreadDbStore.usesDb(threadDir)) {
         new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
       }
       this.saveThreadDataUnlocked(id, data, terminalScrollbacks)
@@ -1044,6 +1213,18 @@ export class ThreadDataStore extends EventEmitter {
   ): void {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
+    if (ThreadDbStore.usesDb(threadDir)) {
+      this.threadDb().save(threadDir, {
+        messages: data.messages,
+        agents: data.agents,
+        tasks: data.tasks,
+        llmContext: data.llmContext ?? null,
+        mousseAgentSessions: data.mousseAgentSessions ?? null
+      })
+      this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
+      this.touchAfterSave(threadDir, data.messages.length > 0, { throttle: true })
+      return
+    }
     const transactional = this.transactionalStoreEnabled()
     const journal = transactional ? new ThreadJournal(threadDir) : undefined
     const operationId = transactional ? uuidv4() : undefined
@@ -1130,33 +1311,8 @@ export class ThreadDataStore extends EventEmitter {
         this.writeCompatibilityProjection(threadDir, data)
       }
 
-      if (terminalScrollbacks) {
-        const terminalsDir = join(threadDir, 'terminals')
-        mkdirSync(terminalsDir, { recursive: true })
-        for (const [ptyId, scrollback] of Object.entries(terminalScrollbacks)) {
-          writeFileSync(join(terminalsDir, `${ptyId}.txt`), scrollback, 'utf-8')
-        }
-      }
-
-      const metaPath = join(threadDir, 'meta.json')
-      if (existsSync(metaPath)) {
-        try {
-          const meta = readThreadMeta<ThreadMeta>(metaPath)
-          meta.updatedAt = new Date().toISOString()
-          if (!meta.startedAt && data.messages.length > 0) {
-            meta.startedAt = meta.updatedAt
-          }
-          this.writeJsonAtomic(metaPath, meta)
-
-          if (!meta.projectId) {
-            this.updateStandaloneIndexEntry(meta)
-          }
-          // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
-          this.patchListCache(meta)
-        } catch {
-          // Corrupt meta: do not overwrite with a stale reconstructed fallback.
-        }
-      }
+      this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
+      this.touchAfterSave(threadDir, data.messages.length > 0)
     } catch (error) {
       if (!committed) {
         journal?.append({
@@ -1170,6 +1326,68 @@ export class ThreadDataStore extends EventEmitter {
         })
       }
       throw error
+    }
+  }
+
+  private writeTerminalScrollbacks(threadDir: string, terminalScrollbacks?: Record<string, string>): void {
+    if (!terminalScrollbacks) return
+    const terminalsDir = join(threadDir, 'terminals')
+    mkdirSync(terminalsDir, { recursive: true })
+    for (const [ptyId, scrollback] of Object.entries(terminalScrollbacks)) {
+      writeFileSync(join(terminalsDir, `${ptyId}.txt`), scrollback, 'utf-8')
+    }
+  }
+
+  /**
+   * A save moves `updatedAt`, and the first message marks the thread started. `meta.json` and the standalone index are
+   * rewritten (and fsynced) for that, which costs more than a database save itself; so for a thread in `thread.db`
+   * the lists in memory move on every save, while the files are written when the thread starts, when the last write
+   * is `META_TOUCH_INTERVAL_MS` old, and at shutdown (`closeThreadStorage`).
+   */
+  private touchAfterSave(threadDir: string, hasMessages: boolean, options: { throttle?: boolean } = {}): void {
+    const metaPath = join(threadDir, 'meta.json')
+    if (!existsSync(metaPath)) return
+    try {
+      const meta = readThreadMeta<ThreadMeta>(metaPath)
+      const now = new Date().toISOString()
+      const starting = !meta.startedAt && hasMessages
+      meta.updatedAt = now
+      if (starting) meta.startedAt = now
+      const lastWrite = this.metaTouchedAt.get(threadDir) ?? 0
+      if (options.throttle && !starting && Date.now() - lastWrite < META_TOUCH_INTERVAL_MS) {
+        this.pendingMetaTouch.set(threadDir, now)
+        this.patchListCache(meta)
+        return
+      }
+      this.writeJsonAtomic(metaPath, meta)
+      this.metaTouchedAt.set(threadDir, Date.now())
+      this.pendingMetaTouch.delete(threadDir)
+      if (!meta.projectId) this.updateStandaloneIndexEntry(meta)
+      // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
+      this.patchListCache(meta)
+    } catch {
+      // Corrupt meta: do not overwrite with a stale reconstructed fallback.
+    }
+  }
+
+  private readonly metaTouchedAt = new Map<string, number>()
+  private readonly pendingMetaTouch = new Map<string, string>()
+
+  /** Writes the `updatedAt` saves held back (`touchAfterSave`). */
+  private flushMetaTouches(): void {
+    for (const [threadDir, updatedAt] of [...this.pendingMetaTouch]) {
+      this.pendingMetaTouch.delete(threadDir)
+      try {
+        const metaPath = join(threadDir, 'meta.json')
+        if (!existsSync(metaPath)) continue
+        const meta = readThreadMeta<ThreadMeta>(metaPath)
+        if (meta.updatedAt >= updatedAt) continue
+        meta.updatedAt = updatedAt
+        this.writeJsonAtomic(metaPath, meta)
+        if (!meta.projectId) this.updateStandaloneIndexEntry(meta)
+      } catch {
+        // A thread moved or gone since; its own record is what counts.
+      }
     }
   }
 
@@ -1191,6 +1409,20 @@ export class ThreadDataStore extends EventEmitter {
       llmContext: data.llmContext
     })
     // Intentionally do not write queue.json here.
+  }
+
+  /**
+   * A thread's agents and tasks, and how many subagent sessions and queued messages it has, without loading its
+   * transcript (for runtime hydration and the restart pass over every thread).
+   */
+  loadThreadWorkState(id: string): { agents: Agent[]; tasks: Task[]; sessions: number; queued: number } {
+    const threadDir = this.getThreadDir(id)
+    if (ThreadDbStore.usesDb(threadDir)) {
+      const state = this.threadDb().readState(threadDir)
+      return { agents: state.agents as Agent[], tasks: state.tasks as Task[], sessions: state.sessions, queued: this.readMessageQueueFile(threadDir, id).length }
+    }
+    const data = this.loadThreadData(id)
+    return { agents: data.agents, tasks: data.tasks, sessions: data.mousseAgentSessions?.length ?? 0, queued: data.messageQueue?.length ?? 0 }
   }
 
   /** True once the chat has content (and backfills startedAt for older threads). */
@@ -1283,8 +1515,7 @@ export class ThreadDataStore extends EventEmitter {
     let threadDir: string | null = null
     try {
       threadDir = this.resolveThreadDir(thread, projectPath)
-      const messages = this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), [])
-      hasMessages = messages.length > 0
+      hasMessages = this.messageCountAt(threadDir) > 0
     } catch {
       // Project path may be unavailable; fall through to title-based detection.
     }
@@ -1497,57 +1728,11 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private readJsonFile<T>(filePath: string, fallback: T): T {
-    if (!existsSync(filePath)) return fallback
-    try {
-      return JSON.parse(readFileSync(filePath, 'utf-8')) as T
-    } catch (error) {
-      throw new ThreadDataCorruptionError(filePath, error)
-    }
+    return readJsonFile(filePath, fallback)
   }
 
   private validateArray<T>(value: unknown, collection: string, threadDir: string): T[] {
-    if (!Array.isArray(value)) {
-      throw new ThreadDataCorruptionError(
-        join(threadDir, `${collection}.json`),
-        new Error(`${collection} must be an array`)
-      )
-    }
-    return value as T[]
-  }
-
-  /**
-   * Load durable Mousse subagent sessions for a thread directory.
-   * Missing files are legacy-safe. Malformed JSON is fail-closed so a later
-   * persist cannot silently replace recovery evidence with an empty list.
-   */
-  private loadMousseAgentSessions(threadDir: string): MousseAgentSessionSnapshot[] {
-    const filePath = join(threadDir, 'mousse-agent-sessions.json')
-    try {
-      if (!existsSync(filePath)) return []
-      const raw = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown
-      return this.parseSessionCollection(raw, filePath) ?? []
-    } catch (error) {
-      if (error instanceof ThreadDataCorruptionError) throw error
-      throw new ThreadDataCorruptionError(filePath, error)
-    }
-  }
-
-  private parseSessionCollection(
-    raw: unknown,
-    filePath: string
-  ): MousseAgentSessionSnapshot[] | undefined {
-    if (raw === undefined) return undefined
-    if (!Array.isArray(raw)) {
-      throw new ThreadDataCorruptionError(filePath, new Error('sessions must be an array'))
-    }
-    const sessions = parseMousseAgentSessions(raw)
-    if (sessions.length !== raw.length) {
-      throw new ThreadDataCorruptionError(
-        filePath,
-        new Error('sessions contain an unsupported record')
-      )
-    }
-    return sessions
+    return validateArray<T>(value, collection, threadDir)
   }
 
   /** Same-directory durable replacement with file and parent-directory fsync. */
@@ -1626,10 +1811,10 @@ export class ThreadDataStore extends EventEmitter {
       if (options.titlesOnly || scanned >= scanBudget) continue
       scanned += 1
       try {
-        const messages = this.readJsonFile<Array<{ id: string; content: string }>>(
-          join(this.getThreadDir(thread.id), 'messages.json'),
-          []
-        )
+        const threadDir = this.getThreadDir(thread.id)
+        const messages = ThreadDbStore.usesDb(threadDir)
+          ? this.threadDb().client.callSync('searchTranscript', threadDir, normalized, limit)
+          : this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])
         for (const message of messages) {
           const content = message.content ?? ''
           const index = content.toLowerCase().indexOf(normalized)
