@@ -61,3 +61,21 @@ describe('the compaction row', () => {
     expect(text()).toContain('Compaction interrupted · full history kept')
   })
 })
+
+describe('compaction rows after a turn', () => {
+  it('leave the answer in place, and do not count toward the time the turn worked', () => {
+    const start = Date.parse(at)
+    const later = (ms: number) => new Date(start + ms).toISOString()
+    show([
+      prompt,
+      { id: 'a1', role: 'assistant', content: 'The answer of the turn', timestamp: later(41_000) },
+      row({ id: 'k1', streaming: false, content: 'Compaction stopped · full history kept', compaction: { manual: true, kept: 'stopped' }, timestamp: later(2 * 60 * 60_000) }),
+      row({ id: 'k2', streaming: false, content: 'Context compacted · 51K → 28K', compaction: { manual: true }, timestamp: later(2 * 60 * 60_000 + 5_000) })
+    ])
+    expect(text()).toContain('The answer of the turn')
+    expect(text()).toContain('Worked for 41s')
+    // In the order they happened, after the answer: no row folds into the turn's activity.
+    const order = ['The answer of the turn', 'Compaction stopped', 'Context compacted'].map((part) => text().indexOf(part))
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+  })
+})

@@ -54,6 +54,7 @@ import {
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
   type ToolPartBase,
@@ -215,7 +216,8 @@ function turnDurationMs(
   if (start == null) return null;
   let end = start;
   for (const message of assistants) {
-    if (isThreadNotice(message)) continue;
+    // A compaction started after the turn (Compact now, hours later) is no part of its work.
+    if (isThreadNotice(message) || isCompactionRow(message)) continue;
     const at = readCreatedAt(message);
     if (at != null && at > end) end = at;
   }
