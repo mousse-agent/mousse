@@ -717,6 +717,12 @@ export interface ChatMessage {
   /** Selection actually admitted for this user turn, independent of composer edits. */
   /** The model the message's turn ran (older messages carry the level packed into `model`). */
   modelSelection?: MessageModelSelection
+  /**
+   * Set on a copy of the source thread's conversation that a fork shows above its own (SPEC §16.2): the thread it
+   * came from and that message's turn there. Presentation only: the model gets the history through the fork's
+   * transfer, and Undo, edit and fork never act on a copy.
+   */
+  inherited?: { threadId: string; turnId?: string }
   contextHandoff?: {
     from: MessageModelSelection
     to: MessageModelSelection

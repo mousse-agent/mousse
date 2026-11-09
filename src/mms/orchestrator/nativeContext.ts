@@ -125,6 +125,8 @@ export function nextPromptCache(
 }
 
 export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext {
+  // A fork's copies of its source's conversation are shown only: the model gets that history through the transfer.
+  messages = messages.filter((message) => !message.inherited)
   // A newly created task has no legacy context to estimate. Preserve exact provenance.
   if (messages.length === 0) return createNativeContext()
   const transcript: Message[] = []
