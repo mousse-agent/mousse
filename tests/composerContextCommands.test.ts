@@ -31,7 +31,7 @@ import { nativeAgentAssistantMessage } from '../src/mms/providers/nativeAgentHis
 import type { ChatMessage } from '../src/shared/types'
 import { mutateDurableQueue } from '../src/mms/queue/durableQueue'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
-import { getQueueHoldPath, QUEUE_HOLD_STALE_MS, readQueueHold } from '../src/mms/queue/queueHold'
+import { getQueueHoldPath, QUEUE_HOLD_STALE_MS, readQueueHold, requestQueueHoldStop } from '../src/mms/queue/queueHold'
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {
@@ -347,6 +347,21 @@ describe('a message sent while the context compacts', () => {
     expect(fullHistory(orch, thread.id, before)).toBe(true)
   }, 30_000)
 
+  it('stops when another process asks it to through the hold (Send now there), and keeps the full history', async () => {
+    const { orch, thread, harness, engine, store } = await setup()
+    const before = longThread(orch, thread.id)
+    controlled(harness as never)
+    ;(orch as unknown as { queueHoldRenewMs: number }).queueHoldRenewMs = 20
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    const dir = store.getThreadDir(thread.id)
+    expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe(true)
+    expect(await compaction).toBe('stopped')
+    expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
+    expect(fullHistory(orch, thread.id, before)).toBe(true)
+    expect(existsSync(getQueueHoldPath(dir))).toBe(false)
+  }, 30_000)
+
   it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
     const { orch, thread, harness, engine, prompts, store } = await setup()
     longThread(orch, thread.id)
@@ -456,6 +471,27 @@ describe('a compaction hold found at startup', () => {
     expect(store.loadThreadData(thread.id).messages.find((message) => message.id === 'compacting'))
       .toMatchObject({ content: 'Compaction interrupted · full history kept', compaction: { kept: 'interrupted' } })
     expect(orch.getMessagesForPersistence(thread.id).find((message) => message.id === 'compacting')).toMatchObject({ streaming: false })
+  }, 30_000)
+
+  it('of another process: Send now there moves the message to the front and asks that process to stop; it goes first once the hold lifts', async () => {
+    const { orch, thread, store, prompts } = await setup()
+    leftBehind(store, thread.id, { pid: process.ppid, instance: 'another-process' })
+    await orch.send('picked', false, { threadId: thread.id, clientRequestId: 'peer-picked' })
+    const picked = orch.listQueue(thread.id).find((item) => item.content === 'picked')!
+
+    expect(orch.promoteQueueItemToSteer(thread.id, picked.id)).toBe(true)
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['picked', 'queued before the restart'])
+    expect(readQueueHold(store.getThreadDir(thread.id))).toMatchObject({ id: 'compacting', stopRequested: true })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(prompts).toHaveLength(0)
+
+    // That process reads the request, stops its compaction, settles its row and lifts the hold.
+    store.mutateThreadData(thread.id, (current) => ({ messages: current.messages.map((message) => (message.id === 'compacting' ? { ...message, streaming: false, content: 'Compaction stopped · full history kept' } : message)) }))
+    rmSync(getQueueHoldPath(store.getThreadDir(thread.id)))
+    orch.drainQueueAfterCompaction(thread.id)
+    await until(() => prompts.some((prompt) => prompt.text.includes('queued before the restart')))
+    expect(prompts[0]!.text).toContain('picked')
+    expect(prompts[0]!.text).not.toContain('queued before the restart')
   }, 30_000)
 
   it('of another process that still runs it: nothing drains and a send queues, until that compaction ends', async () => {

@@ -288,7 +288,7 @@ import {
   waitAcquireExecutionLease,
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
-import { isProcessAlive } from '../queue/processLiveness'
+import { isProcessAlive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import {
   clearQueueHold,
   clearStaleQueueHold,
@@ -296,6 +296,7 @@ import {
   QUEUE_HOLD_RENEW_MS,
   readQueueHold,
   renewQueueHold,
+  requestQueueHoldStop,
   setQueueHold,
   type QueueHold
 } from '../queue/queueHold'
@@ -7363,8 +7364,9 @@ export class OrchestratorService extends EventEmitter {
       threadId,
       session.executionLease?.owner.token
     )
-    // A compaction has no turn to steer: Send now skips it and the message goes first, with the full history.
-    if (!localActive && !externalActive && this.compactions.has(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
+    // A compaction (here, or in another process) has no turn to steer: Send now skips it and the message goes first,
+    // with the full history.
+    if (!localActive && !externalActive && this.compactionHoldsQueue(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
     if (!localActive && !externalActive) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
@@ -7412,7 +7414,9 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Send now on a message the queue holds while a compaction runs: the message moves to the front of the queue and
    * the compaction stops, with nothing cut ("Compaction stopped · full history kept"). Its hold lifts as it ends, and
-   * the queue drains as usual from the front, so this message is the first to go, with the full history.
+   * the queue drains as usual from the front, so this message is the first to go, with the full history. A
+   * compaction another process runs is asked to stop through its saved hold, which that process reads when it
+   * renews the hold.
    */
   private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): boolean {
     const threadId = session.threadId
@@ -7427,8 +7431,21 @@ export class OrchestratorService extends EventEmitter {
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
     this.emitQueueUpdated(threadId, session.queue)
     // A Stop already on its way ends it the same way.
-    this.stopCompaction(threadId)
+    if (!this.stopCompaction(threadId)) this.requestPeerCompactionStop(threadId)
     return true
+  }
+
+  /** Asks the process that runs the thread's compaction (its saved queue hold names it) to stop it. */
+  private requestPeerCompactionStop(threadId: string): void {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) return
+    try {
+      const hold = readQueueHold(threadDir)
+      if (hold && hold.ownerInstance !== PROCESS_INSTANCE_ID) requestQueueHoldStop(threadDir, hold.id)
+    } catch (error) {
+      // The message is first in the queue all the same, and goes when the compaction ends.
+      console.warn('[orchestrator] the compaction in another process could not be asked to stop', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
@@ -12204,7 +12221,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The heartbeat of a running compaction's queue hold. A hold that is gone was found stale by another process,
-   * whose queue may already have gone on with the full history: the compaction stops, so nothing it cut follows.
+   * whose queue may already have gone on with the full history: the compaction stops, so nothing it cut follows. A
+   * hold another process asked to stop (Send now there) stops it too.
    */
   private renewCompactionHold(threadId: string, threadDir: string, holdId: string, stop: AbortController): void {
     if (stop.signal.aborted) return
@@ -12213,6 +12231,9 @@ export class OrchestratorService extends EventEmitter {
       if (!hold) {
         console.warn('[orchestrator] the queue hold of a running compaction was lifted elsewhere; stopping the compaction', { threadId })
         stop.abort()
+      } else if (hold.stopRequested) {
+        // Send now on a held message in another process: stopped as a Stop here would.
+        this.stopCompaction(threadId)
       }
     } catch (error) {
       // A missed renewal is retried on the next beat; the hold stays well within its lifetime meanwhile.

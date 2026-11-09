@@ -7,6 +7,9 @@
  * The hold names the process that set it, which renews it every `QUEUE_HOLD_RENEW_MS` while the compaction
  * runs. A hold whose process is gone (a crash, a restart), or that nobody renewed for `QUEUE_HOLD_STALE_MS`
  * (its process hung, or the pid now belongs to another program), holds nothing; the next reader removes it.
+ *
+ * Another process asks the owner to stop the compaction through the hold (`stopRequested`, Send now on a
+ * held message there); the owner reads it when it renews the hold and stops as a Stop would.
  */
 
 import { existsSync, readFileSync, rmSync } from 'fs'
@@ -32,6 +35,8 @@ export interface QueueHold {
   ownerPid: number
   /** The owner process instance: tells a restarted process that reused the pid from the one that set the hold. */
   ownerInstance: string
+  /** Another process asked the owner to stop the compaction (Send now on a held message). */
+  stopRequested?: true
 }
 
 export function getQueueHoldPath(threadDir: string): string {
@@ -43,6 +48,7 @@ function isQueueHold(value: unknown): value is QueueHold {
   const hold = value as Partial<QueueHold>
   return hold.kind === 'compaction' && typeof hold.id === 'string' && typeof hold.since === 'string' &&
     (hold.renewedAt === undefined || typeof hold.renewedAt === 'string') &&
+    (hold.stopRequested === undefined || hold.stopRequested === true) &&
     typeof hold.ownerPid === 'number' && typeof hold.ownerInstance === 'string'
 }
 
@@ -80,6 +86,19 @@ export function renewQueueHold(threadDir: string, id: string, now = Date.now()):
     const renewed: QueueHold = { ...hold, renewedAt: new Date(now).toISOString() }
     atomicWriteJsonSync(getQueueHoldPath(threadDir), renewed)
     return renewed
+  })
+}
+
+/**
+ * Asks the process that set the hold `id` to stop its compaction: the request is saved on the hold, which that
+ * process reads when it next renews it. Returns whether the hold was there to ask.
+ */
+export function requestQueueHoldStop(threadDir: string, id: string): boolean {
+  return withQueueMutationLock(threadDir, () => {
+    const hold = readQueueHold(threadDir)
+    if (!hold || hold.id !== id) return false
+    if (!hold.stopRequested) atomicWriteJsonSync(getQueueHoldPath(threadDir), { ...hold, stopRequested: true })
+    return true
   })
 }
 

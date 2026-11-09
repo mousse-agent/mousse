@@ -13,6 +13,7 @@ import {
   QUEUE_HOLD_STALE_MS,
   readQueueHold,
   renewQueueHold,
+  requestQueueHoldStop,
   setQueueHold,
   type QueueHold
 } from '../src/mms/queue/queueHold'
@@ -73,6 +74,17 @@ describe('a queue hold this process set', () => {
     rmSync(getQueueHoldPath(dir))
     expect(renewQueueHold(dir, 'row', t0 + 20_000)).toBeNull()
     expect(readQueueHold(dir)).toBeNull()
+  })
+
+  it('carries a stop another process asked for through each renewal', () => {
+    const dir = threadDir()
+    setQueueHold(dir, { kind: 'compaction', id: 'row' }, t0)
+    expect(requestQueueHoldStop(dir, 'other')).toBe(false)
+    expect(readQueueHold(dir)!.stopRequested).toBeUndefined()
+    expect(requestQueueHoldStop(dir, 'row')).toBe(true)
+    expect(renewQueueHold(dir, 'row', t0 + 10_000)).toMatchObject({ stopRequested: true })
+    rmSync(getQueueHoldPath(dir))
+    expect(requestQueueHoldStop(dir, 'row')).toBe(false)
   })
 
   it('holds while this process says it still runs it, however long ago it was renewed', () => {
