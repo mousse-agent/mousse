@@ -18,7 +18,8 @@ export const THREAD_DB_FORMAT = 1
 export const ORD_STEP = 1024
 
 export interface DbInfo { seq: number; epoch: number; dbId: string; horizon: number }
-export interface DbRow { rid: number; coll: string; ord: number; payload: string }
+/** A row as read; `seq` is the thread's sequence when it last changed. */
+export interface DbRow { rid: number; coll: string; ord: number; seq: number; payload: string }
 export interface DbStateRow { key: string; payload: string }
 export interface DbLoad { info: DbInfo; rows: DbRow[]; state: DbStateRow[] }
 export interface DbChanges extends DbLoad { removed: Array<{ rid: number; coll: string }>; removedState: string[]; reset: boolean }
@@ -120,7 +121,7 @@ function loadFrom(db: DatabaseSync): DbLoad {
   db.exec('BEGIN')
   try {
     const info = readInfo(db)
-    const rows = db.prepare('SELECT rid, coll, ord, payload FROM items ORDER BY coll, ord, rid').all() as unknown as DbRow[]
+    const rows = db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload FROM items ORDER BY coll, ord, rid').all() as unknown as DbRow[]
     const state = db.prepare('SELECT key, payload FROM state').all() as unknown as DbStateRow[]
     return { info, rows, state }
   } finally {
@@ -241,7 +242,7 @@ export class ThreadDbEngine {
         const full = loadFrom(db)
         return { ...full, removed: [], removedState: [], reset: true }
       }
-      const rows = db.prepare('SELECT rid, coll, ord, payload FROM items WHERE changed_seq > ? ORDER BY coll, ord, rid').all(since) as unknown as DbRow[]
+      const rows = db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload FROM items WHERE changed_seq > ? ORDER BY coll, ord, rid').all(since) as unknown as DbRow[]
       const state = db.prepare('SELECT key, payload FROM state WHERE changed_seq > ?').all(since) as unknown as DbStateRow[]
       const removedRows = db.prepare('SELECT rid, coll FROM removed WHERE changed_seq > ?').all(since) as Array<{ rid: number; coll: string }>
       const removed = removedRows.filter((row) => !row.coll.startsWith('$state:'))
@@ -323,15 +324,16 @@ export class ThreadDbEngine {
     return row?.value
   }
 
-  /** Transcript messages whose text contains `needle` (case-insensitive), newest first. */
+  /**
+   * Transcript messages whose text contains `needle` with JavaScript's case-insensitive comparison
+   * (`toLowerCase().includes`), oldest first, as the JSON search read them. Every row is checked: SQLite's own case
+   * folding only knows ASCII, so it cannot narrow the scan without losing matches.
+   */
   searchTranscript(dir: string, needle: string, limit: number): Array<{ id: string; content: string }> {
     const connection = this.open(dir)
     const lowered = needle.toLowerCase()
     const out: Array<{ id: string; content: string }> = []
-    // Narrow by the raw payload first; the JSON escape of the needle is what the payload holds.
-    const escaped = JSON.stringify(lowered).slice(1, -1)
-    const rows = this.statement(connection, "SELECT payload FROM items WHERE coll = 'm' AND instr(lower(payload), ?) > 0 ORDER BY ord DESC, rid DESC").all(escaped) as Array<{ payload: string }>
-    for (const row of rows) {
+    for (const row of this.statement(connection, "SELECT payload FROM items WHERE coll = 'm' ORDER BY ord, rid").iterate() as Iterable<{ payload: string }>) {
       const message = JSON.parse(row.payload) as { id?: unknown; content?: unknown }
       const content = typeof message.content === 'string' ? message.content : ''
       if (typeof message.id === 'string' && content.toLowerCase().includes(lowered)) out.push({ id: message.id, content })

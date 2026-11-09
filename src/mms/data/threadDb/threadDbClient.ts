@@ -75,7 +75,8 @@ export class ThreadDbClient {
   private closed = false
   readonly mode: 'worker' | 'inline'
 
-  constructor(options: { script?: string | null } = {}) {
+  constructor(options: { script?: string | null; syncTimeoutMs?: number } = {}) {
+    this.syncTimeoutMs = options.syncTimeoutMs ?? SYNC_TIMEOUT_MS
     const script = options.script === null ? undefined : options.script ?? threadDbWorkerScript()
     if (!script) {
       this.mode = 'inline'
@@ -84,18 +85,8 @@ export class ThreadDbClient {
       return
     }
     this.mode = 'worker'
-    const flag = new Int32Array(new SharedArrayBuffer(4))
-    const { port1, port2 } = new MessageChannel()
-    this.writer = new Worker(script, {
-      workerData: { role: 'write', flag, port: port2 },
-      transferList: [port2],
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-    })
-    this.writer.unref()
-    // The port is only read synchronously; it must not keep the process alive.
-    port1.unref()
-    this.syncPort = port1
-    this.syncFlag = flag
+    this.writerScript = script
+    this.startWriter()
     this.reader = new Worker(script, { workerData: { role: 'read' }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
     this.reader.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
       const entry = this.pending.get(message.id)
@@ -116,16 +107,46 @@ export class ThreadDbClient {
     this.reader.unref()
   }
 
+  private writerScript?: string
+  private readonly syncTimeoutMs: number
+  private nextSyncId = 1
+
+  /** A write worker with its own reply port and flag. A worker that timed out is replaced by a new one. */
+  private startWriter(): void {
+    const flag = new Int32Array(new SharedArrayBuffer(4))
+    const { port1, port2 } = new MessageChannel()
+    this.writer = new Worker(this.writerScript!, {
+      workerData: { role: 'write', flag, port: port2 },
+      transferList: [port2],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    })
+    this.writer.unref()
+    // The port is only read synchronously; it must not keep the process alive.
+    port1.unref()
+    this.syncPort = port1
+    this.syncFlag = flag
+  }
+
   /** A save or a small read, finished when this returns. */
   callSync<K extends Op>(op: K, ...args: Args<K>): Result<K> {
     if (this.closed) throw new Error('Thread database client is closed')
     if (this.inlineWrite) return runOp(this.inlineWrite, op, args) as Result<K>
     const flag = this.syncFlag!
+    const id = this.nextSyncId++
     Atomics.store(flag, 0, 0)
-    this.writer!.postMessage({ op, args })
-    const waited = Atomics.wait(flag, 0, 0, SYNC_TIMEOUT_MS)
-    if (waited === 'timed-out') throw new Error(`Thread database ${op} did not finish in ${SYNC_TIMEOUT_MS / 1000} s`)
-    const reply = receiveMessageOnPort(this.syncPort!)?.message as { ok: boolean; value?: unknown; error?: WireError } | undefined
+    this.writer!.postMessage({ id, op, args })
+    const waited = Atomics.wait(flag, 0, 0, this.syncTimeoutMs)
+    if (waited === 'timed-out') {
+      // Its reply may still come, and must never be taken for the next request's: this worker and its port are
+      // replaced. A save it was running either committed or not; the next save finds out by the sequence.
+      const stuck = this.writer!
+      this.startWriter()
+      void stuck.terminate()
+      throw new Error(`Thread database ${op} did not finish in ${this.syncTimeoutMs / 1000} s`)
+    }
+    // Only this request can be answered on this port; anything else is a bug, and is not taken as the answer.
+    let reply: { id: number; ok: boolean; value?: unknown; error?: WireError } | undefined
+    while ((reply = receiveMessageOnPort(this.syncPort!)?.message as typeof reply) !== undefined && reply.id !== id);
     if (!reply) throw new Error(`Thread database ${op} sent no reply`)
     if (!reply.ok) throw fromWireError(reply.error!)
     return reply.value as Result<K>

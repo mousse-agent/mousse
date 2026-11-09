@@ -165,3 +165,108 @@ describe('thread database import', () => {
     expect(readdirSync(dir).filter((name) => name.includes('import-test2'))).toEqual([])
   })
 })
+
+describe('ThreadDbStore keeps rows its caller never saw', () => {
+  let dir: string
+  let client: ThreadDbClient
+  let store: ThreadDbStore
+  let peer: ThreadDbStore
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-peer-')))
+    client = new ThreadDbClient({ script: null })
+    store = new ThreadDbStore(client)
+    peer = new ThreadDbStore(new ThreadDbClient({ script: null }))
+    client.callSync('create', dir)
+  })
+
+  afterEach(async () => {
+    await client.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const ids = (): string[] => new ThreadDbStore(client).load(dir).messages.map((m) => m.id)
+
+  it('after the thread left the cache', () => {
+    store.save(dir, { messages: [message('a', 'a')] })
+    const held = store.load(dir).messages
+    peer.save(dir, { messages: [...peer.load(dir).messages, message('peer', 'p')] })
+    store.forget(dir)
+    held.push(message('b', 'b'))
+    store.save(dir, { messages: held })
+    expect(ids()).toEqual(['a', 'peer', 'b'])
+  })
+
+  it('in the model context, where rows have no id', () => {
+    const context = (messages: unknown[]) => ({ version: 2, messages, fidelity: 'native', activeStartIndex: 0 }) as unknown as NativeLlmContext
+    store.save(dir, { llmContext: context([{ role: 'user', content: 'a' }]) })
+    const mine = store.load(dir).llmContext!
+    const theirs = peer.load(dir).llmContext!
+    peer.save(dir, { llmContext: { ...theirs, messages: [...theirs.messages, { role: 'user', content: 'peer' }] } as NativeLlmContext })
+    store.save(dir, { llmContext: { ...mine, messages: [...mine.messages, { role: 'user', content: 'owner' }] } as NativeLlmContext })
+    const contents = new ThreadDbStore(client).load(dir).llmContext!.messages.map((m) => (m as { content: string }).content)
+    expect(contents).toEqual(['a', 'peer', 'owner'])
+  })
+
+  it('but removes what it saw, even when it clears the list or replaces every message with a copy', () => {
+    peer.save(dir, { messages: [message('only', 'x')] })
+    const loaded = store.load(dir).messages
+    loaded.splice(0)
+    expect(store.save(dir, { messages: loaded }).deleted).toBe(1)
+    expect(ids()).toEqual([])
+    peer.save(dir, { messages: [message('p1', 'x'), message('p2', 'y')] })
+    const copies = store.load(dir).messages.map((m) => structuredClone(m)).filter((m) => m.id !== 'p1')
+    store.save(dir, { messages: copies })
+    expect(ids()).toEqual(['p2'])
+  })
+})
+
+describe('JSON fidelity of saved rows', () => {
+  let dir: string
+  let client: ThreadDbClient
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-json-')))
+    client = new ThreadDbClient({ script: null })
+    client.callSync('create', dir)
+  })
+
+  afterEach(async () => {
+    await client.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('keeps an own __proto__ key in memory, on disk and in a fresh load', () => {
+    const store = new ThreadDbStore(client)
+    const parsed = JSON.parse('{"id":"m","role":"user","content":"x","timestamp":"t","meta":{"__proto__":{"important":1}}}') as ChatMessage
+    store.save(dir, { messages: [parsed] })
+    const expected = JSON.stringify([parsed])
+    expect(JSON.stringify(store.load(dir).messages)).toBe(expected)
+    expect(JSON.stringify(new ThreadDbStore(client).load(dir).messages)).toBe(expected)
+  })
+
+  it('saves exactly what JSON.stringify writes, and sees every change to it', () => {
+    const store = new ThreadDbStore(client)
+    const tricky = [
+      { n: new Number(42), s: new String('boxed'), b: new Boolean(false) },
+      { keyed: { toJSON: (key: string) => (key === 'keyed' ? 'by key' : 'other') } },
+      { nested: [undefined, () => 1, Symbol('x'), NaN, Infinity, -0] },
+      { date: new Date('2026-01-01T00:00:00Z') },
+      Object.defineProperty({}, 'getter', { enumerable: true, get: () => 'read' })
+    ]
+    tricky.forEach((extra, i) => {
+      const value = { id: `m${i}`, role: 'user', content: 'x', timestamp: 't', extra } as unknown as ChatMessage
+      store.save(dir, { messages: [value] })
+      expect(JSON.stringify(new ThreadDbStore(client).load(dir).messages)).toBe(JSON.stringify([value]))
+    })
+    // A change only JSON sees (a boxed number, a toJSON that depends on its key) is written.
+    const before = { id: 'k', role: 'user', content: 'x', timestamp: 't', extra: { x: {} } } as unknown as ChatMessage
+    store.save(dir, { messages: [before] })
+    const loaded = store.load(dir).messages
+    ;(loaded[0] as unknown as { extra: { x: unknown } }).extra.x = new Number(42)
+    expect(store.save(dir, { messages: loaded }).updated).toBe(1)
+    ;(loaded[0] as unknown as { extra: { x: unknown } }).extra.x = { toJSON: (key: string) => (key === 'x' ? 2 : 1) }
+    expect(store.save(dir, { messages: loaded }).updated).toBe(1)
+    expect(new ThreadDbStore(client).load(dir).messages[0]).toMatchObject({ extra: { x: 2 } })
+  })
+})

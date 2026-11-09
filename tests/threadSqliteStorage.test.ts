@@ -174,6 +174,14 @@ describe('threads kept in thread.db', () => {
     expect(results).toEqual([expect.objectContaining({ threadId: thread.id, matchType: 'message', messageId: 'm1' })])
   })
 
+  it('finds non-ASCII text whatever its case', () => {
+    const path = home()
+    const { threads } = open(path)
+    const thread = threads.createThread('Accents', undefined, undefined, { started: true })
+    threads.mutateThreadData(thread.id, () => ({ messages: [message('m1', 'Un ÉLAN rare')] }))
+    expect(threads.searchThreads('élan').map((hit) => hit.messageId)).toEqual(['m1'])
+  })
+
   it('reports message counts without loading a thread', () => {
     const path = home()
     const { threads } = open(path)

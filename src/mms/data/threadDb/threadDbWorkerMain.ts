@@ -10,12 +10,12 @@ const data = workerData as { role: 'write'; flag: Int32Array; port: MessagePort 
 
 if (data.role === 'write') {
   const engine = new ThreadDbEngine({ idleCloseMs: 2_000 })
-  parentPort!.on('message', (request: { op: string; args: unknown[] }) => {
-    let reply: { ok: boolean; value?: unknown; error?: ReturnType<typeof toWireError> }
+  parentPort!.on('message', (request: { id: number; op: string; args: unknown[] }) => {
+    let reply: { id: number; ok: boolean; value?: unknown; error?: ReturnType<typeof toWireError> }
     try {
-      reply = { ok: true, value: runOp(engine, request.op, request.args) }
+      reply = { id: request.id, ok: true, value: runOp(engine, request.op, request.args) }
     } catch (error) {
-      reply = { ok: false, error: toWireError(error) }
+      reply = { id: request.id, ok: false, error: toWireError(error) }
     }
     data.port.postMessage(reply)
     Atomics.store(data.flag, 0, 1)

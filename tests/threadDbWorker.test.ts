@@ -54,3 +54,31 @@ describe('thread database workers', () => {
     await expect(client.call('load', join(out, 'missing'))).rejects.toThrow(/No thread database/)
   })
 })
+
+describe('a write worker that does not answer in time', () => {
+  it('is replaced, and its late reply never answers the next request', async () => {
+    const out = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-threaddb-slow-')))
+    const script = join(out, 'slow.mjs')
+    // Speaks the write worker's protocol: "slow" answers after 400 ms, anything else at once with its own name.
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(script, `
+      import { parentPort, workerData } from 'node:worker_threads'
+      const { role, flag, port } = workerData
+      if (role === 'write') parentPort.on('message', (request) => {
+        if (request.op === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400)
+        port.postMessage({ id: request.id, ok: true, value: request.op })
+        Atomics.store(flag, 0, 1)
+        Atomics.notify(flag, 0)
+      })
+    `)
+    const slow = new ThreadDbClient({ script, syncTimeoutMs: 100 })
+    try {
+      expect(() => slow.callSync('slow' as never)).toThrow(/did not finish/)
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      expect(slow.callSync('info' as never)).toBe('info')
+    } finally {
+      await slow.close()
+      rmSync(out, { recursive: true, force: true })
+    }
+  })
+})

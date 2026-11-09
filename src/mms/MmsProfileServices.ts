@@ -473,7 +473,8 @@ export class MmsProfileServices {
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
-    this.threads.setSqliteStoreEnabled(this.config.get().features.sqliteThreadStore)
+    // The feature turns the store on; when it is off, MOUSSE_SQLITE_THREAD_STORE still can (development and tests).
+    if (this.config.get().features.sqliteThreadStore) this.threads.setSqliteStoreEnabled(true)
     this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
     this.projects.setThreadStore(this.threads)
     this.platform = new MmsProfilePlatform(this)

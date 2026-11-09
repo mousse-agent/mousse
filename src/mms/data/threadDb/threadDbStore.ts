@@ -9,9 +9,14 @@
  * sent to the write worker.
  *
  * Rows keep their identity through edits: an object this store handed out is known by its `rid`; a replaced object
- * claims the row with its message id (the n-th occurrence of an id claims the n-th row with it); context messages,
- * which have no id, claim the row at their position. A row another process added since this store last looked is
- * never removed by a save that did not include it.
+ * claims a row with its message id (the n-th occurrence of an id claims the n-th row with it); context messages,
+ * which have no id, claim the row at their position.
+ *
+ * A save removes only rows its caller could have seen. Every object and array this store hands out (or is given in
+ * a save) remembers the thread's sequence at that moment, and every row the sequence it last changed at; a row that
+ * changed after the newest view the caller's data came from is kept, and is never claimed by a new message in its
+ * place. Data with no remembered view (cloned objects) may remove only rows this process has handed out or saved.
+ * What is remembered is kept by object, not by cached thread, so it holds after the thread leaves the cache.
  */
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -20,21 +25,24 @@ import { fromSkeleton, sameAsSkeleton, skeletonOf, type Skeleton } from './jsonS
 import { ORD_STEP, THREAD_DB_FILE, type DbChanges, type DbInfo, type DbLoad, type SaveRequest } from './threadDbEngine'
 import type { ThreadDbClient } from './threadDbClient'
 
-interface Row { rid: number; ord: number; id: string | null; skel: Skeleton }
+interface Row {
+  rid: number
+  ord: number
+  id: string | null
+  skel: Skeleton
+  /** The thread's sequence when the row last changed. */
+  seq: number
+  /** Written by another process and never handed out or saved here since. */
+  unseen?: boolean
+}
+
+/** What this store remembers about an object or array it handed out or saved. */
+interface Known { dbId: string; rid?: number; view: number }
 
 interface Entry {
   info: DbInfo
   collections: Map<string, Row[]>
   state: Map<string, Skeleton>
-  ridOf: WeakMap<object, number>
-  /**
-   * Rows another process wrote, with the first load that handed them out. A save removes such a row only when the
-   * thread it is given came from that load or a later one; a view older than the row never had it.
-   */
-  external: Map<number, number | undefined>
-  /** The load each handed-out object came from. */
-  viewOf: WeakMap<object, number>
-  loads: number
   usedAt: number
 }
 
@@ -65,6 +73,7 @@ const MAX_CACHED_THREADS = 64
 
 export class ThreadDbStore {
   private readonly entries = new Map<string, Entry>()
+  private readonly known = new WeakMap<object, Known>()
   /** Loads a save or synchronous read had to do without a warm copy; tests assert entry points never cause one. */
   coldLoads = 0
   lastSave?: SaveStats
@@ -81,11 +90,11 @@ export class ThreadDbStore {
       const value = JSON.parse(row.payload) as unknown
       let rows = collections.get(row.coll)
       if (!rows) collections.set(row.coll, (rows = []))
-      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null })
+      rows.push({ rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq })
     }
     for (const rows of collections.values()) sortRows(rows)
     const state = new Map<string, Skeleton>(load.state.map((row) => [row.key, skeletonOf(JSON.parse(row.payload)) ?? null]))
-    return { info: load.info, collections, state, ridOf: new WeakMap(), external: new Map(), viewOf: new WeakMap(), loads: 0, usedAt: Date.now() }
+    return { info: load.info, collections, state, usedAt: Date.now() }
   }
 
   private remember(dir: string, entry: Entry): Entry {
@@ -101,20 +110,16 @@ export class ThreadDbStore {
       if (!rows) continue
       const index = rows.findIndex((row) => row.rid === removed.rid)
       if (index >= 0) rows.splice(index, 1)
-      entry.external.delete(removed.rid)
     }
     const touched = new Set<string>()
     for (const row of changes.rows) {
       const value = JSON.parse(row.payload) as unknown
       let rows = entry.collections.get(row.coll)
       if (!rows) entry.collections.set(row.coll, (rows = []))
-      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null }
+      const next: Row = { rid: row.rid, ord: row.ord, id: rowId(row.coll, value), skel: skeletonOf(value) ?? null, seq: row.seq, unseen: true }
       const index = rows.findIndex((existing) => existing.rid === row.rid)
       if (index >= 0) rows[index] = next
-      else {
-        rows.push(next)
-        entry.external.set(row.rid, undefined)
-      }
+      else rows.push(next)
       touched.add(row.coll)
     }
     for (const coll of touched) sortRows(entry.collections.get(coll)!)
@@ -193,18 +198,25 @@ export class ThreadDbStore {
   }
 
   private materialize(entry: Entry): StoredThreadData {
-    const view = ++entry.loads
-    for (const [rid, seen] of entry.external) if (seen === undefined) entry.external.set(rid, view)
+    const { dbId, seq: view } = entry.info
     const collections = new Map<string, unknown[]>()
     for (const [coll, rows] of entry.collections) {
-      collections.set(coll, rows.map((row) => {
+      const items = rows.map((row) => {
+        row.unseen = false
         const value = fromSkeleton<unknown>(row.skel)
-        if (value && typeof value === 'object') {
-          entry.ridOf.set(value, row.rid)
-          entry.viewOf.set(value, view)
-        }
+        if (value && typeof value === 'object') this.known.set(value, { dbId, rid: row.rid, view })
         return value
-      }))
+      })
+      this.known.set(items, { dbId, view })
+      collections.set(coll, items)
+    }
+    // An empty collection the caller fills in is still known to come from this view.
+    for (const coll of [TRANSCRIPT, 'c:a']) {
+      if (!collections.has(coll)) {
+        const items: unknown[] = []
+        this.known.set(items, { dbId, view })
+        collections.set(coll, items)
+      }
     }
     const state = new Map<string, unknown>()
     for (const [key, skel] of entry.state) state.set(key, fromSkeleton(skel))
@@ -230,7 +242,7 @@ export class ThreadDbStore {
       const entry = this.fresh(dir)
       const plan = this.plan(entry, change)
       if (!plan.request.inserts.length && !plan.request.updates.length && !plan.request.deletes.length && !plan.request.state.length && !info) {
-        this.registerObjects(entry, plan, [])
+        this.registerObjects(entry, plan, [], entry.info.seq)
         return (this.lastSave = { inserted: 0, updated: 0, deleted: 0, state: 0, bytes: 0 })
       }
       if (info) plan.request.info = info
@@ -311,9 +323,23 @@ export class ThreadDbStore {
 
   private planCollection(entry: Entry, coll: string, items: unknown[], plan: Plan): void {
     const old = entry.collections.get(coll) ?? []
+    const dbId = entry.info.dbId
+    const knownOf = (value: unknown): Known | undefined => {
+      const found = value && typeof value === 'object' ? this.known.get(value) : undefined
+      return found && found.dbId === dbId ? found : undefined
+    }
+    // The newest view the caller's data came from: the array's own, or any of its elements'.
+    let view = knownOf(items)?.view
+    for (const item of items) {
+      const found = knownOf(item)
+      if (found && (view === undefined || found.view > view)) view = found.view
+    }
+    /** Rows the caller could have seen: those it may remove, and the only ones a new message may claim. */
+    const seen = (row: Row): boolean => (view === undefined ? !row.unseen : row.seq <= view)
     const byRid = new Map<number, Row>(old.map((row) => [row.rid, row]))
+    const visible = old.filter(seen)
     const byId = new Map<string, Row[]>()
-    for (const row of old) {
+    for (const row of visible) {
       if (row.id === null) continue
       let list = byId.get(row.id)
       if (!list) byId.set(row.id, (list = []))
@@ -321,18 +347,13 @@ export class ThreadDbStore {
     }
     const claimed = new Set<number>()
     const matches: Array<Row | undefined> = new Array(items.length)
-    let newestView = 0
-    for (const item of items) {
-      const view = item && typeof item === 'object' ? entry.viewOf.get(item) : undefined
-      if (view !== undefined && view > newestView) newestView = view
-    }
     const hasIds = coll === TRANSCRIPT || /^s:\d+:m$/.test(coll)
     for (let j = 0; j < items.length; j++) {
       const item = items[j]
       let row: Row | undefined
-      const known = item && typeof item === 'object' ? entry.ridOf.get(item) : undefined
-      if (known !== undefined) {
-        const candidate = byRid.get(known)
+      const rid = knownOf(item)?.rid
+      if (rid !== undefined) {
+        const candidate = byRid.get(rid)
         if (candidate && !claimed.has(candidate.rid)) row = candidate
       }
       if (!row && hasIds) {
@@ -340,7 +361,8 @@ export class ThreadDbStore {
         if (id !== null) row = byId.get(id)?.find((candidate) => !claimed.has(candidate.rid))
       }
       if (!row && !hasIds) {
-        const candidate = old[j]
+        // Positions among the rows the caller saw: a row another writer appended is not taken for a new one.
+        const candidate = visible[j]
         if (candidate && !claimed.has(candidate.rid)) row = candidate
       }
       if (row) {
@@ -363,9 +385,8 @@ export class ThreadDbStore {
     const survivors: Row[] = []
     for (const row of old) {
       if (claimed.has(row.rid)) continue
-      const seen = entry.external.get(row.rid)
-      if (entry.external.has(row.rid) && (seen === undefined || newestView < seen)) survivors.push(row)
-      else plan.request.deletes.push({ rid: row.rid, coll })
+      if (seen(row)) plan.request.deletes.push({ rid: row.rid, coll })
+      else survivors.push(row)
     }
 
     // Orders for new rows: between the rows they sit between, or after the last one.
@@ -420,29 +441,35 @@ export class ThreadDbStore {
       if (row) {
         const same = sameAsSkeleton(item, row.skel)
         if (same && row.ord === ord) {
-          planned.push({ item, rid: row.rid, ord, skel: row.skel })
+          planned.push({ item, rid: row.rid, ord, skel: row.skel, seq: row.seq })
           continue
         }
-        const payload = same ? undefined : JSON.stringify(item)
+        // The payload is the skeleton serialized, so what is written and what is remembered can never differ.
+        const skel = same ? row.skel : skeletonOf(item) ?? null
+        const payload = same ? undefined : JSON.stringify(skel)
         if (payload !== undefined) plan.bytes += payload.length
         plan.request.updates.push({ rid: row.rid, coll, ord, payload })
-        planned.push({ item, rid: row.rid, ord, skel: same ? row.skel : skeletonOf(item) ?? null })
+        planned.push({ item, rid: row.rid, ord, skel })
       } else {
-        const payload = JSON.stringify(item)
+        const skel = skeletonOf(item) ?? null
+        const payload = JSON.stringify(skel)
         plan.bytes += payload.length
         const tmp = plan.request.inserts.length
         plan.request.inserts.push({ tmp, coll, ord, payload })
-        planned.push({ item, tmp, ord, skel: skeletonOf(item) ?? null })
+        planned.push({ item, tmp, ord, skel })
       }
     }
-    plan.collections.set(coll, { planned, survivors })
+    plan.collections.set(coll, { planned, survivors, items })
   }
 
-  private registerObjects(entry: Entry, plan: Plan, rids: number[]): void {
-    for (const { planned } of plan.collections.values()) {
+  /** After a save, what the caller gave is known to reflect the thread at `view`. */
+  private registerObjects(entry: Entry, plan: Plan, rids: number[], view: number): void {
+    const dbId = entry.info.dbId
+    for (const { planned, items } of plan.collections.values()) {
+      this.known.set(items, { dbId, view })
       for (const slot of planned) {
         const rid = slot.rid ?? rids[slot.tmp!]
-        if (rid !== undefined && slot.item && typeof slot.item === 'object') entry.ridOf.set(slot.item, rid)
+        if (rid !== undefined && slot.item && typeof slot.item === 'object') this.known.set(slot.item, { dbId, rid, view })
       }
     }
   }
@@ -451,29 +478,32 @@ export class ThreadDbStore {
     for (const [coll, { planned, survivors }] of plan.collections) {
       const rows: Row[] = planned.map((slot) => {
         const rid = slot.rid ?? rids[slot.tmp!]!
-        entry.external.delete(rid)
-        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel }
+        // Unchanged rows keep their sequence; written ones (and moved ones) take this save's.
+        return { rid, ord: slot.ord, id: rowId(coll, slot.item), skel: slot.skel, seq: slot.seq ?? info.seq }
       })
-      for (const survivor of survivors) rows.push({ ...survivor, ord: plan.moved.get(survivor.rid) ?? survivor.ord })
+      for (const survivor of survivors) {
+        const moved = plan.moved.get(survivor.rid)
+        rows.push(moved === undefined ? survivor : { ...survivor, ord: moved, seq: info.seq })
+      }
       sortRows(rows)
       if (rows.length) entry.collections.set(coll, rows)
       else entry.collections.delete(coll)
     }
-    for (const deleted of plan.request.deletes) entry.external.delete(deleted.rid)
     for (const [key, skel] of plan.state) {
       if (skel === null) entry.state.delete(key)
       else entry.state.set(key, skel)
     }
-    this.registerObjects(entry, plan, rids)
     entry.info = info
+    this.registerObjects(entry, plan, rids, info.seq)
   }
 }
 
-interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton }
+/** `seq` is set for a row left exactly as it was. */
+interface PlannedRow { item: unknown; rid?: number; tmp?: number; ord: number; skel: Skeleton; seq?: number }
 
 interface Plan {
   request: SaveRequest
-  collections: Map<string, { planned: PlannedRow[]; survivors: Row[] }>
+  collections: Map<string, { planned: PlannedRow[]; survivors: Row[]; items: unknown[] }>
   state: Map<string, Skeleton | null>
   bytes: number
   moved: Map<number, number>
