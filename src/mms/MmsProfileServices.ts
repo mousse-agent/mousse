@@ -1972,6 +1972,8 @@ export class MmsProfileServices {
     await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
+    // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute.
+    this.threads.startSearchIndexSweep()
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()

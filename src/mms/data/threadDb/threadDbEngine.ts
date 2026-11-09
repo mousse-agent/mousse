@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
+import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
@@ -240,6 +241,12 @@ export class ThreadDbEngine {
 
   closeAll(): void {
     for (const dir of [...this.connections.keys()]) this.close(dir)
+  }
+
+  /** Closes the search index too (at shutdown; the read worker keeps it open between requests). */
+  closeEverything(): void {
+    this.closeAll()
+    this.searchIndex?.close()
   }
 
   info(dir: string): DbInfo {
@@ -498,6 +505,30 @@ export class ThreadDbEngine {
     const rows = this.statement(this.open(dir), 'SELECT blob_paths FROM items WHERE blob_paths IS NOT NULL').all() as Array<{ blob_paths: string }>
     for (const row of rows) for (const ref of parseBlobPaths(row.blob_paths)) referenced.add(ref.sha256)
     return collectBlobs(dir, referenced, minAgeMs)
+  }
+
+  private searchIndex?: ThreadIndex
+
+  private index(): ThreadIndex {
+    return (this.searchIndex ??= new ThreadIndex(this))
+  }
+
+  /** Brings the profile's search index up to date for these threads (`threadIndex.ts`). */
+  indexUpdate(profileHome: string, targets: IndexTarget[]): number {
+    return this.index().update(profileHome, targets)
+  }
+
+  /** The search index sweep: catch up changed threads, drop threads no longer listed. */
+  indexReconcile(profileHome: string, live: IndexTarget[]): { updated: number; dropped: number } {
+    return this.index().reconcile(profileHome, live)
+  }
+
+  indexSearch(profileHome: string, request: IndexSearchRequest): IndexHit[] {
+    return this.index().search(profileHome, request)
+  }
+
+  indexStatus(profileHome: string): Array<{ threadId: string; seq: number }> {
+    return this.index().status(profileHome)
   }
 
   /** Checkpoints and closes the thread's database before its folder is moved or purged. */

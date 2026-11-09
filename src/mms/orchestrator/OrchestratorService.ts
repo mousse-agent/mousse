@@ -3402,7 +3402,7 @@ export class OrchestratorService extends EventEmitter {
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
-      searchThreads: (query, limit, options) => this.threadStore?.searchThreads(query, limit, { hideSubagents: true, ...options }) ?? [],
+      searchThreads: async (query, limit, options) => (await this.threadStore?.searchThreadsAsync(query, limit, { hideSubagents: true, ...options })) ?? [],
       threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),

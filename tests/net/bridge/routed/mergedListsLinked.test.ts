@@ -247,7 +247,7 @@ describe('another computer’s lists over a real link', () => {
     const thread = t.owner.threads.createThread('Findable elsewhere zebra')
     t.owner.threads.updateThreadMeta(thread.id, { startedAt: new Date().toISOString() } as never)
     t.caller.threads.createThread('Findable here zebra')
-    const scan = vi.spyOn(t.owner.threads, 'searchThreads')
+    const scan = vi.spyOn(t.owner.threads, 'searchThreadsAsync')
     const found = await t.dispatch('threads.search', { query: 'zebra', limit: 20 })
     // The other computer reads the transcripts of its newest threads only for a search asked from here.
     expect(scan.mock.calls.at(-1)?.[2]).toMatchObject({
