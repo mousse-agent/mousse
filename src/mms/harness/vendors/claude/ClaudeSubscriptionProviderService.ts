@@ -11,7 +11,8 @@ import type {
   ConfiguredProvider,
   ProviderLoginOption,
   ProviderLoginResult,
-  ProviderUsage
+  ProviderUsage,
+  UsageProxyKeyResult
 } from '../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
 import type { CredentialKind } from '../../../../shared/harness/status'
@@ -48,7 +49,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeEffectiveVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -56,6 +57,8 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
+import { checkProxyKey, localProxyOrigin, PROXY_KEY_VARIABLES, readLocalProxyClaudeUsage, type ProxyUsage, type ProxyUsageOptions } from '../../../providers/localProxyUsage'
+import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
@@ -244,6 +247,12 @@ type Dependencies = {
   live?: false | Partial<LiveTimings>
   /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
   usageLimitHoldMs?: number
+  /** Reads the limits of a local proxy Claude Code's base URL points at (default `readLocalProxyClaudeUsage`; tests). */
+  proxyUsage?: (options: ProxyUsageOptions) => Promise<ProxyUsage | undefined>
+  /** Checks a proxy key before it is saved (default `checkProxyKey`; tests). */
+  checkProxyKey?: (options: { baseUrl: string | undefined; key: string; signal?: AbortSignal }) => Promise<UsageProxyKeyResult>
+  /** Where proxy keys entered in Mousse are kept, encrypted (tests: a scratch file and codec). */
+  proxyKeys?: UsageProxyKeyStore
   /**
    * Ends a closed Claude Code process that has not exited by itself (`reapProcessTree`), with the
    * commands it started; tests substitute the grace or the kill.
@@ -1465,7 +1474,58 @@ export class ClaudeSubscriptionProviderService {
       /* a listener must not break provider work */
     }
   }
+  /**
+   * The account's plan limits from Claude Code itself; when it has none to give, the limits of the
+   * local CLI-to-API proxy its base URL points at, if it is one (labelled with that source).
+   */
   async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
+    const usage = await this.accountUsage(cwd, signal)
+    if (usage.status === 'available' || signal?.aborted) return usage
+    const proxy = await this.localProxyUsage(signal).catch(() => undefined)
+    if (!proxy) return usage
+    const { message: _own, ...named } = usage
+    return { ...named, ...proxy }
+  }
+
+  /** Only Claude Code's own base URL counts, and the key only from the user's Claude environment. */
+  private async localProxyUsage(signal?: AbortSignal): Promise<ProxyUsage | undefined> {
+    const env = this.environment()
+    const baseUrl = claudeEffectiveVariable(env, 'ANTHROPIC_BASE_URL')
+    if (!baseUrl) return undefined
+    // A key in Claude's environment wins; else the one saved in Mousse for exactly this proxy's origin.
+    const fromEnv = PROXY_KEY_VARIABLES.map((name) => claudeEffectiveVariable(env, name)).find(Boolean)
+    const origin = localProxyOrigin(baseUrl)
+    const saved = fromEnv || !origin ? undefined : this.usageProxyKeys().get(origin)
+    const keySource = fromEnv ? 'environment' as const : saved ? 'saved' as const : undefined
+    return (this.dependencies.proxyUsage ?? readLocalProxyClaudeUsage)({ baseUrl, managementKey: fromEnv ?? saved, ...(keySource ? { keySource } : {}), ...(signal ? { signal } : {}) })
+  }
+
+  private proxyKeyStore?: UsageProxyKeyStore
+  private usageProxyKeys(): UsageProxyKeyStore {
+    return (this.proxyKeyStore ??= this.dependencies.proxyKeys ?? new UsageProxyKeyStore(join(this.dir, 'usage-proxy-keys.json')))
+  }
+
+  /**
+   * Saves the management key of the local proxy Claude Code's base URL points at, after one
+   * management call shows the proxy accepts it. It is kept encrypted, for that origin only, and is
+   * never returned.
+   */
+  async setUsageProxyKey(key: string, signal?: AbortSignal): Promise<UsageProxyKeyResult> {
+    const baseUrl = claudeEffectiveVariable(this.environment(), 'ANTHROPIC_BASE_URL')
+    const origin = localProxyOrigin(baseUrl)
+    if (!origin) return { ok: false, reason: 'no_proxy' }
+    const result = await (this.dependencies.checkProxyKey ?? checkProxyKey)({ baseUrl, key, ...(signal ? { signal } : {}) })
+    if (result.ok) this.usageProxyKeys().set(origin, key.trim())
+    return result
+  }
+
+  /** Forgets the key saved for the proxy Claude Code's base URL points at now. */
+  clearUsageProxyKey(): void {
+    const origin = localProxyOrigin(claudeEffectiveVariable(this.environment(), 'ANTHROPIC_BASE_URL'))
+    if (origin) this.usageProxyKeys().clear(origin)
+  }
+
+  private async accountUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
     const unavailable = parseClaudeSubscriptionUsage(undefined)
     if (this.checkDue()) await this.status()
     if (!this.configured()) return unavailable

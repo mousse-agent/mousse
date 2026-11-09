@@ -3071,6 +3071,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         fetchedAt: new Date().toISOString()
       }
     }
+    // The management key of the local CLI-to-API proxy Claude's usage is read through: saved
+    // encrypted for that proxy's origin after it accepts the key, and never sent back. Only a window
+    // or the CLI on this computer may set or clear it (`providers.*` is never routed either).
+    case 'providers.setUsageProxyKey': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is set on its own computer')
+      const p = isObject(params) ? params : {}
+      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      return ctx.mms.claudeSubscription.setUsageProxyKey(asString(p.key, 'key', 1024))
+    }
+    case 'providers.clearUsageProxyKey': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is cleared on its own computer')
+      const p = isObject(params) ? params : {}
+      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      ctx.mms.claudeSubscription.clearUsageProxyKey()
+      return { ok: true }
+    }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)

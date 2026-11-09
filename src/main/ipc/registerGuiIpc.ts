@@ -2629,6 +2629,12 @@ export function registerGuiIpc(
   registerHandler('providers:getUsage', async () =>
     guiMms.request('providers.getUsage')
   )
+  registerHandler('providers:setUsageProxyKey', async (_e, providerId: string, key: string) =>
+    guiMms.request('providers.setUsageProxyKey', { providerId, key })
+  )
+  registerHandler('providers:clearUsageProxyKey', async (_e, providerId: string) => {
+    await guiMms.request('providers.clearUsageProxyKey', { providerId })
+  })
   registerHandler('providers:getSubscriptionUsage', async (_e, providerId: string) => {
     const res = await guiMms.request<{ usage?: string }>('providers.getSubscriptionUsage', {
       providerId

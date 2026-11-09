@@ -348,6 +348,8 @@ export const PROTOCOL_METHODS = [
   'settings.getOptions',
   'providers.getUsage',
   'providers.getSubscriptionUsage',
+  'providers.setUsageProxyKey',
+  'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech',
   'providers.transcribeAudio',
   // Harness gateway: instance snapshots and commands. Long operations return an operation id

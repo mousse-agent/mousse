@@ -102,7 +102,7 @@ export interface ManagedInstall {
 }
 
 /** What a runtime says of the account's usage; the gateway adds the instance's id and name. */
-export type RuntimeUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'manageUrl'>
+export type RuntimeUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'manageUrl' | 'source' | 'readAt' | 'plan'>
 
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
 export type RuntimeFactsReport = Omit<RuntimeFacts, 'instanceId' | 'configRevision' | 'accountGeneration'>

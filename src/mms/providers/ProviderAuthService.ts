@@ -579,7 +579,8 @@ export class ProviderAuthService {
         }
       })
     )
-    return { providers, fetchedAt: new Date().toISOString() }
+    // A sign-in's `source` says where its credential is kept ("stored"), not where the numbers came from.
+    return { providers: providers.map(({ source: _credential, ...usage }) => usage), fetchedAt: new Date().toISOString() }
   }
 
   /**

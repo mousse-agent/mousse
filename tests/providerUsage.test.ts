@@ -166,6 +166,8 @@ describe('provider usage dispatch', () => {
     const { providers } = await auth.getUsage()
     expect(providers.map(({ id, status }) => [id, status])).toEqual([['xai', 'available'], ['opencode-go', 'available'], ['openrouter', 'unavailable']])
     expect(providers[2].message).toBe('Usage information is not available for this provider.')
+    // Where a credential is kept is not a usage source: the page would show it beside the name.
+    expect(providers.every((provider) => provider.source === undefined)).toBe(true)
     expect(readers.xai).toHaveBeenCalledTimes(1)
     expect(readers.go).toHaveBeenCalledTimes(1)
     expect(fetchSpy).not.toHaveBeenCalled()

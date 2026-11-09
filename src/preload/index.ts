@@ -112,7 +112,7 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent } from '../shared/providerAuth'
+import type { CliInstallEvent, UsageProxyKeyResult } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
@@ -976,6 +976,11 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
+    /** Saves a proxy's management key for usage (checked first); the key never comes back. */
+    setUsageProxyKey: (providerId: string, key: string): Promise<UsageProxyKeyResult> =>
+      ipcRenderer.invoke('providers:setUsageProxyKey', providerId, key),
+    clearUsageProxyKey: (providerId: string): Promise<void> =>
+      ipcRenderer.invoke('providers:clearUsageProxyKey', providerId),
     onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
       ipcRenderer.on('providers:install:event', handler)

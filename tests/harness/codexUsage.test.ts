@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { USAGE_READ_MS, type Harness } from '../../src/mms/harness/gateway'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import type { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
-import { usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
+import { reportedUsageWindows, snapshotPlan, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
+import { managedCodexUsage, userCodexLimits } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { usageText } from '../../src/mms/providers/usageText'
 import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
@@ -24,6 +25,15 @@ import type { DriverContext } from '../../src/mms/harness/driver'
 
 const device = { kind: 'device' } as const
 const window = (usedPercent: number, windowDurationMins: number | null, resetsAt: number | null) => ({ usedPercent, windowDurationMins, resetsAt })
+
+describe('snapshotPlan', () => {
+  it('names the plan as ChatGPT does, and nothing for an unknown or odd value', () => {
+    expect(['plus', 'pro', 'team', 'edu_plus'].map((planType) => snapshotPlan({ primary: null, secondary: null, planType }))).toEqual(['Plus', 'Pro', 'Team', 'Edu Plus'])
+    expect(snapshotPlan({ primary: null, secondary: null, planType: 'unknown' })).toBeUndefined()
+    expect(snapshotPlan({ primary: null, secondary: null, planType: '<b>x</b>' })).toBeUndefined()
+    expect(snapshotPlan({ primary: null, secondary: null })).toBeUndefined()
+  })
+})
 
 describe('usageWindows', () => {
   it('names the 5-hour and weekly windows and reports what is left', () => {
@@ -46,6 +56,56 @@ describe('usageWindows', () => {
     expect(usageWindows({ primary: null, secondary: null })).toEqual([])
     expect(usageWindows(undefined)).toEqual([])
     expect(usageWindows({ primary: window(Number.NaN, 300, null), secondary: null })).toEqual([])
+  })
+})
+
+describe('a ChatGPT subscription shows the limits Codex reported on its last turn', () => {
+  const now = Date.UTC(2026, 10, 8, 12)
+  const seconds = (ms: number) => Math.floor(ms / 1000)
+  // The snapshot a turn's `account/rateLimits/updated` carries: a 5-hour and a weekly window.
+  const reported = { snapshot: { primary: window(42, 300, seconds(now + 3_600_000)), secondary: window(18, 10_080, seconds(now + 3 * 86_400_000)) }, at: now - 600_000 }
+
+  it("shows both windows with what is left and when they reset, dated, beside ChatGPT's page", () => {
+    expect(managedCodexUsage(true, reported, now)).toEqual({
+      status: 'available',
+      windows: [
+        { id: 'five_hour', label: '5-hour limit', remainingPercent: 58, resetsAt: new Date(seconds(now + 3_600_000) * 1000).toISOString() },
+        { id: 'seven_day', label: 'Weekly limit', remainingPercent: 82, resetsAt: new Date(seconds(now + 3 * 86_400_000) * 1000).toISOString() }
+      ],
+      readAt: new Date(now - 600_000).toISOString(),
+      manageUrl: CHATGPT_USAGE_URL
+    })
+  })
+
+  it('a window whose reset has passed since the snapshot reads as started over', () => {
+    expect(reportedUsageWindows(reported.snapshot, now + 2 * 3_600_000)[0]).toEqual({ id: 'five_hour', label: '5-hour limit', remainingPercent: 100 })
+    expect(reportedUsageWindows(reported.snapshot, now + 2 * 3_600_000)[1]).toMatchObject({ remainingPercent: 82 })
+  })
+
+  it('signed out, no turn yet, or a plan with no windows: one short line and the link', () => {
+    expect(managedCodexUsage(false, reported, now)).toEqual({ status: 'unavailable', windows: [], message: 'Sign in with ChatGPT to see limits.', manageUrl: CHATGPT_USAGE_URL })
+    expect(managedCodexUsage(true, undefined, now)).toEqual({ status: 'unavailable', windows: [], message: 'Limits show after the next turn.', manageUrl: CHATGPT_USAGE_URL })
+    expect(managedCodexUsage(true, { snapshot: { primary: null, secondary: null }, at: now }, now)).toMatchObject({ status: 'unavailable', message: 'No limits reported for this plan.' })
+  })
+})
+
+describe("the plan's limits read now through the user's own Codex CLI", () => {
+  const snapshot = { primary: window(10, 300, null), secondary: null }
+  const cli = (subject: string | undefined, read: () => Promise<{ snapshot: typeof snapshot; at: number; live: boolean }>) =>
+    ({ status: async () => ({}) as never, account: () => (subject ? { subject } : undefined), rateLimits: read })
+
+  it('only for the same ChatGPT account, only a live read, and never a failure', async () => {
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: true })), ' Me@Example.com ')).toEqual({ snapshot, at: 5 })
+    expect(await userCodexLimits(cli('chatgpt:other@example.com', async () => ({ snapshot, at: 5, live: true })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: false })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => { throw new Error('offline') }), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli(undefined, async () => ({ snapshot, at: 5, live: true })), 'me@example.com')).toBeUndefined()
+    expect(await userCodexLimits(cli('chatgpt:me@example.com', async () => ({ snapshot, at: 5, live: true })), null)).toBeUndefined()
+    expect(await userCodexLimits(undefined, 'me@example.com')).toBeUndefined()
+  })
+
+  it('a reading made now is shown undated', () => {
+    expect(managedCodexUsage(true, { snapshot, at: 1 }, 2, { live: true })).toEqual({ status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }], manageUrl: CHATGPT_USAGE_URL })
   })
 })
 
@@ -76,7 +136,7 @@ describe("the user's own Codex reports its plan limits", () => {
 
   it('says so when the numbers are the last Codex reported, not read now', async () => {
     const usage = await runtime(async () => ({ snapshot: { primary: window(20, 300, null), secondary: null }, at: Date.UTC(2026, 9, 27), live: false })).usage!(signal)
-    expect(usage).toMatchObject({ status: 'available', message: expect.stringContaining('last reported (2026-10-27T00:00:00.000Z)') })
+    expect(usage).toMatchObject({ status: 'available', message: "Codex couldn't be reached.", readAt: '2026-10-27T00:00:00.000Z' })
   })
 
   it('a plan with no limits is unavailable, not an empty meter', async () => {
