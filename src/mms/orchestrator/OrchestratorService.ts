@@ -11586,10 +11586,26 @@ export class OrchestratorService extends EventEmitter {
     for (const thread of ordered) {
       if (this.lifecycle.stopping) return
       if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
-      if (!this.sessions.has(thread.id)) await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      if (!this.sessions.has(thread.id)) {
+        // A thread with nothing to drain is not loaded at all: its transcript stays on disk until someone opens it.
+        if (!this.hasPendingNormalQueueItem(thread.id)) {
+          this.reclaimStaleThreadLease(thread.id)
+          continue
+        }
+        await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      }
       this.considerStartupDrain(thread.id)
     }
     this.pumpStartupDrainQueue()
+  }
+
+  private hasPendingNormalQueueItem(threadId: string): boolean {
+    try {
+      return listPendingQueue(this.threadStore?.loadMessageQueue(threadId) ?? []).some((item) => item.intent === 'normal' && item.state === 'pending')
+    } catch {
+      // An unreadable queue is left to the session load, which reports it.
+      return true
+    }
   }
 
   /**

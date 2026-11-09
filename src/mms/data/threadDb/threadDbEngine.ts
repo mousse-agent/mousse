@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
-import { formatCursor, parseCursor } from './pageCursor'
+import { formatCursor, parseCursor } from '../../../shared/pageCursor'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
@@ -161,9 +161,10 @@ function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null
 /** The cursor of a transcript row: its message id, and its occurrence when the id repeats. */
 function rowCursor(db: DatabaseSync, row: { rid: number; ord: number; payload: string; msg_id: string | null }): string {
   const id = row.msg_id ?? String((JSON.parse(row.payload) as { id?: unknown }).id)
-  const total = Number((db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND msg_id = ?").get(id) as { n: number }).n)
+  // Occurrences among visible messages only, as a loaded transcript counts them.
+  const total = Number((db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ?").get(id) as { n: number }).n)
   if (total <= 1) return id
-  const earlier = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND msg_id = ? AND (ord < ? OR (ord = ? AND rid < ?))").get(id, row.ord, row.ord, row.rid) as { n: number }
+  const earlier = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? AND (ord < ? OR (ord = ? AND rid < ?))").get(id, row.ord, row.ord, row.rid) as { n: number }
   return formatCursor(id, Number(earlier.n), true)
 }
 
@@ -410,9 +411,10 @@ export class ThreadDbEngine {
       let cursor: { ord: number; rid: number } | undefined
       if (cursorText !== undefined) {
         const { id, occurrence } = parseCursor(cursorText)
+        // Among visible messages, as a loaded transcript pages; a bare id of a hidden message still finds it.
         cursor = (occurrence === undefined
-          ? db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(id)
-          : db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord ASC, rid ASC LIMIT 1 OFFSET ?").get(id, occurrence)) as { ord: number; rid: number } | undefined
+          ? db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY hidden ASC, ord DESC, rid DESC LIMIT 1").get(id)
+          : db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? ORDER BY ord ASC, rid ASC LIMIT 1 OFFSET ?").get(id, occurrence)) as { ord: number; rid: number } | undefined
         if (!cursor) return { info, messages: [], missing: true }
       }
       const forward = request.after !== undefined

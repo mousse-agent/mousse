@@ -1,7 +1,7 @@
 /**
  * Page cursors of a transcript: the message id a page starts or ends at. When an id appears more than once (a
  * message written twice by an older build), the cursor also says which occurrence, so paging never jumps between
- * the copies. Readers treat a cursor as opaque and send it back.
+ * the copies. Occurrences count visible messages only. Readers send a cursor back as it came.
  */
 const OCCURRENCE = '\u001f'
 

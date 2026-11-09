@@ -4,7 +4,7 @@
  * message's size is its JSON, so an image held inline counts in full.
  */
 
-import { cursorAt, cursorIndex } from '../data/threadDb/pageCursor'
+import { cursorAt, cursorIndex } from '../../shared/pageCursor'
 
 interface Identified {
   id: string

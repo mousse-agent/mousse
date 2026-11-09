@@ -198,3 +198,16 @@ describe('a long thread opened at its newest page', () => {
     expect(useAppStore.getState().messages).toHaveLength(51)
   })
 })
+
+describe('a reconnect to a long thread whose ids repeat', () => {
+  it('keeps the boundary this window already paged past', () => {
+    const withId = (id: string, content: string) => ({ ...message(id), content })
+    useAppStore.setState({
+      activeThreadId: 't',
+      messages: [withId('a', 'a'), withId('d', 'first'), withId('x', 'x'), withId('d', 'second'), withId('y', 'y')],
+      earlierByThread: { t: { before: 'a', count: 1 } }
+    })
+    useAppStore.getState().applyThreadView({ threadId: 't', messages: [withId('d', 'second'), withId('y', 'y')], earlier: { before: 'd\u001f1', count: 4 } } as never)
+    expect(useAppStore.getState().earlierByThread.t).toEqual({ before: 'a', count: 1 })
+  })
+})

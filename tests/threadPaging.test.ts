@@ -122,6 +122,28 @@ describe('thread pages from thread.db', () => {
     }
   })
 
+  it('counts repeated ids among visible messages, so a cursor works in a loaded transcript too', async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-paging-hidden-dup-')))
+    try {
+      client.callSync('create', other)
+      store.save(other, { messages: [message('a', 'a'), message('d', 'hidden d', { hidden: true }), message('x', 'x'), message('d', 'shown d'), message('y', 'y')] })
+      const newest = await client.call('page', other, { limit: 2, maxBytes: 1_000_000 })
+      // Only one visible message has id d, so its cursor is the bare id.
+      expect(newest.earlier?.before).toBe('d')
+      const cursor = newest.earlier!.before
+      const visible = store.load(other).messages.filter((m) => !m.hidden)
+      // The same cursor, in the database and in the loaded transcript, names the same message.
+      expect(messagesBefore(visible, cursor, 1, 1_000_000)!.messages.map((m) => m.content)).toEqual(['x'])
+      const fromDb = await client.call('page', other, { before: cursor, limit: 1, maxBytes: 1_000_000 })
+      expect(fromDb.messages.map((payload) => (JSON.parse(payload) as ChatMessage).content)).toEqual(['x'])
+      const back = await client.call('page', other, { before: fromDb.earlier!.before, limit: 5, maxBytes: 1_000_000 })
+      expect(back.messages.map((payload) => (JSON.parse(payload) as ChatMessage).content)).toEqual(['a'])
+    } finally {
+      client.quiesce(other)
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
   it('reports a message hidden since as removed, and one removed and written again as present', async () => {
     const seq = store.info(dir).seq
     const loaded = store.load(dir).messages
@@ -195,6 +217,16 @@ describe('opening a thread kept in thread.db', () => {
     const snapshot = await dispatchMethod(ctx(), 'thread.snapshot', { threadId: thread.id, newest: 5 }) as { messages: ChatMessage[] }
     const row = snapshot.messages.find((m) => m.id === 'c1')!
     expect(row.streaming).not.toBe(true)
+  })
+
+  it('does not load a thread with nothing queued when the daemon starts', async () => {
+    const thread = mms.threads.createThread('Idle', undefined, undefined, { started: true })
+    mms.threads.mutateThreadData(thread.id, () => ({ messages: transcript(50) }))
+    await mms.stop()
+    mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+    await mms.start()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(mms.orchestrator.hasSession(thread.id)).toBe(false)
   })
 
   it('answers a snapshot without newest with the whole visible transcript', async () => {
