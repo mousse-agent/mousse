@@ -190,7 +190,7 @@ export class ThreadDbClient {
       // Closing is best effort; SQLite recovers an unclosed WAL at the next open.
     }
     this.closed = true
-    this.inlineRead?.closeAll()
+    this.inlineRead?.closeEverything()
     await Promise.all([this.writer?.terminate(), this.reader?.terminate()])
   }
 }

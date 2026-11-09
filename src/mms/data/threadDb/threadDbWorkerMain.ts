@@ -24,6 +24,7 @@ if (data.role === 'write') {
 } else {
   // Reads open a connection per request and close it after, so this worker holds nothing open between them.
   const engine = new ThreadDbEngine({ idleCloseMs: 0, checkpointOnClose: false })
+  process.on('exit', () => engine.closeEverything())
   parentPort!.on('message', (request: { id: number; op: string; args: unknown[] }) => {
     try {
       const value = runOp(engine, request.op, request.args)

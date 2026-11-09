@@ -430,7 +430,7 @@ describe('agent access grant (SPEC §15.1)', () => {
       const allowed = (thread: { projectId?: string }) => thread.projectId === other.id
       // A search that only filters afterwards sees nothing but excluded matches in its first page.
       expect(d.store.searchThreads('needle', 5, { hideSubagents: true, titlesOnly: true }).some((hit) => hit.threadId === wanted.id)).toBe(false)
-      const found = host.searchThreads!('needle', 5, { allow: allowed, titlesOnly: true })
+      const found = await host.searchThreads!('needle', 5, { allow: allowed, titlesOnly: true })
       expect(found.map((hit) => hit.threadId)).toEqual([wanted.id])
     }, 60_000)
 
@@ -443,11 +443,11 @@ describe('agent access grant (SPEC §15.1)', () => {
       d.store.updateThreadMeta(old.id, { name: 'Old chat' })
       d.store.updateThreadMeta(recent.id, { name: 'Recent chat' })
       const messageHits = (options: Parameters<NonNullable<ReturnType<Phase6Daemon['orch']['mcpToolHost']>['searchThreads']>>[2]) =>
-        d.orch.mcpToolHost().searchThreads!('needle', 50, options).filter((hit) => hit.matchType === 'message').map((hit) => hit.threadId).sort()
-      expect(messageHits({ titlesOnly: true })).toEqual([])
-      expect(messageHits({})).toEqual([old.id, recent.id].sort())
+        Promise.resolve(d.orch.mcpToolHost().searchThreads!('needle', 50, options)).then((found) => found.filter((hit) => hit.matchType === 'message').map((hit) => hit.threadId).sort())
+      expect(await messageHits({ titlesOnly: true })).toEqual([])
+      expect(await messageHits({})).toEqual([old.id, recent.id].sort())
       // One transcript only: the thread updated last.
-      const hits = messageHits({ maxMessageThreads: 1 })
+      const hits = await messageHits({ maxMessageThreads: 1 })
       expect(hits).toEqual([d.store.listAllThreads().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0].id])
     })
 

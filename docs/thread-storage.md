@@ -66,6 +66,19 @@ Connections are opened only for a database that exists and are checked against t
 
 The worker is built as one self-contained file beside each bundle (`out/cli/threadDbWorker.js`, `out/main/threadDbWorker.js`) and unpacked in packaged builds. Tests that run from source use the same engine in-process.
 
+## Search
+
+`<profile>/thread-index.db` holds the transcript text of every thread kept in `thread.db`, with an FTS5 trigram index over it, so search matches substrings, case-insensitively, as it always did. It is a cache: the app never treats it as the record of anything.
+
+- It runs in the read worker, which handles requests in order.
+- **A save, then a search.** After a save, the daemon sends an index notice within a second, or right before the next search. The worker applies the notice before answering, so a search finds what was saved before it.
+- **Writes from elsewhere.** Before answering, a search also catches up any candidate thread whose database files changed since it was indexed, for example written by another process. That check costs a `stat` per thread.
+- **The sweep.** It runs at startup and every minute. It catches up changed threads and drops threads that are no longer listed.
+- **Rebuilding.** A missing, damaged or outdated index file is deleted and rebuilt from the thread databases. A thread whose database was replaced or renumbered is indexed again from scratch.
+- **Who may be searched.** That is still decided in the daemon, before the limit. The index is given the allowed threads and returns message matches only. Title and project matches are unchanged.
+- **Query length.** Queries of three characters or more use the full-text index. Shorter ones scan the index table, never the thread files.
+- **No scan bound.** Threads in `thread.db` are always all searched. `maxMessageThreads` still bounds the scan of threads that are still on JSON.
+
 ## Moving a thread from JSON
 
 With the feature on, a JSON thread is imported the first time it is read, in the background:

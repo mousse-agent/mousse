@@ -120,6 +120,28 @@ const threadErrors = createErrorProvider({
   thread_worktree_locked: { category: 'conflict', retryable: false, message: 'Worktree mode can only be changed before the first message.' }
 })
 
+export interface ThreadSearchResult {
+  threadId: string
+  threadName: string
+  projectId?: string
+  projectName?: string
+  matchType: 'thread' | 'project' | 'message'
+  snippet?: string
+  messageId?: string
+}
+
+type ScoredSearchResult = ThreadSearchResult & { score: number }
+
+interface SearchPlan {
+  normalized: string
+  projectNameById: Map<string, string>
+  titles: ScoredSearchResult[]
+  /** Threads that may match, in the order transcripts are read. */
+  candidates: Thread[]
+  /** The candidates whose transcripts a bounded scan reads. */
+  scan: Thread[]
+}
+
 export type ThreadImportOutcome =
   | { status: 'imported'; messages: number }
   | { status: 'already' }
@@ -277,6 +299,7 @@ export class ThreadDataStore extends EventEmitter {
   /** Writes back and closes the thread databases at shutdown; the next use opens them again. */
   closeThreadStorage(): void {
     this.flushMetaTouches()
+    this.stopSearchIndexSweep()
     const store = this.threadDbStore
     if (!store) return
     try { store.client.callSync('closeAll') } catch { /* the workers may be gone */ }
@@ -363,6 +386,7 @@ export class ThreadDataStore extends EventEmitter {
         rmSync(errorPath, { force: true })
         rmSync(join(threadDir, EXPORTED_MARKER), { force: true })
         if (published === 'already') return { status: 'already' }
+        this.noteIndexChange(id, threadDir)
         this.emit('thread-storage-imported', { id, messages: built.messages })
         return { status: 'imported', messages: built.messages }
       }
@@ -457,6 +481,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private invalidateListCache(): void {
+    this.dirCache.clear()
     this.listCache = null
     this.listCacheProjectsKey = null
     this.standaloneListCache = null
@@ -1106,6 +1131,7 @@ export class ThreadDataStore extends EventEmitter {
         if (patch.llmContext !== undefined) change.llmContext = patch.llmContext
         if (patch.mousseAgentSessions !== undefined) change.mousseAgentSessions = patch.mousseAgentSessions
         this.threadDb().save(threadDir, change)
+        if (change.messages !== undefined) this.noteIndexChange(id, threadDir)
         this.touchAfterSave(threadDir, patch.messages ? patch.messages.length > 0 : this.threadDb().messageCount(threadDir) > 0, { throttle: true })
         return {
           messages: patch.messages ?? current.messages,
@@ -1225,6 +1251,7 @@ export class ThreadDataStore extends EventEmitter {
         llmContext: data.llmContext ?? null,
         mousseAgentSessions: data.mousseAgentSessions ?? null
       })
+      this.noteIndexChange(id, threadDir)
       this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
       this.touchAfterSave(threadDir, data.messages.length > 0, { throttle: true })
       return
@@ -1748,32 +1775,75 @@ export class ThreadDataStore extends EventEmitter {
    * Matches over every thread by default. `hideSubagents` leaves out the threads a thread list would
    * fold under their parent (see `visibleThreads`); it applies before `limit`, so hidden threads
    * never use up result slots.
+   *
+   * Message matches of threads kept in `thread.db` come from the profile's search index in the read worker
+   * (`searchThreadsAsync`); this synchronous form, kept for callers that cannot wait, reads them from each
+   * thread's database instead.
    */
-  searchThreads(query: string, limit = 50, options: ThreadSearchOptions = {}): Array<{
-    threadId: string
-    threadName: string
-    projectId?: string
-    projectName?: string
-    matchType: 'thread' | 'project' | 'message'
-    snippet?: string
-    messageId?: string
-  }> {
+  searchThreads(query: string, limit = 50, options: ThreadSearchOptions = {}): ThreadSearchResult[] {
+    const plan = this.searchPlan(query, options)
+    if (!plan) return []
+    const messages: ScoredSearchResult[] = []
+    for (const thread of plan.scan) {
+      try {
+        const threadDir = this.listedThreadDir(thread.id)
+        const found = ThreadDbStore.usesDb(threadDir)
+          ? this.threadDb().client.callSync('searchTranscript', threadDir, plan.normalized, limit)
+          : this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])
+        messages.push(...this.messageResults(thread, plan, found))
+      } catch {
+        /* skip invalid thread data */
+      }
+    }
+    return this.finishSearch([...plan.titles, ...messages], limit)
+  }
+
+  /**
+   * `searchThreads` off the event loop: threads kept in `thread.db` are matched by the profile's search index
+   * (every one of them, with no bound on how many), JSON threads as before. Saves made before the call are
+   * indexed before it is answered.
+   */
+  async searchThreadsAsync(query: string, limit = 50, options: ThreadSearchOptions = {}): Promise<ThreadSearchResult[]> {
+    const plan = this.searchPlan(query, options)
+    if (!plan) return []
+    const messages: ScoredSearchResult[] = []
+    const indexed: Array<Thread & { dir: string }> = []
+    let budget = options.maxMessageThreads ?? Number.POSITIVE_INFINITY
+    if (!options.titlesOnly) {
+      for (const thread of plan.candidates) {
+        let threadDir: string
+        try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
+        if (ThreadDbStore.usesDb(threadDir)) {
+          indexed.push({ ...thread, dir: threadDir })
+          continue
+        }
+        if (budget <= 0) continue
+        budget -= 1
+        try {
+          messages.push(...this.messageResults(thread, plan, this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])))
+        } catch {
+          /* skip invalid thread data */
+        }
+      }
+    }
+    if (indexed.length) {
+      this.flushIndexNotices()
+      const byId = new Map(indexed.map((thread) => [thread.id, thread]))
+      const ordered = [...indexed].sort((a, b) => a.name.localeCompare(b.name)).map((thread) => ({ id: thread.id, name: thread.name, dir: thread.dir }))
+      const hits = await this.threadDb().client.call('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: limit * 4 })
+      for (const hit of hits) {
+        const thread = byId.get(hit.threadId)
+        if (thread) messages.push(...this.messageResults(thread, plan, [{ id: hit.messageId, content: hit.body }]))
+      }
+    }
+    return this.finishSearch([...plan.titles, ...messages], limit)
+  }
+
+  /** Who may be matched (decided before anything is matched), and the title and project matches. */
+  private searchPlan(query: string, options: ThreadSearchOptions): SearchPlan | undefined {
     const normalized = query.trim().toLowerCase()
-    if (!normalized) return []
-
-    const results: Array<{
-      threadId: string
-      threadName: string
-      projectId?: string
-      projectName?: string
-      matchType: 'thread' | 'project' | 'message'
-      snippet?: string
-      messageId?: string
-      score: number
-    }> = []
-
-    const projects = this.projectManager.listProjects()
-    const projectNameById = new Map(projects.map((p) => [p.id, p.name]))
+    if (!normalized) return undefined
+    const projectNameById = new Map(this.projectManager.listProjects().map((p) => [p.id, p.name]))
     const inventory = this.listAllThreads()
     let threads = options.hideSubagents ? visibleThreads(inventory) : inventory
     // Who may see a thread is decided before anything is matched, so excluded threads never use up
@@ -1782,71 +1852,41 @@ export class ThreadDataStore extends EventEmitter {
     // Bounded scans read the transcripts of the most recently updated threads only.
     const scanBudget = options.maxMessageThreads ?? Number.POSITIVE_INFINITY
     if (Number.isFinite(scanBudget) && !options.titlesOnly) threads = [...threads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    let scanned = 0
-
+    const titles: ScoredSearchResult[] = []
+    const candidates: Thread[] = []
     for (const thread of threads) {
       if (thread.settledAt) continue
       // Skip pure empty drafts; startedAt may be backfilled above via ensureStartedAt.
       if (!thread.startedAt && isDefaultThreadName(thread.name)) continue
       const projectName = thread.projectId ? projectNameById.get(thread.projectId) : undefined
-
-      if (thread.name.toLowerCase().includes(normalized)) {
-        results.push({
-          threadId: thread.id,
-          threadName: thread.name,
-          projectId: thread.projectId,
-          projectName,
-          matchType: 'thread',
-          score: 0
-        })
-      }
-
-      if (projectName && projectName.toLowerCase().includes(normalized)) {
-        results.push({
-          threadId: thread.id,
-          threadName: thread.name,
-          projectId: thread.projectId,
-          projectName,
-          matchType: 'project',
-          score: 1
-        })
-      }
-
-      if (options.titlesOnly || scanned >= scanBudget) continue
-      scanned += 1
-      try {
-        const threadDir = this.getThreadDir(thread.id)
-        const messages = ThreadDbStore.usesDb(threadDir)
-          ? this.threadDb().client.callSync('searchTranscript', threadDir, normalized, limit)
-          : this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])
-        for (const message of messages) {
-          const content = message.content ?? ''
-          const index = content.toLowerCase().indexOf(normalized)
-          if (index === -1) continue
-
-          const start = Math.max(0, index - 40)
-          const end = Math.min(content.length, index + normalized.length + 40)
-          const snippet =
-            (start > 0 ? '…' : '') +
-            content.slice(start, end).replace(/\s+/g, ' ').trim() +
-            (end < content.length ? '…' : '')
-
-          results.push({
-            threadId: thread.id,
-            threadName: thread.name,
-            projectId: thread.projectId,
-            projectName,
-            matchType: 'message',
-            snippet,
-            messageId: message.id,
-            score: 2
-          })
-        }
-      } catch {
-        /* skip invalid thread data */
-      }
+      const base = { threadId: thread.id, threadName: thread.name, projectId: thread.projectId, projectName }
+      if (thread.name.toLowerCase().includes(normalized)) titles.push({ ...base, matchType: 'thread', score: 0 })
+      if (projectName && projectName.toLowerCase().includes(normalized)) titles.push({ ...base, matchType: 'project', score: 1 })
+      candidates.push(thread)
     }
+    const scan = options.titlesOnly ? [] : candidates.slice(0, Number.isFinite(scanBudget) ? scanBudget : undefined)
+    return { normalized, projectNameById, titles, candidates, scan }
+  }
 
+  private messageResults(thread: Thread, plan: SearchPlan, messages: Array<{ id: string; content: string }>): ScoredSearchResult[] {
+    const out: ScoredSearchResult[] = []
+    const projectName = thread.projectId ? plan.projectNameById.get(thread.projectId) : undefined
+    for (const message of messages) {
+      const content = message.content ?? ''
+      const index = content.toLowerCase().indexOf(plan.normalized)
+      if (index === -1) continue
+      const start = Math.max(0, index - 40)
+      const end = Math.min(content.length, index + plan.normalized.length + 40)
+      const snippet =
+        (start > 0 ? '…' : '') +
+        content.slice(start, end).replace(/\s+/g, ' ').trim() +
+        (end < content.length ? '…' : '')
+      out.push({ threadId: thread.id, threadName: thread.name, projectId: thread.projectId, projectName, matchType: 'message', snippet, messageId: message.id, score: 2 })
+    }
+    return out
+  }
+
+  private finishSearch(results: ScoredSearchResult[], limit: number): ThreadSearchResult[] {
     const seen = new Set<string>()
     return results
       .sort((a, b) => a.score - b.score || a.threadName.localeCompare(b.threadName))
@@ -1858,5 +1898,84 @@ export class ThreadDataStore extends EventEmitter {
       })
       .slice(0, limit)
       .map(({ score: _score, ...rest }) => rest)
+  }
+
+  /**
+   * Folders of listed threads, for reads that visit every thread (search, the index sweep). Resolving a folder
+   * reads the thread's lifecycle record, which on hundreds of threads costs more than the search itself. Cleared
+   * with the thread lists, so a move or a trash is never served from it.
+   */
+  private readonly dirCache = new Map<string, string>()
+
+  private listedThreadDir(id: string): string {
+    let dir = this.dirCache.get(id)
+    if (!dir) {
+      dir = this.getThreadDir(id)
+      this.dirCache.set(id, dir)
+    }
+    return dir
+  }
+
+  private readonly indexDirty = new Map<string, string>()
+  private indexTimer?: ReturnType<typeof setTimeout>
+  private sweepTimer?: ReturnType<typeof setInterval>
+
+  /** A thread in `thread.db` was saved: its index rows are brought up to date shortly (or before the next search). */
+  private noteIndexChange(id: string, threadDir: string): void {
+    this.indexDirty.set(id, threadDir)
+    if (this.indexTimer) return
+    this.indexTimer = setTimeout(() => this.flushIndexNotices(), 1_000)
+    this.indexTimer.unref?.()
+  }
+
+  /** Sends the pending index notices; the read worker applies them before anything sent later. */
+  private flushIndexNotices(): void {
+    if (this.indexTimer) clearTimeout(this.indexTimer)
+    this.indexTimer = undefined
+    if (!this.indexDirty.size || !this.threadDbStore) return
+    const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
+    this.indexDirty.clear()
+    this.threadDbStore.client.call('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
+      console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /** Threads kept in `thread.db`, with their folders. */
+  private databaseThreads(): Array<{ threadId: string; dir: string }> {
+    const out: Array<{ threadId: string; dir: string }> = []
+    for (const thread of this.listAllThreads()) {
+      try {
+        const dir = this.listedThreadDir(thread.id)
+        if (ThreadDbStore.usesDb(dir)) out.push({ threadId: thread.id, dir })
+      } catch {
+        // A thread whose folder cannot be resolved now is not indexed now.
+      }
+    }
+    return out
+  }
+
+  /**
+   * Keeps the search index matching the thread databases: at once, then every `intervalMs`. Threads whose
+   * database files changed since they were indexed (written by another process, or a notice that was lost) are
+   * caught up, and threads no longer listed are dropped. A missing or damaged index is rebuilt by the first pass.
+   */
+  startSearchIndexSweep(intervalMs = 60_000): void {
+    if (this.sweepTimer) return
+    const sweep = (): void => {
+      const live = this.databaseThreads()
+      if (!live.length && !this.threadDbStore) return
+      this.threadDb().client.call('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+        console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    sweep()
+    this.sweepTimer = setInterval(sweep, intervalMs)
+    this.sweepTimer.unref?.()
+  }
+
+  stopSearchIndexSweep(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer)
+    this.sweepTimer = undefined
+    this.flushIndexNotices()
   }
 }

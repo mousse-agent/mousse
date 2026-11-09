@@ -589,7 +589,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
       minLevel: 'read',
       offered: () => false,
       target: () => ({}),
-      handler: (args, ctx) => {
+      handler: async (args, ctx) => {
         if (!host.searchThreads) return notAvailable('thread_search')
         if (typeof args.query !== 'string' || !args.query.trim()) throw new Error('query must be a non-empty string')
         if (args.query.length > THREAD_SEARCH_MAX_QUERY_CHARS) throw new Error(`query must be at most ${THREAD_SEARCH_MAX_QUERY_CHARS} characters`)
@@ -600,11 +600,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
         // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
         // or reads any transcript; transcripts are scanned for the most recent threads only.
         const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
-        const results = host.searchThreads(args.query, limit, {
+        const results = (await host.searchThreads(args.query, limit, {
           allow: (found) => (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId) && !isBotThread(host, found.id, found),
           titlesOnly: !manage,
           maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
-        })
+        }))
           .filter((hit) => manage || hit.matchType !== 'message')
           .filter((hit) => inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
           .slice(0, limit)

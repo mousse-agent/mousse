@@ -260,7 +260,7 @@ export interface AppToolHost extends DelegationToolsHost {
    * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
    * transcript is read.
    */
-  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads'>): ThreadSearchHit[]
+  searchThreads?(query: string, limit: number, options?: Pick<ThreadSearchOptions, 'allow' | 'titlesOnly' | 'maxMessageThreads'>): ThreadSearchHit[] | Promise<ThreadSearchHit[]>
   /** The thread's visible transcript. */
   threadMessages?(threadId: string): ChatMessage[]
   /** What waits on a thread: its queued messages and unanswered questions. */
