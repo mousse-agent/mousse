@@ -149,7 +149,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     since: { transcript: 2 }
   }),
   // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
-  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit']),
+  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit'], { version: 2, since: { after: 2 } }),
   'thread.changesSince': read('thread', ['threadId', 'seq', 'epoch']),
   // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
   'thread.messageImage': read('thread', ['threadId', 'messageId', 'queueItemId', 'index'], {
