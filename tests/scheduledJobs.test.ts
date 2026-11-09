@@ -1545,8 +1545,8 @@ describe('ScheduledJobService webhook placeholders', () => {
     expect(prompts[0]).toContain('untrusted')
     expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'ok', occurrenceKey: `webhook:${occurrenceId}`, missingPlaceholders: ['body.nope'] })
     expect(store.listWebhookDeliveries(job.id)[0]).toMatchObject({ occurrenceId, outcome: 'completed', missingPlaceholders: ['body.nope'] })
-    // The run is over, so its stored request is gone.
-    expect(store.readWebhookBody(job.id, occurrenceId)).toBeUndefined()
+    // The run is over; its stored request stays for Resend.
+    expect(store.readWebhookBody(job.id, occurrenceId)).toContain('Fix the cache')
     // The job's own prompt is untouched.
     expect(store.getJob(job.id)?.prompt).toBe('Review {{body.pull_request.title}} and {{body.nope}}.')
   })
@@ -1641,12 +1641,12 @@ describe('ScheduledJobService webhook placeholders', () => {
     service.start()
     await vi.waitFor(() => expect(store.getJob(job.id)?.pendingOccurrence).toMatchObject({ runId: 'run-1' }))
     expect(store.listWebhookDeliveries(job.id)[0]).toMatchObject({ outcome: 'queued', missingPlaceholders: ['body.nope'] })
-    // The stored request stays until the run ends.
+    // The stored request stays while the run goes, and after it for Resend.
     expect(store.readWebhookBody(job.id, occurrenceId)).toBe('{"action":"opened"}')
 
     service.occurrenceSettled({ jobId: job.id, occurrenceKey: `webhook:${occurrenceId}`, runId: 'run-1', status: 'ok', text: 'the reply' })
     expect(store.getJob(job.id)?.runHistory?.[0]).toMatchObject({ status: 'ok', output: 'the reply', missingPlaceholders: ['body.nope'] })
     expect(store.listWebhookDeliveries(job.id)[0]).toMatchObject({ outcome: 'completed', missingPlaceholders: ['body.nope'] })
-    expect(store.readWebhookBody(job.id, occurrenceId)).toBeUndefined()
+    expect(store.readWebhookBody(job.id, occurrenceId)).toBe('{"action":"opened"}')
   })
 })

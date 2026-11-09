@@ -1345,7 +1345,10 @@ export class MmsProfileServices {
         return open ? { kind: 'workflow_approval', runId, approvalId: open.approvalId, nodeId: open.nodeId, instanceKey: open.instanceKey, attempt: open.attempt } : undefined
       },
       watchStatus: (threadId) => this.pullRequestWatch.status(threadId),
-      moved: () => this.movedAutomations?.list() ?? []
+      moved: () => this.movedAutomations?.list() ?? [],
+      requestUrl: (jobId) => this.scheduledWebhookUrl(jobId),
+      deliveries: (jobId) => this.scheduled.listWebhookDeliveries(jobId),
+      payloadKept: (jobId, occurrenceId) => this.scheduled.hasWebhookPayload(jobId, occurrenceId)
     })
   }
 

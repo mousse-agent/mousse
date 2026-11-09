@@ -13,7 +13,6 @@ import { useAppStore } from '../../stores/appStore'
 import { useChatsStore } from '../../stores/chatsStore'
 import { Modal } from '../ui/Modal'
 import type { RowMenuItem } from '../integrations/RowMenu'
-import { WebhookDialog, type WebhookApi } from '../scheduled/WebhookDialog'
 import { draftFromJob, EMPTY_CATALOG, isUnchanged, modelGroups, patchOf, type ScheduledCatalog } from '../scheduled/jobDraft'
 import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
@@ -24,20 +23,20 @@ import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest
 import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
-import { defaultMay, groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentRuns, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { defaultMay, groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentEntries, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { deliveryText, type RequestApi } from './RequestTrigger'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 import { computerChoicesOf } from './computerChoice'
 
 /** How often the open page reads the list again, for sources that send no change event (bots' next runs, watches). */
 const POLL_MS = 15_000
 
-function browserWebhookApi(): WebhookApi {
+function browserRequestApi(): RequestApi {
   const webhook = window.mousse.scheduled.webhook
   return {
     enable: (id) => webhook.enable(id),
     rotate: (id) => webhook.rotate(id),
     disable: (id) => webhook.disable(id),
-    deliveries: (id) => webhook.deliveries(id),
     copy: (text) => navigator.clipboard.writeText(text)
   }
 }
@@ -92,14 +91,13 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [pausedOpen, setPausedOpen] = useState(false)
   const [recentOpen, setRecentOpen] = useState(false)
-  const [webhookJobId, setWebhookJobId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [moving, setMoving] = useState<string[] | null>(null)
   const [createRequest, setCreateRequest] = useState(0)
   const [prefill, setPrefill] = useState<CreatePrefill | null>(null)
   const automateRequest = useAutomationCreate((state) => state.request)
   const listRef = useRef<HTMLDivElement>(null)
-  const webhookApi = useMemo(browserWebhookApi, [])
+  const requestApi = useMemo(browserRequestApi, [])
   const viewerZone = useMemo(viewerTimeZone, [])
   const activeProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === state.activeThreadId)?.projectId ?? '')
   const profileId = useAppStore((state) => state.profileId)
@@ -180,7 +178,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const groups = useMemo(() => groupAutomations(shown, new Date()), [shown])
   const pausedGroup = groups.find((group) => group.key === 'paused')
   const visibleGroups = groups.filter((group) => group.key !== 'paused')
-  const recent = useMemo(() => recentRuns(shown), [shown])
+  const recent = useMemo(() => recentEntries(shown), [shown])
   const ordered = useMemo(() => [...visibleGroups.flatMap((group) => group.items), ...(pausedOpen ? pausedGroup?.items ?? [] : [])], [visibleGroups, pausedGroup, pausedOpen])
   const jobOf = (item: AutomationItem) => (item.link.kind === 'job' ? allJobs.find((job) => job.id === (item.link as { jobId: string }).jobId) : undefined)
   // This computer, then the person's other computers (the Computer chip; names show once there are two).
@@ -257,6 +255,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     }))
   }
   const keep = (jobId: string) => act(() => client.keep(jobId))
+  const resend = (jobId: string, occurrenceId: string) => act(() => client.resend(jobId, occurrenceId))
   const resume = (jobIds: string[]) => act(async () => { for (const id of jobIds) await window.mousse.scheduled.resume(id) })
   // A row paused because its bot is paused resumes the bot (all its schedules), as the bot's own Resume does.
   const resumeItem = (item: AutomationItem) => {
@@ -376,13 +375,11 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const selectedItems = selected.flatMap((key) => items.filter((item) => item.key === key))
   const moveReason = moveBlocked(selectedItems)
 
-  const webhookJob = webhookJobId ? jobs.find((job) => job.id === webhookJobId) : undefined
   const schedulerDown = status !== null && !status.running
   const rowCount = items.filter((item) => item.kind !== 'moved').length
 
   const dialogs = (
     <>
-      {webhookJob ? <WebhookDialog job={webhookJob} api={webhookApi} onClose={() => setWebhookJobId(null)} /> : null}
       {moving ? <MovePicker count={moving.length} computers={computers.filter((computer) => computer.node !== '')} onCancel={() => setMoving(null)} onMove={(node) => move(moving, node)} /> : null}
       {pausing ? <PausePicker count={pausing.length} onCancel={() => setPausing(null)} onPause={(until) => pause(pausing, until)} /> : null}
       {deleting ? (
@@ -431,7 +428,8 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             onPause={() => setPausing([detailItem.key])}
             onResume={() => void resumeItem(detailItem)}
             onDelete={() => setDeleting([detailItem.key])}
-            onWebhook={() => setWebhookJobId(detailJob.id)}
+            requestApi={requestApi}
+            onResend={(occurrenceId) => void resend(detailJob.id, occurrenceId)}
             onKeep={() => void keep(detailJob.id)}
             onOpenThread={goThread}
             onOpenBot={openBot}
@@ -580,16 +578,22 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
           {recentOpen && recent.length ? (
             <section className="automation-group" data-testid="automation-recent-runs" aria-label="Recent runs">
               <ul className="automation-recent">
-                {recent.map(({ item, run }, at) => (
-                  <li key={`${item.key}-${run.at}-${at}`} className="automation-run" data-state={run.state}>
-                    <span className={`automation-glyph ${glyphOf(item).kind}`} aria-hidden="true">{glyphOf(item).glyph}</span>
-                    <span className="automation-run-name">{item.kind === 'moved' ? `${item.name} · ${item.whenText}` : item.name}</span>
-                    <span className="automation-run-text">{runText(run, now, item.computer, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '')}</span>
-                    <span className="automation-run-when">{ownedWhenText(run.at, now, item.computer, viewerZone)}</span>
-                    {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
-                    {run.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => goThread(run.threadId!)}>Open thread</button> : null}
-                  </li>
-                ))}
+                {recent.map(({ item, at, run, delivery }, index) => {
+                  const request = delivery ? deliveryText(delivery) : undefined
+                  const occurrenceId = run?.request?.resendable ? run.request.occurrenceId : delivery?.resendable ? delivery.occurrenceId : undefined
+                  return (
+                    <li key={`${item.key}-${at}-${index}`} className="automation-run" data-state={run?.state ?? 'refused'} data-testid={delivery && !run ? 'automation-recent-delivery' : undefined}>
+                      <span className={`automation-glyph ${glyphOf(item).kind}`} aria-hidden="true">{glyphOf(item).glyph}</span>
+                      <span className="automation-run-name">{item.kind === 'moved' ? `${item.name} · ${item.whenText}` : item.name}</span>
+                      {request ? <span className={`scheduled-outcome${request.refused ? ' refused' : ''}`} title={request.detail || undefined}>{request.word}</span> : null}
+                      <span className="automation-run-text">{run ? runText(run, now, item.computer, viewerZone).replace(/ · (just now|\d+ (min|h|d) ago)$/, '') : request?.detail}</span>
+                      <span className="automation-run-when">{ownedWhenText(at, now, item.computer, viewerZone)}</span>
+                      {run && missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
+                      {run?.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => goThread(run.threadId!)}>Open thread</button> : null}
+                      {occurrenceId && item.link.kind === 'job' ? <button type="button" className="scheduled-link-btn" data-testid="automation-recent-resend" title="Run it again with this request's stored body" onClick={() => void resend((item.link as { jobId: string }).jobId, occurrenceId)}>Resend</button> : null}
+                    </li>
+                  )
+                })}
               </ul>
             </section>
           ) : null}

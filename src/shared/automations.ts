@@ -1,13 +1,13 @@
 import type { BotLook } from './bots/personal/look'
 import type { PermissionMode } from './permissionMode'
-import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, TellMe } from './types'
+import type { JobSchedule, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, ScheduledWebhookDeliveryOutcome, TellMe } from './types'
 
 /**
  * Automations: everything that runs on its own, in one list (the Automations page). Phase 1 reads three sources
  * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
  */
 
-export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move'] as const
+export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend'] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
@@ -54,6 +54,24 @@ export interface AutomationRun {
   agentChanged?: true
   /** Repeats missed while the owning computer was off collapsed into this run, which ran once ("Missed while offline"). */
   missed?: { count: number; since: string }
+  /** A request started it: the delivery, and whether its stored payload is still there to Resend. */
+  request?: { occurrenceId: string; resendable?: true }
+}
+
+/** One request to an automation's URL and what became of it (its delivery log). */
+export interface AutomationDelivery {
+  at: string
+  outcome: ScheduledWebhookDeliveryOutcome
+  /** Why it was refused, or how its run ended, in the log's own words. */
+  detail?: string
+  /** Fields the prompt uses that the request did not have. */
+  missing?: string[]
+  bytes: number
+  occurrenceId?: string
+  /** Its payload is still stored: Resend runs the automation again with it. */
+  resendable?: true
+  /** It was a Resend of an earlier delivery. */
+  resent?: true
 }
 
 /** How an occurrence that ended maps onto the contract; null while it waits (a usage limit, a waiting workflow). */
@@ -221,6 +239,8 @@ export interface AutomationItem {
   keepable?: true
   /** A watch that only notifies its thread and never starts a turn. */
   notifyOnly?: true
+  /** It takes signed requests: where senders post, and the newest requests with what became of each. */
+  request?: { url: string; deliveries: AutomationDelivery[] }
   /** Present exactly when the item is in Needs you. */
   attention?: AutomationAttention
   link: AutomationLink

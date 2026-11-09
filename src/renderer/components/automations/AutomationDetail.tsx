@@ -36,6 +36,7 @@ import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationL
 import { DoPicker, useWorkflowFields, WorkflowInputs } from './WhoDoPickers'
 import { parseWorkflowCommand, workflowCommandText } from '../../../shared/workflows/workflowCommand'
 import { BotFaceStill } from '../bots/face/BotFace'
+import { DeliveryLog, RequestFields, RequestSetup, type RequestApi } from './RequestTrigger'
 
 /** The custom schedule builder's choices. Daily and Weekly are plain forms that save as cron. */
 type BuilderKind = 'interval' | 'daily' | 'weekly' | 'cron' | 'once' | 'manual'
@@ -143,7 +144,8 @@ export function AutomationDetail({
   onPause,
   onResume,
   onDelete,
-  onWebhook,
+  requestApi,
+  onResend,
   onKeep,
   onOpenThread,
   onOpenBot
@@ -168,7 +170,10 @@ export function AutomationDetail({
   onPause: () => void
   onResume: () => void
   onDelete: () => void
-  onWebhook: () => void
+  /** The Request trigger's daemon calls (set up, rotate, turn off, copy). */
+  requestApi: RequestApi
+  /** Resend: runs it again with a delivery's stored payload. */
+  onResend: (occurrenceId: string) => void
   /** Keep: an agent-added automation loses only its end. */
   onKeep: () => void
   onOpenThread: (threadId: string) => void
@@ -322,11 +327,7 @@ export function AutomationDetail({
         ...(onOpenBot ? [{ label: 'Open bot chat', onSelect: () => onOpenBot(bot.id) }] : []),
         { label: 'Delete', danger: true, onSelect: onDelete }
       ]
-    : [
-        // A request URL is served by the computer that runs it, and set up there.
-        ...(remoteNode ? [] : [{ label: job.trigger?.webhook ? 'Request URL…' : 'Add request URL…', onSelect: onWebhook }]),
-        { label: 'Delete', danger: true, onSelect: onDelete }
-      ]
+    : [{ label: 'Delete', danger: true, onSelect: onDelete }]
 
   return (
     <form
@@ -504,6 +505,7 @@ export function AutomationDetail({
             {...field('prompt')}
             onChange={(event) => patch({ prompt: event.target.value })}
           />
+          {job.trigger?.webhook && !bot ? <RequestFields prompt={draft.prompt} promptRef={promptRef} onChange={(prompt) => patch({ prompt })} /> : null}
         </>
       )}
       {fieldError('prompt')}
@@ -582,6 +584,7 @@ export function AutomationDetail({
                 {missedText(run) ? <span className="automation-run-missed" data-testid="automation-run-missed" title={missedText(run)!.title}>{missedText(run)!.text}</span> : null}
                 {run.agentChanged ? <span className="automation-run-changed" data-testid="automation-run-changed" title="The saved agent was published again since the run before">agent changed since last run</span> : null}
                 {run.threadId ? <button type="button" className="scheduled-link-btn" onClick={() => onOpenThread(run.threadId!)}>Open thread</button> : null}
+                {run.request?.resendable ? <button type="button" className="scheduled-link-btn" data-testid="automation-run-resend" title="Run it again with this request's stored body" onClick={() => onResend(run.request!.occurrenceId)}>Resend</button> : null}
               </li>
             ))}
           </ul>
@@ -591,10 +594,12 @@ export function AutomationDetail({
         ) : null}
       </section>
 
+      {item?.request ? <DeliveryLog deliveries={item.request.deliveries} when={(iso) => ownedWhenText(iso, now, owner, viewerZone)} onResend={onResend} /> : null}
+
       <button type="button" className="scheduled-disclosure" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · limits · request URL · added by'}</span>
+        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · limits · request URL + curl · added by'}</span>
       </button>
 
       {moreOpen ? (
@@ -635,9 +640,10 @@ export function AutomationDetail({
             <Select<JobDraft['mode']> id={id('mode')} className="scheduled-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
           } />
 
-          <MoreRow title="Request URL" description={job.trigger?.webhook ? 'On: a signed request runs it' : 'Off'} control={
-            <button type="button" className="settings-btn" onClick={onWebhook}>{job.trigger?.webhook ? 'Manage' : 'Set up'}</button>
-          } />
+          {/* A request URL is served by the computer that runs it, and set up there. */}
+          <MoreRow title="Request URL" testId="request-row" description={remoteNode ? `Set up on ${owner.name}` : undefined}>
+            {remoteNode ? null : <RequestSetup job={job} request={item?.request} prompt={draft.prompt} api={requestApi} />}
+          </MoreRow>
 
           {job.createdBy ? (
             <MoreRow title="Added by" testId="agent-row" description={

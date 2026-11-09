@@ -180,6 +180,8 @@ export interface ScheduledWebhookDelivery {
   error?: string
   missingPlaceholders?: string[]
   bodyBytes: number
+  /** Resend: the person started the job again with the payload this earlier delivery stored. */
+  resentFrom?: string
 }
 
 /** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */

@@ -194,6 +194,36 @@ describe('the automation index', () => {
     expect(jobEffectiveMay(job({ prompt: '/release-notes', permissionCeiling: 'ask' }), 'auto')).toBe('ask')
   })
 
+  it('gives a request automation its URL and delivery log, and Resend only where a stored payload ran', () => {
+    const delivered = job({
+      schedule: { kind: 'manual' },
+      nextRunAt: null,
+      trigger: { webhook: { scheme: 'mousse', secretRef: 'scheduled-webhook-j1', createdAt: PAST } },
+      runHistory: [{ runAt: PAST, status: 'ok', occurrenceKey: 'webhook:occ-1' }, { runAt: PAST, status: 'ok', occurrenceKey: 'webhook:occ-0' }]
+    })
+    const index = buildAutomationIndex({
+      ...sources({ jobs: [delivered] }),
+      requestUrl: (id) => `http://127.0.0.1:18790/hooks/${id}`,
+      deliveries: () => [
+        { occurrenceId: 'occ-1', receivedAt: '2026-11-08T09:00:00.000Z', outcome: 'completed', bodyBytes: 12, missingPlaceholders: ['body.pr'] },
+        { receivedAt: '2026-11-08T08:59:00.000Z', outcome: 'rejected_signature', bodyBytes: 3 },
+        { occurrenceId: 'occ-0', receivedAt: '2026-11-08T08:00:00.000Z', outcome: 'completed', bodyBytes: 2, resentFrom: 'occ-x' }
+      ],
+      payloadKept: (_job, occurrenceId) => occurrenceId === 'occ-1'
+    })
+    const [row] = index.items
+    expect(row).toMatchObject({ trigger: 'request', request: { url: 'http://127.0.0.1:18790/hooks/j1' } })
+    expect(row!.request!.deliveries).toEqual([
+      { at: '2026-11-08T09:00:00.000Z', outcome: 'completed', bytes: 12, missing: ['body.pr'], occurrenceId: 'occ-1', resendable: true },
+      { at: '2026-11-08T08:59:00.000Z', outcome: 'rejected_signature', bytes: 3 },
+      { at: '2026-11-08T08:00:00.000Z', outcome: 'completed', bytes: 2, occurrenceId: 'occ-0', resent: true }
+    ])
+    expect(row!.runs.map((run) => run.request)).toEqual([{ occurrenceId: 'occ-0' }, { occurrenceId: 'occ-1', resendable: true }])
+    // An agent-added one before Keep cannot be resent.
+    const unkept = buildAutomationIndex({ ...sources({ jobs: [{ ...delivered, createdBy: { threadId: 't' }, expiresAt: '2026-11-15T00:00:00.000Z' }] }), requestUrl: () => 'u', deliveries: () => [{ occurrenceId: 'occ-1', receivedAt: PAST, outcome: 'completed', bodyBytes: 1 }], payloadKept: () => true })
+    expect(unkept.items[0]!.request!.deliveries[0]!.resendable).toBeUndefined()
+  })
+
   it('marks a paused job with the time it resumes, and gives it no next run', () => {
     const index = buildAutomationIndex(sources({ jobs: [job({ state: 'paused', enabled: false, resumeAt: '2026-11-10T03:30:00.000Z' })] }))
     expect(index.items[0]).toMatchObject({ paused: true, pausedUntil: '2026-11-10T03:30:00.000Z' })

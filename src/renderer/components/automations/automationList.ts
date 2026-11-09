@@ -1,4 +1,5 @@
-import { offlineText, type AutomationItem, type AutomationMoveResult, type AutomationRun } from '../../../shared/automations'
+import { offlineText, type AutomationDelivery, type AutomationItem, type AutomationMoveResult, type AutomationRun } from '../../../shared/automations'
+import { deliveryStartedRun } from '../../../shared/requestTrigger'
 import { describePermissionMode, normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { describeSchedule } from '../../../shared/scheduleLabel'
 import { agoText, ownedWhenText, zonedDayOffset } from './automationTime'
@@ -59,11 +60,31 @@ export function groupAutomations(items: readonly AutomationItem[], now: Date = n
   })
 }
 
-/** Every run of every automation, newest first (the Recent fold). */
-export function recentRuns(items: readonly AutomationItem[], limit = 50): Array<{ item: AutomationItem; run: AutomationRun }> {
+/** One line of the Recent fold: a run (with the request that started it, if one did), or a request that started nothing. */
+export interface RecentEntry {
+  item: AutomationItem
+  at: string
+  run?: AutomationRun
+  delivery?: AutomationDelivery
+}
+
+/**
+ * Every run of every automation, newest first (the Recent fold). A request automation's refused requests (a rejected
+ * signature, the rate limit, a body too large, a replay) are lines of their own, so its delivery log shows here too.
+ */
+export function recentEntries(items: readonly AutomationItem[], limit = 50): RecentEntry[] {
   return items
-    .flatMap((item) => item.runs.map((run) => ({ item, run })))
-    .sort((a, b) => Date.parse(b.run.at) - Date.parse(a.run.at))
+    .flatMap((item): RecentEntry[] => {
+      const deliveries = item.request?.deliveries ?? []
+      const runs = item.runs.map((run) => {
+        const delivery = run.request ? deliveries.find((entry) => entry.occurrenceId === run.request!.occurrenceId) : undefined
+        return { item, at: run.at, run, ...(delivery ? { delivery } : {}) }
+      })
+      const ran = new Set(item.runs.flatMap((run) => (run.request ? [run.request.occurrenceId] : [])))
+      const alone = deliveries.filter((delivery) => !delivery.occurrenceId || (!ran.has(delivery.occurrenceId) && !deliveryStartedRun(delivery.outcome)))
+      return [...runs, ...alone.map((delivery) => ({ item, at: delivery.at, delivery }))]
+    })
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     .slice(0, limit)
 }
 

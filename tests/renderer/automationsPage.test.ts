@@ -549,6 +549,82 @@ describe('the Automations page', () => {
     expect(mark.title).toMatch(/^4 runs fell while the computer was off/)
   })
 
+  it('shows a request automation in its detail: + Field inserts a token, More has the URL and a signed curl line, and the delivery log resends', async () => {
+    const webhook = { scheme: 'mousse' as const, secretRef: 'scheduled-webhook-j1', createdAt: '2026-11-01T00:00:00.000Z' }
+    const stored = job({ id: 'j1', name: 'Deploy preview', prompt: 'Deploy {{body.ref}}', schedule: { kind: 'manual' }, nextRunAt: null, trigger: { webhook } })
+    const at = new Date(Date.now() - 600_000).toISOString()
+    const run = { at, state: 'done' as const, request: { occurrenceId: 'occ-1', resendable: true as const } }
+    const request = {
+      url: 'http://127.0.0.1:18790/hooks/j1',
+      deliveries: [
+        { at, outcome: 'completed' as const, bytes: 14, occurrenceId: 'occ-1', resendable: true as const },
+        { at: new Date(Date.now() - 300_000).toISOString(), outcome: 'rejected_signature' as const, bytes: 3 },
+        { at: new Date(Date.now() - 200_000).toISOString(), outcome: 'completed' as const, bytes: 2, occurrenceId: 'occ-2', missing: ['body.ref'] }
+      ]
+    }
+    const row = item({ key: 'job:j1', name: 'Deploy preview', trigger: 'request', runs: [run], last: run, request })
+    const mousse = await mount([row], [stored])
+    mousse.platformRequest.request.mockImplementation(async (method: string) => {
+      if (method === 'automations.list') return { items: [row], computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
+      if (method === 'automations.request.resend') return { occurrenceId: 'occ-3' }
+      if (method in LIBRARY) return LIBRARY[method]
+      throw new Error(method)
+    })
+    // Recent shows the refused request as a line of its own, and Resend on the delivered one.
+    await click($('[data-testid="automation-recent"]'))
+    expect($('[data-testid="automation-recent-delivery"]')?.textContent).toContain('Rejected signature')
+    await click($('[data-testid="automation-recent-resend"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.request.resend', { jobId: 'j1', occurrenceId: 'occ-1' })
+
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['ref'])
+    const prompt = $<HTMLTextAreaElement>('textarea.scheduled-prompt')!
+    prompt.setSelectionRange(prompt.value.length, prompt.value.length)
+    await click($('[data-testid="request-field-add"]'))
+    await type($<HTMLInputElement>('[data-testid="request-field-input"]')!, 'pr.number')
+    await click([...document.querySelectorAll('button')].find((button) => button.textContent === 'Insert'))
+    expect(prompt.value).toBe('Deploy {{body.ref}}{{body.pr.number}}')
+    expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['ref', 'pr.number'])
+
+    // The delivery log: the outcome in the log's words, the missing fields, and Resend where a stored request ran.
+    const rows = $$('[data-testid="automation-delivery"]')
+    expect(rows.map((row) => row.querySelector('.scheduled-outcome')?.textContent)).toEqual(['Accepted', 'Rejected signature', 'Accepted'])
+    expect(rows[2]!.textContent).toContain('Missing fields: body.ref')
+    expect(rows.map((row) => Boolean(row.querySelector('[data-testid="automation-resend"]')))).toEqual([true, false, false])
+
+    await click($('[data-testid="automation-more"]'))
+    expect($('[data-testid="request-url"]')?.textContent).toBe('http://127.0.0.1:18790/hooks/j1')
+    const curl = $('[data-testid="request-curl"]')!.textContent!
+    expect(curl).toContain(`BODY='{"ref":"<ref>","pr":{"number":"<pr.number>"}}'`)
+    expect(curl).toContain('-hmac "$MOUSSE_SECRET"')
+    expect(curl).toContain("curl -sS -X POST 'http://127.0.0.1:18790/hooks/j1'")
+    // The old dialog is gone: the menu has no Request URL… entry.
+    await click($('[aria-label="More actions for Deploy preview"]'))
+    expect($$('[role="menuitem"]').map((entry) => entry.textContent)).toEqual(['Delete'])
+  })
+
+  it('says why an agent-added automation cannot take requests before Keep, and sets one up after it', async () => {
+    const stored = job({ id: 'j1', name: 'Rerun test', schedule: { kind: 'manual' }, nextRunAt: null, createdBy: { threadId: 't1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
+    const mousse = await mount([item({ key: 'job:j1', name: 'Rerun test', trigger: 'on_demand', addedBy: { threadId: 't1' }, keepable: true })], [stored])
+    mousse.scheduled.webhook.enable.mockResolvedValue({ job: stored, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/j1', listening: true })
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    await click($('[data-testid="automation-more"]'))
+    expect($<HTMLButtonElement>('[data-testid="request-enable"]')!.disabled).toBe(true)
+    expect($('[data-testid="request-refusal"]')?.textContent).toMatch(/^Keep it first/)
+  })
+
+  it('shows the secret once after Set up, and the curl line signed with it', async () => {
+    const stored = job({ id: 'j1', name: 'Deploy preview', prompt: 'Deploy {{body.ref}}', schedule: { kind: 'manual' }, nextRunAt: null })
+    const mousse = await mount([item({ key: 'job:j1', name: 'Deploy preview', trigger: 'on_demand' })], [stored])
+    mousse.scheduled.webhook.enable.mockResolvedValue({ job: stored, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/j1', listening: true })
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    await click($('[data-testid="automation-more"]'))
+    await click($('[data-testid="request-enable"]'))
+    expect(mousse.scheduled.webhook.enable).toHaveBeenCalledWith('j1')
+    expect($('[data-testid="request-secret"]')?.textContent).toBe('whsec_shown_once')
+    expect($('[data-testid="request-curl"]')?.textContent).toContain("-hmac 'whsec_shown_once'")
+  })
+
   it('opens a bot\'s automation as a normal editable row: Who stays the bot, May is its grant, When and Tell me save', async () => {
     const stored = job({ id: 'b--s', name: 'Weather', prompt: 'Tell me if it rains', schedule: { kind: 'interval', minutes: 30 }, threadId: 'bot-schedule:b', bot: { botId: 'b', scheduleId: 's', createdBy: 'bot' } })
     const pip = { kind: 'bot' as const, name: 'Pip', look: { colour: 'teal', accessory: 'none' } as const }

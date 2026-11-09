@@ -1,6 +1,6 @@
 import { ipcErrorMessage } from '../../utils/voiceErrors'
 import { clockText, WEEKDAY_NAMES } from '../../../shared/scheduleLabel'
-import type { JobSchedule, ScheduledWebhookDelivery, ScheduledWebhookDeliveryOutcome } from '../../../shared/types'
+import type { JobSchedule } from '../../../shared/types'
 
 export type SchedulePreset = 'hourly' | 'daily' | 'weekdays' | 'custom'
 
@@ -42,38 +42,4 @@ export function nameFromPrompt(prompt: string): string {
 /** An error from the main process without the prefix Electron adds. */
 export function errorText(error: unknown): string {
   return ipcErrorMessage(error) || String(error)
-}
-
-interface OutcomeText {
-  label: string
-  /** Shown when the log has no reason of its own for the row. */
-  reason: string
-  refused: boolean
-}
-
-/** How each request ended, in words. A refused request started nothing. */
-export const DELIVERY_OUTCOME: Record<ScheduledWebhookDeliveryOutcome, OutcomeText> = {
-  accepted: { label: 'Accepted', reason: 'Waiting for the scheduler to start it.', refused: false },
-  queued: { label: 'Accepted', reason: 'Waiting in the queue behind another run.', refused: false },
-  completed: { label: 'Accepted', reason: 'The run finished.', refused: false },
-  failed: { label: 'Accepted', reason: 'The run failed or was interrupted.', refused: false },
-  dispatch_failed: { label: 'Accepted', reason: 'The run could not be started.', refused: false },
-  uncertain: { label: 'Accepted', reason: 'The run may have made changes before it stopped.', refused: false },
-  running: { label: 'Refused', reason: 'The job was already running.', refused: true },
-  pending: { label: 'Refused', reason: 'An earlier request is still waiting to start.', refused: true },
-  paused: { label: 'Refused', reason: 'The job is paused.', refused: true },
-  replay: { label: 'Refused', reason: 'The same signed request was sent again.', refused: true },
-  rejected_signature: { label: 'Refused', reason: 'The signature did not match.', refused: true },
-  rate_limited: { label: 'Refused', reason: 'Too many requests in a minute.', refused: true },
-  too_large: { label: 'Refused', reason: 'The request body was too large.', refused: true }
-}
-
-export function describeDelivery(delivery: ScheduledWebhookDelivery): OutcomeText & { detail: string; bytes: string; missing: string | null } {
-  const outcome = DELIVERY_OUTCOME[delivery.outcome] ?? { label: delivery.outcome, reason: '', refused: false }
-  return {
-    ...outcome,
-    detail: delivery.error?.trim() || outcome.reason,
-    bytes: `${delivery.bodyBytes} ${delivery.bodyBytes === 1 ? 'byte' : 'bytes'}`,
-    missing: delivery.missingPlaceholders?.length ? delivery.missingPlaceholders.join(', ') : null
-  }
 }

@@ -1063,7 +1063,6 @@ html :is(
   .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
-  .scheduled-btn.primary,
   .devices-dialog-btn.primary,
   .side-card-git-pr-merge[data-ready]
 ) {
@@ -1084,7 +1083,6 @@ html :is(
   .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
-  .scheduled-btn.primary,
   .devices-dialog-btn.primary,
   .side-card-git-pr-merge[data-ready]
 ):hover:not(:disabled, [aria-disabled='true']) {
@@ -1101,7 +1099,6 @@ html :is(
   .composer-implement-btn,
   .composer-question-btn.is-primary,
   .chat-workspace-recovery-btn-primary,
-  .scheduled-btn.primary,
   .devices-dialog-btn.primary,
   .side-card-git-pr-merge[data-ready]
 ):is(:disabled, [aria-disabled='true']) {

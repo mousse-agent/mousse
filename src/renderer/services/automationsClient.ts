@@ -11,6 +11,8 @@ export interface AutomationsClient {
   keep(jobId: string): Promise<ScheduledJob>
   /** Move to computer: this computer's automations to another of the person's computers (`automations.move`). */
   move(jobIds: string[], node: string): Promise<AutomationMoveResult>
+  /** Resend: runs a request automation again with a delivery's stored payload (`automations.request.resend`). */
+  resend(jobId: string, occurrenceId: string): Promise<void>
 }
 
 /** Uses the host's profile-bound bridge. */
@@ -19,7 +21,8 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     list: () => transport.request<AutomationIndex>('automations.list', {}),
     answerAsk: async (askId, answer) => { await transport.request('automations.asks.answer', { askId, answer }) },
     keep: async (jobId) => (await transport.request<{ job: ScheduledJob }>('automations.keep', { jobId })).job,
-    move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node })
+    move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node }),
+    resend: async (jobId, occurrenceId) => { await transport.request('automations.request.resend', { jobId, occurrenceId }) }
   }
 }
 

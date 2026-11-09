@@ -18,6 +18,7 @@ import {
 } from './ScheduledJobStore'
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
 import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
+import { requestRefusal } from '../../shared/requestTrigger'
 
 /** Runs one tick starts at most; a catch-up after downtime follows over the next ticks instead of in one second. */
 const MAX_STARTS_PER_TICK = 3
@@ -194,10 +195,10 @@ export class ScheduledJobService extends EventEmitter {
     const secrets = this.requireWebhookSecrets()
     const job = this.store.getJob(id)
     if (!job) throw new ScheduledWebhookError(`Job not found: ${id}`)
-    if (job.createdBy) throw new ScheduledWebhookError('Agent-created jobs cannot have a webhook trigger.')
-    if (job.schedule.kind === 'once') throw new ScheduledWebhookError('A one-time job runs once and cannot have a webhook; use a manual job for a webhook-only trigger.')
     if (job.trigger?.webhook) throw new ScheduledWebhookError('This job already has a webhook. Rotate its secret to get a new one.')
-    if (job.bot) throw new ScheduledWebhookError('A bot runs on its schedule; ask it in its chat for anything else.')
+    // An agent-added automation takes requests only once kept; a bot and a one-time job never do.
+    const refusal = requestRefusal(job)
+    if (refusal) throw new ScheduledWebhookError(refusal)
     const secretRef = webhookSecretRef(id)
     const secret = generateWebhookSecret()
     secrets.write(secretRef, secret)
@@ -247,6 +248,25 @@ export class ScheduledJobService extends EventEmitter {
   listWebhookDeliveries(id: string): ScheduledWebhookDelivery[] {
     if (!this.store.getJob(id)) throw new ScheduledWebhookError(`Job not found: ${id}`)
     return this.store.listWebhookDeliveries(id)
+  }
+
+  /** Resend: runs the job again with the payload an earlier delivery stored; it starts within seconds. */
+  resendWebhook(id: string, occurrenceId: string): { occurrenceId: string } {
+    this.lifecycle.assertAccepting()
+    let result: { occurrenceId: string }
+    try {
+      result = this.store.resendWebhook(id, occurrenceId)
+    } catch (error) {
+      throw error instanceof Error ? new ScheduledWebhookError(error.message) : error
+    }
+    this.emitUpdated()
+    this.wake()
+    return result
+  }
+
+  /** Whether a delivery's payload is still stored (Resend). */
+  hasWebhookPayload(id: string, occurrenceId: string): boolean {
+    return this.store.hasWebhookPayload(id, occurrenceId)
   }
 
   private requireWebhookSecrets(): ScheduledWebhookSecrets {

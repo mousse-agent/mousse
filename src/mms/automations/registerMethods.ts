@@ -17,6 +17,8 @@ export interface AutomationsDomain {
   keep(jobId: string): ScheduledJob | null
   /** Move to computer: this computer's automations to another online computer of the person. */
   move(jobIds: string[], node: string, signal?: AbortSignal): Promise<AutomationMoveResult>
+  /** Resend: runs a request automation again with the payload one of its deliveries stored. */
+  resend(jobId: string, occurrenceId: string): { occurrenceId: string }
 }
 
 /**
@@ -77,6 +79,25 @@ export function registerAutomationMethods(
       // A person in a window moves them; the CLI and agents never move an automation to another computer.
       if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Only a Mousse window can move an automation to another computer.')
       return (await bound(binding)).move(params.jobIds as string[], params.node as string, context.connection?.lifetime)
+    }
+  })
+  domains.register({
+    method: 'automations.request.resend',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'jobId', 'occurrenceId'])
+      if (typeof p.jobId !== 'string' || !p.jobId || p.jobId.length > 256) throw new DomainRpcError('invalid_params', 'A job id is required')
+      if (typeof p.occurrenceId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(p.occurrenceId)) throw new DomainRpcError('invalid_params', 'A delivery id is required')
+      return p
+    },
+    async handle(_context, params, binding) {
+      try {
+        return (await bound(binding)).resend(params.jobId as string, params.occurrenceId as string)
+      } catch (error) {
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError('resend_refused', error instanceof Error ? error.message : String(error))
+      }
     }
   })
   domains.register({

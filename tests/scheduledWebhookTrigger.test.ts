@@ -21,7 +21,7 @@ import { ScheduledJobStore, WEBHOOK_RATE_LIMIT_PER_MINUTE } from '../src/mms/sch
 import { ScheduledWebhookServer, WEBHOOK_MAX_BODY_BYTES, scheduledWebhookPort, signWebhookBody, type ScheduledWebhookHooks } from '../src/mms/scheduled/ScheduledWebhookServer'
 import { WebhookSecretCache } from '../src/mms/scheduled/webhookSecretCache'
 import { atomicWriteJsonSync } from '../src/mms/data/AtomicFs'
-import { appendDelivery, readDeliveries, readReceipts, readTriggerPayload, writeReceipts } from '../src/mms/scheduled/webhookFiles'
+import { appendDelivery, MAX_KEPT_PAYLOADS, readDeliveries, readReceipts, readTriggerPayload, writeReceipts } from '../src/mms/scheduled/webhookFiles'
 import type { ScheduledJob, ScheduledWebhookDelivery } from '../src/shared/types'
 import type { ScheduledJobIngress } from '../src/mms/platform/MmsWorkflowChat'
 
@@ -459,7 +459,7 @@ describe('scheduled job webhook trigger', () => {
   })
 
   describe('what an accepted delivery does', () => {
-    it('runs the job, leaves an interval job\'s timer alone, and ends the delivery as completed with its payload deleted', async () => {
+    it('runs the job, leaves an interval job\'s timer alone, and ends the delivery as completed with its payload kept for Resend', async () => {
       const b = await boot({ start: true })
       const { job, secret } = webhookJob(b, { schedule: { kind: 'interval', minutes: 600 } })
       const nextBefore = b.store.getJob(job.id)!.nextRunAt
@@ -475,7 +475,7 @@ describe('scheduled job webhook trigger', () => {
       expect(after.state).toBe('scheduled')
       expect(after.pendingTrigger).toBeUndefined()
       expect(after.runHistory?.at(-1)).toMatchObject({ status: 'ok', occurrenceKey: `webhook:${occurrenceId}` })
-      expect(readTriggerPayload(home, job.id, occurrenceId)).toBeUndefined()
+      expect(readTriggerPayload(home, job.id, occurrenceId)?.body).toBe('{"go":true}')
     })
 
     it('does not put the request body in a prompt that has no placeholders, or in the run\'s inputs', async () => {
@@ -624,7 +624,7 @@ describe('scheduled job webhook trigger', () => {
       await until(() => deliveries(second, job.id).some((row) => row.outcome === 'completed'), 'completion')
     })
 
-    it('ends a delivery as dispatch_failed when its claim died before it got a run, and deletes its payload', async () => {
+    it('ends a delivery as dispatch_failed when its claim died before it got a run, and keeps its payload for Resend', async () => {
       const b = await boot({ listen: false })
       const { job } = webhookJob(b, { schedule: { kind: 'interval', minutes: 600 } })
       const nextBefore = b.store.getJob(job.id)!.nextRunAt
@@ -637,7 +637,7 @@ describe('scheduled job webhook trigger', () => {
 
       b.store.reconcileStaleRunningJobs()
       expect(deliveries(b, job.id).find((row) => row.occurrenceId === result.occurrenceId)).toMatchObject({ outcome: 'dispatch_failed' })
-      expect(readTriggerPayload(home, job.id, result.occurrenceId)).toBeUndefined()
+      expect(readTriggerPayload(home, job.id, result.occurrenceId)).toBeDefined()
       expect(b.store.getJob(job.id)).toMatchObject({ state: 'scheduled', nextRunAt: nextBefore, runClaim: undefined })
     })
 
@@ -670,16 +670,65 @@ describe('scheduled job webhook trigger', () => {
       b.store.sweepWebhookPayloads(nowMs)
       expect(existsSync(pendingFile)).toBe(true)
     })
+
+    it('Resend runs the job again with a delivered request\'s stored body, as a new delivery that says it was resent', async () => {
+      const b = await boot({ start: true })
+      const { job, secret } = webhookJob(b, { prompt: 'Handle {{body.action}}', accessCap: 'read' })
+      const res = await signedPost(b.port(), job.id, '{"action":"opened"}', { secret })
+      const { occurrenceId } = JSON.parse(res.body) as { occurrenceId: string }
+      await until(() => deliveries(b, job.id).some((row) => row.outcome === 'completed'), 'the first run')
+      const resent = b.service.resendWebhook(job.id, occurrenceId)
+      await until(() => b.calls.length === 2, 'the resent run')
+      expect(b.calls[1].prompt).toMatch(/^Handle <webhook-data-[0-9a-f]{16}>opened</)
+      expect(b.calls[1].ingress.occurrenceKey).toBe(`webhook:${resent.occurrenceId}`)
+      expect(deliveries(b, job.id).find((row) => row.occurrenceId === resent.occurrenceId)).toMatchObject({ resentFrom: occurrenceId })
+    })
+
+    it('Resend refuses a paused job, a request no longer stored, and a job whose request URL is off; turning it off deletes the stored requests', async () => {
+      const b = await boot({ listen: false })
+      const { job } = webhookJob(b)
+      const accepted = b.store.triggerFromWebhook(job.id, { ts: Math.floor(Date.now() / 1000), sig: 'e'.repeat(64), body: Buffer.from('{"a":1}') })
+      if (accepted.kind !== 'accepted') throw new Error('expected accepted')
+      expect(() => b.service.resendWebhook(job.id, accepted.occurrenceId)).toThrow(/waiting to start/)
+      b.store.claimDueJobs()
+      b.store.markJobRun(job.id, true, 'ok', undefined, false, b.store.getJob(job.id)!.runClaim!.token)
+      b.service.pauseJob(job.id)
+      expect(() => b.service.resendWebhook(job.id, accepted.occurrenceId)).toThrow(/paused/)
+      b.service.resumeJob(job.id)
+      expect(() => b.service.resendWebhook(job.id, 'not-stored')).toThrow(/no longer stored/)
+      expect(b.service.hasWebhookPayload(job.id, accepted.occurrenceId)).toBe(true)
+      b.service.disableWebhook(job.id)
+      expect(b.service.hasWebhookPayload(job.id, accepted.occurrenceId)).toBe(false)
+      expect(() => b.service.resendWebhook(job.id, accepted.occurrenceId)).toThrow(/no request URL/)
+    })
+
+    it('keeps the payloads of the newest deliveries only', async () => {
+      const b = await boot({ listen: false })
+      const { job } = webhookJob(b)
+      const ids: string[] = []
+      for (let n = 0; n < MAX_KEPT_PAYLOADS + 2; n += 1) {
+        const accepted = b.store.triggerFromWebhook(job.id, { ts: Math.floor(Date.now() / 1000), sig: n.toString(16).padStart(64, '0'), body: Buffer.from(`{"n":${n}}`) })
+        if (accepted.kind !== 'accepted') throw new Error(`expected accepted, got ${accepted.kind}`)
+        ids.push(accepted.occurrenceId)
+        b.store.claimDueJobs()
+        b.store.markJobRun(job.id, true, 'ok', undefined, false, b.store.getJob(job.id)!.runClaim!.token)
+      }
+      expect(ids.slice(0, 2).map((id) => b.service.hasWebhookPayload(job.id, id))).toEqual([false, false])
+      expect(ids.slice(2).every((id) => b.service.hasWebhookPayload(job.id, id))).toBe(true)
+    })
   })
 
   describe('enabling, rotating and disabling', () => {
-    it('refuses a one-time job, an agent-created job and a second enable', async () => {
+    it('refuses a one-time job, an agent-added job before Keep and a second enable; a kept one takes a request URL', async () => {
       const b = await boot({ listen: false })
       const once = b.service.createJob({ name: 'Once', prompt: 'x', schedule: { kind: 'once', runAt: new Date(Date.now() + 3600_000).toISOString() } })
       expect(() => b.service.enableWebhook(once.id)).toThrow(ScheduledWebhookError)
-      expect(() => b.service.enableWebhook(once.id)).toThrow(/manual/)
-      const byAgent = b.service.createJob({ name: 'Agent', prompt: 'x', schedule: { kind: 'manual' }, createdBy: { threadId: 'thread-1' } })
-      expect(() => b.service.enableWebhook(byAgent.id)).toThrow(/Agent-created/)
+      expect(() => b.service.enableWebhook(once.id)).toThrow(/On demand/)
+      const byAgent = b.service.createJob({ name: 'Agent', prompt: 'x', schedule: { kind: 'manual' }, createdBy: { threadId: 'thread-1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
+      expect(() => b.service.enableWebhook(byAgent.id)).toThrow(/Keep it first/)
+      const kept = b.service.createJob({ name: 'Kept', prompt: 'x', schedule: { kind: 'manual' }, createdBy: { threadId: 'thread-1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
+      b.service.keepJob(kept.id)
+      expect(b.service.enableWebhook(kept.id).secret).toMatch(/^whsec_/)
       const { job } = webhookJob(b)
       expect(() => b.service.enableWebhook(job.id)).toThrow(/already has a webhook/)
       expect(() => b.service.enableWebhook('missing')).toThrow(/not found/)
@@ -687,12 +736,15 @@ describe('scheduled job webhook trigger', () => {
       expect(b.store.getJob(byAgent.id)!.trigger).toBeUndefined()
     })
 
-    it('does not authenticate a webhook on an agent-created job even if one is written straight into the store', async () => {
+    it('does not authenticate a webhook on an agent-added job before Keep, even one written straight into the store; after Keep it does', async () => {
       const b = await boot()
       const { job, secret } = webhookJob(b)
-      b.store.updateJob(job.id, { createdBy: { threadId: 'thread-1' } })
+      b.store.updateJob(job.id, { createdBy: { threadId: 'thread-1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
       b.cache.invalidate()
       expect((await signedPost(b.port(), job.id, '{}', { secret })).status).toBe(401)
+      b.store.keepJob(job.id)
+      b.cache.invalidate()
+      expect((await signedPost(b.port(), job.id, '{}', { secret })).status).toBe(202)
     })
 
     it('stores the secret only in the profile secret file and returns it only when it is created', async () => {
@@ -1159,7 +1211,7 @@ describe('scheduled job webhook trigger', () => {
 
     it('refuses to enable a one-time job and reports a listener that cannot bind', async () => {
       const once = await client.request<{ job: { id: string } }>('scheduled.create', { input: { name: 'once', prompt: 'x', schedule: { kind: 'once', runAt: new Date(Date.now() + 3600_000).toISOString() } } })
-      await expect(client.request('scheduled.webhook.enable', { id: once.job.id })).rejects.toThrow(/manual/)
+      await expect(client.request('scheduled.webhook.enable', { id: once.job.id })).rejects.toThrow(/On demand/)
 
       const taken = createHttpServer()
       blockers.push(taken)

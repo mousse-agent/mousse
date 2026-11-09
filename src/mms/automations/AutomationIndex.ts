@@ -5,6 +5,7 @@ import {
   jobActiveRun,
   jobLastEndedRun,
   jobRecordRun,
+  type AutomationDelivery,
   type AutomationIndex,
   type AutomationItem,
   type AutomationRun,
@@ -13,7 +14,8 @@ import {
 } from '../../shared/automations'
 import { narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { isWorkflowPrompt } from '../../shared/jobPermissionEdit'
-import { tellMeOf, type ScheduledJob, type Thread } from '../../shared/types'
+import { tellMeOf, type ScheduledJob, type ScheduledJobRunRecord, type ScheduledWebhookDelivery, type Thread } from '../../shared/types'
+import { deliveryStartedRun, takesRequests } from '../../shared/requestTrigger'
 import type { BotAutomationFacts, BotAutomationRunStatus } from '../bots/chat/BotChatService'
 import type { AgentJobAsk } from './AgentJobAsks'
 import { describeSchedule } from '../../shared/scheduleLabel'
@@ -46,6 +48,12 @@ export interface AutomationIndexSources {
   watchStatus?(threadId: string): { state: 'watching' | 'paused' | 'ended' | 'off'; nextCheckAt: string | null }
   /** Automations that moved to another computer: their history stays here, read-only. */
   moved?(): MovedAutomation[]
+  /** Where a job's signed requests are posted. */
+  requestUrl?(jobId: string): string
+  /** A job's delivery log, newest first. */
+  deliveries?(jobId: string): ScheduledWebhookDelivery[]
+  /** Whether a delivery's payload is still stored, so Resend can run it again. */
+  payloadKept?(jobId: string, occurrenceId: string): boolean
   computerName?: string
   timeZone?: string
   now?: () => Date
@@ -135,6 +143,35 @@ function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> 
   }
 }
 
+/** How many requests of an automation's delivery log the list carries. */
+const DELIVERIES_PER_ITEM = 20
+
+/** The delivery a run record names (`webhook:<id>`), or undefined for a timed or manual run. */
+function requestOf(record: ScheduledJobRunRecord): string | undefined {
+  return record.occurrenceKey?.startsWith('webhook:') ? record.occurrenceKey.slice('webhook:'.length) : undefined
+}
+
+/**
+ * A job that takes requests: where senders post, and its newest requests with what became of each. A delivery that
+ * started a run and whose payload is still stored can be resent.
+ */
+function requestPart(job: ScheduledJob, sources: AutomationIndexSources): AutomationItem['request'] | undefined {
+  if (!job.trigger?.webhook || !sources.requestUrl) return undefined
+  const canResend = takesRequests(job)
+  const kept = (occurrenceId: string) => canResend && (safely(() => sources.payloadKept?.(job.id, occurrenceId)) ?? false)
+  const deliveries = (safely(() => sources.deliveries?.(job.id)) ?? []).slice(0, DELIVERIES_PER_ITEM).map((row): AutomationDelivery => ({
+    at: row.receivedAt,
+    outcome: row.outcome,
+    bytes: row.bodyBytes,
+    ...(row.error ? { detail: row.error } : {}),
+    ...(row.missingPlaceholders?.length ? { missing: row.missingPlaceholders } : {}),
+    ...(row.occurrenceId ? { occurrenceId: row.occurrenceId } : {}),
+    ...(row.occurrenceId && deliveryStartedRun(row.outcome) && kept(row.occurrenceId) ? { resendable: true as const } : {}),
+    ...(row.resentFrom ? { resent: true as const } : {})
+  }))
+  return { url: sources.requestUrl(job.id), deliveries }
+}
+
 function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: AutomationItem['computer'], now: Date): AutomationItem {
   const workflow = isWorkflowPrompt(job.prompt)
   const who: AutomationWho = workflow
@@ -146,7 +183,13 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
   const paused = job.state === 'paused' || (!job.enabled && job.state !== 'running')
   const active = jobActiveRun(job, now)
   const last = jobLastEndedRun(job)
-  const runs = [...(job.runHistory ?? [])].reverse().slice(0, RUNS_PER_ITEM).map(jobRecordRun)
+  const request = requestPart(job, sources)
+  const resendable = new Set(request?.deliveries.flatMap((row) => (row.resendable && row.occurrenceId ? [row.occurrenceId] : [])) ?? [])
+  const runs = [...(job.runHistory ?? [])].reverse().slice(0, RUNS_PER_ITEM).map((record) => {
+    const run = jobRecordRun(record)
+    const occurrenceId = requestOf(record)
+    return occurrenceId ? { ...run, request: { occurrenceId, ...(resendable.has(occurrenceId) ? { resendable: true as const } : {}) } } : run
+  })
   // A run waiting for the person's answer on its thread is an open ask; a permission request on it is answered in place.
   const approval = job.liveStatus === 'needs_answer' && job.liveThreadId ? safely(() => sources.pendingApproval?.(job.liveThreadId!)) : undefined
   const ask = job.liveStatus === 'needs_answer'
@@ -180,6 +223,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     ...(job.createdBy ? { addedBy: { threadId: job.createdBy.threadId, ...(creator?.name ? { threadName: creator.name } : {}) } } : {}),
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.createdBy && job.expiresAt ? { keepable: true as const } : {}),
+    ...(request ? { request } : {}),
     ...(attention ? { attention } : {}),
     link: { kind: 'job', jobId: job.id },
     computer

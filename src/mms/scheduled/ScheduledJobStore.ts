@@ -44,6 +44,9 @@ import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type Jo
 import {
   ReceiptsUnreadableError,
   appendDelivery,
+  hasTriggerPayload,
+  keptPayloadIds,
+  pruneTriggerPayloads,
   readDeliveries,
   readReceipts,
   readTriggerPayload,
@@ -55,6 +58,7 @@ import {
   writeReceipts,
   writeTriggerPayload
 } from './webhookFiles'
+import { requestRefusal, takesRequests } from '../../shared/requestTrigger'
 
 export const TICKER_INTERVAL_MS = 60_000
 
@@ -618,6 +622,8 @@ export class ScheduledJobStore {
       if (dropped) {
         this.settleWebhookDelivery(job.id, webhookOccurrenceKey(dropped.occurrenceId), { outcome: 'dispatch_failed', error: 'Dropped: the webhook was disabled before the run started' })
       }
+      // Turned off: the payloads kept for Resend go (a run in flight already read its own); the log stays.
+      if (!trigger) pruneTriggerPayloads(this.homeDir, job.id, new Set(this.referencedPayloads(job)))
       return job
     })
   }
@@ -638,8 +644,8 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === jobId)
-      // A job an agent created never takes a webhook (decision: no inbound trigger for agent-made jobs).
-      if (!job?.trigger?.webhook || job.createdBy) return { kind: 'unknown' }
+      // A job an agent created takes no request until the person keeps it (Keep removes its end).
+      if (!job?.trigger?.webhook || !takesRequests(job)) return { kind: 'unknown' }
 
       const nowMs = request.now ?? Date.now()
       const nowSec = Math.floor(nowMs / 1000)
@@ -696,8 +702,63 @@ export class ScheduledJobStore {
         throw error
       }
       this.logDelivery(job.id, { occurrenceId, receivedAt: nowIso, outcome: 'accepted', bodyBytes })
+      this.pruneKeptPayloads(job)
       return { kind: 'accepted', occurrenceId }
     })
+  }
+
+  /**
+   * Resend (a person's choice): starts the job again with the payload an earlier delivery stored, as a new delivery in
+   * its log. No signature is checked (the person asked, over the owner's protocol), and the request rules that protect
+   * the URL do not apply; the job's own state does: one delivery at a time, never while paused or running.
+   */
+  resendWebhook(jobId: string, occurrenceId: string, now = Date.now()): { occurrenceId: string } {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === jobId)
+      if (!job) throw new Error('This automation is gone.')
+      if (!job.trigger?.webhook) throw new Error('It has no request URL now.')
+      const refusal = requestRefusal(job)
+      if (refusal) throw new Error(refusal)
+      if (job.state === 'running' || job.runClaim || job.pendingOccurrence) throw new Error('It is running. Resend once the run ends.')
+      if (job.pendingTrigger) throw new Error('Another request is waiting to start.')
+      if (!job.enabled || job.state === 'paused') throw new Error('It is paused. Resume it first.')
+      const stored = readTriggerPayload(this.homeDir, job.id, occurrenceId)
+      if (!stored) throw new Error('That request is no longer stored.')
+      const nowIso = new Date(now).toISOString()
+      const next = uuidv4()
+      writeTriggerPayload(this.homeDir, { occurrenceId: next, jobId: job.id, receivedAt: nowIso, bodyBytes: stored.bodyBytes, body: stored.body })
+      job.pendingTrigger = { occurrenceId: next, receivedAt: nowIso }
+      try {
+        this.saveRuntimeDurably(jobs)
+      } catch (error) {
+        removeTriggerPayload(this.homeDir, job.id, next)
+        throw error
+      }
+      this.logDelivery(job.id, { occurrenceId: next, receivedAt: nowIso, outcome: 'accepted', bodyBytes: stored.bodyBytes, resentFrom: occurrenceId })
+      this.pruneKeptPayloads(job)
+      return { occurrenceId: next }
+    })
+  }
+
+  /** Whether a delivery's payload is still stored, so Resend can run it again. */
+  hasWebhookPayload(jobId: string, occurrenceId: string): boolean {
+    return hasTriggerPayload(this.homeDir, jobId, occurrenceId)
+  }
+
+  /** The occurrence ids a job's state still names: a delivery waiting, claimed or admitted. Caller holds the lock. */
+  private referencedPayloads(job: ScheduledJob): string[] {
+    return [job.pendingTrigger?.occurrenceId, job.runClaim?.webhookOccurrenceId, webhookIdOfOccurrence(job.pendingOccurrence?.occurrenceKey)]
+      .filter((id): id is string => Boolean(id))
+  }
+
+  /** Keeps the payloads of the newest accepted deliveries (Resend) and of any delivery in flight; the rest go. */
+  private pruneKeptPayloads(job: ScheduledJob): void {
+    try {
+      pruneTriggerPayloads(this.homeDir, job.id, new Set([...keptPayloadIds(this.homeDir, job.id), ...this.referencedPayloads(job)]))
+    } catch {
+      /* the daily sweep retries */
+    }
   }
 
   /**
@@ -742,10 +803,8 @@ export class ScheduledJobStore {
         isReferenced: (jobId, occurrenceId) => {
           const job = jobs.find((entry) => entry.id === jobId)
           if (!job) return false
-          const key = webhookOccurrenceKey(occurrenceId)
-          return job.pendingTrigger?.occurrenceId === occurrenceId
-            || job.runClaim?.webhookOccurrenceId === occurrenceId
-            || job.pendingOccurrence?.occurrenceKey === key
+          // A delivery in flight, or one of the newest the job keeps for Resend.
+          return this.referencedPayloads(job).includes(occurrenceId) || (Boolean(job.trigger?.webhook) && keptPayloadIds(this.homeDir, jobId).has(occurrenceId))
         }
       })
     })
@@ -773,12 +832,15 @@ export class ScheduledJobStore {
     this.logDelivery(jobId, { ...row, outcome })
   }
 
-  /** Moves a webhook delivery's log row to `result`; an ended delivery's stored payload goes with it. */
+  /**
+   * Moves a webhook delivery's log row to `result`. Its stored payload stays for Resend while the delivery is among the
+   * newest the job keeps (`MAX_KEPT_PAYLOADS`); a newer delivery prunes it.
+   */
   private settleWebhookDelivery(
     jobId: string,
     occurrenceKey: string | undefined,
     result: { outcome: ScheduledWebhookDeliveryOutcome; error?: string },
-    options: { keepPayload?: boolean; missingPlaceholders?: string[] } = {}
+    options: { missingPlaceholders?: string[] } = {}
   ): void {
     const occurrenceId = webhookIdOfOccurrence(occurrenceKey)
     if (!occurrenceId) return
@@ -790,7 +852,6 @@ export class ScheduledJobStore {
     } catch {
       /* the log is a courtesy */
     }
-    if (!options.keepPayload) removeTriggerPayload(this.homeDir, jobId, occurrenceId)
   }
 
   /** Pauses a job, until a person resumes it or, with `resumeAt`, until then. */
@@ -1237,7 +1298,7 @@ export class ScheduledJobStore {
       job.waitingBehind = undefined
       job.state = 'scheduled'
       job.updatedAt = now
-      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { keepPayload: true, missingPlaceholders: details?.missingPlaceholders })
+      this.settleWebhookDelivery(job.id, claim.occurrenceKey, { outcome: 'queued' }, { missingPlaceholders: details?.missingPlaceholders })
       const settled = claim.settledResult
       if (settled) this.applyOccurrenceResult(jobs, job, claim.occurrenceKey, settled, now)
       this.saveJobs(jobs)

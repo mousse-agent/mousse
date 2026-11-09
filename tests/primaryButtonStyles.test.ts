@@ -72,7 +72,6 @@ const PRIMARY_CLASSES = [
   '.composer-implement-btn',
   '.composer-question-btn.is-primary',
   '.chat-workspace-recovery-btn-primary',
-  '.scheduled-btn.primary',
   '.devices-dialog-btn.primary',
   '.side-card-git-pr-merge[data-ready]'
 ]

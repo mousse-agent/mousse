@@ -250,7 +250,8 @@ export class MousseMainService extends MmsProfileServices {
         index: (viewer, signal) => viewer === 'window' ? services.automationIndexForWindow(signal) : viewer === 'computer' ? services.automationIndexForComputer() : services.automationIndex(),
         answerAsk: (askId, answer) => services.answerAgentJobAsk(askId, answer),
         keep: (jobId) => services.scheduled.keepJob(jobId),
-        move: (jobIds, node, signal) => services.moveAutomations(jobIds, node, signal)
+        move: (jobIds, node, signal) => services.moveAutomations(jobIds, node, signal),
+        resend: (jobId, occurrenceId) => services.scheduled.resendWebhook(jobId, occurrenceId)
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
