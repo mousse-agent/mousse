@@ -17,6 +17,12 @@ import { VENDOR_SETTINGS_CHANGED, type VendorSettingEntry, type VendorSettingsVi
 
 export const CLAUDE_SETTINGS_BACKUP_SUFFIX = '.mousse-bak'
 
+/**
+ * A refusal Mousse words itself (a value it won't save, a file it leaves alone, a file changed on disk):
+ * safe to show the user, and never carrying the value.
+ */
+export class ClaudeSettingsError extends Error {}
+
 type Json = Record<string, unknown>
 
 interface KnownSetting {
@@ -110,13 +116,13 @@ export function claudeSettingsWriteTarget(path: string): string {
   } catch (error) {
     // A missing file is created; a link to a missing file is not followed anywhere.
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      if (target !== path) throw new Error('This settings.json is a link to a file that is not there, so Mousse leaves it alone.')
+      if (target !== path) throw new ClaudeSettingsError('This settings.json is a link to a file that is not there, so Mousse leaves it alone.')
       return path
     }
     throw error
   }
   try {
-    if (!statSync(target).isFile()) throw new Error('This settings.json is not a file, so Mousse leaves it alone.')
+    if (!statSync(target).isFile()) throw new ClaudeSettingsError('This settings.json is not a file, so Mousse leaves it alone.')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
@@ -138,7 +144,7 @@ const UNREADABLE = "Mousse can't read this settings.json as JSON, so it leaves t
 
 function parse(text: string): Json {
   const value: unknown = JSON.parse(text.replace(/^\uFEFF/, ''))
-  if (!isRecord(value)) throw new Error(UNREADABLE)
+  if (!isRecord(value)) throw new ClaudeSettingsError(UNREADABLE)
   return value
 }
 
@@ -245,20 +251,20 @@ export function writeClaudeSetting(
   deps: ClaudeSettingsWriteDeps = {}
 ): void {
   const problem = claudeSettingProblem(key, value)
-  if (problem) throw new Error(problem)
+  if (problem) throw new ClaudeSettingsError(problem)
   const target = claudeSettingsWriteTarget(path)
   const text = readText(target)
   let settings: Json
   try {
     settings = text?.trim() ? parse(text) : {}
   } catch {
-    throw new Error(UNREADABLE)
+    throw new ClaudeSettingsError(UNREADABLE)
   }
-  if (claudeSettingsRevision(text) !== expectedRevision) throw new Error(VENDOR_SETTINGS_CHANGED)
+  if (claudeSettingsRevision(text) !== expectedRevision) throw new ClaudeSettingsError(VENDOR_SETTINGS_CHANGED)
   const before = JSON.stringify(settings)
   if (key.startsWith('env.')) {
     const name = key.slice(4)
-    if (settings.env !== undefined && !isRecord(settings.env)) throw new Error('The env of this settings.json is not an object, so Mousse leaves it alone.')
+    if (settings.env !== undefined && !isRecord(settings.env)) throw new ClaudeSettingsError('The env of this settings.json is not an object, so Mousse leaves it alone.')
     if (value === null) {
       if (isRecord(settings.env)) delete settings.env[name]
     } else {

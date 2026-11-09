@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { claudeSettingsPath, maskSecret, readClaudeSettingsFile, writeClaudeSetting } from '../../src/mms/harness/vendors/claude/claudeSettingsFile'
 import { classifyRoutedMethod } from '../../src/shared/bridge/routed'
+import { normalizeAppError } from '../../src/shared/errors'
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
@@ -306,8 +307,12 @@ describe('the gateway on a home shared with the terminal', () => {
     await second.harness.instances.setVendorSetting({ instanceId: 'claude', key: 'model', value: 'claude-sonnet-5-5', expectedRevision: again.revision! })
     expect(JSON.parse(readFileSync(path, 'utf8')).model).toBe('claude-sonnet-5-5')
     // The page still holds the earlier revision: refused, the file stays.
-    await expect(second.harness.instances.setVendorSetting({ instanceId: 'claude', key: 'model', value: 'stale', expectedRevision: again.revision! })).rejects.toThrow('File changed, reload.')
+    const stale = await second.harness.instances.setVendorSetting({ instanceId: 'claude', key: 'model', value: 'stale', expectedRevision: again.revision! }).catch((error: unknown) => error)
     expect(JSON.parse(readFileSync(path, 'utf8')).model).toBe('claude-sonnet-5-5')
+    // The refusal reaches the window in its own words, not as "Something went wrong".
+    expect(normalizeAppError(stale, 'handler_error').message).toBe('File changed, reload.')
+    const invalid = await second.harness.instances.setVendorSetting({ instanceId: 'claude', key: 'env.ANTHROPIC_BASE_URL', value: 'not a url', expectedRevision: second.harness.instances.vendorSettings('claude')!.revision! }).catch((error: unknown) => error)
+    expect(normalizeAppError(invalid, 'handler_error').message).toBe("The URL can't contain spaces.")
   })
 
   it('asks again for another shared file', async () => {

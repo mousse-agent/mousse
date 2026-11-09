@@ -59,7 +59,7 @@ import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
-import { claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
+import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
 import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
@@ -2598,8 +2598,16 @@ export class Harness implements HarnessGateway {
         return harnessFail('unsupported', 'This also changes Claude in your terminal. Confirm the change first.', input.instanceId)
       this.sharedConsent.add(target.path)
     }
-    // The value is never logged or echoed: a failure names the setting, not what was typed.
-    writeClaudeSetting(target.path, input.key, input.value, input.expectedRevision)
+    // The value is never logged or echoed: a failure names the setting, not what was typed. Mousse's
+    // own refusals reach the window as they are ("File changed, reload."); a file system failure
+    // only by its code.
+    try {
+      writeClaudeSetting(target.path, input.key, input.value, input.expectedRevision)
+    } catch (error) {
+      if (error instanceof ClaudeSettingsError) return harnessFail('unsupported', error.message, input.instanceId)
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      return harnessFail('unsupported', `Mousse couldn't write this settings.json${typeof code === 'string' ? ` (${code})` : ''}.`, input.instanceId)
+    }
     // Every entry reading the same file runs differently now (another key, URL or model).
     const entries = this.instanceMap.list()
     for (const instanceId of Object.keys(entries)) {
