@@ -1230,6 +1230,8 @@ export interface Project {
  * Where a subagent thread came from. Written when the child is created and backfilled for older
  * children from the run store's `thread_lineage`; the run store stays the source of truth.
  */
+export type ThreadTitleSource = 'provisional' | 'auto' | 'final' | 'user'
+
 export interface ThreadLineage {
   parentThreadId: string
   /** The thread at the top of the parent chain, the one a person started. */
@@ -1283,6 +1285,14 @@ export interface ThreadRunsOn {
 export interface Thread {
   id: string
   name: string
+  /**
+   * Who set `name`. `provisional`: taken from the first message while the title model works, and shown
+   * dimmed. `auto`: the title model named it from the first message; it is named once more after the first
+   * reply. `final`: named for good by Mousse. `user`: the person renamed it. Mousse never renames a thread
+   * that is `final` or `user`, nor one without the field that has a name (older threads, threads an agent or
+   * job named).
+   */
+  titleSource?: ThreadTitleSource
   projectId?: string
   createdAt: string
   updatedAt: string

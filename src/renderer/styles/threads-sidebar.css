@@ -346,6 +346,16 @@
   white-space: nowrap;
 }
 
+/* A title taken from the first message while the title model works: dimmed until the model's title
+   replaces it, which then fades in to full strength. */
+.threads-sidebar-thread-name {
+  transition: opacity 0.25s ease;
+}
+
+.threads-sidebar-thread-name.provisional {
+  opacity: 0.5;
+}
+
 /* No bottom margin: it sits inside the Collapse, so it would add to the project's own 8px instead of
    merging with it (polish.css and compact-shell.css follow the same rule). */
 .threads-sidebar-children {

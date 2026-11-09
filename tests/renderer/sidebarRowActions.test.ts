@@ -166,6 +166,19 @@ describe('rename', () => {
   })
 })
 
+describe('a title being generated', () => {
+  it('shows the title taken from the message dimmed until the generated title replaces it', () => {
+    show([thread('a', 'Fix the OAuth callback loop', { titleSource: 'provisional' })])
+    openProject()
+    const title = () => host.querySelector('.threads-sidebar-thread-name')!
+    expect(title().textContent).toBe('Fix the OAuth callback loop')
+    expect(title().classList.contains('provisional')).toBe(true)
+    show([thread('a', 'OAuth callback loop', { titleSource: 'auto' })])
+    expect(title().textContent).toBe('OAuth callback loop')
+    expect(title().classList.contains('provisional')).toBe(false)
+  })
+})
+
 describe('the row menu', () => {
   it('opens from the "…" button with the same items as a right-click, and focuses the first', () => {
     show([thread('a', 'Fix tests')])

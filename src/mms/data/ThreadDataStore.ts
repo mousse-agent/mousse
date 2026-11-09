@@ -667,7 +667,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
+    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)
