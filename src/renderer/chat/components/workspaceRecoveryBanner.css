@@ -1,4 +1,5 @@
-/* A thread whose worktree needs recovery: why it is paused and the button that fixes it. Sits where "Run paused" does. */
+/* A thread whose worktree needs recovery: why it is paused and the button that fixes it. Sits where "Run paused" does.
+   A soft raised surface with a faint warning tint does the work; the edge is a hairline, with no outline, side bar or shadow. */
 .chat-workspace-recovery {
   display: flex;
   flex-wrap: wrap;
@@ -8,10 +9,10 @@
   width: min(100%, var(--an-max-width, 680px));
   box-sizing: border-box;
   margin: 8px auto;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--warning) 7%, transparent);
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--text-primary) 6%, transparent);
+  border-radius: var(--ui-card-radius, 12px);
+  background: color-mix(in srgb, var(--warning) 8%, var(--ui-raised, var(--surface-soft)));
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
@@ -28,7 +29,7 @@
 .chat-workspace-recovery-head {
   display: inline-flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 7px;
   color: var(--text-primary);
 }
 
@@ -43,7 +44,9 @@
   overflow-wrap: anywhere;
 }
 
+/* Lines up under the title, past the icon. */
 .chat-workspace-recovery-detail {
+  padding-left: 20px;
   overflow-wrap: anywhere;
 }
 
@@ -59,24 +62,27 @@
   gap: 6px;
 }
 
+/* Quiet by default: a faint fill that deepens on hover. The primary class (the recovery action) takes the app's
+   shared primary style in polish.css. */
 .chat-workspace-recovery-btn {
   min-height: 26px;
   padding: 3px 11px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ui-control-radius, 8px);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
   color: var(--text-primary);
   font: inherit;
   font-weight: 500;
   cursor: pointer;
+  transition: background-color var(--ui-dur-fast, 120ms) ease;
 }
 
 .chat-workspace-recovery-btn:hover {
-  background: var(--ui-hover);
+  background: var(--ui-pressed);
 }
 
 .chat-workspace-recovery-btn:active {
-  background: var(--ui-pressed);
+  background: color-mix(in srgb, var(--text-primary) 13%, transparent);
 }
 
 .chat-workspace-recovery-btn:focus-visible {
@@ -92,6 +98,7 @@
 .chat-workspace-recovery-error {
   flex-basis: 100%;
   margin: 0;
+  padding-left: 20px;
   color: var(--danger);
 }
 
@@ -99,13 +106,13 @@
 .chat-workspace-recovery-note {
   flex-basis: 100%;
   margin: 0;
+  padding-left: 20px;
   color: var(--text-secondary);
 }
 
 /* A kind this build does not know: said, with no button and no warning colour. */
 .chat-workspace-recovery[data-kind="notice"] {
-  border-color: var(--border);
-  background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+  background: var(--ui-raised, var(--surface-soft));
 }
 
 .chat-workspace-recovery[data-kind="notice"] .chat-workspace-recovery-head svg {
