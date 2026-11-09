@@ -188,12 +188,57 @@ export function resetsLabel(resets: Pick<UsageResets, 'available'> | undefined):
   return `${resets.available} reset${resets.available === 1 ? '' : 's'}`
 }
 
-/** The chip's tooltip: one line per credit, "<title> · <type> · expires in 5d", from what the provider says. */
+/** Reset types as people read them: the known windows by name, anything else in sentence case. */
+const RESET_TYPE_LABELS: Readonly<Record<string, string>> = {
+  five_hour: '5-hour',
+  weekly: 'Weekly',
+  seven_day: 'Weekly',
+  // Codex's one kind today: a reset of all its rate limits.
+  codexratelimits: 'Codex limits',
+  unknown: ''
+}
+
+/**
+ * "five_hour" → "5-hour", "weekly" / "seven_day" → "Weekly", "codexRateLimits" → "Codex limits",
+ * anything else in sentence case ("extra_usage_2" → "Extra usage 2"); "" for an unknown type.
+ */
+export function resetTypeLabel(type: string): string {
+  const known = RESET_TYPE_LABELS[type.trim().toLowerCase()]
+  if (known !== undefined) return known
+  const words = type.trim().replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').toLowerCase()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : type
+}
+
+/** What using a reset of this type does, in a few words: "Your Codex limits go back to 100%." and its toast. */
+export function resetEffect(type: string | undefined): { sentence: string; done: string } {
+  const label = type ? resetTypeLabel(type) : ''
+  if (!label) return { sentence: 'Your limits go back to 100%.', done: 'Limits reset' }
+  if (/limits$/i.test(label)) return { sentence: `Your ${label} go back to 100%.`, done: `${label} reset` }
+  return { sentence: `Your ${label} limit goes back to 100%.`, done: `${label} limit reset` }
+}
+
+/** What a reset that did not reset says. */
+export function resetOutcomeText(outcome: string): string | undefined {
+  switch (outcome) {
+    case 'reset': return undefined
+    case 'nothingToReset': return 'Nothing to reset'
+    case 'noCredit': return 'No resets left'
+    case 'alreadyRedeemed': return 'Already used'
+    default: return "Couldn't use the reset"
+  }
+}
+
+/**
+ * The chip's tooltip: one line per credit, "<title> · <type> · expires in 5d 0h", from what the
+ * provider says; the type is left out when the title already names it ("Weekly limit reset").
+ */
 export function resetsTooltip(resets: UsageResets, now: number): string | undefined {
   const lines = (resets.credits ?? []).map((credit) => {
     const at = credit.expiresAt ? Date.parse(credit.expiresAt) : Number.NaN
     const expiry = Number.isNaN(at) ? undefined : at <= now ? 'expired' : `expires in ${formatCountdown(Math.floor((at - now) / 60_000))}`
-    return [credit.title, credit.type, expiry].filter(Boolean).join(' · ')
+    const type = credit.type ? resetTypeLabel(credit.type) : undefined
+    const named = type && credit.title?.toLowerCase().includes(type.toLowerCase())
+    return [credit.title, named ? undefined : type, expiry].filter(Boolean).join(' · ')
   }).filter(Boolean)
   return lines.length ? lines.join('\n') : undefined
 }
