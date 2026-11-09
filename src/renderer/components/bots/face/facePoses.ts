@@ -223,8 +223,8 @@ export interface FaceUniforms {
   uE: [number, number, number, number]
   uE2: [number, number, number, number]
   uV: [number, number, number, number]
-  /** Kind (`BOT_KINDS` index) and eye shape (`BOT_EYES` index). */
-  uK: [number, number]
+  /** Kind (`BOT_KINDS` index), eye shape (`BOT_EYES` index), and 1 when the Mousse's eyes are white. */
+  uK: [number, number, number]
 }
 
 /** Metal accessories get the bright specular. */
@@ -232,6 +232,19 @@ const METAL: ReadonlySet<string> = new Set(['crown'])
 
 export function hexToRgb(hex: string): [number, number, number] {
   return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number]
+}
+
+/**
+ * The Mousse's eyes are flat white or near-black, whichever stands out on its colour at eye height
+ * (the shader's gradient there is about 0.89 of the colour): white when that colour's relative
+ * luminance is under 0.3.
+ */
+export function mousseEyesWhite(hex: string): boolean {
+  const lin = hexToRgb(hex).map((v) => {
+    const c = v * 0.89
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+  })
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2] < 0.3
 }
 
 export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView): FaceUniforms {
@@ -247,6 +260,10 @@ export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView)
     uE: [pose.open, pose.closed, pose.arc, pose.worried],
     uE2: [pose.lookX, pose.lookY, pose.es, pose.sweat],
     uV: [head ? 0.8 : 0.32, head ? 1.45 : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
-    uK: [BOT_KINDS.indexOf(botKindOf(look)), BOT_EYES.indexOf(botEyesOf(look))]
+    uK: [
+      BOT_KINDS.indexOf(botKindOf(look)),
+      BOT_EYES.indexOf(botEyesOf(look)),
+      mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? 1 : 0
+    ]
   }
 }
