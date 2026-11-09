@@ -77,7 +77,15 @@ export class ThreadDbError extends Error {
 
 interface Connection { db: DatabaseSync; ino: number; statements: Map<string, StatementSync>; timer?: ReturnType<typeof setTimeout> }
 
-function fsyncPath(path: string): void {
+/** Flushes a file. Opened for writing: Windows flushes only a handle that may write. */
+function fsyncFile(path: string): void {
+  const fd = openSync(path, 'r+')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+/** Flushes a folder's entries. Windows cannot open a folder to flush it; NTFS journals folder entries itself. */
+function fsyncDir(path: string): void {
+  if (process.platform === 'win32') return
   const fd = openSync(path, 'r')
   try { fsyncSync(fd) } finally { closeSync(fd) }
 }
@@ -395,9 +403,9 @@ export class ThreadDbEngine {
       db.close()
     }
     try {
-      fsyncPath(tmp)
+      fsyncFile(tmp)
       linkSync(tmp, this.path(dir))
-      fsyncPath(dir)
+      fsyncDir(dir)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     } finally {
@@ -437,7 +445,7 @@ export class ThreadDbEngine {
       } finally {
         db.close()
       }
-      fsyncPath(tmp)
+      fsyncFile(tmp)
       if (!sameFingerprint(legacyFingerprint(dir), request.fingerprint)) {
         rmSync(tmp, { force: true })
         return { ok: false, stale: true }
