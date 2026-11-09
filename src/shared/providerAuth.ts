@@ -155,7 +155,15 @@ export type UsageProblem = 'no_subscription' | 'session_expired' | 'key_expired'
 /** Limit resets an account has available: how many, and what the provider says of each. */
 export interface UsageResets {
   available: number
-  credits?: Array<{ title?: string; type?: string; status?: string; expiresAt?: string }>
+  /** `id` is the provider's opaque credit id, for using that credit (never shown). */
+  credits?: Array<{ id?: string; title?: string; type?: string; status?: string; expiresAt?: string }>
+}
+
+/** What using a limit reset did, as the provider reports it. */
+export type LimitResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed'
+
+export interface UseLimitResetResponse {
+  outcome: LimitResetOutcome
 }
 
 /** A credit balance in USD: what is left, what was spent, and the limit when the provider has one. */

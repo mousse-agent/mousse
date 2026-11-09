@@ -5,7 +5,7 @@ import type { ProviderUsage, ProvidersUsageResponse } from '../../src/shared/pro
 import { SubscriptionUsageView } from '../../src/renderer/components/SubscriptionUsagePage'
 import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui/DelayedLoader'
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
-import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
+import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, resetTypeLabel, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
 import { formatResetLine, orderUsageWindows, remainingNow, remainingPercent, shortUsageNote, usageReadAtLabel, usageReadingTime, usageRedMix } from '../../src/renderer/lib/subscriptionUsage'
 
@@ -177,7 +177,17 @@ describe('resets available', () => {
     const resets = { available: 2, credits: [{ title: 'Weekly limit reset', type: 'weekly', expiresAt: '2026-11-14T12:00:00Z' }, { title: '5-hour reset', type: 'five_hour', expiresAt: '2026-11-09T14:30:00Z' }] }
     const html = view({ now, usage: response([chatgpt(resets)]) })
     expect(text(html)).toContain('ChatGPT subscription Plus 2 resets')
-    expect(resetsTooltip(resets, now)).toBe('Weekly limit reset · weekly · expires in 5d 0h\n5-hour reset · five_hour · expires in 2h 30m')
+    // The title already names the type, so it is not said twice.
+    expect(resetsTooltip(resets, now)).toBe('Weekly limit reset · expires in 5d 0h\n5-hour reset · expires in 2h 30m')
+  })
+
+  it('names reset types as people read them, and keeps a type the title does not name', () => {
+    expect([resetTypeLabel('five_hour'), resetTypeLabel('weekly'), resetTypeLabel('seven_day'), resetTypeLabel('extra_usage_2'), resetTypeLabel('MONTHLY'), resetTypeLabel('opus-weekly')])
+      .toEqual(['5-hour', 'Weekly', 'Weekly', 'Extra usage 2', 'Monthly', 'Opus weekly'])
+    expect(resetsTooltip({ available: 1, credits: [{ title: 'Limit reset', type: 'seven_day', expiresAt: '2026-11-10T12:00:00Z' }] }, now)).toBe('Limit reset · Weekly · expires in 1d 0h')
+    expect(resetsTooltip({ available: 1, credits: [{ type: 'five_hour' }] }, now)).toBe('5-hour')
+    // A Claude reset grant carries only its expiry.
+    expect(resetsTooltip({ available: 2, credits: [{ expiresAt: '2026-11-09T13:00:00Z' }] }, now)).toBe('expires in 1h 0m')
   })
 
   it('nothing at 0 or when absent', () => {

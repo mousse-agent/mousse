@@ -351,6 +351,7 @@ export const PROTOCOL_METHODS = [
   'providers.getSubscriptionUsage',
   'providers.usageSlots',
   'providers.getUsageFor',
+  'providers.useLimitReset',
   'providers.setUsageProxyKey',
   'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech',

@@ -144,6 +144,7 @@ import Task01Icon from '@hugeicons/core-free-icons/Task01Icon'
 import TerminalIcon from '@hugeicons/core-free-icons/TerminalIcon'
 import Tick02Icon from '@hugeicons/core-free-icons/Tick02Icon'
 import Undo02Icon from '@hugeicons/core-free-icons/Undo02Icon'
+import UndoIcon from '@hugeicons/core-free-icons/UndoIcon'
 import Upload04Icon from '@hugeicons/core-free-icons/Upload04Icon'
 import UserCircleIcon from '@hugeicons/core-free-icons/UserCircleIcon'
 import UserGroupIcon from '@hugeicons/core-free-icons/UserGroupIcon'
@@ -292,6 +293,8 @@ export const Redo2 = /* @__PURE__ */ createIcon('Redo2', Redo02Icon)
 export const RefreshCw = /* @__PURE__ */ createIcon('RefreshCw', RefreshIcon)
 export const Repeat = /* @__PURE__ */ createIcon('Repeat', RepeatIcon)
 export const RotateCcw = /* @__PURE__ */ createIcon('RotateCcw', RotateCcwIcon)
+/** A plain counter-clockwise arrow (↺), without RotateCcw's dotted arc. */
+export const RotateCcwArrow = /* @__PURE__ */ createIcon('RotateCcwArrow', UndoIcon)
 export const Save = /* @__PURE__ */ createIcon('Save', SaveIcon)
 export const Search = /* @__PURE__ */ createIcon('Search', Search01Icon)
 export const Send = /* @__PURE__ */ createIcon('Send', SentIcon)

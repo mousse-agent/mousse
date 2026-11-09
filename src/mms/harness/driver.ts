@@ -2,7 +2,7 @@ import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harne
 import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
-import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
+import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage, UseLimitResetResponse } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { AcpSource } from './acp/preset'
@@ -241,6 +241,11 @@ export interface DriverRuntime {
    * Throws when it cannot be read; the gateway reports that as an error entry. Absent: no usage.
    */
   usage?(signal: AbortSignal): Promise<RuntimeUsage>
+  /**
+   * Uses one limit-reset credit of the signed-in account (the one named, or the provider's next) and
+   * reads the limits again. Absent: the provider has no resets to use.
+   */
+  useLimitReset?(creditId: string | undefined, signal: AbortSignal): Promise<UseLimitResetResponse>
   /** `force` skips the runtime's own cache (Recheck; turn admission without `identity`). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   /**

@@ -799,3 +799,129 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   font-size: var(--settings-fs-small);
   text-align: center;
 }
+
+
+/* The card's reset button: the header's icon size; a soft accent when a limit runs low. */
+.usage-reset-btn.is-hint {
+  color: var(--accent);
+}
+
+/* Using a reset: one quiet row under the bars, a background and no border. It grows in and out with the
+   shared Collapse (UsageResetConfirm). */
+.usage-reset-row {
+  margin: 0 0 var(--space-12);
+  padding: var(--space-8) var(--space-12);
+  border-radius: calc(var(--ui-card-radius) - 4px);
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  font-size: var(--settings-fs-small);
+}
+
+.usage-reset-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8) var(--space-12);
+}
+
+/* While the row opens or closes its content also blurs in or out, with Collapse's durations and easing;
+   Collapse fades it. Only the content takes the filter, never the card. Child combinators, and only while
+   `data-motion` is set, so a settled row has no filter and nothing replays when the motion ends. */
+.ui-collapse[data-motion='enter'] > .ui-collapse-clip > .usage-reset-panel > .usage-reset-row > .usage-reset-content {
+  transition: filter 160ms var(--ui-collapse-ease);
+}
+
+@starting-style {
+  .ui-collapse[data-motion='enter'] > .ui-collapse-clip > .usage-reset-panel > .usage-reset-row > .usage-reset-content {
+    filter: blur(6px);
+  }
+}
+
+.ui-collapse[data-motion='exit'] > .ui-collapse-clip > .usage-reset-panel > .usage-reset-row > .usage-reset-content {
+  filter: blur(6px);
+  transition: filter 180ms var(--ui-collapse-ease-close);
+}
+
+/* The states share one place: the text layers stack in one cell, and the buttons keep their room when
+   hidden, so a change of state crossfades (with a light blur) and never changes the row's height. */
+.usage-reset-text {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.usage-reset-text > .usage-reset-layer {
+  grid-area: 1 / 1;
+}
+
+.usage-reset-layer {
+  transition:
+    opacity calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    filter calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease),
+    visibility 0s;
+}
+
+.usage-reset-layer:not([data-on]) {
+  opacity: 0;
+  filter: blur(3px);
+  visibility: hidden;
+  transition-delay: 0s, 0s, calc(180ms * var(--ui-motion-scale, 1));
+}
+
+.usage-reset-layer.is-done {
+  color: var(--text-secondary);
+}
+
+.usage-reset-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-reset-layer,
+  .usage-reset-content {
+    transition: none !important;
+  }
+}
+
+.usage-reset-now {
+  height: 26px;
+  padding: 0 var(--space-12);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: var(--accent);
+  color: var(--ui-on-accent, #15121b);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.usage-reset-now:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.usage-reset-now:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.usage-reset-now:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+/* A window with nothing left reads as empty, not missing: a faint red track and its share in red. */
+.usage-window-used.is-empty {
+  color: var(--danger);
+}
+
+.usage-window-used.is-empty .settings-muted {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.usage-window-head:has(.usage-window-used.is-empty) + .usage-bar {
+  background: color-mix(in srgb, var(--danger) 16%, var(--bg-secondary));
+}

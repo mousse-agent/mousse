@@ -337,7 +337,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
   }
 
   /** What every Codex runtime does with its service: turns, listings, usage, refresh. */
-  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation'> {
+  function serviceRuntime(service: CodexProviderService): Pick<DriverRuntime, 'adapter' | 'configured' | 'configuredProvider' | 'llmProvider' | 'models' | 'modelsRefreshedAt' | 'usage' | 'useLimitReset' | 'permissionLimits' | 'refreshModels' | 'forgetConversation' | 'compactConversation'> {
     return {
       adapter: new CodexAdapter(() => service),
       configured: () => service.configured(),
@@ -346,6 +346,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       models: () => service.models(),
       modelsRefreshedAt: () => service.modelsRefreshedAt(),
       usage: (signal) => readUsage(service, signal),
+      // The user's own Codex: its reset credits are its own account's.
+      useLimitReset: (creditId, signal) => service.consumeResetCredit(creditId, signal),
       permissionLimits: () => CODEX_PERMISSION_LIMITS,
       refreshModels: async () => {
         await service.status()

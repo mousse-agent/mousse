@@ -3227,6 +3227,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (provider) keepUsage(ctx.mms, provider)
       return { ...(provider ? { provider } : {}) }
     }
+    // Uses one of a provider's limit-reset credits (Codex), asked for by the usage page on this computer only.
+    case 'providers.useLimitReset': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A limit reset is used on its own computer')
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      const creditId = p.creditId === undefined ? undefined : asString(p.creditId, 'creditId', 256)
+      if (!ctx.mms.harness) throw new Error('Providers are not ready yet')
+      return ctx.mms.harness.instances.useLimitReset({ kind: 'device' }, providerId, creditId)
+    }
     // The management key of the local CLI-to-API proxy Claude's usage is read through: saved
     // encrypted for that proxy's origin after it accepts the key, and never sent back. Only a window
     // or the CLI on this computer may set or clear it (`providers.*` is never routed either).

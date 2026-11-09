@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, ExternalLink, RefreshCw } from '../lib/icons'
 import { useComputers } from '../lib/computers'
 import {
   ALL_COMPUTERS, THIS_COMPUTER, resetsLabel, totalResets, formatResetLine, orderUsageWindows, remainingNow, rememberedUsageComputer, rememberUsageComputer, resetTooltip, shortUsageNote,
-  usageReadAtLabel, usageReadingTime, usageRows, usageSelection, type ComputerUsage
+  usageReadAtLabel, usageReadingTime, usageRows, usageSelection, type ComputerUsage, resetEffect, resetOutcomeText
 } from '../lib/subscriptionUsage'
 import { useAppStore } from '../stores/appStore'
 import { localDeviceName } from './sideCard/deviceMenu'
@@ -11,10 +11,11 @@ import { SettingsGroup } from './settings/SettingsRow'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { Select } from './ui/Select'
 import { needsProxyKey, ProxyKeyNote, UsageSettingsButton, type SaveProxyKey } from './UsageProxyControls'
-import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow } from '../../shared/providerAuth'
+import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow, UseLimitResetResponse } from '../../shared/providerAuth'
 import { UsageBar } from './UsageBar'
 import { activeAccountsLabel, UsageAccountsView } from './UsageAccountsView'
 import { UsageResetsChip } from './UsageResetsChip'
+import { soonestCredit, UsageResetButton, UsageResetConfirm, type ResetFlow } from './UsageResetAction'
 import { UsageRowMenu, type UsageRowActions } from './UsageRowMenu'
 import { Modal } from './ui/Modal'
 import { showToast } from './ui/Toast'
@@ -44,7 +45,7 @@ function UsageBarRow({ entry, now }: { entry: ProviderUsageWindow; now: number }
   return <div className="usage-window" data-testid="usage-window" data-remaining={remaining ?? 'unknown'}>
     <div className="usage-window-head">
       <span className="usage-window-label">{entry.label}</span>
-      <span className="usage-window-used">{remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{remaining}% <span className="settings-muted">left</span></>}</span>
+      <span className={`usage-window-used${remaining === 0 ? ' is-empty' : ''}`}>{remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{remaining}% <span className="settings-muted">left</span></>}</span>
     </div>
     <UsageBar remaining={remaining} label={entry.label} />
     {reset && <div className="usage-window-reset settings-muted" title={resetTooltip(entry.resetsAt, now)}>{reset}</div>}
@@ -89,6 +90,8 @@ export interface SubscriptionUsageViewProps {
   loadingIds?: ReadonlySet<string>
   /** Opens a provider's settings (an instance id), for Reconnect. */
   onReconnect?: (instanceId: string) => void
+  /** Uses one of a provider's limit resets (Codex); the chip asks first. */
+  onUseReset?: (providerId: string, creditId: string | undefined) => Promise<UseLimitResetResponse>
   /** Providers hidden from this page (Other usage and Needs attention rows), and what their "…" menu does. */
   hidden?: ReadonlySet<string>
   rowActions?: UsageRowActions
@@ -97,8 +100,36 @@ export interface SubscriptionUsageViewProps {
   onDisableAnswer?: (confirmed: boolean) => void
 }
 
-export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onBack, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer }: SubscriptionUsageViewProps) {
+export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onBack, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset }: SubscriptionUsageViewProps) {
   const [showHidden, setShowHidden] = useState(false)
+  // Using a limit reset, for one card at a time: asked from its header button, answered in its own row.
+  const [resetFlow, setResetFlow] = useState<ResetFlow | null>(null)
+  // One reset at a time: a second Reset now while one is out uses nothing (each call spends a credit).
+  const resetRunning = useRef(false)
+  const runReset = async (provider: ProviderUsage) => {
+    if (!onUseReset || resetRunning.current) return
+    resetRunning.current = true
+    const credit = soonestCredit(provider.resets)
+    setResetFlow({ providerId: provider.id, phase: 'working' })
+    try {
+      const { outcome } = await onUseReset(provider.id, credit?.id)
+      const failed = resetOutcomeText(outcome)
+      if (failed) {
+        setResetFlow({ providerId: provider.id, phase: 'failed', message: failed })
+        onRefresh()
+        return
+      }
+      setResetFlow({ providerId: provider.id, phase: 'done', message: resetEffect(credit?.type ?? 'codexRateLimits').done })
+      onRefresh()
+      setTimeout(() => setResetFlow((current) => (current?.providerId === provider.id && current.phase === 'done' ? null : current)), 2500)
+    } catch {
+      setResetFlow({ providerId: provider.id, phase: 'failed', message: "Couldn't use the reset" })
+      // The reset may still have been used (a timeout): read the limits again before anyone tries again.
+      onRefresh()
+    } finally {
+      resetRunning.current = false
+    }
+  }
   const [otherOpen, setOtherOpen] = useState<boolean | undefined>(() => rememberedSectionOpen('other'))
   const [attentionOpen, setAttentionOpen] = useState<boolean>(() => rememberedSectionOpen('attention') ?? false)
   const readAt = usage ? usageReadingTime(usage.fetchedAt) : undefined
@@ -179,6 +210,11 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
                 {provider.plan && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-plan">{provider.plan}</span>}
                 {multi && provider.proxy && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-source">via CLI API proxy</span>}
                 {!multi && <UsageResetsChip resets={provider.resets} now={now} />}
+                {!multi && onUseReset && local && provider.id.startsWith('codex') && <UsageResetButton
+                  resets={provider.resets}
+                  hint={provider.windows.some((window) => (remainingNow(window, now) ?? 100) < 20)}
+                  onStart={() => setResetFlow({ providerId: provider.id, phase: 'confirm' })}
+                />}
                 {provider.proxy && onSaveProxyKey && onClearProxyKey && local && <UsageSettingsButton provider={provider} onSave={onSaveProxyKey} onClear={onClearProxyKey} onSaved={onRefresh} />}
               </>
             : undefined}
@@ -204,6 +240,12 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
           {needsProxyKey(provider) && onSaveProxyKey && local
             ? <ProxyKeyNote provider={provider} onSave={onSaveProxyKey} onSaved={onRefresh} />
             : !multi && !waiting && <UsageNote provider={provider} />}
+          {!multi && onUseReset && local && provider.id.startsWith('codex') && <UsageResetConfirm
+            resets={provider.resets}
+            flow={resetFlow?.providerId === provider.id ? resetFlow : null}
+            onConfirm={() => void runReset(provider)}
+            onCancel={() => setResetFlow(null)}
+          />}
         </SettingsGroup>
         })}
         {others.length > 0 && <UsageCollapsibleSection id="usage-other" title="Other usage" count={others.length} open={otherShown} onToggle={toggleOther}>
@@ -350,6 +392,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     onReconnect={(instanceId) => { onClose(); openProvider(instanceId) }}
     hidden={hidden}
     rowActions={rowActions}
+    onUseReset={(providerId, creditId) => window.mousse.providers.useLimitReset({ providerId, ...(creditId ? { creditId } : {}) })}
     disableAsk={disableAsk}
     onDisableAnswer={(confirmed) => (confirmed && disableAsk ? void disable(disableAsk) : setDisableAsk(null))}
   />
