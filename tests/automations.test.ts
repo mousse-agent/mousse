@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
-import { missedWhileOffline, ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
+import { missedWhileOffline, recordTickerHeartbeat, ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { askText, botRun, buildAutomationIndex, jobEffectiveMay, type AutomationIndexSources } from '../src/mms/automations/AutomationIndex'
 import { AgentJobAskStore } from '../src/mms/automations/AgentJobAsks'
@@ -321,6 +321,8 @@ describe('the scheduler', () => {
     const firstMissed = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 4, 3, 0)
     store.updateJob(daily.id, { nextRunAt: firstMissed.toISOString(), state: 'scheduled' })
     store.updateJob(onTime.id, { nextRunAt: new Date(now.getTime() - 60_000).toISOString(), state: 'scheduled' })
+    // Its last tick before it stopped, persisted then.
+    recordTickerHeartbeat(true, home, new Date(firstMissed.getTime() - 30_000))
     await tick(service)
     await settle(service)
     expect(prompts.filter((prompt) => prompt.includes('bump'))).toHaveLength(1)
@@ -338,14 +340,35 @@ describe('the scheduler', () => {
     service.stop()
   })
 
+  it('never marks a run a busy scheduler delayed as missed while offline, however late', async () => {
+    const store = new ScheduledJobStore(MousseConfigStore.load(home))
+    const prompts: string[] = []
+    const service = new ScheduledJobService({ runIsolated: async (prompt) => { prompts.push(prompt); return { text: 'Done.', silent: false } } }, store)
+    start(service)
+    const late = store.createJob({ name: 'Late', prompt: 'late', schedule: { kind: 'interval', minutes: 60 } })
+    // Due 40 minutes ago, while the scheduler kept ticking (its last tick a minute ago): busy, not offline.
+    const now = Date.now()
+    store.updateJob(late.id, { nextRunAt: new Date(now - 40 * 60_000).toISOString(), state: 'scheduled' })
+    recordTickerHeartbeat(true, home, new Date(now - 60_000))
+    await tick(service)
+    await settle(service)
+    expect(prompts).toEqual(['late'])
+    expect(store.getJob(late.id)!.runHistory![0]!.missed).toBeUndefined()
+    service.stop()
+  })
+
   it('counts the missed repeats of an interval and a cron, and never a job that runs on demand', () => {
     const now = new Date('2026-11-09T12:00:00.000Z')
-    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T09:00:00.000Z', now)).toEqual({ count: 4, since: '2026-11-09T09:00:00.000Z' })
-    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T11:58:00.000Z', now)).toBeUndefined()
-    expect(missedWhileOffline({ schedule: { kind: 'manual' } }, '2026-11-01T00:00:00.000Z', now)).toBeUndefined()
-    expect(missedWhileOffline({ schedule: { kind: 'once', runAt: '2026-11-08T00:00:00.000Z' } }, '2026-11-08T00:00:00.000Z', now)).toMatchObject({ count: 1 })
+    const down = { from: '2026-10-31T00:00:00.000Z', to: now.toISOString() }
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T09:00:00.000Z', now, down)).toEqual({ count: 4, since: '2026-11-09T09:00:00.000Z' })
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T11:58:00.000Z', now, down)).toBeUndefined()
+    expect(missedWhileOffline({ schedule: { kind: 'manual' } }, '2026-11-01T00:00:00.000Z', now, down)).toBeUndefined()
+    expect(missedWhileOffline({ schedule: { kind: 'once', runAt: '2026-11-08T00:00:00.000Z' } }, '2026-11-08T00:00:00.000Z', now, down)).toMatchObject({ count: 1 })
     // An every-minute repeat after a long time off stops counting at 1000.
-    expect(missedWhileOffline({ schedule: { kind: 'cron', expr: '* * * * *' } }, '2026-11-01T00:00:00.000Z', now)?.count).toBe(1000)
+    expect(missedWhileOffline({ schedule: { kind: 'cron', expr: '* * * * *' } }, '2026-11-01T00:00:00.000Z', now, down)?.count).toBe(1000)
+    // Late but due while the scheduler was ticking (before the gap, or with no gap at all): never missed.
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T09:00:00.000Z', now)).toBeUndefined()
+    expect(missedWhileOffline({ schedule: { kind: 'interval', minutes: 60 } }, '2026-11-09T09:00:00.000Z', now, { from: '2026-11-09T10:00:00.000Z', to: now.toISOString() })).toBeUndefined()
   })
 
   it('announces how each run ended once, with whether its Tell me lets it notify', async () => {

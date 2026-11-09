@@ -178,12 +178,12 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path)
 }
 
-function atomicWriteEpoch(path: string): void {
+function atomicWriteEpoch(path: string, at: Date = new Date()): void {
   ensureScheduledDir(dirname(path))
   const tmpPath = join(dirname(path), `.hb_${process.pid}_${Date.now()}.tmp`)
   const fd = openSync(tmpPath, 'w')
   try {
-    writeSync(fd, String(Date.now() / 1000))
+    writeSync(fd, String(at.getTime() / 1000))
     fsyncSync(fd)
   } finally {
     closeSync(fd)
@@ -191,11 +191,11 @@ function atomicWriteEpoch(path: string): void {
   renameSync(tmpPath, path)
 }
 
-export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir()): void {
+export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date()): void {
   try {
-    atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'))
+    atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'), at)
     if (success) {
-      atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
+      atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'), at)
     }
   } catch {
     /* best effort */
@@ -341,17 +341,29 @@ function claimRecordFields(claim: ScheduledJobRunClaim | undefined): Partial<Sch
   }
 }
 
-/** A timed occurrence that is this late was not missed by a busy tick: the computer (or Mousse) was off or asleep. */
-const MISSED_GRACE_MS = 5 * 60_000
+/**
+ * A gap this long between two scheduler ticks (one a minute) means the scheduler was not running: Mousse was closed,
+ * or the computer off or asleep. A run this late is not one a busy tick delayed.
+ */
+export const MISSED_GRACE_MS = 5 * 60_000
+
+/** When the scheduler was last down: from its last tick before the gap to its first tick after it. */
+export interface SchedulerDowntime {
+  from: string
+  to: string
+}
 
 /**
- * The repeats a job missed while its computer was off, when the occurrence it is about to run is one of them: due
- * more than a few minutes ago. They collapse into this one run, which runs once and says so ("Missed while offline").
+ * The repeats a job missed while its computer was off, when the occurrence it is about to run is one of them: it fell
+ * due while the scheduler was down (after its last tick before the gap, by the persisted heartbeat) and is more than a
+ * few minutes late. They collapse into this one run, which runs once and says so ("Missed while offline"). A run a
+ * busy scheduler delayed, however long, fell due while it was ticking and is never marked.
  */
-export function missedWhileOffline(job: Pick<ScheduledJob, 'schedule'>, dueAt: string, now: Date): ScheduledMissedRuns | undefined {
-  if (job.schedule.kind === 'manual') return undefined
+export function missedWhileOffline(job: Pick<ScheduledJob, 'schedule'>, dueAt: string, now: Date, downtime?: SchedulerDowntime): ScheduledMissedRuns | undefined {
+  if (job.schedule.kind === 'manual' || !downtime) return undefined
   const due = Date.parse(dueAt)
   if (!Number.isFinite(due) || now.getTime() - due <= MISSED_GRACE_MS) return undefined
+  if (due <= Date.parse(downtime.from) || due > Date.parse(downtime.to)) return undefined
   return { count: occurrencesSince(job.schedule, dueAt, now), since: new Date(due).toISOString() }
 }
 
@@ -993,7 +1005,7 @@ export class ScheduledJobStore {
    * Atomically claim due jobs for execution. Each claimed job receives a durable
    * runClaim (pid + process instance + token). Live running claims are never stolen.
    */
-  claimDueJobs(now = new Date(), options: { limit?: number; skipJobIds?: ReadonlySet<string> } = {}): ScheduledJob[] {
+  claimDueJobs(now = new Date(), options: { limit?: number; skipJobIds?: ReadonlySet<string>; downtime?: SchedulerDowntime } = {}): ScheduledJob[] {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       // Reconcile dead running owners before taking new claims (same lock section).
       this.reconcileStaleRunningJobsUnlocked(now)
@@ -1064,7 +1076,7 @@ export class ScheduledJobStore {
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
         const resumedWaiting = job.lastStatus === 'waiting'
-        const missed = resumedWaiting || job.waitingBehind ? undefined : missedWhileOffline(job, job.nextRunAt, now)
+        const missed = resumedWaiting || job.waitingBehind ? undefined : missedWhileOffline(job, job.nextRunAt, now, options.downtime)
         job.state = 'running'
         job.runClaim = { ...newRunClaim(job.nextRunAt), ...(resumedWaiting ? { resumedWaiting: true } : {}), ...(missed ? { missed } : {}) }
         due.push({ ...job, runClaim: { ...job.runClaim } })

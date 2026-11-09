@@ -12,10 +12,12 @@ import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import {
   ScheduledJobStore,
+  MISSED_GRACE_MS,
   TICKER_INTERVAL_MS,
   recordTickerHeartbeat,
   readTickerHeartbeat,
-  type ScheduledRunDetails
+  type ScheduledRunDetails,
+  type SchedulerDowntime
 } from './ScheduledJobStore'
 import type { BackgroundWorkflowTurnResult, ScheduledJobIngress } from '../platform/MmsWorkflowChat'
 import { hasPlaceholders, renderPrompt } from './promptPlaceholders'
@@ -115,6 +117,8 @@ export class ScheduledJobService extends EventEmitter {
   private ownedRunClaims = new Map<string, string>()
   private lastTickError: string | null = null
   private lastHeartbeatAt: string | null = null
+  /** The scheduler's newest downtime, read from the heartbeat persisted before it; only runs due in it were missed. */
+  private downtime: SchedulerDowntime | undefined
   private lastSuccessAt: string | null = null
   private tickInProgress = false
   /** When true, future ticks are no-ops (stop does not wait for in-flight LLM). */
@@ -659,13 +663,19 @@ export class ScheduledJobService extends EventEmitter {
     try {
       if (this.stopped && !force) return
 
-      this.lastHeartbeatAt = new Date().toISOString()
-      recordTickerHeartbeat(false, this.store.homeDir)
+      // The last tick before this one, by any process, read before it is overwritten: a gap means the scheduler was down.
+      const tickAt = this.clock()
+      const previousTick = readTickerHeartbeat(this.store.homeDir).heartbeatAt
+      if (previousTick && tickAt.getTime() - Date.parse(previousTick) > MISSED_GRACE_MS) {
+        this.downtime = { from: previousTick, to: tickAt.toISOString() }
+      }
+      this.lastHeartbeatAt = tickAt.toISOString()
+      recordTickerHeartbeat(false, this.store.homeDir, tickAt)
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
       this.sweepWebhookPayloadsIfDue()
-      const dueJobs = this.store.claimDueJobs(this.clock(), { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()) })
+      const dueJobs = this.store.claimDueJobs(tickAt, { limit: MAX_STARTS_PER_TICK, skipJobIds: new Set(this.inFlight.keys()), ...(this.downtime ? { downtime: this.downtime } : {}) })
       if (dueJobs.length >= MAX_STARTS_PER_TICK) this.scheduleCatchUp()
       for (const job of dueJobs) {
         if (job.runClaim) this.ownedRunClaims.set(job.id, job.runClaim.token)
