@@ -242,6 +242,11 @@ export interface HarnessGateway {
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
    */
   compactConversation(request: NativeCompactRequest): Promise<boolean>
+  /**
+   * Drops the thread's native session on `instanceId`, so its next turn starts a new one with the full history
+   * (a runtime compaction whose result Mousse did not take).
+   */
+  forgetConversation(request: { threadId: string; instanceId: string }): void
   /** Where runtimes with live processes per thread report (every instance's, now and later). */
   setLiveHost(host: LiveProcessHost | null): void
   /** The profile's Mousse MCP server, which turn bridges attach (null: none). */
@@ -1822,6 +1827,10 @@ export class Harness implements HarnessGateway {
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {
     const runtime = this.recordOrUndefined(request.instanceId)?.runtime
     return runtime?.compactConversation ? runtime.compactConversation(request) : false
+  }
+
+  forgetConversation(request: { threadId: string; instanceId: string }): void {
+    this.recordOrUndefined(request.instanceId)?.runtime.forgetConversation?.(request.threadId)
   }
 
   setLiveHost(host: LiveProcessHost | null): void {

@@ -352,12 +352,13 @@ describe('the prompt cache record', () => {
 
   it('keeps the earlier lifetime for a turn that only read the cache, on the same model', () => {
     const first = withTurn()
-    const cached = { ...first, promptCache: nextPromptCache(first, { at: 1_000, ttlMs: hour, modelKey: 'm' }) }
+    const cached = { ...first, promptCache: nextPromptCache(first, { at: 1_000, ttlMs: hour, modelKey: 'm', instanceId: 'claude' }) }
     const next = appendNativeMessage(appendNativeMessage(cached, userMessage('again')), assistant('stop'))
-    expect(nextPromptCache(next, { at: 2_000, modelKey: 'm' })).toEqual({ lastRequestAt: 2_000, ttlMs: hour, revision: next.revision, modelKey: 'm' })
-    // A write says its own lifetime; another model has its own cache.
-    expect(nextPromptCache(next, { at: 2_000, ttlMs: 5 * 60_000, modelKey: 'm' }).ttlMs).toBe(5 * 60_000)
-    expect(nextPromptCache(next, { at: 2_000, modelKey: 'other' }).ttlMs).toBeUndefined()
+    expect(nextPromptCache(next, { at: 2_000, modelKey: 'm', instanceId: 'claude' })).toEqual({ lastRequestAt: 2_000, ttlMs: hour, revision: next.revision, modelKey: 'm', instanceId: 'claude' })
+    // A write says its own lifetime; another model, or another instance of the same provider, has its own cache.
+    expect(nextPromptCache(next, { at: 2_000, ttlMs: 5 * 60_000, modelKey: 'm', instanceId: 'claude' }).ttlMs).toBe(5 * 60_000)
+    expect(nextPromptCache(next, { at: 2_000, modelKey: 'other', instanceId: 'claude' }).ttlMs).toBeUndefined()
+    expect(nextPromptCache(next, { at: 2_000, modelKey: 'm', instanceId: 'claude:work' }).ttlMs).toBeUndefined()
   })
 
   it('drops an unreadable record when a session loads, and keeps a good one', () => {

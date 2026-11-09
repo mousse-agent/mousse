@@ -31,7 +31,7 @@ import { nativeAgentAssistantMessage } from '../src/mms/providers/nativeAgentHis
 import type { ChatMessage } from '../src/shared/types'
 import { mutateDurableQueue } from '../src/mms/queue/durableQueue'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
-import { getQueueHoldPath, readQueueHold } from '../src/mms/queue/queueHold'
+import { getQueueHoldPath, QUEUE_HOLD_STALE_MS, readQueueHold, requestQueueHoldStop } from '../src/mms/queue/queueHold'
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {
@@ -326,6 +326,121 @@ describe('a message sent while the context compacts', () => {
     }
   }, 60_000)
 
+  it('renews its saved hold while it runs, and stops when the hold was lifted elsewhere', async () => {
+    const { orch, thread, harness, engine, store } = await setup()
+    const before = longThread(orch, thread.id)
+    controlled(harness as never)
+    ;(orch as unknown as { queueHoldRenewMs: number }).queueHoldRenewMs = 20
+    let now = Date.now()
+    ;(orch as unknown as { queueHoldClock: () => number }).queueHoldClock = () => now
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    const dir = store.getThreadDir(thread.id)
+    const set = readQueueHold(dir)!
+    now += 10_000
+    await until(() => readQueueHold(dir)?.renewedAt === new Date(now).toISOString())
+    expect(readQueueHold(dir)!.since).toBe(set.since)
+
+    // Another process found it out of date (this one hung) and lifted it; its queue may have gone on.
+    rmSync(getQueueHoldPath(dir))
+    expect(await compaction).toBe('stopped')
+    expect(fullHistory(orch, thread.id, before)).toBe(true)
+  }, 30_000)
+
+  it('stops when another process asks it to through the hold (Send now there), and keeps the full history', async () => {
+    const { orch, thread, harness, engine, store } = await setup()
+    const before = longThread(orch, thread.id)
+    controlled(harness as never)
+    ;(orch as unknown as { queueHoldRenewMs: number }).queueHoldRenewMs = 20
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    const dir = store.getThreadDir(thread.id)
+    expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe('requested')
+    expect(await compaction).toBe('stopped')
+    expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
+    expect(fullHistory(orch, thread.id, before)).toBe(true)
+    expect(existsSync(getQueueHoldPath(dir))).toBe(false)
+  }, 30_000)
+
+  it('does not take a result that ends right after a stop was asked for, or after its hold was lifted elsewhere, before any renewal', async () => {
+    for (const ending of ['stop asked', 'hold lifted'] as const) {
+      for (const runtimeCompacted of [true, false]) {
+        const { orch, thread, harness, engine, store } = await setup()
+        const before = longThread(orch, thread.id)
+        const finish = controlled(harness as never)
+        const forget = vi.fn()
+        ;(harness as unknown as { forgetConversation: typeof forget }).forgetConversation = forget
+        // No renewal runs in between: the check happens as the result is taken.
+        ;(orch as unknown as { queueHoldRenewMs: number }).queueHoldRenewMs = 60_000
+        const compaction = compactNow(orch, engine, thread.id)
+        await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+        const dir = store.getThreadDir(thread.id)
+        if (ending === 'stop asked') expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe('requested')
+        else rmSync(getQueueHoldPath(dir))
+        finish(runtimeCompacted)
+        expect(await compaction).toBe('stopped')
+        expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
+        expect(fullHistory(orch, thread.id, before)).toBe(true)
+        // The runtime's compacted session is dropped: the next turn starts a new one with the full history.
+        expect(forget.mock.calls).toEqual(runtimeCompacted ? [[{ threadId: thread.id, instanceId: 'acp:echo' }]] : [])
+        expect(existsSync(getQueueHoldPath(dir))).toBe(false)
+      }
+    }
+  }, 60_000)
+
+  it('when the runtime goes away mid-compaction: the hold lifts, Mousse cuts its own copy and the row says so', async () => {
+    const { orch, thread, harness, engine, prompts, store } = await setup()
+    longThread(orch, thread.id)
+    const finish = controlled(harness as never)
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    await orch.send('waiting for the compaction', false, { threadId: thread.id, clientRequestId: 'runtime-gone' })
+    // As Codex reports a process that exited after taking the compaction in (its session is dropped).
+    finish(new Error('Codex stopped while compacting this thread'))
+    expect(await compaction).toBe('compacted')
+    expect(orch.getMessagesForPersistence(thread.id).find((message) => message.kind === 'context_compaction')?.content).toMatch(/^Context compacted · \d+K → \d+K$/)
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+    await until(() => Boolean(sentWith(prompts, 'waiting for the compaction')))
+  }, 30_000)
+
+  it('Send now here once the result was taken says the compaction had finished, and the message goes with the compacted context', async () => {
+    const { orch, thread, harness, engine, prompts } = await setup()
+    longThread(orch, thread.id)
+    const finish = controlled(harness as never)
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    await orch.send('just too late', false, { threadId: thread.id, clientRequestId: 'too-late' })
+    const [item] = orch.listQueue(thread.id)
+    // Send now while the result is being saved.
+    const internal = orch as unknown as { persist: (immediate?: boolean) => void }
+    const realPersist = internal.persist.bind(orch)
+    let sent: unknown
+    vi.spyOn(internal, 'persist').mockImplementation((immediate) => {
+      if (sent === undefined && lastRow(orch, thread.id)?.content.startsWith('Context compacted')) sent = orch.promoteQueueItem(thread.id, item!.id)
+      return realPersist(immediate)
+    })
+    finish(false)
+    expect(await compaction).toBe('compacted')
+    vi.restoreAllMocks()
+    expect(sent).toEqual({ ok: true, notice: 'compaction_finished' })
+    await until(() => Boolean(sentWith(prompts, 'just too late')))
+    expect(orch.getNativeContext(thread.id).compaction).toBeDefined()
+  }, 30_000)
+
+  it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
+    const { orch, thread, harness, engine, prompts, store } = await setup()
+    longThread(orch, thread.id)
+    controlled(harness as never)
+    vi.spyOn(orch as unknown as { persist: (immediate?: boolean) => void }, 'persist').mockImplementationOnce(() => { throw new Error('disk full') })
+    await expect(compactNow(orch, engine, thread.id)).rejects.toThrow('disk full')
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+    // No compaction is left to stop, and a new one may start.
+    expect(orch.stopCompaction(thread.id)).toBe(false)
+    vi.restoreAllMocks()
+    await orch.send('after the failed start', false, { threadId: thread.id, clientRequestId: 'after-failed-start' })
+    await until(() => Boolean(sentWith(prompts, 'after the failed start')))
+  }, 30_000)
+
   it('Send now on the first held message stops the compaction, cuts nothing, and sends that message first with the full history', async () => {
     const { orch, thread, harness, engine, prompts } = await setup()
     const before = longThread(orch, thread.id)
@@ -382,13 +497,13 @@ describe('a message sent while the context compacts', () => {
 
 describe('a compaction hold found at startup', () => {
   /** The thread as a daemon left it: a queued message, a compaction row still running, and the hold saved for it. */
-  const leftBehind = (store: ThreadDataStore, threadId: string, owner: { pid: number; instance: string }) => {
+  const leftBehind = (store: ThreadDataStore, threadId: string, owner: { pid: number; instance: string }, renewedAt = Date.now()) => {
     mutateDurableQueue(store, threadId, (items) => enqueueMessage(items, { threadId, content: 'queued before the restart', intent: 'normal', source: 'gui' }).items)
     store.mutateThreadData(threadId, () => ({ messages: [
       { id: 'u1', role: 'user', content: 'hello', timestamp: new Date().toISOString() },
       { id: 'compacting', role: 'assistant', kind: 'context_compaction', content: 'Compacting context…', streaming: true, compaction: { manual: true }, timestamp: new Date().toISOString() }
     ] }))
-    writeFileSync(getQueueHoldPath(store.getThreadDir(threadId)), JSON.stringify({ kind: 'compaction', id: 'compacting', since: new Date().toISOString(), ownerPid: owner.pid, ownerInstance: owner.instance }))
+    writeFileSync(getQueueHoldPath(store.getThreadDir(threadId)), JSON.stringify({ kind: 'compaction', id: 'compacting', since: new Date(renewedAt).toISOString(), renewedAt: new Date(renewedAt).toISOString(), ownerPid: owner.pid, ownerInstance: owner.instance }))
   }
 
   it('of a daemon that is gone: the row is settled as interrupted, the hold lifts and the queue drains', async () => {
@@ -401,6 +516,59 @@ describe('a compaction hold found at startup', () => {
     expect(store.loadThreadData(thread.id).messages.find((message) => message.id === 'compacting'))
       .toMatchObject({ content: 'Compaction interrupted · full history kept', streaming: false })
     expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+  }, 30_000)
+
+  it('of a live process that no longer renews it: once it is out of date, the row is settled, the hold lifts and the queue drains', async () => {
+    const { orch, thread, store, prompts } = await setup()
+    // The pid is alive (the parent of this test), but nothing renews the hold: a hung daemon, or a pid reused.
+    leftBehind(store, thread.id, { pid: process.ppid, instance: 'another-process' })
+    orch.recoverAndDrainPendingQueues()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(prompts).toHaveLength(0)
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(true)
+
+    const later = Date.now() + QUEUE_HOLD_STALE_MS + 1_000
+    ;(orch as unknown as { queueHoldClock: () => number }).queueHoldClock = () => later
+    orch.recoverAndDrainPendingQueues()
+    await until(() => prompts.some((prompt) => prompt.text.includes('queued before the restart')))
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+    await until(() => store.loadThreadData(thread.id).messages.find((message) => message.id === 'compacting')?.streaming === false)
+    expect(store.loadThreadData(thread.id).messages.find((message) => message.id === 'compacting'))
+      .toMatchObject({ content: 'Compaction interrupted · full history kept', compaction: { kept: 'interrupted' } })
+    expect(orch.getMessagesForPersistence(thread.id).find((message) => message.id === 'compacting')).toMatchObject({ streaming: false })
+  }, 30_000)
+
+  it('of another process: Send now there moves the message to the front and asks that process to stop; it goes first once the hold lifts', async () => {
+    const { orch, thread, store, prompts } = await setup()
+    leftBehind(store, thread.id, { pid: process.ppid, instance: 'another-process' })
+    await orch.send('picked', false, { threadId: thread.id, clientRequestId: 'peer-picked' })
+    const picked = orch.listQueue(thread.id).find((item) => item.content === 'picked')!
+
+    expect(orch.promoteQueueItemToSteer(thread.id, picked.id)).toBe(true)
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['picked', 'queued before the restart'])
+    expect(readQueueHold(store.getThreadDir(thread.id))).toMatchObject({ id: 'compacting', stopRequested: true })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(prompts).toHaveLength(0)
+
+    // That process reads the request, stops its compaction, settles its row and lifts the hold.
+    store.mutateThreadData(thread.id, (current) => ({ messages: current.messages.map((message) => (message.id === 'compacting' ? { ...message, streaming: false, content: 'Compaction stopped · full history kept' } : message)) }))
+    rmSync(getQueueHoldPath(store.getThreadDir(thread.id)))
+    orch.drainQueueAfterCompaction(thread.id)
+    await until(() => prompts.some((prompt) => prompt.text.includes('queued before the restart')))
+    expect(prompts[0]!.text).toContain('picked')
+    expect(prompts[0]!.text).not.toContain('queued before the restart')
+  }, 30_000)
+
+  it('of another process whose result was already taken: Send now says so, and the message goes first all the same', async () => {
+    const { orch, thread, store } = await setup()
+    leftBehind(store, thread.id, { pid: process.ppid, instance: 'another-process' })
+    const path = getQueueHoldPath(store.getThreadDir(thread.id))
+    writeFileSync(path, JSON.stringify({ ...readQueueHold(store.getThreadDir(thread.id)), taken: true }))
+    await orch.send('picked', false, { threadId: thread.id, clientRequestId: 'peer-taken' })
+    const picked = orch.listQueue(thread.id).find((item) => item.content === 'picked')!
+    expect(orch.promoteQueueItem(thread.id, picked.id)).toEqual({ ok: true, notice: 'compaction_finished' })
+    expect(orch.listQueue(thread.id).map((item) => item.content)).toEqual(['picked', 'queued before the restart'])
+    expect(readQueueHold(store.getThreadDir(thread.id))?.stopRequested).toBeUndefined()
   }, 30_000)
 
   it('of another process that still runs it: nothing drains and a send queues, until that compaction ends', async () => {

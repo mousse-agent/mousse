@@ -354,7 +354,8 @@ const api = {
       ipcRenderer.invoke('queue:edit', threadId, itemId, content, expectedContent),
     reorder: (threadId: string, orderedIds: string[]): Promise<QueuedMessage[]> =>
       ipcRenderer.invoke('queue:reorder', threadId, orderedIds),
-    promoteToSteer: (threadId: string, itemId: string): Promise<boolean> =>
+    /** `notice: 'compaction_finished'`: the compaction it would skip had finished; the message goes first with the compacted context. */
+    promoteToSteer: (threadId: string, itemId: string): Promise<{ ok: boolean; notice?: 'compaction_finished' }> =>
       ipcRenderer.invoke('queue:promoteToSteer', threadId, itemId),
     onUpdated: (
       cb: (payload: { threadId: string; items: QueuedMessage[] }) => void

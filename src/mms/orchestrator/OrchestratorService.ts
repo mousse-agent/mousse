@@ -288,8 +288,19 @@ import {
   waitAcquireExecutionLease,
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
-import { isProcessAlive } from '../queue/processLiveness'
-import { clearQueueHold, isQueueHoldLive, readQueueHold, setQueueHold } from '../queue/queueHold'
+import { isProcessAlive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
+import {
+  clearQueueHold,
+  clearStaleQueueHold,
+  isQueueHoldLive,
+  QUEUE_HOLD_RENEW_MS,
+  readQueueHold,
+  renewQueueHold,
+  requestQueueHoldStop,
+  setQueueHold,
+  takeQueueHold,
+  type QueueHold
+} from '../queue/queueHold'
 import {
   completeClaimDurable,
   mutateDurableQueue,
@@ -796,6 +807,15 @@ const CONTINUATION_CALL_WAIT_MS = 10_000
 const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 /** The compaction row of a `/compact` that was stopped or ran out of time. */
 const COMPACTION_STOPPED_TEXT = 'Compaction stopped · full history kept'
+
+/**
+ * What Send now did: `ok` false when it was refused. `notice: 'compaction_finished'`: it would have skipped a
+ * compaction that had already finished, so the message goes first with the compacted context.
+ */
+export interface SendNowOutcome {
+  ok: boolean
+  notice?: 'compaction_finished'
+}
 
 /** "182K", "9K", "1.2M": a compaction row's sizes. */
 function shortTokenCount(tokens: number): string {
@@ -1592,8 +1612,14 @@ export class OrchestratorService extends EventEmitter {
   private turnStates = new Map<string, TurnState>()
   /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
   private readonly compactions = new Map<string, AbortController>()
+  /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
+  private readonly takenCompactions = new WeakSet<AbortController>()
   /** How long a `/compact` waits for the runtime's own compaction (tests shorten it). */
   private nativeCompactTimeoutMs = NATIVE_COMPACT_TIMEOUT_MS
+  /** How often a running compaction renews its saved queue hold (tests shorten it). */
+  private queueHoldRenewMs = QUEUE_HOLD_RENEW_MS
+  /** The clock saved queue holds are renewed and judged by (tests move it). */
+  private queueHoldClock: () => number = () => Date.now()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
@@ -7342,6 +7368,18 @@ export class OrchestratorService extends EventEmitter {
     itemId: string,
     opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
   ): boolean {
+    return this.promoteQueueItem(threadId, itemId, opts).ok
+  }
+
+  /**
+   * Send now, with what became of it: `notice: 'compaction_finished'` when the compaction it would skip had already
+   * finished (its result taken), so the message goes first with the compacted context.
+   */
+  promoteQueueItem(
+    threadId: string,
+    itemId: string,
+    opts?: { expectedRevision?: string; expectedRunId?: string; permissionCeiling?: PermissionMode }
+  ): SendNowOutcome {
     const session = this.getOrCreateSession(threadId)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
@@ -7350,8 +7388,9 @@ export class OrchestratorService extends EventEmitter {
       threadId,
       session.executionLease?.owner.token
     )
-    // A compaction has no turn to steer: Send now skips it and the message goes first, with the full history.
-    if (!localActive && !externalActive && this.compactions.has(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
+    // A compaction (here, or in another process) has no turn to steer: Send now skips it and the message goes first,
+    // with the full history.
+    if (!localActive && !externalActive && this.compactionHoldsQueue(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
     if (!localActive && !externalActive) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
@@ -7390,18 +7429,20 @@ export class OrchestratorService extends EventEmitter {
       this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
     ) {
       this.emitQueueUpdated(threadId, session.queue)
-      return true
+      return { ok: true }
     }
 
-    return this.deliverPromotedItem(session, item!, steerRunId)
+    return { ok: this.deliverPromotedItem(session, item!, steerRunId) }
   }
 
   /**
    * Send now on a message the queue holds while a compaction runs: the message moves to the front of the queue and
    * the compaction stops, with nothing cut ("Compaction stopped · full history kept"). Its hold lifts as it ends, and
-   * the queue drains as usual from the front, so this message is the first to go, with the full history.
+   * the queue drains as usual from the front, so this message is the first to go, with the full history. A
+   * compaction another process runs is asked to stop through its saved hold, which that process reads when it
+   * renews the hold.
    */
-  private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): boolean {
+  private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): SendNowOutcome {
     const threadId = session.threadId
     const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
       assertQueueRevision(items, expectedRevision)
@@ -7413,9 +7454,29 @@ export class OrchestratorService extends EventEmitter {
     }
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
     this.emitQueueUpdated(threadId, session.queue)
+    // Too late once its result was taken: the message then goes first with the compacted context, and says so.
+    const running = this.compactions.get(threadId)
+    if (running && this.takenCompactions.has(running)) return { ok: true, notice: 'compaction_finished' }
     // A Stop already on its way ends it the same way.
-    this.stopCompaction(threadId)
-    return true
+    if (this.stopCompaction(threadId)) return { ok: true }
+    return this.requestPeerCompactionStop(threadId) === 'taken' ? { ok: true, notice: 'compaction_finished' } : { ok: true }
+  }
+
+  /**
+   * Asks the process that runs the thread's compaction (its saved queue hold names it) to stop it. `taken` when
+   * that compaction's result was already taken: too late to stop.
+   */
+  private requestPeerCompactionStop(threadId: string): 'requested' | 'taken' | 'gone' {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) return 'gone'
+    try {
+      const hold = readQueueHold(threadDir)
+      return hold && hold.ownerInstance !== PROCESS_INSTANCE_ID ? requestQueueHoldStop(threadDir, hold.id) : 'gone'
+    } catch (error) {
+      // The message is first in the queue all the same, and goes when the compaction ends.
+      console.warn('[orchestrator] the compaction in another process could not be asked to stop', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return 'gone'
+    }
   }
 
   /**
@@ -8169,11 +8230,13 @@ export class OrchestratorService extends EventEmitter {
       let caps: HarnessCaps | undefined
       let compactsNearWindow = false
       let driver: string | undefined
+      let instanceId: string | undefined
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
         compactsNearWindow = resolved.compactsNearWindow === true
         driver = resolved.driver
+        instanceId = resolved.instanceId
       } catch {
         caps = undefined
       }
@@ -8201,10 +8264,12 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      // The cache of the history as it is now, on the model the composer would send to (another model has its own).
+      // The cache of the history as it is now, on the instance and model the composer would send to (another
+      // instance, a second Claude account, or another model has its own). A record that names no instance is cold.
       const cache = promptCacheOf(this.nativeContext)
       const cacheKey = cache?.modelKey
-      const cached = cache && (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
+      const cached = cache && instanceId !== undefined && cache.instanceId === instanceId &&
+        (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
       // A price only where the thread pays per token: pi with a saved API key and a priced model.
       const price = cached && driver === 'pi' && typeof this.providerAuth?.uncachedInputPrice === 'function'
         ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)
@@ -10302,6 +10367,8 @@ export class OrchestratorService extends EventEmitter {
     let lastUsageAt: number | undefined
     let promptTurnCommitted = false
     const promptContextKey = `${selectedModel.llmProvider}:${selectedModel.model}`
+    /** The instance the turn runs on, once resolved: the prompt cache is that instance's. */
+    let promptCacheInstanceId: string | undefined
     const commitPromptTurn = (text: string): void => {
       if (promptTurnCommitted) return
       promptTurnCommitted = true
@@ -10323,7 +10390,8 @@ export class OrchestratorService extends EventEmitter {
       this.nativeContext.promptCache = nextPromptCache(this.nativeContext, {
         at: promptMetrics?.promptCache?.at ?? lastUsageAt ?? Date.now(),
         ...(promptMetrics?.promptCache?.ttlMs ? { ttlMs: promptMetrics.promptCache.ttlMs } : {}),
-        modelKey: promptContextKey
+        modelKey: promptContextKey,
+        ...(promptCacheInstanceId ? { instanceId: promptCacheInstanceId } : {})
       })
       this.persist(true)
     }
@@ -10334,6 +10402,7 @@ export class OrchestratorService extends EventEmitter {
         purpose: 'turn',
         scope: this.threadScope(session.threadId)
       })
+      promptCacheInstanceId = instance.instanceId
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
       if (session.sharedWorkspace) {
@@ -11308,19 +11377,65 @@ export class OrchestratorService extends EventEmitter {
     return this.peerCompactionHold(threadId)
   }
 
-  /** A hold another live process saved on the thread's queue. A hold its process left behind is removed and holds nothing. */
+  /**
+   * A hold another live process saved on the thread's queue and still renews. A hold its process left behind, or
+   * that nobody renewed in time (a hung process, a pid another program now has), is removed and holds nothing.
+   */
   private peerCompactionHold(threadId: string): boolean {
     const threadDir = this.resolveThreadDir(threadId)
     if (!threadDir) return false
     const hold = readQueueHold(threadDir)
     if (!hold) return false
-    if (isQueueHoldLive(hold, () => this.compactions.has(threadId))) return true
+    const live = (current: QueueHold): boolean => isQueueHoldLive(current, () => this.compactions.has(threadId), this.queueHoldClock())
+    if (live(hold)) return true
     try {
-      clearQueueHold(threadDir, hold.id)
+      // Read again under the lock: the owner may have renewed it meanwhile, or a new hold replaced it.
+      if (!clearStaleQueueHold(threadDir, hold.id, live)) {
+        const current = readQueueHold(threadDir)
+        return current !== null && live(current)
+      }
+      // Outside the caller's locks (a drain reads this under the queue lock).
+      setImmediate(() => {
+        try {
+          this.settleLeftCompactionRow(threadId, hold.id)
+        } catch (error) {
+          logDebug('OrchestratorService', 'the row of a compaction left behind could not be settled', error, { threadId })
+        }
+      })
     } catch (error) {
       logDebug('OrchestratorService', 'a stale queue hold could not be removed', error, { threadId })
     }
     return false
+  }
+
+  /**
+   * The row of a compaction whose saved hold was left behind (its process gone, or no longer renewing it): that
+   * compaction never finished, so the row says so (interrupted, full history kept), on disk and in a loaded session.
+   */
+  private settleLeftCompactionRow(threadId: string, rowId: string): void {
+    const settle = (messages: readonly ChatMessage[]): Map<string, ChatMessage> =>
+      closeStaleActivity(messages.filter((message) => message.id === rowId && message.kind === 'context_compaction'), new Date().toISOString())
+    let saved: ChatMessage | undefined
+    const store = this.threadStore
+    if (store?.getThread(threadId)) {
+      try {
+        store.mutateThreadData(threadId, (current) => {
+          const closed = settle(current.messages)
+          if (!closed.size) throw new StaleActivitySkipped()
+          saved = closed.get(rowId)
+          return { messages: current.messages.map((message) => closed.get(message.id) ?? message) }
+        })
+      } catch (error) {
+        if (!(error instanceof StaleActivitySkipped)) throw error
+      }
+    }
+    const session = this.sessions.get(threadId)
+    const row = session?.messages.find((message) => message.id === rowId)
+    if (!session || !row || !isOpenActivityRow(row)) return
+    const closed = saved ?? settle([row]).get(rowId)
+    if (!closed) return
+    session.messages = session.messages.map((message) => (message.id === rowId ? closed : message))
+    this.sessionAls.run(session, () => this.emitMessageUpdated(closed))
   }
 
   /**
@@ -12048,20 +12163,29 @@ export class OrchestratorService extends EventEmitter {
     // that drains this thread's queue waits too.
     const threadDir = this.resolveThreadDir(threadId)
     try {
-      if (threadDir) setQueueHold(threadDir, { kind: 'compaction', id: note.id })
+      if (threadDir) setQueueHold(threadDir, { kind: 'compaction', id: note.id }, this.queueHoldClock())
     } catch (error) {
       this.compactions.delete(threadId)
       clearTimeout(timeout)
       throw error
     }
-    this.sessionAls.run(session, () => {
-      session.messages.push(note)
-      this.emitMessageAdded(note)
-      this.persist(true)
-    })
+    // The hold is renewed while the compaction runs: one nobody renews is taken as left behind.
+    const renewal = threadDir ? setInterval(() => this.renewCompactionHold(threadId, threadDir, note.id, stop), this.queueHoldRenewMs) : undefined
+    renewal?.unref?.()
+    // The context as it was: a result taken but not saved is undone to it.
+    const original = session.nativeContext
+    let native = false
+    let instanceId: string | undefined
+    let taken = false
+    // From here on the hold and the Stop are released however this ends, a failed write of the row included.
     try {
-      let native = false
-      const instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
+      this.sessionAls.run(session, () => {
+        session.messages.push(note)
+        this.emitMessageAdded(note)
+        this.persist(true)
+      })
+      native = false
+      instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
       if (instanceId) {
         try {
           native = await this.harness.compactConversation({
@@ -12079,6 +12203,15 @@ export class OrchestratorService extends EventEmitter {
         finish(COMPACTION_STOPPED_TEXT, 'stopped')
         return 'stopped'
       }
+      // The result stands only while this compaction still owns its hold and nobody asked it to stop (a Stop here,
+      // Send now in another process), checked under the queue lock just before it is taken. A runtime session it
+      // compacted is then dropped: the next turn starts a new one with the full history.
+      if (!this.takeCompactionResult(threadId, threadDir, note.id, stop)) {
+        if (native && instanceId) this.forgetNativeCompaction(threadId, instanceId)
+        finish(COMPACTION_STOPPED_TEXT, 'stopped')
+        return 'stopped'
+      }
+      taken = true
       const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
         const compacted = compactNativeContext(this.nativeContext, undefined, focus)
         if (compacted === this.nativeContext) return 'unchanged' as const
@@ -12101,12 +12234,30 @@ export class OrchestratorService extends EventEmitter {
           : 'Context compacted')
       return outcome
     } catch (error) {
-      // The row says why; the queue then goes on with the full history.
+      // The row says why; the queue then goes on with the full history. A result taken but not saved is undone:
+      // Mousse's context goes back to what it was, and a runtime session the compaction changed is dropped.
+      if (taken) {
+        try {
+          this.sessionAls.run(session, () => {
+            this.nativeContext = original
+            if (original.lastTurnUsage) this.recordLastTurnUsage(original.lastTurnUsage)
+          })
+        } catch (restoreError) {
+          logDebug('OrchestratorService', 'the context before a failed compaction could not be restored', restoreError, { threadId })
+        }
+        if (native && instanceId) this.forgetNativeCompaction(threadId, instanceId)
+      }
       const reason = error instanceof Error ? error.message : String(error)
-      finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')
+      try {
+        finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')
+      } catch (finishError) {
+        // The write that failed first may fail again; the caller gets the first error.
+        logDebug('OrchestratorService', 'the row of a failed compaction could not be saved', finishError, { threadId })
+      }
       throw error
     } finally {
       clearTimeout(timeout)
+      clearInterval(renewal)
       this.compactions.delete(threadId)
       try {
         if (threadDir) clearQueueHold(threadDir, note.id)
@@ -12122,6 +12273,65 @@ export class OrchestratorService extends EventEmitter {
           logDebug('OrchestratorService', 'the queue could not go on after a compaction', error, { threadId })
         }
       })
+    }
+  }
+
+  /**
+   * The heartbeat of a running compaction's queue hold. A hold that is gone was found stale by another process,
+   * whose queue may already have gone on with the full history: the compaction stops, so nothing it cut follows. A
+   * hold another process asked to stop (Send now there) stops it too.
+   */
+  private renewCompactionHold(threadId: string, threadDir: string, holdId: string, stop: AbortController): void {
+    if (stop.signal.aborted) return
+    try {
+      const hold = renewQueueHold(threadDir, holdId, this.queueHoldClock())
+      if (!hold) {
+        console.warn('[orchestrator] the queue hold of a running compaction was lifted elsewhere; stopping the compaction', { threadId })
+        stop.abort()
+      } else if (hold.stopRequested) {
+        // Send now on a held message in another process: stopped as a Stop here would.
+        this.stopCompaction(threadId)
+      }
+    } catch (error) {
+      // A missed renewal is retried on the next beat; the hold stays well within its lifetime meanwhile.
+      logDebug('OrchestratorService', 'the queue hold of a compaction could not be renewed', error, { threadId })
+    }
+  }
+
+  /**
+   * Whether a finished compaction's result may be taken: it was not stopped, and its saved hold is still its own
+   * with no stop asked for. The hold is then marked taken, so a stop asked for later comes too late instead of being
+   * lost. A stop found here ends the compaction as a Stop would.
+   */
+  private takeCompactionResult(threadId: string, threadDir: string | null | undefined, holdId: string, stop: AbortController): boolean {
+    if (stop.signal.aborted) return false
+    if (!threadDir) {
+      this.takenCompactions.add(stop)
+      return true
+    }
+    let taken: ReturnType<typeof takeQueueHold>
+    try {
+      taken = takeQueueHold(threadDir, holdId, this.queueHoldClock())
+    } catch (error) {
+      console.warn('[orchestrator] the queue hold of a compaction could not be checked; its result is not taken', { threadId, error: error instanceof Error ? error.message : String(error) })
+      taken = 'gone'
+    }
+    if (taken !== 'taken') {
+      if (taken === 'gone') console.warn('[orchestrator] the queue hold of a compaction was lifted elsewhere; its result is not taken', { threadId })
+      if (!stop.signal.aborted) stop.abort()
+      return false
+    }
+    if (stop.signal.aborted) return false
+    this.takenCompactions.add(stop)
+    return true
+  }
+
+  /** A runtime's compaction whose result was not taken: its session is dropped, so the next turn has the full history. */
+  private forgetNativeCompaction(threadId: string, instanceId: string): void {
+    try {
+      this.harness.forgetConversation({ threadId, instanceId })
+    } catch (error) {
+      console.warn('[orchestrator] the runtime session of a compaction not taken could not be dropped', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -12142,7 +12352,9 @@ export class OrchestratorService extends EventEmitter {
     if (session.isTurnRunning()) throw new Error('Cannot activate a conversation branch while a turn is running.')
     this.sessionAls.run(session, () => {
       session.messages = structuredClone(messages)
-      session.nativeContext = normalizeNativeContext(nativeContext)
+      // Another history: the prompt cache recorded with it (a snapshot saved before it was dropped there) is cold.
+      const { promptCache: _cold, ...context } = nativeContext
+      session.nativeContext = normalizeNativeContext(context)
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
     })

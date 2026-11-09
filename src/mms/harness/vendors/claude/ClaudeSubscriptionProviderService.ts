@@ -939,27 +939,46 @@ export class ClaudeSubscriptionProviderService {
    * resumed with `/compact <focus>`. False when no saved session holds this history (the next turn starts a
    * new one anyway) or Claude Code compacted nothing, so the caller compacts Mousse's copy instead. The
    * session keeps its fingerprint: the next turn resumes the compacted session.
+   *
+   * Stopped (`signal`: a Stop, the time limit), at any point, this rejects and a compaction Claude Code finished
+   * meanwhile is not taken. Once `/compact` was handed to Claude Code, the session may have been compacted anyway
+   * (a process stopped mid-way cannot say), so the saved session is dropped unless Claude Code answered without a
+   * compaction: the next turn starts a new session with the full history in the prompt.
    */
   async compactConversation(threadId: string, history: string, instanceId: string | undefined, focus: string | undefined, signal: AbortSignal): Promise<boolean> {
     const saved = this.settings.sessions?.[threadId]
     if (!saved || !sessionBoundTo(saved, instanceId ?? CLAUDE_INSTANCE_ID) || saved.historyKey !== historyKey(history)) return false
     if (this.activeThreads.has(threadId)) throw new Error('A Claude turn is already running for this thread')
-    if (this.checkDue()) await this.status()
-    if (!this.configured()) return false
-    // A live process holds the conversation as it was; it is closed so the next turn resumes the compacted one.
-    const live = this.live.get(threadId)
-    if (live && !live.dead) {
-      if (live.busy || live.pendingRuns > 0 || live.obligations.size > 0) throw new Error('Claude is still running background work on this thread.')
-      live.close('closed')
-      this.live.delete(threadId)
-    }
+    // The thread is held, and a Stop heard, from here on: a Stop during the sign-in check is not lost.
     this.activeThreads.add(threadId)
     const controller = new AbortController()
     this.controllers.add(controller)
     const abort = (): void => controller.abort()
     signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) controller.abort()
+    const stopped = (): boolean => signal.aborted || controller.signal.aborted
+    const throwIfStopped = (): void => {
+      if (stopped()) throw signal.reason ?? new Error('Compaction stopped')
+    }
     let query: Query | undefined
+    /** `/compact` reached Claude Code; until it answers, whether the session changed is unknown. */
+    let sent = false
+    /** Claude Code answered: `compacted` says whether the session changed. */
+    let answered = false
+    let compacted = false
     try {
+      throwIfStopped()
+      if (this.checkDue()) await this.status()
+      throwIfStopped()
+      if (!this.configured()) return false
+      // A live process holds the conversation as it was; it is closed so the next turn resumes the compacted one.
+      const live = this.live.get(threadId)
+      if (live && !live.dead) {
+        if (live.busy || live.pendingRuns > 0 || live.obligations.size > 0) throw new Error('Claude is still running background work on this thread.')
+        live.close('closed')
+        this.live.delete(threadId)
+      }
+      sent = true
       query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
         ...this.options(saved.cwd, controller, this.finalEnv(this.environment())),
         resume: saved.sessionId,
@@ -968,19 +987,25 @@ export class ClaudeSubscriptionProviderService {
         // Compaction runs no tools.
         canUseTool: async () => ({ behavior: 'deny', message: 'No tools run while compacting.' })
       })
-      let compacted = false
       for await (const message of query) {
         if (message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
         if (message.type !== 'result') continue
         const failure = resultFailure(message)
         if (failure) throw failure
+        answered = true
         if (message.session_id && message.session_id !== saved.sessionId) {
           saved.sessionId = message.session_id
           this.save()
         }
         break
       }
+      throwIfStopped()
       return compacted
+    } catch (error) {
+      if (!stopped()) throw error
+      // Stopped: a compaction is never taken. A session that changed, or may have, is not resumed.
+      if (sent && (compacted || !answered) && this.settings.sessions?.[threadId]?.sessionId === saved.sessionId) this.forgetConversation(threadId)
+      throw signal.reason ?? new Error('Compaction stopped')
     } finally {
       query?.close()
       signal.removeEventListener('abort', abort)

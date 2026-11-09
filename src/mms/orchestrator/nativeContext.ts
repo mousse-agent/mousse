@@ -90,7 +90,8 @@ export function isNativePromptCache(value: unknown): value is NativePromptCache 
     typeof cache.lastRequestAt === 'number' && Number.isFinite(cache.lastRequestAt) && cache.lastRequestAt > 0 &&
     Number.isInteger(cache.revision) && (cache.revision ?? -1) >= 0 &&
     (cache.ttlMs === undefined || (typeof cache.ttlMs === 'number' && Number.isFinite(cache.ttlMs) && cache.ttlMs > 0)) &&
-    (cache.modelKey === undefined || typeof cache.modelKey === 'string')
+    (cache.modelKey === undefined || typeof cache.modelKey === 'string') &&
+    (cache.instanceId === undefined || typeof cache.instanceId === 'string')
   )
 }
 
@@ -110,9 +111,9 @@ export function promptCacheOf(context: NativeLlmContext): NativePromptCache | un
  */
 export function nextPromptCache(
   context: NativeLlmContext,
-  turn: { at: number; ttlMs?: number; modelKey?: string }
+  turn: { at: number; ttlMs?: number; modelKey?: string; instanceId?: string }
 ): NativePromptCache {
-  const previous = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey
+  const previous = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey && context.promptCache.instanceId === turn.instanceId
     ? context.promptCache.ttlMs
     : undefined
   const ttlMs = turn.ttlMs ?? previous
@@ -120,7 +121,8 @@ export function nextPromptCache(
     lastRequestAt: turn.at,
     ...(ttlMs ? { ttlMs } : {}),
     revision: context.revision ?? 0,
-    ...(turn.modelKey ? { modelKey: turn.modelKey } : {})
+    ...(turn.modelKey ? { modelKey: turn.modelKey } : {}),
+    ...(turn.instanceId ? { instanceId: turn.instanceId } : {})
   }
 }
 

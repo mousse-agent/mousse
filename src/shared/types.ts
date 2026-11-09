@@ -1420,6 +1420,11 @@ export interface NativePromptCache {
   revision: number
   /** `provider:model` the turn ran: another model has its own cache. */
   modelKey?: string
+  /**
+   * The provider instance the turn ran on: two instances (two Claude accounts) share `provider`, and each has its
+   * own cache. A record without one (saved before it was kept) is taken as cold.
+   */
+  instanceId?: string
 }
 
 export interface FileEntry {
