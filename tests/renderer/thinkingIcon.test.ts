@@ -55,3 +55,25 @@ describe('Thinking icon', () => {
     expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.thinking-icon\.is-thinking,\s*\.thinking-icon\.is-thinking \.thinking-icon-orbit\s*\{\s*animation: none !important;/)
   })
 })
+
+describe('Thinking shimmer in light themes', () => {
+  const globalCss = readFileSync('src/renderer/styles/global.css', 'utf8')
+  const iconCss = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
+  const agentCss = readFileSync('src/renderer/chat/components/agent-elements/agent-ui.css', 'utf8')
+
+  it('gives light (and system on a light OS) two different shimmer colours, from theme tokens', () => {
+    const pairs = [...globalCss.matchAll(/--an-shimmer-base: ([^;]+);\s*--an-shimmer-peak: ([^;]+);/g)]
+    expect(pairs).toHaveLength(2)
+    for (const [, base, peak] of pairs) {
+      expect(base).not.toBe(peak)
+      expect(`${base}${peak}`).not.toMatch(/#[0-9a-f]{3,8}\b/i)
+    }
+  })
+
+  it('sweeps the label and the icon with the same pair', () => {
+    for (const css of [agentCss, iconCss]) {
+      expect(css).toContain('var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3))')
+      expect(css).toContain('var(--an-shimmer-peak, var(--an-foreground-muted, #737373))')
+    }
+  })
+})

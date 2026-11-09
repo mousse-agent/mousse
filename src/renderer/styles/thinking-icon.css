@@ -13,7 +13,7 @@
 }
 
 .thinking-icon.is-thinking {
-  color: var(--an-foreground-subtle, #a3a3a3);
+  color: var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3));
   animation: thinking-icon-sweep var(--an-shimmer-duration, 1.2s) linear infinite;
 }
 
@@ -29,8 +29,8 @@
 /* The label's band (40-60% of a 250%-wide gradient, moving left to right once per period) is left of the
    text for the first sixth of the period; that is when it passes over the icon. */
 @keyframes thinking-icon-sweep {
-  0%, 15%, 100% { color: var(--an-foreground-subtle, #a3a3a3); }
-  5% { color: var(--an-foreground-muted, #737373); }
+  0%, 15%, 100% { color: var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3)); }
+  5% { color: var(--an-shimmer-peak, var(--an-foreground-muted, #737373)); }
 }
 
 [data-motion='off'] .thinking-icon.is-thinking,
