@@ -41,12 +41,12 @@ describe('Go to latest', () => {
 })
 
 describe('Add project on an empty new chat', () => {
-  it('is in the flow, centred under the composer, not floated over the workspace toolbar', () => {
+  it('is in the flow, centred under the composer, below the settings row of a new thread', () => {
     const css = rule(app, '.chat-empty-add-project')
     expect(css).not.toContain('position: absolute')
     expect(css).toContain('margin: 16px auto 0')
     const chat = readFileSync(new URL('../../src/renderer/components/OrchestratorChat.tsx', import.meta.url), 'utf8')
-    expect(chat.indexOf('<EmptyThreadAddProject')).toBeGreaterThan(chat.indexOf('<ComposerWorkspaceToolbar'))
+    expect(chat.indexOf('<EmptyThreadAddProject')).toBeGreaterThan(chat.indexOf('<ComposerThreadSettings'))
   })
 
   it('has the settings button gap and padding, though it renders outside Settings', () => {

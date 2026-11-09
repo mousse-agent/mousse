@@ -24,7 +24,8 @@ import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
-import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
+import { DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
+import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 
 /** What the command palette leads with when it opens. */
@@ -130,7 +131,8 @@ interface AppState {
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
-  sidebarWidth: number
+  /** The panel area's width in pixels, or null for the default; clamped to the window where it is laid out. */
+  mainAreaWidth: number | null
   threadsSidebarWidth: number
   usageOpen: boolean
   setUsageOpen: (open: boolean) => void
@@ -224,7 +226,7 @@ interface AppState {
   updateMessage: (message: ChatMessage) => void
   setAgents: (agents: Agent[]) => void
   setTasks: (tasks: Task[]) => void
-  setSidebarWidth: (width: number) => void
+  setMainAreaWidth: (width: number | null) => void
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
   setScheduledOpen: (open: boolean) => void
@@ -375,7 +377,7 @@ const workspaceStorage = createJSONStorage(() =>
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
   'reviewIgnoreWhitespace'
@@ -386,14 +388,25 @@ let profileActivated = false
 const DEFAULT_MAIN_VIEW: MainView = 'browser'
 
 /** Workspaces saved before the Agents tab was removed still name it as the view or an open surface,
+ * ones saved before Diff and Review became the Changes tab may name Review (now Changes, `git`),
  * and ones saved before the composer mode picker was removed may hold Plan or Build with no way back. */
 export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSurfaceKinds: MainView[]; chatMode?: ChatMode }>(workspace: T): T {
   const retired = (view: unknown) => view === 'agents'
+  const renamed = (view: MainView): MainView => ((view as string) === 'review' ? 'git' : view)
   const openedSurfaceKinds = Array.isArray(workspace.openedSurfaceKinds)
-    ? workspace.openedSurfaceKinds.filter((kind) => !retired(kind))
+    ? [...new Set(workspace.openedSurfaceKinds.filter((kind) => !retired(kind)).map(renamed))]
     : []
-  const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : workspace.mainView
-  return { ...workspace, mainView, openedSurfaceKinds, ...('chatMode' in workspace ? { chatMode: DEFAULT_CHAT_MODE } : {}) }
+  const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : renamed(workspace.mainView)
+  // Older workspaces kept the conversation's share in percent (`sidebarWidth`); the panel area now keeps
+  // its own width, so that share is dropped and a saved width that is not a usable number becomes the default.
+  const { sidebarWidth: _legacyShare, ...rest } = workspace as T & { sidebarWidth?: unknown }
+  return {
+    ...rest,
+    mainView,
+    openedSurfaceKinds,
+    ...('chatMode' in workspace ? { chatMode: DEFAULT_CHAT_MODE } : {}),
+    ...('mainAreaWidth' in workspace ? { mainAreaWidth: savedMainAreaWidth((workspace as { mainAreaWidth?: unknown }).mainAreaWidth) } : {})
+  } as T
 }
 
 function savePersonalWorkspace(state: AppState): void {
@@ -416,7 +429,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
-  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+  mainAreaWidth: null,
   threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
   usageOpen: false,
   setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false } : { usageOpen }),
@@ -470,7 +483,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
-  reviewIgnoreWhitespace: true,
+  reviewIgnoreWhitespace: false,
   setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
@@ -541,7 +554,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     }),
   setAgents: (agents) => set({ agents }),
   setTasks: (tasks) => set({ tasks }),
-  setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
+  setMainAreaWidth: (width) => set({ mainAreaWidth: savedMainAreaWidth(width) }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, usageOpen: false } : { settingsOpen }),
   setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, usageOpen: false } : { scheduledOpen }),
@@ -707,11 +720,11 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
-      reviewIgnoreWhitespace: true,
+      reviewIgnoreWhitespace: false,
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],
-      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      mainAreaWidth: null as number | null,
       threadsSidebarWidth: DEFAULT_THREADS_SIDEBAR_WIDTH,
       threadsSidebarOpen: true,
       mainAreaOpen: false,

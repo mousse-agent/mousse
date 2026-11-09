@@ -221,6 +221,8 @@ export const PROTOCOL_METHODS = [
   'projects.pin',
   'projects.reorder',
   'projects.trustGitSettings',
+  'projects.icon',
+  'projects.setIcon',
   'threads.list',
   'threads.get',
   'threads.create',
@@ -406,6 +408,7 @@ export const PROTOCOL_METHODS = [
   'files.write',
   'files.stat',
   'files.root',
+  'files.drives',
   'files.readAsset',
   'files.writeDirect',
   'files.search',
@@ -433,6 +436,12 @@ export const PROTOCOL_METHODS = [
   'git.deleteBranch',
   'git.init',
   'git.cancelOperation',
+  'git.changes',
+  'git.include',
+  'git.undoLastCommit',
+  'git.revert',
+  'git.restoreReverted',
+  'git.revertedList',
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
@@ -496,6 +505,7 @@ export type ProtocolEventType =
   | 'projects.updated'
   | 'threads.updated'
   | 'pullRequests.updated'
+  | 'git.selectionChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.message'

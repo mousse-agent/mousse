@@ -22,8 +22,8 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import { foldersOf, type BotDefinition, type BotManifest } from '../../src/shared/bots/personal/definition'
-import { permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
+import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
+import { filesAsk, permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
@@ -55,8 +55,8 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: [],
   mcp: [],
   skills: [],
-  // Read access: a write root inside the system temporary folder is refused, and these tests write their ledger rows directly.
-  workspace: { roots: [root], access: 'read' },
+  // No file access: a file call outside its own folders is a wall asking for it (these tests write their ledger rows directly).
+  workspace: null,
   budget: { maxActiveMs: 10 * 60_000 },
   audience: 'owner',
   ...patch
@@ -215,9 +215,9 @@ describe('walls', () => {
     expect(cleared).toEqual([HOME])
     const wall = prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(other, 'a.md') } })
     // A file is asked for by its folder.
-    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: `read files in ${other}` } })
+    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
     expect(isBotWallAbort(prepared.authority.time.signal.reason)).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { path: other, access: 'read' } } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: filesAsk() } })
     expect(escalations).toHaveLength(1)
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
@@ -273,14 +273,14 @@ describe('answers and continuations', () => {
     expect(answered).toMatchObject({ escalation: { status: 'allowed_once' }, activation: { status: 'running' } })
     const next = store.dispatch(activation.id, 2)!
     expect(next).toMatchObject({ kind: 'continue', clientRequestId: `${activation.id}:d2` })
-    expect(next.prompt.text).toBe(`[Mousse] The owner allowed: read files in ${other}. Continue.`)
+    expect(next.prompt.text).toBe('[Mousse] The owner allowed: use files on this computer. Continue.')
     expect(runs.getRun(next.runId!)!.outcome?.continuationOf).toBe(payload.runId)
     const again = bots.prepare(payloadOf(next.runId!))
     if ('refused' in again) throw new Error(again.refused)
     expect(again.history).toBe('thread')
     expect(again.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })).toEqual({ ok: true })
     // The grant itself is unchanged: a later activation does not get it.
-    expect(store.activeGrant('site-editor')!.manifest.workspace!.roots).toEqual([root])
+    expect(store.activeGrant('site-editor')!.manifest.workspace).toBeNull()
   })
 
   it('"Allow for this bot" publishes and approves a wider revision in one action', async () => {
@@ -352,7 +352,7 @@ describe('answers and continuations', () => {
     expect(store.unknownCalls(activation.id)[0].acknowledged).toBe(false)
     await bots.continueActivation(activation.id, { acknowledge: { calls: ['consult-edit'] } })
     const next = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'continue')!
-    expect(next.prompt.text).toContain(`The owner allowed: read files in ${other}.`)
+    expect(next.prompt.text).toContain('The owner allowed: use files on this computer.')
     expect(next.prompt.text).toContain('edit (consult run')
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
@@ -609,49 +609,41 @@ describe('trash and profile hooks', () => {
   })
 })
 
-describe('round 1: folder answers grant exactly what is shown', () => {
+describe('file access is one permission (bot-architecture.md §3.7)', () => {
   const authorityFor = (granted: BotManifest) => {
-    const compiled = compileBotThread({ grant: granted, digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'x'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+    const compiled = compileBotThread({ grant: granted, digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'x'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
     if (!compiled.ok) throw new Error(compiled.error.message)
     return createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
   }
   const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path: join(path, 'a.md') } })
 
-  it('allowing writes to one folder leaves every other folder read-only, and the reverse', () => {
-    const readOnly = manifest({ tools: ['read', 'edit'], workspace: { roots: [root], access: 'read' } })
-    const wider = withPermission(readOnly, { path: other, access: 'write' })
-    expect(foldersOf(wider.workspace)).toEqual([[other, 'write'], [root, 'read']].sort())
-    expect(addedPermissions(wider, readOnly).map((line) => line.text)).toEqual([permissionText({ path: other, access: 'write' })])
+  it('an answer for one folder grants every folder, read and write; another adds nothing', () => {
+    const none = manifest({ tools: ['read', 'edit'] })
+    const wider = withPermission(none, { path: other, access: 'read' })
+    expect(addedPermissions(wider, none).map((line) => line.text)).toEqual([permissionText(filesAsk())])
     const authority = authorityFor(wider)
-    expect(authority.check(edit(root))).toMatchObject({ ok: false, wall: { kind: 'path', access: 'write' } })
+    expect(authority.check(edit(root))).toEqual({ ok: true })
     expect(authority.check(edit(other))).toEqual({ ok: true })
-
-    const writable = manifest({ tools: ['read', 'edit'], workspace: { roots: [root], access: 'write' } })
-    const plusRead = withPermission(writable, { path: other, access: 'read' })
-    expect(addedPermissions(plusRead, writable).map((line) => line.text)).toEqual([`Read files in ${other}`])
-    const second = authorityFor(plusRead)
-    expect(second.check(edit(other))).toMatchObject({ ok: false, wall: { kind: 'path' } })
-    expect(second.check(edit(root))).toEqual({ ok: true })
+    expect(addedPermissions(withPermission(wider, { path: root, access: 'write' }), wider)).toEqual([])
   })
 
   it('a native name that stands for several tools walls only when all are refused, and once', async () => {
     const { activation, prepared } = await running()
-    const call = (tool: 'edit' | 'read') => ({ kind: 'builtin' as const, tool, nativeName: 'Glob', args: { path: join(root, 'a.md') } })
-    // `edit` in a read-only root is refused, `read` passes: allowed, nobody asked.
-    expect(prepared.authority.checkAny!([call('edit'), call('read')])).toEqual({ ok: true })
+    const files = bots.filesFolder('site-editor')
+    const call = (tool: 'write' | 'read', path: string) => ({ kind: 'builtin' as const, tool, nativeName: 'Glob', args: { path: join(path, 'a.md') } })
+    // `write` is not granted, `read` in its files folder passes: allowed, nobody asked.
+    expect(prepared.authority.checkAny!([call('write', files), call('read', files)])).toEqual({ ok: true })
     expect(store.escalations({ activationId: activation.id })).toEqual([])
-    const outside = (tool: 'edit' | 'read') => ({ kind: 'builtin' as const, tool, nativeName: 'Glob', args: { path: join(other, 'a.md') } })
-    expect(prepared.authority.checkAny!([outside('edit'), outside('read')])).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    expect(prepared.authority.checkAny!([call('write', other), call('read', other)])).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
   })
 
-  it('a relative folder is never asked for or resolved against the working directory', async () => {
+  it('any folder, a relative one too, asks for file access as a whole, once; a relative folder is never asked for by name', async () => {
     const { activation, prepared } = await running()
     expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('full path')
-    // A relative path outside the scratch folder is refused without asking anybody.
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toMatchObject({ ok: false, wall: { kind: 'path', path: '../../outside.md' } })
-    expect(store.escalations({ activationId: activation.id })).toEqual([])
-    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
+    expect(store.escalations({ activationId: activation.id }).map((row) => row.permission)).toEqual([filesAsk()])
+    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
   })
 })
 
@@ -682,7 +674,7 @@ describe('round 1: startup recovery', () => {
     store.run('UPDATE bot_counters SET active_ms = 15000 WHERE activation_id = ?', activation.id)
     await crash()
     expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
-    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain(`The owner allowed: read files in ${other}.`)
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use files on this computer.')
     expect(bots.getActivation(activation.id).status).toBe('running')
     await crash()
     expect(store.dispatches(activation.id)).toHaveLength(2)
@@ -1007,13 +999,15 @@ describe('round 3', () => {
     expect(existsSync(scratch)).toBe(true)
   })
 
-  it('a write folder nested in a read-only folder stays read-only, as the shell sandbox has it', () => {
+  it('an older grant with a write folder nested in a read-only one is file access: both are writable', () => {
     const outer = join(base, 'outer')
     const inner = join(outer, 'inner')
     mkdirSync(inner, { recursive: true })
-    const compiled = compileBotThread({ grant: manifest({ tools: ['edit'], workspace: { roots: [outer, inner], access: 'read', rootAccess: { [inner]: 'write' } } }), digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'n'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+    const compiled = compileBotThread({ grant: manifest({ tools: ['edit'], workspace: { roots: [outer, inner], access: 'read', rootAccess: { [inner]: 'write' } } }), digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'n'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
     if (!compiled.ok) throw new Error(compiled.error.message)
     const authority = createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(inner, 'a.md') } })).toMatchObject({ ok: false, wall: { kind: 'path', access: 'write' } })
+    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(inner, 'a.md') } })).toEqual({ ok: true })
+    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(outer, 'a.md') } })).toEqual({ ok: true })
   })
+
 })

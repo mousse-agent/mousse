@@ -27,16 +27,85 @@
 }
 
 /* The composer's model picker: rail, search and list, and a reasoning column for the highlighted
-   model, with the speed footer at the bottom. It opens above the composer and is never wider than it
-   (--floating-anchor-width), so it covers neither the draft nor the details card. Its height fits its
-   rows, the taller of the list and the column, up to 440px (eight one-line model rows under the
-   search); past that the list scrolls. Long names are cut short. */
+   model, with the speed footer at the bottom. Its bottom edge is pinned just above the model button,
+   left-aligned to it (usePinnedPopover). Its height fits the tallest of the
+   rail, the list and the column, never under the rail's own height, and never over 400px or the room
+   it has (--floating-max-height); past that the list scrolls, and growth goes upward. Long names are
+   cut short. */
 .model-picker-panel.is-fixed {
-  width: min(720px, var(--floating-anchor-width, 720px), calc(100vw - 48px));
+  width: min(432px, calc(100vw - 48px));
   min-width: 0;
   max-width: none;
-  max-height: min(440px, calc(100vh - 16px));
+  max-height: min(400px, var(--floating-max-height, 400px));
   overflow: visible;
+}
+
+/* The rail sits on the pinned bottom edge, so its icons stay under the pointer while the list beside
+   them changes height. */
+.model-picker-panel.is-fixed.has-rail .model-picker-rail {
+  justify-content: safe flex-end;
+}
+
+/* A notch tighter than the shared menu rows: about 30px a model or level. */
+.model-picker-panel.is-fixed .model-picker-search {
+  --settings-control-h: 26px;
+}
+
+.model-picker-panel.is-fixed .model-picker-row-main {
+  gap: 6px;
+  padding-block: 3px;
+}
+
+.model-picker-panel.is-fixed .model-picker-row.compact .model-picker-row-main {
+  padding-block: 6px;
+}
+
+.model-picker-panel.is-fixed .model-picker-shortcut {
+  margin-left: 2px;
+  padding: 0 4px;
+  font-size: 10.5px;
+}
+
+.model-picker-panel.is-fixed .model-picker-star {
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+}
+
+/* Opens out of the model button: a quick fade and slight grow from it (transform-origin is set by
+   usePinnedPopover); closes with a shorter fade. Both follow Animation speed and reduced motion. */
+.model-picker-shell.composer-model-picker-shell-floating {
+  animation: model-picker-in calc(140ms * var(--ui-motion-scale)) cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+.model-picker-shell.is-closing {
+  pointer-events: none;
+  animation: model-picker-out calc(90ms * var(--ui-motion-scale)) ease-in both;
+}
+
+@keyframes model-picker-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes model-picker-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+/* Another provider's list fades in where the last one was; the picker itself stays put. */
+.model-picker-list.is-switched {
+  animation: model-picker-list-in calc(110ms * var(--ui-motion-scale)) ease-out both;
+}
+
+@keyframes model-picker-list-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .model-picker-panel.is-fixed .model-picker-main {
@@ -59,8 +128,8 @@
 }
 
 .model-picker-run {
-  flex: 0 0 236px;
-  width: 236px;
+  flex: 0 0 156px;
+  width: 156px;
   min-height: 0;
   overflow-y: auto;
 }
@@ -69,11 +138,11 @@
   padding-bottom: var(--ui-menu-pad);
 }
 
-/* "Reasoning", as tall as the search row; the checked model row already names the model. */
+/* "Reasoning", a muted label as tall as the search row; the checked model row already names the model. */
 .model-picker-run-head {
   display: flex;
   align-items: center;
-  height: 37px;
+  height: 35px;
   margin-bottom: var(--ui-menu-pad);
   padding: 0 12px;
   border-bottom: 1px solid var(--ui-line);
@@ -81,7 +150,7 @@
 }
 
 .model-picker-run-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
 }
@@ -95,19 +164,32 @@
 /* A level: name, "Default" muted, and a check on the chosen one. Hover and focus fill the row. */
 .model-picker-run .composer-mode-menu-item.model-picker-level {
   width: calc(100% - 2 * var(--ui-menu-pad));
+  min-height: 28px;
   margin: 0 var(--ui-menu-pad);
+  padding-block: 4px;
   padding-left: var(--ui-menu-row-x);
 }
 
 .model-picker-level > span:first-child {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Default": a small muted suffix right after the level's name. */
+.model-picker-level .composer-mode-menu-item-meta {
+  margin-left: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 
 .model-picker-level-check {
   display: inline-flex;
   flex: 0 0 14px;
   justify-content: center;
+  margin-left: auto;
   color: var(--text-primary);
 }
 

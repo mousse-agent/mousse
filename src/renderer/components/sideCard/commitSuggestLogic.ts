@@ -1,5 +1,3 @@
-import type { CommitForm, CommitScope } from './gitSectionLogic'
-
 /** The daemon's code when no title model is chosen: nothing can write a message until one is. */
 export const SUGGEST_NO_MODEL_CODE = 'git_suggest_no_model'
 
@@ -33,24 +31,4 @@ export function suggestButtonState(input: SuggestButtonInput): SuggestButtonStat
   if (input.fileCount === 0) return { label, disabled: true, title: 'No changes to describe' }
   if (input.suggesting) return { label, disabled: true, title: 'Writing a message from the changes' }
   return { label, disabled: false, title: 'Write a message from the changes this commit takes' }
-}
-
-/** What a suggestion was asked for, so an answer that arrives late can tell whether it still applies. */
-export interface SuggestionRequest {
-  /** The branch and HEAD it described the changes of. */
-  scope: CommitScope
-  /** The message in the box when it was asked; only that text is ever replaced. */
-  baseline: string
-}
-
-/**
- * The form with a suggestion in its message box, unless it no longer applies. It is dropped when the
- * form is for another branch or HEAD (the changes it described are not these), and when the text in the
- * box is not the text it was asked for: whatever the user typed meanwhile is never overwritten.
- */
-export function applySuggestion(form: CommitForm, request: SuggestionRequest, message: string): CommitForm {
-  if (!message.trim()) return form
-  if (form.branch !== request.scope.branch || form.head !== request.scope.head) return form
-  if (form.draft.message !== request.baseline) return form
-  return { ...form, draft: { message, prefilled: null } }
 }

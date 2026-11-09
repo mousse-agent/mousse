@@ -3,7 +3,7 @@ import { Globe, Plus, X } from '../../lib/icons'
 import type { ChatSummary } from '../../../shared/chats'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { useChatsStore } from '../../stores/chatsStore'
-import { botFaceState, useBotsStore } from '../../stores/botsStore'
+import { botFaceState, useBotsPolling, useBotsStore } from '../../stores/botsStore'
 import { BotFace } from '../bots/face/BotFace'
 import { OpenNetworkChatDialog } from './OpenNetworkChatDialog'
 import '../../styles/chats.css'
@@ -25,9 +25,11 @@ export function ChatsSidebar() {
   const search = useChatsStore((s) => s.search)
   const input = useRef<HTMLInputElement>(null)
   const [networkOpen, setNetworkOpen] = useState(false)
+  // The sidebar lists the bots itself: after a restart it shows without the chat pane.
+  useBotsPolling()
   useEffect(() => { if (searchOpen) input.current?.focus() }, [searchOpen])
   const matches = (name: string) => name.toLowerCase().includes(search.toLowerCase())
-  const newBot = () => useBotsStore.setState({ newBotOpen: true, error: null })
+  const newBot = () => useBotsStore.getState().openNewBot()
   const row = (chat: ChatSummary) => <button type="button" key={chat.id} className={`chat-list-row${chat.id === activeId ? ' active' : ''}`} onClick={() => void openChat(chat.id)}>
     <ChatAvatar name={chat.name} group={chat.kind === 'group'} />
     <span className="chat-list-text"><span className="chat-list-name">{chat.name}</span><span className="chat-list-preview">{chat.presentation === 'network' ? 'Space conversation' : chat.run?.state === 'running' ? 'Working…' : chat.lastMessage?.text || `${chat.participants.filter((p) => p.kind === 'agent').length} agent${chat.kind === 'group' ? 's' : ''}`}</span></span>

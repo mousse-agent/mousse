@@ -2,7 +2,7 @@
 /**
  * A Merge or Close question acts only on what it was asked about. Switching threads with it open closes it and nothing
  * runs on the other thread's pull request; a refresh that brings a new head keeps the reviewed head and says the pull
- * request changed until it is looked at again. Also: the review toolbars' whitespace switch.
+ * request changed until it is looked at again. Also: the Changes tab's whitespace option.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -28,7 +28,7 @@ vi.mock('../../src/renderer/stores/pullRequestStore', async (importOriginal) => 
 }))
 
 const { PullRequestPanel } = await import('../../src/renderer/components/PullRequestPanel')
-const { WhitespaceToggle } = await import('../../src/renderer/components/review/ReviewDiffPane')
+const { MenuButton } = await import('../../src/renderer/components/changes/MenuButton')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -176,21 +176,32 @@ describe('a Merge or Close question in the pull request panel', () => {
   })
 })
 
-describe('the whitespace switch', () => {
-  it('is the app’s switch, labelled, and toggles the setting', async () => {
+describe("the Changes tab's more menu", () => {
+  it('toggles Ignore whitespace from a check-mark row, staying open, and closes on Escape', async () => {
     useAppStore.setState({ reviewIgnoreWhitespace: false })
-    await act(async () => root.render(createElement(WhitespaceToggle)))
-    expect(host.querySelector('input[type="checkbox"]')).toBeNull()
-    const toggle = host.querySelector('[role="switch"]')
-    expect(toggle?.getAttribute('aria-label')).toBe('Ignore leading/trailing whitespace')
-    expect(toggle?.getAttribute('aria-checked')).toBe('false')
+    const Menu = () => {
+      const ignore = useAppStore((s) => s.reviewIgnoreWhitespace)
+      return createElement(MenuButton, {
+        label: 'More',
+        items: [{ label: 'Ignore whitespace', checked: ignore, onSelect: () => useAppStore.getState().setReviewIgnoreWhitespace(!ignore) }],
+        children: '…'
+      })
+    }
+    await act(async () => root.render(createElement(Menu)))
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="More"]')
+    expect(trigger?.getAttribute('aria-haspopup')).toBe('menu')
 
-    await click(toggle)
+    await click(trigger)
+    const item = () => document.querySelector('[role="menuitemcheckbox"]')
+    expect(item()?.textContent).toContain('Ignore whitespace')
+    expect(item()?.getAttribute('aria-checked')).toBe('false')
+
+    await click(item())
     expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(true)
-    expect(host.querySelector('[role="switch"]')?.getAttribute('aria-checked')).toBe('true')
+    expect(item()?.getAttribute('aria-checked')).toBe('true')
 
-    // The text label toggles it too.
-    await click(host.querySelector('.review-toggle span'))
-    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(false)
+    await act(async () => { item()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(item()).toBeNull()
+    expect(trigger?.getAttribute('aria-expanded')).toBe('false')
   })
 })

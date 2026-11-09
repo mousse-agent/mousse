@@ -41,6 +41,8 @@ const plus = account === 'in'
   ...(account === 'none' ? {} : { mousseId: { config: async () => ({ origin: 'https://id.example' }), startCallback: async () => undefined, cancelCallback: async () => undefined } }),
   platformRequest: {
     request: async (method: string) => {
+      // The Chats sidebar lists the bots itself; the log holds account requests only.
+      if (method === 'bots.personal.list') return { bots: [] }
       requestLog.push(method)
       if (method === 'net.status') return { enabled: false, routes: [], peers: [] }
       if (method === 'net.plus.status') return plus

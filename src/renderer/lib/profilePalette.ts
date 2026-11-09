@@ -19,8 +19,11 @@ export function paletteColorFor(seed: string): string {
   return PROFILE_PALETTE[hash % PROFILE_PALETTE.length]!
 }
 
-/** The stored colour of a profile, or undefined to use the accent gradient. */
-export const profileColor = (profile: { color?: string }): string | undefined => profile.color || undefined
+/**
+ * A profile's colour wherever it shows (sidebar footer, rail avatar, menu dots): the stored one, else a palette
+ * colour picked from its id, so it is the same in every place and across restarts.
+ */
+export const profileColor = (profile: { id: string; color?: string }): string => profile.color || paletteColorFor(profile.id)
 
 /** The first palette colour no profile uses yet, so a new profile starts out distinct. */
 export function nextProfileColor(profiles: ReadonlyArray<{ color?: string }>): string {

@@ -134,7 +134,9 @@ export const ROUTED_FORBIDDEN_KEYS = [
   'source',
   'projectPath',
   'profileId',
-  'expectedProfileId'
+  'expectedProfileId',
+  // The folder the Files panel of a window on the computer itself browses (any folder of that computer).
+  'root'
 ] as const
 
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
@@ -190,6 +192,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     required: ['scope', 'path']
   }),
   'git.status': read('folder', [...FOLDER]),
+  // HEAD → working tree as hunks, with what the next commit takes. A large answer is paged.
+  'git.changes': read('folder', [...FOLDER, 'paths']),
+  // The reverts of the folder its copies still let the person restore.
+  'git.revertedList': read('folder', [...FOLDER]),
   'git.diff': read('folder', [...FOLDER, 'path', 'staged'], { required: ['path'] }),
   'git.log': read('folder', [...FOLDER, 'limit']),
   'git.branches': read('folder', [...FOLDER]),
@@ -455,11 +461,20 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'git.checkout': write('folder', [...FOLDER, 'operationId', 'dirty', 'branch'], {
     required: ['branch']
   }),
-  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch'], {
-    required: ['message']
+  // `selection` (version 2): an owner from before it refuses the key (`computerOutdated`), so a chosen commit never
+  // becomes a commit of everything there.
+  'git.commit': write('folder', [...FOLDER, 'operationId', 'message', 'amend', 'expectedBranch', 'selection'], {
+    required: ['message'],
+    version: 2,
+    since: { selection: 2 }
   }),
   'git.push': write('folder', [...FOLDER, 'operationId', 'expectedBranch']),
-  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch']),
+  'git.suggestCommitMessage': write('folder', [...FOLDER, 'expectedBranch', 'selection'], { version: 2, since: { selection: 2 } }),
+  'git.include': write('folder', [...FOLDER, 'path', 'version', 'include', 'hunks', 'lines', 'all'], { required: ['include'] }),
+  'git.undoLastCommit': write('folder', [...FOLDER, 'expectedHead'], { required: ['expectedHead'] }),
+  // Small answers: the tab reads the file again with `git.changes`; a restore that finds changes names blob ids, never contents.
+  'git.revert': write('folder', [...FOLDER, 'path', 'version', 'hunks', 'lines'], { required: ['path', 'version'] }),
+  'git.restoreReverted': write('folder', [...FOLDER, 'revertId'], { required: ['revertId'] }),
   'git.stage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.unstage': write('folder', [...FOLDER, 'all', 'paths']),
   'git.discard': write('folder', [...FOLDER, 'paths'], { required: ['paths'] }),
@@ -617,6 +632,7 @@ export const ROUTED_LARGE_READS: readonly string[] = [
   'files.read',
   'files.readAsset',
   'git.diff',
+  'git.changes',
   'review.file',
   'runs.events'
 ]
@@ -816,9 +832,17 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'Repository identity and trust of a folder are about a local folder; other computers match projects through projects.match.'
   },
   {
+    methods: ['projects.icon', 'projects.setIcon'],
+    reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
+  },
+  {
     methods: ['files.root', 'files.writeDirect'],
     reason:
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
+  },
+  {
+    methods: ['files.drives'],
+    reason: 'The drives of a computer are browsed from a window on that computer only; another computer sees the thread’s folder.'
   },
   {
     methods: [

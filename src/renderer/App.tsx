@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState, startTransition, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { ChatWorkspace } from './components/chats/ChatWorkspace'
+import { NewBotDialogHost } from './components/bots/NewBotDialog'
 import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
@@ -13,6 +14,7 @@ import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { ScheduledPage } from './components/ScheduledPage'
 import { NavigationRail } from './components/NavigationRail'
+import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
@@ -26,10 +28,12 @@ import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 
 import { openSurface } from './lib/surfaces'
-import { DEFAULT_SIDEBAR_WIDTH, DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
+import { DEFAULT_THREADS_SIDEBAR_WIDTH, resizerKeyTarget } from './lib/resizerKeys'
+import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './lib/panelSplit'
 import { selectThread } from './lib/threadActions'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
+import { useViewSwap } from './lib/motion'
 import { normalizeRunSettings } from '../shared/settings'
 import { useAppCommands } from './commands/useAppCommands'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
@@ -42,26 +46,21 @@ const MIN_THREADS_SIDEBAR_WIDTH = 180
 
 const MAX_THREADS_SIDEBAR_WIDTH = 480
 
-// Keep in sync with `.sidebar { min-width }` in app.css
-const SIDEBAR_MIN_WIDTH_PX = 280
-
 const threadsSidebarMaxWidth = (): number =>
   Math.max(MIN_THREADS_SIDEBAR_WIDTH, Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4))
 
 /**
- * The conversation pane's left edge, width and bounds in pixels. `.sidebar { width: N% }` resolves
- * against .app-content, so percentages are computed from that same width; deriving it from
- * window.innerWidth minus the threads sidebar makes the pane outrun the cursor. Dragging measures
- * from the pane's own left edge, so the handle tracks the cursor whatever sits to its left. The
- * bounds match the sidebar CSS (min-width: 280px, max-width: 60%).
+ * The row the conversation shares with the panel area: their two widths, without the divider between
+ * them, and the panel area's right edge. The panel area keeps a width in pixels within this row's
+ * bounds (lib/panelSplit).
  */
-function conversationPane(container: HTMLElement | null, sidebar: HTMLElement | null) {
-  if (!container || !sidebar) return null
-  const containerWidth = container.clientWidth
-  if (containerWidth <= 0) return null
-  const { left, width } = sidebar.getBoundingClientRect()
-  const max = containerWidth * 0.6
-  return { containerWidth, left, width, max, min: Math.min(SIDEBAR_MIN_WIDTH_PX, max) }
+function conversationRow(sidebar: HTMLElement | null) {
+  const main = sidebar?.parentElement?.querySelector<HTMLElement>(':scope > .main-area')
+  if (!sidebar || !main) return null
+  const { right, width: mainWidth } = main.getBoundingClientRect()
+  const width = sidebar.getBoundingClientRect().width + mainWidth
+  const workspaceWidth = sidebar.parentElement?.clientWidth ?? 0
+  return width > 0 && workspaceWidth > 0 ? { right, width, mainWidth, workspaceWidth } : null
 }
 
 // Event delivery is primary. This low-frequency reconciliation covers renderer
@@ -82,14 +81,17 @@ export default function App() {
     window.addEventListener('mousse:open-usage', openUsage)
     return () => window.removeEventListener('mousse:open-usage', openUsage)
   }, [setUsageOpen])
-  const sidebarWidth = useAppStore((s) => s.sidebarWidth)
+  const mainAreaWidth = useAppStore((s) => s.mainAreaWidth)
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
   const overlayOpen = useAppStore((s) => s.settingsOpen)
-  const railPageOpen = useAppStore((s) => s.scheduledOpen)
+  const railPageOpen = useAppStore((s) => s.scheduledOpen || s.usageOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
+  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
+  // fades out, inert, then the new one fades in, in step with the sidebar lists (sidebar-view-motion.css).
+  const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
   useEffect(() => {
     if (!profileReady) return
     useChatsStore.getState().activate(profileId)
@@ -99,7 +101,7 @@ export default function App() {
     return () => clearInterval(timer)
   }, [profileId, profileReady, sidebarMode, threadsSidebarView])
 
-  const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
+  const setMainAreaWidth = useAppStore((s) => s.setMainAreaWidth)
 
   const applyThreadMessages = useAppStore((s) => s.applyThreadMessages)
 
@@ -143,17 +145,14 @@ export default function App() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
-  const [threadsPeek, setThreadsPeek] = useState(false)
-  const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
-  const threadsPeekCloseTimer = useRef<number | null>(null)
-  const threadsPeekUnmountTimer = useRef<number | null>(null)
+  // A rail page that replaces the workspace hides the sidebar, so the peek stands down for it.
+  const threadsPeek = useThreadsPeek(!threadsSidebarOpen && !railPageOpen)
   const resizeRef = useRef<{
     kind: 'main' | 'threads' | null
     pointerId: number | null
     clientX: number | null
     frame: number | null
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
-  const appContentRef = useRef<HTMLDivElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -175,52 +174,6 @@ export default function App() {
       })
     return () => { disposed = true }
   }, [profileReady, bootstrapAttempt])
-
-  const cancelThreadsPeekClose = () => {
-    if (threadsPeekCloseTimer.current !== null) {
-      window.clearTimeout(threadsPeekCloseTimer.current)
-      threadsPeekCloseTimer.current = null
-    }
-    if (threadsPeekUnmountTimer.current !== null) {
-      window.clearTimeout(threadsPeekUnmountTimer.current)
-      threadsPeekUnmountTimer.current = null
-    }
-  }
-
-  const openThreadsPeek = () => {
-    cancelThreadsPeekClose()
-    setThreadsPeekClosing(false)
-    setThreadsPeek(true)
-  }
-
-  const scheduleThreadsPeekClose = () => {
-    cancelThreadsPeekClose()
-    // Grace period so moving from the edge strip to the panel doesn't flicker,
-    // then slide out before unmounting so close animates like open does.
-    threadsPeekCloseTimer.current = window.setTimeout(() => {
-      threadsPeekCloseTimer.current = null
-      setThreadsPeekClosing(true)
-      threadsPeekUnmountTimer.current = window.setTimeout(() => {
-        threadsPeekUnmountTimer.current = null
-        setThreadsPeek(false)
-        setThreadsPeekClosing(false)
-      }, 200)
-    }, 150)
-  }
-
-  useEffect(() => {
-    if (threadsSidebarOpen) {
-      cancelThreadsPeekClose()
-      setThreadsPeek(false)
-      setThreadsPeekClosing(false)
-      return
-    }
-  }, [threadsSidebarOpen])
-
-  useEffect(() => () => {
-    if (threadsPeekCloseTimer.current !== null) window.clearTimeout(threadsPeekCloseTimer.current)
-    if (threadsPeekUnmountTimer.current !== null) window.clearTimeout(threadsPeekUnmountTimer.current)
-  }, [])
 
   useEffect(() => {
     const platform = window.mousse.platform
@@ -362,7 +315,7 @@ export default function App() {
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
       window.mousse.app.onNavigateMainView((view) => {
-        if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'review' || view === 'pullRequest') {
+        if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git' || view === 'pullRequest') {
           openSurface(view)
           return
         }
@@ -437,11 +390,11 @@ export default function App() {
       return
     }
     if (kind === 'main') {
-      const pane = conversationPane(appContentRef.current, sidebarRef.current)
-      if (!pane) return
-      setSidebarWidth((Math.min(pane.max, Math.max(pane.min, clientX - pane.left)) / pane.containerWidth) * 100)
+      // The divider stops where the conversation reaches its 280px minimum or its 60% share.
+      const row = conversationRow(sidebarRef.current)
+      if (row) setMainAreaWidth(mainAreaWidthAtPointer(clientX, row))
     }
-  }, [setSidebarWidth, setThreadsSidebarWidth])
+  }, [setMainAreaWidth, setThreadsSidebarWidth])
 
   // Both dividers are keyboard separators: Left/Right move 16px, Home/End go to the bounds.
   const onThreadsResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -452,11 +405,14 @@ export default function App() {
   }
 
   const onMainResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const pane = conversationPane(appContentRef.current, sidebarRef.current)
-    const next = pane && resizerKeyTarget(event.key, pane.width, pane.min, pane.max)
-    if (!pane || next == null) return
+    // Keys move the divider: Right widens the conversation, so it narrows the panel area.
+    const row = conversationRow(sidebarRef.current)
+    if (!row) return
+    const { min, max } = mainAreaWidthBounds(row)
+    const conversation = resizerKeyTarget(event.key, row.width - row.mainWidth, row.width - max, row.width - min)
+    if (conversation == null) return
     event.preventDefault()
-    setSidebarWidth((next / pane.containerWidth) * 100)
+    setMainAreaWidth(row.width - conversation)
   }
 
   const flushResize = useCallback(() => {
@@ -526,13 +482,17 @@ export default function App() {
       <TitleBar />
       <LinuxWindowResizeHandles />
 
-      <div className="app-content" ref={appContentRef}>
+      <div className="app-content">
 
-        {/* The closed sidebar peeks from its edge strip only; reaching for the rail moves nothing. */}
-        <NavigationRail key={`${profileId}:${bootstrapAttempt}`} />
+        {/* The closed sidebar peeks from its edge strip at once, or after a short rest anywhere on the rail. */}
+        <NavigationRail key={`${profileId}:${bootstrapAttempt}`}
+          onMouseEnter={threadsPeek.enterRail} onMouseLeave={threadsPeek.leaveRail} onPointerDown={threadsPeek.cancelIntent} />
 
         {profileReady && <ScheduledPage />}
-        <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
+        {profileReady && usageOpen && <div className="usage-rail-page">
+          <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />
+        </div>}
+        <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
@@ -568,14 +528,14 @@ export default function App() {
             <div
               className="threads-sidebar-edge-trigger"
               aria-hidden="true"
-              onMouseEnter={openThreadsPeek}
+              onMouseEnter={threadsPeek.show}
             />
               <SlidingThreadsPane
-                open={threadsPeek && !threadsPeekClosing}
+                open={threadsPeek.open}
                 width={threadsSidebarWidth}
                 overlay
-                onMouseEnter={openThreadsPeek}
-                onMouseLeave={scheduleThreadsPeekClose}
+                onMouseEnter={threadsPeek.show}
+                onMouseLeave={threadsPeek.scheduleClose}
               >
                 <ThreadsSidebar />
               </SlidingThreadsPane>
@@ -587,9 +547,9 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
+          style={workspaceMode === 'chats' ? { display: 'none' } : undefined}
+          inert={workspaceSwap === 'out' || undefined}
         >
-          {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
@@ -601,31 +561,32 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {sidebarMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
+        {workspaceMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <ChatWorkspace key={profileId} />}
         </KeepMounted>}
 
-        {mainAreaOpen && sidebarMode === 'projects' && (
+        {mainAreaOpen && workspaceMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
+            inert={workspaceSwap === 'out' || undefined}
             onPointerDown={(event) => startResize('main', event)}
             onKeyDown={onMainResizerKey}
-            onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+            onDoubleClick={() => setMainAreaWidth(null)}
             role="separator"
             tabIndex={0}
             aria-orientation="vertical"
             aria-label="Resize panels"
-            // The conversation's share of the workspace, in percent; CSS caps it at 60.
-            aria-valuenow={Math.round(sidebarWidth)}
-            aria-valuemin={0}
-            aria-valuemax={60}
+            // The panel area's saved width in pixels (null: the default); the layout clamps it to the window.
+            aria-valuenow={mainAreaWidth ?? undefined}
           />
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area">
+        <KeepMounted as="main" active={mainAreaOpen && workspaceMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
+          // Beside it: the threads sidebar and its divider when open, and the 1px divider before it.
+          style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
           <MainViewPanel />
         </KeepMounted>
@@ -636,6 +597,8 @@ export default function App() {
 
       <CommandPalette />
       <ThreadRenameDialog />
+      {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
+      {profileReady && <NewBotDialogHost />}
 
       <ToastHost />
 

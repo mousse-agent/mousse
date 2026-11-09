@@ -2,15 +2,19 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
-import type { BotChatAttachment } from '../../shared/bots/personal/methods'
+import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
+import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
-import { createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
+import type { AttachedFile } from '../components/ChatComposer'
+import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
+import { keepEqualById } from '../lib/keepEqual'
 
 /**
- * The owner's bots in the Agents tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
+ * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
  * was read, the live chip of a working bot, owner messages on their way, and About's detail.
- * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Agents tab is open,
- * `useBotsPolling` lists them again every 2 seconds, in case an event was missed.
+ * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Chats tab is open,
+ * `useBotsPolling` lists them again every 2 seconds while the window shows, in case an event was
+ * missed. A list that changed nothing keeps the objects held, so nothing renders again for it.
  */
 
 /** Messages one chat page asks for. */
@@ -28,6 +32,20 @@ export interface BotChatCache {
 
 export type BotDialog = { kind: 'rename' | 'look' | 'delete'; botId: string }
 
+/**
+ * What the owner has put into New bot so far. It lives here, not in the dialog, so nothing that
+ * closes or remounts the dialog loses it; Create bot clears it once the bot is made.
+ */
+export interface NewBotDraft {
+  /** Picked when the dialog first opens: one the owner's other bots don't wear. */
+  look: BotLook | null
+  name: string
+  description: string
+  /** The owner typed or picked something: a click beside the dialog no longer closes it. */
+  touched: boolean
+}
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', touched: false }
+
 interface BotsState {
   profileId: string | null
   bots: BotSummary[]
@@ -41,12 +59,14 @@ interface BotsState {
   /** Until when (epoch ms) a bot's face plays "done". */
   happy: Record<string, number>
   drafts: Record<string, string>
-  attachments: Record<string, BotChatAttachment[]>
+  /** The files in each bot's composer: picked, dropped or pasted. */
+  attachments: Record<string, AttachedFile[]>
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
   errorBotId: string | null
   busy: boolean
   newBotOpen: boolean
+  newBotDraft: NewBotDraft
   aboutOpen: boolean
   dialog: BotDialog | null
   activate(profileId: string): void
@@ -55,11 +75,16 @@ interface BotsState {
   loadOlder(botId: string): Promise<void>
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
-  setAttachments(botId: string, attachments: BotChatAttachment[]): void
+  setAttachments(botId: string, attachments: AttachedFile[]): void
   send(botId: string): Promise<void>
   stop(botId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
   exportMemory(botId: string, askId: string): Promise<void>
+  openNewBot(): void
+  /** Closes New bot; what was put in stays for the next time it opens. */
+  closeNewBot(): void
+  setNewBotDraft(change: Partial<Omit<NewBotDraft, 'touched'>>): void
+  /** One create at a time: a second call while one is on its way gets the same answer. */
   create(input: { look: BotLook; name?: string; description: string }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   pause(botId: string): Promise<void>
@@ -82,6 +107,9 @@ let refreshOperation: Promise<void> | undefined
 let unsubscribe: Array<() => void> = []
 const pendingSends = new Map<string, { text: string; clientRequestId: string }>()
 let pendingCreate: { key: string; clientRequestId: string } | undefined
+let createOperation: Promise<BotSummary | null> | undefined
+/** Bots made here that no list has carried yet. */
+const created = new Set<string>()
 const readSeq = new Map<string, number>()
 /** Bots deleted in this profile: a list that was on its way when one was deleted never brings it back. */
 const removed = new Set<string>()
@@ -96,6 +124,18 @@ function upsert(messages: BotChatMessage[], incoming: BotChatMessage[]): BotChat
 }
 const replaceBot = (list: BotSummary[], bot: BotSummary) =>
   removed.has(bot.id) ? list : list.some((entry) => entry.id === bot.id) ? list.map((entry) => (entry.id === bot.id ? bot : entry)) : [...list, bot]
+
+/** A composer file as `bots.chat.send` names it: its name and its path on this computer. */
+async function attachmentOf(attached: AttachedFile): Promise<BotChatAttachment> {
+  return { name: attached.file.name || 'file', path: await attachmentPath(attached.file) }
+}
+
+/** Why these files can't be sent, or null when they can. */
+function attachmentsRefusal(files: readonly AttachedFile[]): string | null {
+  if (files.length > MAX_BOT_CHAT_ATTACHMENTS) return `Attach at most ${MAX_BOT_CHAT_ATTACHMENTS} files.`
+  const large = files.find((attached) => attached.file.size > MAX_BOT_CHAT_ATTACHMENT_BYTES)
+  return large ? attachmentTooLargeText(large.file.name) : null
+}
 
 /** The face a bot shows now: its state, or "done" for a moment after it finished well. */
 export function botFaceState(bot: BotSummary, happyUntil: number | undefined, now = Date.now()): BotFaceState {
@@ -112,6 +152,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
     const pending = (state.pending[botId] ?? []).filter((message) => !owned.includes(message.text))
     return { chats: { ...state.chats, [botId]: { ...cache, messages: upsert(cache.messages, incoming) } }, pending: { ...state.pending, [botId]: pending } }
   })
+  /** A list with the bots made here that no list carried yet: one asked for before a bot was made doesn't drop it. */
+  const withCreated = (listed: BotSummary[]): BotSummary[] => {
+    for (const bot of listed) created.delete(bot.id)
+    return created.size ? [...listed, ...get().bots.filter((bot) => created.has(bot.id))] : listed
+  }
   const putBot = (bot: BotSummary) => set((state) => ({ bots: replaceBot(state.bots, bot), ...celebrate(state.bots, [bot]) }))
   /** "Done": a bot that was working and is now idle after a good run plays happy for a moment. */
   const celebrate = (before: BotSummary[], after: BotSummary[]): Pick<BotsState, 'happy'> | Record<string, never> => {
@@ -148,7 +193,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
-    error: null, errorBotId: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null,
+    error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -156,10 +201,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
       refreshOperation = undefined
       pendingSends.clear()
       pendingCreate = undefined
+      createOperation = undefined
+      created.clear()
       readSeq.clear()
       removed.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, live: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {},
-        error: null, errorBotId: null, busy: false, newBotOpen: false, aboutOpen: false, dialog: null })
+        error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
       subscribe()
     },
 
@@ -168,12 +215,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const owner = epoch
       const operation = (async () => {
         try {
-          const list = (await bots().list()).filter((bot) => !removed.has(bot.id))
+          const list = withCreated((await bots().list()).filter((bot) => !removed.has(bot.id)))
           if (owner !== epoch) return
           set((state) => {
+            // A list that brought nothing new keeps the bots held, so the open chat does not render again.
+            const bots = keepEqualById(state.bots, list)
             // A live chip lasts while its bot works.
-            const live = Object.fromEntries(Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working')))
-            return { bots: list, loaded: true, live, ...celebrate(state.bots, list) }
+            const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
+            const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
+            return { bots, loaded: true, live, ...celebrate(state.bots, bots) }
           })
         } catch {
           // A missed list is listed again by the next event or poll; the open chat keeps what it has.
@@ -236,6 +286,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const text = (get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
       if (!text && !attachments.length) return
+      const refusal = attachmentsRefusal(attachments)
+      if (refusal) {
+        set({ error: refusal, errorBotId: botId })
+        return
+      }
       const owner = epoch
       // The same words sent again after a failure reuse their request id, so they are not sent twice.
       const previous = pendingSends.get(botId)
@@ -243,7 +298,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       pendingSends.set(botId, admission)
       const shown: BotChatMessage = {
         seq: Number.MAX_SAFE_INTEGER, id: `pending:${admission.clientRequestId}`, at: new Date().toISOString(), author: 'owner', kind: 'text',
-        text, chips: [], ...(attachments.length ? { attachments } : {})
+        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {})
       }
       set((state) => ({
         error: null,
@@ -252,14 +307,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
         pending: { ...state.pending, [botId]: [...(state.pending[botId] ?? []), shown] }
       }))
       try {
-        const message = await bots().send(botId, text, admission.clientRequestId, attachments)
+        const files = await Promise.all(attachments.map(attachmentOf))
+        const message = await bots().send(botId, text, admission.clientRequestId, files)
+        for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
         if (owner !== epoch) return
         pendingSends.delete(botId)
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
         putMessages(botId, [message])
       } catch (cause) {
         if (owner !== epoch) return
-        // Nothing was sent: the words go back into the composer.
+        // Nothing was sent: the words and files go back into the composer.
         set((state) => ({
           error: errorText(cause),
           errorBotId: botId,
@@ -300,18 +357,38 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId) }
     },
 
-    async create(input) {
+    openNewBot() { set({ newBotOpen: true, error: null, errorBotId: null }) },
+
+    closeNewBot() { set({ newBotOpen: false, error: null }) },
+
+    setNewBotDraft(change) { set((state) => ({ newBotDraft: { ...state.newBotDraft, ...change, touched: true } })) },
+
+    create(input) {
+      if (createOperation) return createOperation
       const owner = epoch
       const key = JSON.stringify(input)
       if (pendingCreate?.key !== key) pendingCreate = { key, clientRequestId: crypto.randomUUID() }
-      set({ busy: true, error: null })
-      try {
-        const bot = await bots().create({ ...input, clientRequestId: pendingCreate.clientRequestId })
-        if (owner !== epoch) return null
-        pendingCreate = undefined
-        set((state) => ({ bots: replaceBot(state.bots, bot), busy: false, newBotOpen: false }))
-        return bot
-      } catch (cause) { fail(owner, cause); return null }
+      const clientRequestId = pendingCreate.clientRequestId
+      set({ busy: true, error: null, errorBotId: null })
+      const operation = (async () => {
+        try {
+          const bot = await bots().create({ ...input, clientRequestId })
+          if (owner !== epoch) return null
+          pendingCreate = undefined
+          created.add(bot.id)
+          set((state) => ({ bots: replaceBot(state.bots, bot), busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT }))
+          return bot
+        } catch (cause) {
+          if (owner !== epoch) return null
+          set({ error: createFailureText(cause), errorBotId: null, busy: false })
+          // An answer that never came may still have made the bot: the list shows it if so.
+          void get().refresh()
+          return null
+        }
+      })()
+      createOperation = operation
+      void operation.finally(() => { if (createOperation === operation) createOperation = undefined })
+      return operation
     },
 
     async update(botId, change) {
@@ -380,12 +457,49 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 })
 
-/** Lists the bots now and every 2 seconds while the calling view (the Agents tab) is shown. */
+/** Failures whose words come from the service and are meant for the owner as they are. */
+const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable'])
+
+/**
+ * What New bot says when Create bot fails. No answer, a lost connection or an unexpected error all
+ * mean the same to the owner: try again, which reuses the request and never makes the bot twice.
+ */
+export function createFailureText(cause: unknown): string {
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String((cause as { code: unknown }).code) : ''
+  const text = errorText(cause)
+  if (PLAIN_CREATE_FAILURES.has(code) && text) return text
+  return 'Mousse couldn’t finish making the bot. What you wrote is kept: press Create bot to try again. It won’t make the same bot twice.'
+}
+
+let pollers = 0
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+/** A poll tick: a hidden window (minimised) lists nothing, and lists again as soon as it shows. */
+function pollVisible(): void {
+  if (document.visibilityState !== 'hidden') void useBotsStore.getState().refresh()
+}
+
+/**
+ * Lists the bots now and every 2 seconds while a view that shows them is mounted: the Chats tab's
+ * sidebar and the chat pane. The sidebar can be shown without the pane (after a restart the pane
+ * opens on Projects), so each lists them; they share one timer. A hidden window skips the ticks.
+ */
 export function useBotsPolling(): void {
   const profileId = useBotsStore((s) => s.profileId)
   useEffect(() => {
     void useBotsStore.getState().refresh()
-    const timer = setInterval(() => { void useBotsStore.getState().refresh() }, POLL_MS)
-    return () => clearInterval(timer)
+    pollers += 1
+    if (pollTimer === undefined) {
+      pollTimer = setInterval(pollVisible, POLL_MS)
+      document.addEventListener('visibilitychange', pollVisible)
+    }
+    return () => {
+      pollers -= 1
+      if (pollers === 0 && pollTimer !== undefined) {
+        clearInterval(pollTimer)
+        pollTimer = undefined
+        document.removeEventListener('visibilitychange', pollVisible)
+      }
+    }
   }, [profileId])
 }

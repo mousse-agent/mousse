@@ -10,6 +10,8 @@ interface FileWorkspaceState {
   workspaces: Record<string, FileWorkspaceSnapshot>
   openFile: (scope: string, path: string) => void
   activateFile: (scope: string, path: string) => void
+  /** Hides the preview: the files stay open, and picking one shows it again. */
+  deactivateFile: (scope: string) => void
   closeFile: (scope: string, path: string) => void
 }
 
@@ -54,6 +56,11 @@ export const useFileWorkspaceStore = create<FileWorkspaceState>()(persist(
       const workspace = current(state, scope)
       if (!workspace.openPaths.includes(path)) return state
       return { workspaces: { ...state.workspaces, [scope]: { ...workspace, activePath: path } } }
+    }),
+    deactivateFile: (scope) => set((state) => {
+      const workspace = current(state, scope)
+      if (workspace.activePath === null) return state
+      return { workspaces: { ...state.workspaces, [scope]: { ...workspace, activePath: null } } }
     }),
     closeFile: (scope, path) => set((state) => ({
       workspaces: { ...state.workspaces, [scope]: closeFileInSnapshot(current(state, scope), path) }

@@ -5,6 +5,7 @@ import type { ChatNetworkBinding } from '../../shared/chatsNetwork'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from './appStore'
 import { useBotsStore } from './botsStore'
+import { keepEqual } from '../lib/keepEqual'
 
 const EMPTY: ChatsSnapshot = { agents: [], chats: [], devices: [] }
 interface ChatsState {
@@ -78,11 +79,12 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       try {
         const snapshot = await window.mousse.platformRequest.request<ChatsSnapshot>('chats.snapshot', {})
         if (owner !== epoch) return
-        set({ snapshot, ...(get().errorSource === 'refresh' ? { error: null, errorSource: null } : {}) })
+        // The chats are listed every second: a list that changed nothing keeps the one held, so nothing renders again.
+        set({ snapshot: keepEqual(get().snapshot, snapshot), ...(get().errorSource === 'refresh' ? { error: null, errorSource: null } : {}) })
         const chatId = get().activeChatId
         if (chatId) {
           const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
-          if (owner === epoch && get().activeChatId === chatId) set({ conversation: retainLoadedPages(get().conversation, conversation) })
+          if (owner === epoch && get().activeChatId === chatId) set({ conversation: keepEqual(get().conversation, retainLoadedPages(get().conversation, conversation)) })
         }
       } catch (error) {
         if (owner === epoch) {

@@ -1,5 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -7,7 +7,8 @@ import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
-import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
+import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
+import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
@@ -33,6 +34,15 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitChangesResult,
+  GitIncludeRequest,
+  GitIncludeResult,
+  GitSelectionState,
+  GitRestoreRevertedResult,
+  GitRevertedItem,
+  GitRevertRequest,
+  GitRevertResult,
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
@@ -120,7 +130,7 @@ import type {
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
-import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
 import type {
   GitHubApi,
@@ -450,14 +460,17 @@ const api = {
     }
   },
   fs: {
-    listDir: (dirPath?: string, projectId?: string, threadId?: string | null): Promise<FileEntry[]> =>
-      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
-    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
-    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
+    /** `root`: an absolute folder the Files panel browses instead of the thread's (this computer's window only). */
+    listDir: (dirPath?: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileEntry[]> =>
+      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
+    readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
+    /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
+    listDrives: (): Promise<{ home: string; drives: Array<{ path: string; label: string }> }> => ipcRenderer.invoke('fs:listDrives'),
     search: (
       query: string,
       options?: { limit?: number; kinds?: Array<'file' | 'directory'> },
@@ -495,8 +508,32 @@ const api = {
       storageInvoke('git:checkout', scope, branch, options),
     commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
       storageInvoke('git:commit', scope, message, options),
-    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string; selection?: GitCommitSelection }): Promise<GitCommitSuggestion> =>
       storageInvoke('git:suggestCommitMessage', scope, options),
+    /** HEAD → working tree as hunks, and what of it the next commit takes. */
+    changes: (scope: GitScope, options?: { paths?: string[] }): Promise<GitChangesResult> =>
+      storageInvoke('git:changes', scope, options),
+    /** Includes or leaves out a file, some of its hunks or lines, or everything. */
+    include: (scope: GitScope, input: GitIncludeRequest | { all: true; include: boolean }): Promise<GitIncludeResult | { selection: GitSelectionState }> =>
+      storageInvoke('git:include', scope, input),
+    /** Undoes the last local commit of a project folder; its changes stay in the files and the index. */
+    undoLastCommit: (scope: GitScope, expectedHead: string): Promise<GitMutationResult> =>
+      storageInvoke('git:undoLastCommit', scope, expectedHead),
+    /** Makes hunks, lines or a whole file match HEAD again, keeping a copy first; `revertId` puts it back. */
+    revert: (scope: GitScope, input: GitRevertRequest): Promise<GitRevertResult> =>
+      storageInvoke('git:revert', scope, input),
+    /** Puts a revert back while its files are still as it left them. */
+    restoreReverted: (scope: GitScope, revertId: string): Promise<GitRestoreRevertedResult> =>
+      storageInvoke('git:restoreReverted', scope, revertId),
+    /** The reverts of the folder whose copies are still kept, newest first. */
+    revertedList: (scope: GitScope): Promise<GitRevertedItem[]> =>
+      storageInvoke('git:revertedList', scope),
+    /** Another view changed what the next commit takes in a thread's or project's folder. */
+    onSelectionChanged: (cb: (event: { threadId?: string; projectId?: string }) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { threadId?: string; projectId?: string }): void => cb(payload)
+      ipcRenderer.on('git:selectionChanged', handler)
+      return () => ipcRenderer.removeListener('git:selectionChanged', handler)
+    },
     push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
       storageInvoke('git:push', scope, options),
     init: (scope: GitScope): Promise<GitMutationResult> =>
@@ -603,6 +640,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: InAppBrowserState) => listener(state)
       ipcRenderer.on('browser:automation-state', handler)
       return () => { ipcRenderer.removeListener('browser:automation-state', handler) }
+    },
+    onCursor: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, cursor: InAppBrowserCursor) => listener(cursor)
+      ipcRenderer.on('browser:agent-cursor', handler)
+      return () => { ipcRenderer.removeListener('browser:agent-cursor', handler) }
     }
   } satisfies InAppBrowserApi,
   browser: {
@@ -689,7 +731,10 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
-    }
+    },
+    /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
+    attachmentPath: async (file: File): Promise<string> =>
+      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer()))
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
@@ -769,6 +814,12 @@ const api = {
       ipcRenderer.invoke('projects:reorder', projectIds),
     trustGitSettings: (projectId: string): Promise<{ filters: string[] }> =>
       ipcRenderer.invoke('projects:trustGitSettings', projectId),
+    /** The project's icon as a checked data URL, or null for the folder glyph. */
+    icon: (projectId: string): Promise<ProjectIconImage | null> => ipcRenderer.invoke('projects:icon', projectId),
+    setIcon: (projectId: string, choice: ProjectIconChoice): Promise<Project> =>
+      ipcRenderer.invoke('projects:setIcon', projectId, choice),
+    /** Opens the icon file picker in `defaultPath`; null when cancelled. */
+    pickIcon: (defaultPath?: string): Promise<string | null> => ipcRenderer.invoke('projects:pickIcon', defaultPath),
     listThreads: (projectId: string): Promise<Thread[]> =>
       ipcRenderer.invoke('projects:threads', projectId),
     onUpdated: (cb: (projects: Project[]) => void): (() => void) => {
@@ -784,9 +835,9 @@ const api = {
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
     /** `opts.node` creates the chat on another of the user's computers (`projectId` is then that computer's, as this computer lists it). */
-    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }): Promise<Thread> =>
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId, opts),
-    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }): Promise<Thread> =>
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     /** A page of the messages before `before` of a long thread of another computer. */
@@ -1031,6 +1082,19 @@ const api = {
     /** Bytes of one file of a downloaded local model. */
     readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
+    /** Starts a native engine slot for a downloaded Kokoro model; resolves with its id once the model has loaded. */
+    nativeOpen: (modelId: LocalTtsModelId): Promise<number> => ipcRenderer.invoke('readAloud:nativeOpen', modelId),
+    /** Voices one segment on a slot; rejects when the slot stopped. */
+    nativeSpeak: (slotId: number, text: string, voice: string, speed: number): Promise<NativeSpeechResult> =>
+      ipcRenderer.invoke('readAloud:nativeSpeak', slotId, text, voice, speed),
+    /** Stops a slot at once, also mid-segment. */
+    nativeClose: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeClose', slotId),
+    /** A slot's process ended without being closed. */
+    onNativeSlotExit: (cb: (slotId: number) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { slotId: number }) => cb(event.slotId)
+      ipcRenderer.on('readAloud:nativeSlotExit', handler)
+      return () => ipcRenderer.removeListener('readAloud:nativeSlotExit', handler)
+    },
     /** Speech audio for at most PROVIDER_TTS_MAX_CHARS characters, made with a provider's TTS model. */
     synthesizeWithProvider: (request: ProviderSpeechRequest): Promise<ProviderSpeechResult> =>
       ipcRenderer.invoke('readAloud:synthesizeWithProvider', request),
@@ -1182,10 +1246,7 @@ const api = {
       ipcRenderer.invoke('dialog:pickExecutable', options ?? {}),
     /** Native folder picker; resolves to the chosen absolute path, or null when cancelled. */
     pickFolder: (options?: { title?: string; buttonLabel?: string }): Promise<string | null> =>
-      ipcRenderer.invoke('dialog:pickFolder', options ?? {}),
-    /** Native multi-file picker; resolves to the chosen absolute paths, empty when cancelled. */
-    pickFiles: (options?: { title?: string }): Promise<string[]> =>
-      ipcRenderer.invoke('dialog:pickFiles', options ?? {})
+      ipcRenderer.invoke('dialog:pickFolder', options ?? {})
   },
   window: {
     resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),

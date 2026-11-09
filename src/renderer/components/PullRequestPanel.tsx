@@ -15,7 +15,7 @@ import {
   usePullRequestDetail
 } from '../stores/pullRequestStore'
 import { routeLink } from '../utils/chatLinks'
-import { useGitActionRunner } from './git/GitActionButtons'
+import { useGitActionRunner } from './git/useGitActionRunner'
 import { RowMenu } from './integrations/RowMenu'
 import { PullRequestMarkdown, openExternalUrl } from './PullRequestMarkdown'
 import { PullRequestCreateForm } from './sideCard/PullRequestCreateForm'

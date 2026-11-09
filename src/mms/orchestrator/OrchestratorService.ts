@@ -197,6 +197,7 @@ import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
   createDefinitionBrowserBinding,
+  isBrowserAutomationTool,
   readHostBrowserRuntime,
   snapshotBrowserExecutionBinding
 } from './browser'
@@ -221,7 +222,8 @@ import {
   COMMIT_SUGGESTION_SYSTEM,
   buildCommitSuggestionPrompt,
   commitSuggestionErrors,
-  parseCommitSuggestion
+  parseCommitSuggestion,
+  type CommitInput
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
@@ -3053,7 +3055,10 @@ export class OrchestratorService extends EventEmitter {
       ...(session.sharedWorkspace ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
       // A bot turn: every app-tool call is held to the bot's grant (the registry checks it).
       ...(bot ? { bot: bot.authority } : {}),
-      settingsEnabled: (name) => settingsToolEnabled(this.settingsStore.get().integrations?.tools, name)
+      // A bot's browser tools run on its own browser, never the profile's tabs.
+      ...(bot?.browser ? { browserRuntime: bot.browser.runtime } : {}),
+      // The owner allowing a bot the browser is its setting: the browser tools follow the grant.
+      settingsEnabled: (name) => (bot?.browser && isBrowserAutomationTool(name)) || settingsToolEnabled(this.settingsStore.get().integrations?.tools, name)
     }, { continuation })
   }
 
@@ -7841,10 +7846,12 @@ export class OrchestratorService extends EventEmitter {
     /** The thread whose worktree this is, when it is one; names the provider's cache session. */
     threadId: string | null
     branch?: string | null
+    /** Reads what the commit takes instead (a chosen selection); it may refuse (`stale`). */
+    describe?: () => Promise<CommitInput>
   }): Promise<{ message: string; truncated: boolean }> {
     const titleSettings = this.settingsStore.get().title
     if (!titleSettings.llmProvider?.trim() || !titleSettings.model?.trim()) throw commitSuggestionErrors.create('git_suggest_no_model')
-    const input = await this.gitService?.describeCommitInput(params.root, { all: params.all })
+    const input = params.describe ? await params.describe() : await this.gitService?.describeCommitInput(params.root, { all: params.all })
     if (!input || input.files.length === 0) throw commitSuggestionErrors.create('git_suggest_empty')
     try {
       const prompt = buildCommitSuggestionPrompt(input, params.branch)
@@ -10128,6 +10135,9 @@ export class OrchestratorService extends EventEmitter {
       // Runtimes with their own loop get the browser through Mousse's MCP server.
       const browserExecution = !mcpAttachable(instance.caps)
         ? undefined
+        : opts?.bot
+          // A bot's browser is its own (`BotBrowsers`), never the GUI's or the profile's.
+          ? opts.bot.browser?.binding
         : this.mainBrowserFactory
           ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined

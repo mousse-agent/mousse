@@ -83,7 +83,7 @@ import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
-import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
+import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
@@ -1316,6 +1316,17 @@ export function OrchestratorChat() {
   }
 
   const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  // A new thread's settings (project above the composer, where it runs and Private / Delete after below) leave once the first send starts.
+  const newThreadSettings = newChat && !turnActive && !loading
+  const newThreadKey = `${profileId}:${activeThreadId ?? '__blank__'}`
+  const composerDevice: ComposerDeviceProps = {
+    localName,
+    devices: runOnDevices,
+    notSharing,
+    onRefresh: refreshRunOnDevices,
+    onSelect: (node) => void selectRunOnDevice(node),
+    onOpenRemoteProject: openProjectOnRunOnDevice
+  }
 
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -1436,6 +1447,18 @@ export function OrchestratorChat() {
           }}
         />
 
+        {newThreadSettings && (
+          <ComposerProjectPicker
+            key={`${newThreadKey}:project`}
+            projects={toolbarProjects}
+            workspace={workspace}
+            disabled={workspaceLocked}
+            device={composerDevice}
+            onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+            onOpenProject={openProjectForDraft}
+            onError={setSendError}
+          />
+        )}
             <ChatComposer
               disabled={workspacePending || !workspaceReady}
               input={input}
@@ -1451,18 +1474,20 @@ export function OrchestratorChat() {
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
               enabledSkills={enabledSkills}
-              providers={providers}
-              selectedProviderId={selectedProviderId}
-              selectedInstanceId={selectedInstanceId}
-              selectedModelId={selectedModelId}
-              modelMenuOpen={modelMenuOpen}
-              onModelMenuOpenChange={setModelMenuOpen}
-              onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
-              onOpenSettings={() => setSettingsOpen(true)}
-              contextUsage={contextUsage}
-              contextCompactionSetting={contextCompactionSetting}
-              contextOpen={contextOpen}
-              onContextOpenChange={setContextOpen}
+              run={{
+                providers,
+                selectedProviderId,
+                selectedInstanceId,
+                selectedModelId,
+                modelMenuOpen,
+                onModelMenuOpenChange: setModelMenuOpen,
+                onModelSelect: (providerId, modelId) => void handleModelSelect(providerId, modelId),
+                onOpenSettings: () => setSettingsOpen(true),
+                contextUsage,
+                contextCompactionSetting,
+                contextOpen,
+                onContextOpenChange: setContextOpen
+              }}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
               placeholder={!workspaceReady ? ''
@@ -1474,31 +1499,7 @@ export function OrchestratorChat() {
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onStop={() => void handleStop()}
               lastPrompt={lastPrompt}
-              privateChat={newChat ? Boolean(workspace.localOnly) : activeThread?.localOnly === true}
-              // The new-thread row is the card's top row: one surface with the input.
               banner={<>
-                {newChat && (
-                  <ComposerWorkspaceToolbar
-                    key={`${profileId}:${activeThreadId ?? '__blank__'}`}
-                    projects={toolbarProjects}
-                    workspace={workspace}
-                    disabled={workspaceLocked}
-                    device={{
-                      localName,
-                      devices: runOnDevices,
-                      notSharing,
-                      onRefresh: refreshRunOnDevices,
-                      onSelect: (node) => void selectRunOnDevice(node),
-                      onOpenRemoteProject: openProjectOnRunOnDevice
-                    }}
-                    onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
-                    onPrivateChange={(localOnly) =>
-                      setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node), privateDefaultMs))}
-                    onExpiryChange={(ms, stopsRun) => setComposerWorkspaceDraft(activeThreadId, workspaceWithExpiry(workspace, ms, stopsRun))}
-                    onOpenProject={openProjectForDraft}
-                    onError={setSendError}
-                  />
-                )}
                 <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
                 <SubagentComposerBanner threadId={activeThreadId} />
               </>}
@@ -1507,6 +1508,18 @@ export function OrchestratorChat() {
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
+        {newThreadSettings && (
+          <ComposerThreadSettings
+            key={`${newThreadKey}:settings`}
+            workspace={workspace}
+            disabled={workspaceLocked}
+            device={composerDevice}
+            onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+            onPrivateChange={(localOnly) =>
+              setComposerWorkspaceDraft(activeThreadId, workspaceWithPrivate(workspace, localOnly, projects.filter((entry) => !entry.node), privateDefaultMs))}
+            onExpiryChange={(ms, stopsRun) => setComposerWorkspaceDraft(activeThreadId, workspaceWithExpiry(workspace, ms, stopsRun))}
+          />
+        )}
         </ComposerNoticeProvider>
         {emptyThread && newChat && offersAddProject(projects.length, workspace.node) && (
           <EmptyThreadAddProject onAdd={() => void openProjectForDraft().catch((error) => setSendError(error instanceof Error ? error.message : String(error)))} />

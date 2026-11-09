@@ -5,6 +5,7 @@ import type {
   GitBranchOptions,
   GitCheckoutOptions,
   GitCheckoutResult,
+  GitCommitSelection,
   GitCommit,
   GitCommitSuggestion,
   GitDeleteBranchOptions,
@@ -294,6 +295,8 @@ export interface CommitGitOptions {
   pullRequestFormHost?: PullRequestFormHost
   /** Reports each step, so a button can say what is running. */
   onPhase?: (phase: CommitPhase) => void
+  /** The Changes tab's choice: everything, or exactly the chosen hunks (checked against the daemon's token). */
+  selection?: GitCommitSelection
 }
 
 /** What became of the pull request step of "Commit, push and open PR". */
@@ -380,7 +383,7 @@ export async function commitGitChanges(
   // The form is for the branch the button was pressed on; if the status has moved on, nothing has run yet, so stop here.
   if (pullRequestScope && pullRequestScope.branch !== expectedBranch) throw new Error(BRANCH_CHANGED_MESSAGE)
   options.onPhase?.('committing')
-  await trackGitOperation(key, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId }), gitOperationOwner(scope))
+  await trackGitOperation(key, 'commit', (operationId) => git.commit(scope, message, { amend: options.amend === true, expectedBranch, operationId, ...(options.selection ? { selection: options.selection } : {}) }), gitOperationOwner(scope))
   let pushError: CommitPushError | null = null
   if (push) {
     options.onPhase?.('pushing')
@@ -405,9 +408,9 @@ export async function commitGitChanges(
  * A proposed message for what the next commit takes. Nothing changes in the repository, so there is no
  * refresh. Rejects with the daemon's code, `git_suggest_no_model` among them.
  */
-export async function suggestGitCommitMessage(key: string, scope: GitScope): Promise<GitCommitSuggestion> {
+export async function suggestGitCommitMessage(key: string, scope: GitScope, selection?: GitCommitSelection): Promise<GitCommitSuggestion> {
   const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
-  const suggestion = await window.mousse.git.suggestCommitMessage(scope, { expectedBranch })
+  const suggestion = await window.mousse.git.suggestCommitMessage(scope, { expectedBranch, ...(selection ? { selection } : {}) })
   return { message: suggestion.message, truncated: suggestion.truncated }
 }
 

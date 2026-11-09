@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
-import { botManifestDigest, compileBotThread, type CompileInput } from '../../src/mms/bots/grants/compile'
+import { botManifestDigest, compileBotThread, computerRoots, mousseDataFolder, type CompileInput } from '../../src/mms/bots/grants/compile'
 import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
@@ -61,7 +61,6 @@ const compile = (patch: Partial<CompileInput> = {}) => {
     profileHome: profile,
     nativeNames: piNames,
     remaining: { maxTurns: 40, deadlineMs: 600_000 },
-    temps: [join(base, 'tmp-root')],
     ...patch
   })
 }
@@ -92,7 +91,8 @@ describe('compileBotThread', () => {
       budget: { maxWallMs: 600_000, maxTurns: 40 },
       authority: { kind: 'bot', digest: botManifestDigest(manifest()) }
     })
-    expect(compiled.permissions.workspace).toEqual({ roots: [root], access: 'write', writeRoots: [root], scratch: realpathSync(scratch) })
+    // File access is one permission (§3.7): every folder, read and write, with Mousse's data closed.
+    expect(compiled.permissions.workspace).toEqual({ roots: computerRoots(), access: 'write', writeRoots: computerRoots(), scratch: realpathSync(scratch), computer: { closed: profile } })
   })
 
   it('compiles "run commands" (shell) like any tool: the runtime\'s shell is on the allowlist', () => {
@@ -102,14 +102,25 @@ describe('compileBotThread', () => {
     expect(compiled.permissions.tools).toEqual(['read', 'shell'])
   })
 
-  it('refuses a write root inside a temporary folder, and roots overlapping Mousse data or scratch', () => {
+  it('compiles any workspace as file access: the folders an older grant names are neither checked nor kept', () => {
     const temp = join(base, 'tmp-root', 'work')
     mkdirSync(temp, { recursive: true })
-    expect(compile({ grant: manifest({ workspace: { roots: [temp], access: 'write' } }) })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('temporary folder') } })
-    // Reading from a temporary folder is fine.
-    expect(compile({ grant: manifest({ workspace: { roots: [temp], access: 'read' } }) }).ok).toBe(true)
-    expect(compile({ grant: manifest({ workspace: { roots: [base], access: 'read' } }) })).toMatchObject({ ok: false, error: { reason: expect.stringContaining('scratch') } })
-    expect(compile({ grant: manifest({ workspace: { roots: [join(profile, 'bots')], access: 'read' } }) })).toMatchObject({ ok: false })
+    const whole = compile()
+    if (!whole.ok) throw new Error(whole.error.message)
+    // A write folder in a temporary folder, one holding scratch, one inside Mousse data: each was
+    // refused when it was a folder of its own; now each grants the same file access.
+    for (const roots of [[temp], [base], [join(profile, 'bots')]]) {
+      const compiled = compile({ grant: manifest({ workspace: { roots, access: 'read' } }) })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      expect(compiled.permissions.workspace, roots[0]).toEqual(whole.permissions.workspace)
+    }
+    expect(compile({ grant: manifest({ workspace: null }) })).toMatchObject({ ok: true, permissions: { workspace: null } })
+  })
+
+  it('closes Mousse\'s own data: the Mousse home holding the profile, or the profile alone', () => {
+    expect(mousseDataFolder(join('/x', '.mousse', 'profiles', 'p1'))).toBe(join('/x', '.mousse'))
+    expect(mousseDataFolder(join('/x', 'profile'))).toBe(join('/x', 'profile'))
+    expect(computerRoots('linux')).toEqual(['/'])
   })
 
   it('refuses delegation and thread tools, and user MCP tools, even in a stored grant', () => {
@@ -124,7 +135,9 @@ describe('compileBotThread', () => {
     const compiled = compile({ grant, revision })
     if (!compiled.ok) throw new Error(compiled.error.message)
     expect(compiled.policy.tools).toEqual({ allow: ['list_skills', 'load_skill', 'read'] })
-    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'], workspace: { roots: [root], access: 'read' } })
+    // File access is one permission: a revision with any workspace keeps it whole, one without drops it.
+    expect(compiled.permissions).toMatchObject({ tools: ['read'], appTools: ['list_skills', 'load_skill'], workspace: { access: 'write', computer: { closed: profile } } })
+    expect(compile({ grant, revision: manifest({ workspace: null }) })).toMatchObject({ ok: true, permissions: { workspace: null } })
     // A revision can never name more than the grant: what the grant lacks is dropped.
     const wider = compile({ grant: manifest({ tools: ['read'], appTools: [] }), revision: manifest({ tools: ['read', 'edit'] }) })
     if (!wider.ok) throw new Error(wider.error.message)
@@ -228,29 +241,49 @@ describe('BotAuthority.check', () => {
     expect(bot.check(edit('notes.md'))).toEqual({ ok: true })
   })
 
-  it('checks every root of a multi-root grant, and nothing outside them', () => {
+  it('with file access every folder is open, read and write, but Mousse\'s own data, where only scratch is the bot\'s', () => {
     const bot = authorityFor(manifest({ workspace: { roots: [root, other], access: 'read' } }))
     expect(bot.check(read(join(other, 'a.md')))).toEqual({ ok: true })
-    expect(bot.check(read(join(base, 'secret.txt')))).toEqual({ ok: false, wall: { kind: 'path', tool: 'read', path: join(base, 'secret.txt'), access: 'read' } })
-    expect(bot.check(read(join(root, '..', 'secret.txt')))).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(bot.check(read(join(base, 'secret.txt')))).toEqual({ ok: true })
+    expect(bot.check(edit(join(base, 'secret.txt')))).toEqual({ ok: true })
+    expect(bot.check(edit(join(root, '..', 'new', 'file.md')))).toEqual({ ok: true })
+    // Git metadata is a file like any other once the bot may change files anywhere.
+    expect(bot.check(edit(join(root, '.git', 'config')))).toEqual({ ok: true })
+    expect(bot.check(edit(join(scratch, 'draft.md')))).toEqual({ ok: true })
+    // Mousse's data: never, and never an ask (the bot has all there is to ask for).
+    expect(bot.check(read(join(profile, 'profile.json')))).toEqual({ ok: false, wall: { kind: 'closed', tool: 'read', path: join(profile, 'profile.json') } })
+    expect(bot.check(edit(join(profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(bot.check(read(join(scratch, '..', 'act-2', 'x')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(bot.check(read(profile))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
   })
 
-  it('follows links: a link inside a root that leads out is refused', () => {
+  it('follows links: a link that leads into Mousse\'s data is refused', () => {
     const link = join(root, 'escape')
     try {
-      symlinkSync(base, link, process.platform === 'win32' ? 'junction' : 'dir')
+      symlinkSync(profile, link, process.platform === 'win32' ? 'junction' : 'dir')
     } catch {
       return // The platform does not let this process make links.
     }
     const bot = authorityFor()
-    expect(bot.check(read(join(link, 'secret.txt')))).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(bot.check(read(join(link, 'profile.json')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(bot.check(edit(join(link, 'new.md')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
   })
 
-  it('a read-only grant refuses writes in the root, but scratch stays writable', () => {
+  it('an older read-only grant is file access too: writes anywhere but Mousse\'s data', () => {
     const bot = authorityFor(manifest({ workspace: { roots: [root], access: 'read' } }))
     expect(bot.check(read(join(root, 'index.html')))).toEqual({ ok: true })
-    expect(bot.check(edit(join(root, 'index.html')))).toEqual({ ok: false, wall: { kind: 'path', tool: 'edit', path: join(root, 'index.html'), access: 'write' } })
-    expect(bot.check(edit(join(scratch, 'draft.md')))).toEqual({ ok: true })
+    expect(bot.check(edit(join(root, 'index.html')))).toEqual({ ok: true })
+    expect(bot.check(edit(join(other, 'notes.md')))).toEqual({ ok: true })
+  })
+
+  it('Claude Code\'s own storage, recognised by its gate, needs no file access', () => {
+    const bot = authorityFor(manifest({ workspace: null }))
+    const saved = '/home/me/.claude/projects/-x/session/tool-results/out.txt'
+    expect(bot.check(read(saved))).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(bot.check({ ...read(saved), own: true })).toEqual({ ok: true })
+    // The tool must still be granted, and nothing runs while the activation waits.
+    expect(authorityFor(manifest({ tools: ['web_search'], workspace: null })).check({ ...read(saved), own: true })).toMatchObject({ ok: false, wall: { kind: 'tool' } })
+    expect(authorityFor(manifest({ workspace: null }), true).check({ ...read(saved), own: true })).toEqual({ ok: false, wall: { kind: 'waiting' } })
   })
 
   it('refuses an ungranted tool, skill, app tool and a same-named MCP tool on another server', () => {
@@ -286,7 +319,9 @@ describe('the check points', () => {
   it('a runtime built-in is held to its neutral tool; one with no neutral name is never granted', () => {
     const bot = authorityFor(manifest({ tools: ['search'] }))
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'grep', { path: root })).toEqual({ ok: true })
-    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toEqual({ ok: true })
+    expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'find', { path: join(profile, 'bots') })).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(checkBuiltinCall(authorityFor(manifest({ tools: ['search'], workspace: null })), PI_NATIVE_TOOLS, 'find', { path: join(base, 'secret.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'powershell', {})).toEqual({ ok: false, wall: { kind: 'tool', tool: 'powershell' } })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path: join(root, 'index.html') })).toEqual({ ok: false, wall: { kind: 'tool', tool: 'read' } })
   })
@@ -321,8 +356,12 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       [PI_NATIVE_TOOLS, 'grep', { pattern: 'x', path: '~' }],
       [PI_NATIVE_TOOLS, 'write', { path: '@notes.md', content: 'x' }]
     ]
-    for (const [table, name, args] of cases)
-      expect(checkBuiltinCall(bot, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    // With file access it is a path to give in full, never an ask; without it, the ask for file access.
+    const without = authorityFor(manifest({ workspace: null }))
+    for (const [table, name, args] of cases) {
+      expect(checkBuiltinCall(bot, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
+      expect(checkBuiltinCall(without, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    }
     // A real path in scratch or the root still passes.
     expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path: root })).toEqual({ ok: true })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'write', { path: join(scratch, 'notes.md'), content: 'x' })).toEqual({ ok: true })
@@ -344,8 +383,8 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
     const bot = authorityFor()
     const claude = { search: ['Glob', 'Grep'], read: ['Read'] }
     for (const path of [` ${base}`, `${root}${sep}.. `, ' ../secret.txt', '\t..', '.. ', `\n${base}\n`]) {
-      expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
-      expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path' } })
+      expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
+      expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'read', { path }), JSON.stringify(path)).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
     }
   })
 })
@@ -372,7 +411,7 @@ describe('onAllowed (Bot Phase 1 §5.8)', () => {
     const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'index.html') } }
     expect(authority.check(read)).toEqual({ ok: true })
     expect(authority.check({ kind: 'app', tool: 'web_search', args: { query: 'x' } })).toEqual({ ok: true })
-    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'secret.txt') } }).ok).toBe(false)
+    expect(authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(profile, 'profile.json') } }).ok).toBe(false)
     expect(authority.check({ kind: 'app', tool: 'delegate_task', args: {} }).ok).toBe(false)
     expect(calls).toEqual([read, { kind: 'app', tool: 'web_search', args: { query: 'x' } }])
   })

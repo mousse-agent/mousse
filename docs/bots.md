@@ -8,7 +8,7 @@ A bot is an agent a person makes from a **look** and one sentence ("What should 
 
 - The definition is format 2 (`src/shared/bots/personal/definition.ts`): name, description, look, role, the main thread spec with its model choice, and the grant (`permissions`). `owner` and `placement` are reserved for Teams and bot servers. Format 1 files are upgraded on read.
 - `bots.create` names the bot with one short model call (5 seconds at most). When that fails, a name made from the description is used, and the bot picks its own in its first turn. The bot's first message is produced at once, as a chat activation.
-- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and 15 minutes of work per activation.
+- **The starter grant** (approved by pressing Create bot): read, list, search, edit and write in the bot's files folder only, the web (`web_search`, `web_fetch`), the bot's own tools, and an hour of work per activation. A bot whose grant still holds the earlier default of 15 minutes is moved to the hour when the profile opens (`BotEngine.upgradeWorkTime`, the same publish-and-approve as Allow); a grant the owner raised stays. The browser is asked for separately (see Use the browser).
 
 ## Lanes
 
@@ -27,6 +27,8 @@ Each bot has two lanes. At most one chat activation and one run activation exist
 - Ordinary sends, steers and queue writes to a bot's threads are still refused (`bot_thread_read_only`). The owner's chat goes through `bots.chat.*`, so every turn keeps the bot's grant and lock.
 - **The bot chat is `bot_messages`** in `bots.db`: owner messages, replies, run reports, notices with ask cards, error lines, and the chips of each message. The renderer reads only this table, never transcripts, so tool rows and model names can't leak.
 - Each activation has a scratch folder, deleted when it ends. Documents the bot keeps go to its **files folder**, `<profile>/bots/files/<botId>/`, which every bot may write and which About never lists.
+- **The bot chat's composer** is the thread composer (`ChatComposer`) without a thread's run settings: no model picker, reasoning level, permission mode, context ring, `/` commands or skills, since a bot picks its own model. It keeps the same box, attach (the button, dropping files and pasting images), dictation, Up for the last message, and Send or Stop.
+- **Attached files** are copied into the bot's files folder, under `attachments/<date>/`, and the message and the bot's input name the copies (`copyBotAttachments`). The starter grant reads them, so the bot never needs the folder the owner keeps them in, and its edits never touch the originals. A pasted file has no path: it waits in a temporary folder until it is copied. At most 10 files of 50 MB each per message. Images reach the bot as files it reads, not as pictures in the message.
 
 ## Asks
 
@@ -34,7 +36,7 @@ An ask is a request for one permission, shown as a card with Allow and Not now (
 
 - **In a chat turn** the bot's authority check returns a wall: the dispatch ends, the reply carries the card, and the answer continues the turn ("The owner allowed …" or "The owner said not now …"). Several `escalate` calls in one turn put all their cards on that one message. At most 5 walls per activation (`MAX_BOT_WALLS`).
 - **In a run** the check returns a third outcome, `refused`: the call fails with "The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped." and the dispatch goes on. One open ask is kept per permission (by fingerprint); later runs get the same refusal and write no new ask. A run writes at most 5 new asks, a bot at most 10 a day. An ask that waits never blocks a run or skips a schedule.
-- **Budgets** are different: a run that runs out of time or turns ends as failed, with an ask for more room.
+- **Budgets** are different: a run that runs out of time or turns ends as failed, with an ask for more room. Only work is charged: time spent waiting for the internet is not (see No internet), and a run that made no call at all in its whole time, with the internet there, ends failed with no ask (`no_progress`, "I couldn't get anything done on this run, so I stopped.").
 - **Allow** publishes and approves the widened grant; a run ask is used from the next run, with no follow-up activation. **Not now** closes the ask; a run may ask again for it after 24 hours. Asks never expire.
 - About lists what the bot can use, each with Remove (`bots.permissions.revoke`). Narrowing needs no approval.
 - Card wording comes from `askText` (`src/shared/bots/personal/askText.ts`).
@@ -44,17 +46,52 @@ An ask is a request for one permission, shown as a card with Allow and Not now (
 
 "Run commands" (the neutral tool `shell`) is one permission for any command. The bot asks for it once (a card reading "run commands"); after Allow it is in the grant like any other tool, and no command is asked about again. Not now, the ask caps and About → Remove work as for every other permission. The authority allows every `shell` call once the grant holds it, whatever command or folder the call names (`botAuthority.ts`); without it, a command is a wall in the chat and a refusal with an ask in a run. Commands start in the bot's files folder. How far a command reaches depends on the runtime:
 
-- **Claude Code** (owner's entry): Bash is offered only when the grant holds `shell`. Where Claude Code's own sandbox can run (bubblewrap and socat on Linux, Seatbelt on macOS), Bash runs in it: writable are the bot's files folder, its scratch folder and the folders it may change; the home folder is unreadable except for those; the network is closed; `dangerouslyDisableSandbox` is refused (`claudeLockedSandbox`). Where the sandbox can't run (Windows, or Linux without bubblewrap or socat), Bash still runs, outside any sandbox, because the owner allowed commands as a whole.
-- **Codex**: with `shell` the thread runs in the `workspace-write` sandbox over exactly the bot's files folder, its scratch folder and the folders it may change, with no network and no temporary folder (`codexTurnPolicy`, `codexBotSandbox`). Approvals stay `untrusted`, and the grant answers every command approval with accept. A retry outside the sandbox ("retry without sandbox?") is always declined. A read-only folder inside a writable one is writable to commands. Without `shell` the sandbox stays read-only and command approvals are walls or asks.
+- **Claude Code** (owner's entry): Bash is offered only when the grant holds `shell`. Where Claude Code's own sandbox can run (bubblewrap and socat on Linux, Seatbelt on macOS), Bash runs in it: writable are the bot's files folder and its scratch folder; without file access the home folder is unreadable except for those; with it commands read and write the whole file system but Mousse's own data (see File access); the network is closed; `dangerouslyDisableSandbox` is refused (`claudeLockedSandbox`). Where the sandbox can't run (Windows, or Linux without bubblewrap or socat), Bash still runs, outside any sandbox, because the owner allowed commands as a whole.
+- **Codex**: with `shell` the thread runs in the `workspace-write` sandbox over exactly the bot's files folder and its scratch folder, and with file access every entry beside Mousse's own data too, with no network and no temporary folder (`codexTurnPolicy`, `codexBotSandbox`). Approvals stay `untrusted`, and the grant answers every command approval with accept. A retry outside the sandbox ("retry without sandbox?") is always declined. Without `shell` the sandbox stays read-only and command approvals are walls or asks.
 - **Pi**: with `shell` the turn offers Pi's `bash` tool; it runs in the locked environment, from the bot's files folder, with no sandbox.
 
 So a command can read, and on Pi or an unsandboxed Claude Code change, files outside the bot's folders. The card's note says so.
+
+## File access
+
+"Use files on this computer" is one permission for every file and folder, read and write (`docs/plans/bot-architecture.md` §3.7). Without it a bot's file tools reach only its files folder and its scratch folder. The first time a file call names anything else, or the bot asks with `escalate` for any folder, there is one ask (`filesAsk()`, the same card whatever the folder); after Allow, no file or folder is asked about again. Not now, About → Remove and the ask caps work as for every other permission.
+
+- **Stored form.** The grant's `workspace`: any non-null workspace is file access. Allow writes `{roots: ['/'], access: 'write'}` (the system drive on Windows). A grant an older build wrote for some folders keeps its form and digest and counts as file access; About lists it as one line.
+- **Older asks.** When bots open (`BotEngine.upgradeFileAsks`), open folder asks are worded as the file ask. A bot that already has file access gets them settled as allowed, and a chat waiting at one continues. Otherwise one stays open (the chat's wall, else the oldest) and the others are withdrawn.
+- **Mousse's own data stays closed**: the Mousse home holding the profile (every profile, the instances' sign-ins, Mousse's sign-in and keys), except the bot's files folder and scratch (`mousseDataFolder`, `BotAuthority.check`). A call there is refused with no ask, and so is a path a runtime would rewrite (`~`, a variable). This was already the floor for folders; it now holds for the whole computer.
+- **Per runtime.** Claude Code: the grant gate checks every path; with "run commands" the sandbox writes the whole file system, cannot read Mousse's data but for the bot's folders, and cannot write any entry in it that does not lead to them (`claudeLockedSandbox`, `entriesBeside`). Codex: file changes are checked per path; with "run commands" its writable roots are every entry beside Mousse's data plus the bot's folders, so a command cannot make a new entry directly in a folder on the way to it, such as the home folder. Pi: its gate checks every path; `bash` has no sandbox.
+- **A runtime's own storage never asks**, with or without file access. Claude Code saves large tool output (web results, long command output) in `<Claude home>/projects/<working folder as a name>/<session>/tool-results/` and reads it back with Read or Grep. The bot's working folder is its files folder, so that project folder holds only this bot's sessions; the grant gate recognises calls there (`claudeOwnStorage`) and allows them (`NormalisedCall.own`), and its sandbox can read it. Codex and Pi have no such storage that a bot's calls reach.
+
+## Use the browser
+
+"Use the browser" is one permission for every browser tool (`browser` in the grant, `BOT_BROWSER_PERMISSION`). The bot asks for it once (a card reading "use the browser"); an ask for any single browser tool, such as `browser_act`, is the same ask, and its card never names a tool. After Allow, `compileBotThread` turns it into the browser tools (all but `browser_request_human`: the bot asks its owner in its reply instead) and the bot has them in every chat and run, with no new ask. Not now, About → Remove and the ask caps work as for every other permission. Other Mousse tools stay refused: an `escalate` for one no bot can hold is refused at once, with no card.
+
+The browser is the bot's own (`src/mms/bots/browser/BotBrowsers.ts`), never the owner's tabs or a thread's:
+
+- **One managed Chromium session per bot**, without a window, so a scheduled run works with no app open. It runs on a persistent Chromium profile of its own (`botbrowser_<botId>` under the profile's managed browser data), so sites the owner signs in to for the bot stay signed in for that bot only, and the bot never uses the owner's other sign-ins. A deleted bot's browser closes at once; its profile is erased with the 30-day purge.
+- **Owned by the bot's home thread, with no run**, in the browser inventory: both lanes share the session, and no thread's agent or the owner's in-app browser reaches it (another owner is refused).
+- **A tab per activation.** Each activation opens and uses only its own tabs; another activation's tab is refused, and a tab list shows its own. When an activation ends, its tabs close; when the last one ends, the browser closes after two idle minutes, unless the owner is watching it or holds it.
+- **First use installs it.** On a computer without the managed browser, the first browser call of any bot downloads it through the browser setup (`BrowserSetupService`, once for the installation) and waits for it; the preview reads "Setting up the browser". A computer that can't run it gets a plain refusal.
+- **Stop and limits.** Every call carries the activation's signal: a stop, a wall or the deadline ends it. A stopped activation can't use the browser.
+- **The owner's view** (`bots.browser.*`, apart from the required Bot UI methods, so an older daemon simply shows none): `get` returns the followed tab's URL and title, the activations that used the browser and, when asked, a fresh JPEG of the tab (`frame` in the browser worker: not an observation, never sent to a model) with the agent cursor; `control` hands the browser to the owner (the bot's actions wait) and back; `input` sends the owner's clicks, scrolling, typing, keys and navigation; `open` opens the browser for the owner, under their control, to sign in to a site for the bot.
+
+In the bot chat, the reply of the last activation that used the browser shows a small live preview: the picture, the page's title and site, and the agent cursor. While that activation still works, the preview sits under the working line. Hovering it shows Expand, which opens the split view: the bot's browser beside its chat, following the same tab, with Take over and Give back, back, forward, reload and an address field. Activity chips read "using the browser" and "used the browser · example.com".
 
 ## Schedules
 
 Schedules live in `bots.db` (`bot_schedules`), not on the definition, so a schedule the bot writes changes no revision and needs no approval. The bot keeps them with `bot_schedule_add`, `bot_schedule_remove` and `bot_schedule_list` (the job scheduler already owns the `schedule_*` names): at most 8 per bot, at most every 5 minutes, on an interval or a cron expression. Each add shows its label as a chip ("every weekday · 09:00"). About lists them with Remove (`bots.schedules.remove`).
 
-`BotScheduler` (`src/mms/bots/triggers/scheduler.ts`) ticks every 30 seconds, separate from the job scheduler. An occurrence is skipped while the bot is paused, while every model is at its usage limit, or while the same schedule's previous run is still queued. A new or edited schedule starts from now and never runs a backlog.
+`BotScheduler` (`src/mms/bots/triggers/scheduler.ts`) ticks every 30 seconds, separate from the job scheduler. An occurrence is skipped while the bot is paused, while every model is at its usage limit, while the same schedule's previous run is still queued, or while the same schedule's run waits for the internet (`waiting_for_internet`): a waiting run never expires, so a schedule keeps at most one. A new or edited schedule starts from now and never runs a backlog.
+
+## No internet
+
+A bot activation (chat lane or run lane) waits when the internet is gone, instead of failing.
+
+- **The check** (`src/mms/bots/activation/connectivity.ts`, the host's `connectivity`): a DNS lookup and a TCP connection to port 443 of the provider's API host (Claude Code `api.anthropic.com`, Codex `chatgpt.com`, a known Pi provider's host) and of two well-known hosts; any one that answers is online. It never calls a model API. A Pi provider on this computer (Ollama, LM Studio) is never checked. Results are reused for 5 seconds.
+- **When.** Before each main dispatch is sent (`sendDispatch`). While a dispatch runs, every 20 seconds once it has made no call for a minute; two failed checks in a row end it. At its deadline, when it made no call for a minute. And when its run fails on a connection error (`[provider_unavailable]`, ENOTFOUND and the like; `isConnectionFailure`); with the internet there, that is the provider's own failure and ends the run as before.
+- **While it waits** the activation stays `running` with `end_reason` `waiting_for_internet` (no new column, so older builds still read `bots.db`), and holds its lane. Its chat gets one notice, "Waiting for internet. I'll carry on when it's back." (`bm_<activationId>_offline`, at most one per activation), and no error row. The summary's `stateText` is "Waiting for internet" (sidebar row, chat header and status line, `waiting: 'internet'`) while every running activation of the bot waits. A dispatch ended for the internet is charged only up to its last call. Waiting is never a failure, never counts toward the failure streak and never raises an ask.
+- **When it is back** (checked after 15 s, then 30 s, then every minute): a dispatch that was never sent is sent; one that ended is continued on the same thread with "The internet connection dropped while you were working; it is back now. Continue." (`continueWith`, `network`), as a restart continuation is, without using the automatic restart allowance. Unknown calls still pause it first.
+- **Restarts.** A waiting activation is found by the startup pass: a dispatch never sent is sent again through the same check; one that ended waits again and continues once the internet is back.
 
 ## Model and depth
 
@@ -68,10 +105,10 @@ The model is hidden. The definition holds `{mode: 'auto', depth}` or `{mode: 'na
 
 ## States and pausing
 
-States are idle, working, needs you (an open ask), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
+States are idle, working ("Waiting for internet" while it waits for it), needs you (an open ask), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
 
 - **Pause** stops schedules only; chat still works. The owner pauses from the menu (`bots.personal.pause`).
-- **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, stops and chat failures never count.
+- **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
 - **Resume** (`bots.personal.resume`) clears every pause, the failure count and the stuck error.
 
 ## Runtimes that can hold a bot
@@ -110,7 +147,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Area | Path |
 |---|---|
 | Shared types: definition, look, chat rows, chips, states, asks, memory, methods | `src/shared/bots/personal/` |
-| Engine: activations, lanes, dispatch, walls and asks, usage pauses, delete | `src/mms/bots/activation/BotEngine.ts` |
+| Engine: activations, lanes, dispatch, walls and asks, usage pauses, waiting for the internet, delete | `src/mms/bots/activation/BotEngine.ts`, `src/mms/bots/activation/connectivity.ts` |
 | Bot UI daemon side: create, chat, About, and what clients see | `src/mms/bots/chat/` |
 | Daemon methods (`bots.personal.v2`) | `src/mms/bots/registerMethods.ts`, `src/shared/bots/personal/methods.ts` |
 | Store, `bots.db` migrations | `src/mms/bots/store/BotStore.ts` |
@@ -121,6 +158,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Chips | `src/shared/bots/personal/chips.ts`, `src/mms/bots/activity/BotActivitySink.ts` |
 | Instructions | `src/mms/bots/instructions.ts` |
 | Bot app tools | `src/mms/run/mcp/appTools/bots.ts`, `src/mms/run/mcp/appTools/botMemory.ts` |
+| The bot's own browser, its methods | `src/mms/bots/browser/`, `src/shared/bots/personal/browser.ts` |
 | Memory and context | `src/mms/bots/memory/` |
 | Wiring | `src/mms/MmsProfileServices.ts` |
-| Renderer: chat, ask cards, menu, About, New bot, faces | `src/renderer/components/bots/`, `src/renderer/stores/botsStore.ts`, `src/renderer/services/personalBotsClient.ts` |
+| Renderer: chat, ask cards, menu, About, New bot, faces, browser preview and split view | `src/renderer/components/bots/`, `src/renderer/stores/botsStore.ts`, `src/renderer/stores/botBrowserStore.ts`, `src/renderer/services/personalBotsClient.ts` |

@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ANIMATION_SPEED_SCALE, isAnimationSpeed, type AnimationSpeed } from '../../shared/settings'
 
 // Mirrors Settings > Appearance > Advanced > Animation speed. useTheme feeds it from the open
@@ -73,4 +73,44 @@ function subscribe(listener: () => void): () => void {
 /** motionScale() for components; re-renders when the speed or the OS setting changes. */
 export function useMotionScale(): number {
   return useSyncExternalStore(subscribe, motionScale, motionScale)
+}
+
+/** A view swap's fade-out and fade-in, before the speed scale (sidebar tabs, the workspace beside them). */
+export const VIEW_SWAP_OUT_MS = 140
+export const VIEW_SWAP_IN_MS = 180
+
+export type ViewSwapPhase = 'out' | 'in' | null
+
+/**
+ * A view that trails `target` by a fade-out: while `phase` is 'out' the old view stays laid out (and should be
+ * inert) as it fades, then `shown` takes the latest target and `phase` is 'in' while the new view fades in.
+ * Changes during the fade-out restart nothing: the target chosen last comes in. With motion off (the setting,
+ * the OS, or no renderer) `shown` follows `target` at once and `phase` stays null.
+ */
+export function useViewSwap<T>(target: T): { shown: T; phase: ViewSwapPhase } {
+  const instant = useMotionScale() === 0 || typeof globalThis.matchMedia !== 'function'
+  const [shown, setShown] = useState(target)
+  const [entering, setEntering] = useState(0)
+  const latest = useRef(target)
+  latest.current = target
+  const current = instant ? target : shown
+  const leaving = !Object.is(current, target)
+  useEffect(() => {
+    if (instant) { setShown(target); setEntering(0) }
+  }, [instant, target])
+  useEffect(() => {
+    if (!leaving) return
+    const timer = setTimeout(() => {
+      setShown(latest.current)
+      setEntering((count) => Math.abs(count) + 1)
+    }, scaleMotionMs(VIEW_SWAP_OUT_MS))
+    return () => clearTimeout(timer)
+  }, [leaving])
+  useEffect(() => {
+    if (entering <= 0) return
+    // A little past the fade-in, so its transitions finish before the swap's rules go.
+    const timer = setTimeout(() => setEntering((count) => -count), scaleMotionMs(VIEW_SWAP_IN_MS) + 40)
+    return () => clearTimeout(timer)
+  }, [entering])
+  return { shown: current, phase: leaving ? 'out' : !instant && entering > 0 ? 'in' : null }
 }

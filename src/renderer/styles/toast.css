@@ -82,17 +82,20 @@ html[data-theme='light'] .ui-toaster {
 
 .ui-toast-card {
   --tone: var(--text-secondary);
+  /* The tone's tint: a faint wash over the surface and a softly coloured edge. Neutral has none. */
+  --toast-wash: transparent;
+  --toast-edge: color-mix(in srgb, var(--text-primary) 4%, transparent);
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   min-height: 50px;
-  padding: 7px 8px 7px 12px;
+  padding: 7px 8px 7px 14px;
   overflow: hidden;
   /* A faint edge only: the specular light draws the top, "lit, not outlined". */
-  border: 1px solid color-mix(in srgb, var(--text-primary) 4%, transparent);
+  border: 1px solid var(--toast-edge);
   border-radius: var(--ui-card-radius, 12px);
-  background: var(--toast-surface);
+  background: linear-gradient(var(--toast-wash), var(--toast-wash)), var(--toast-surface);
   -webkit-backdrop-filter: blur(22px) saturate(1.6);
   backdrop-filter: blur(22px) saturate(1.6);
   color: var(--text-primary);
@@ -151,36 +154,36 @@ html[data-theme='light'] .ui-toaster {
 .ui-toast-paused { --tone: var(--warning); }
 .ui-toast-error { --tone: var(--danger); }
 
-/* The status mark: the sidebar's status dot, in the status colour with a soft ring. */
-.ui-toast-mark {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 18px;
+.ui-toast-success,
+.ui-toast-attention,
+.ui-toast-paused,
+.ui-toast-error {
+  --toast-wash: color-mix(in srgb, var(--tone) var(--toast-wash-amount, 10%), transparent);
+  --toast-edge: color-mix(in srgb, var(--tone) var(--toast-edge-amount, 22%), transparent);
 }
 
-.ui-toast-two-line .ui-toast-mark {
-  align-self: flex-start;
+/* Light surfaces show a tint more strongly: a lighter wash, a slightly firmer edge. */
+html[data-theme='light'] .ui-toaster {
+  --toast-wash-amount: 7%;
+  --toast-edge-amount: 28%;
 }
 
-.ui-toast-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--tone);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 18%, transparent);
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .ui-toaster {
+    --toast-wash-amount: 7%;
+    --toast-edge-amount: 28%;
+  }
 }
 
-.ui-toast-neutral .ui-toast-dot {
-  background: var(--ui-faint, var(--text-secondary));
-  box-shadow: none;
+.ui-toast-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .ui-toast-text {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 0;
   min-width: 0;
@@ -228,6 +231,119 @@ html[data-theme='light'] .ui-toaster {
 .ui-toast-two-line .ui-toast-message {
   color: var(--text-secondary);
   font-size: 12.5px;
+}
+
+/*
+ * A toast whose text is cut off opens to show all of it: on hover, or on click or Enter until
+ * clicked again. The text grows from its one line (two with a title) to a capped, scrolling
+ * block; the actions and close button keep their place on the first line.
+ */
+.ui-toast-expandable {
+  --toast-text-h: calc(12.5px * 1.35);
+  transition: background-color 0.18s ease;
+}
+
+.ui-toast-expandable.ui-toast-two-line {
+  --toast-text-h: calc(13.5px * 1.35 + 12.5px * 1.35);
+}
+
+.ui-toast-expandable:not(.ui-toast-openable) .ui-toast-text {
+  height: var(--toast-text-h);
+  overflow: hidden;
+  border-radius: 5px;
+  interpolate-size: allow-keywords;
+  transition: height var(--ui-dur-slow, 0.2s) var(--toast-ease);
+}
+
+.ui-toast-text[role='button'] {
+  cursor: pointer;
+}
+
+.ui-toast-text[role='button']:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-toast-expandable:not(.ui-toast-openable):hover {
+  background-color: color-mix(in srgb, var(--toast-surface) 100%, var(--text-primary) 5%);
+}
+
+.ui-toast-card.is-open {
+  align-items: flex-start;
+}
+
+/* Where the centred row put each part, so opening only grows the text. */
+.ui-toast-card.is-open .ui-toast-body {
+  margin-top: max(0px, calc((34px - var(--toast-text-h)) / 2));
+}
+
+.ui-toast-card.is-open .ui-toast-actions {
+  margin-top: 4px;
+}
+
+.ui-toast-card.is-open .ui-toast-corner {
+  margin-top: 5px;
+}
+
+.ui-toast-card.is-open .ui-toast-text {
+  height: auto;
+  max-height: 168px;
+  height: calc-size(auto, min(size, 168px));
+  overflow-y: auto;
+  scrollbar-width: thin;
+  animation: ui-toast-reveal var(--ui-dur-slow, 0.2s) ease both;
+}
+
+.ui-toast-card.is-open .ui-toast-title,
+.ui-toast-card.is-open .ui-toast-message {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-toast-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 -2px -5px;
+  animation: ui-toast-reveal var(--ui-dur-slow, 0.2s) ease both;
+}
+
+.ui-toast-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ui-faint, var(--text-secondary));
+  cursor: pointer;
+  transition: background-color var(--ui-dur-fast, 0.12s) ease, color var(--ui-dur-fast, 0.12s) ease;
+}
+
+.ui-toast-copy:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.ui-toast-copy:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-toast-copied {
+  color: var(--ui-faint, var(--text-secondary));
+  font-size: 11.5px;
+}
+
+@keyframes ui-toast-reveal {
+  from {
+    opacity: 0.4;
+  }
 }
 
 .ui-toast-actions {

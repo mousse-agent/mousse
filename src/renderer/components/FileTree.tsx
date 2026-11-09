@@ -16,8 +16,10 @@ import { addReferenceToChat, filesEntryReference } from '../utils/fileReference'
 import { DelayedLoader } from './ui/DelayedLoader'
 
 interface FileTreeProps {
+  /** The folder the tree shows; entries are named relative to it. */
   filesRoot: string
-  rootLabel: string
+  /** Sent with every listing when the tree shows a folder other than the thread's own (absolute). */
+  listRoot?: string
   threadId: string | null
   selectedPath: string | null
   onSelectFile: (path: string) => void
@@ -238,7 +240,7 @@ function TreeNode({
 
 export function FileTree({
   filesRoot,
-  rootLabel,
+  listRoot,
   threadId,
   selectedPath,
   onSelectFile,
@@ -252,8 +254,8 @@ export function FileTree({
   const [notice, setNotice] = useState<{ error: boolean; text: string } | null>(null)
 
   const loadChildren = useCallback(
-    async (dirPath: string) => window.mousse.fs.listDir(dirPath, undefined, threadId),
-    [threadId]
+    async (dirPath: string) => window.mousse.fs.listDir(dirPath, undefined, threadId, listRoot),
+    [listRoot, threadId]
   )
 
   const refreshRoot = useCallback(async () => {
@@ -261,7 +263,7 @@ export function FileTree({
     setLoading(true)
     setRootError(null)
     try {
-      const entries = await window.mousse.fs.listDir('', undefined, threadId)
+      const entries = await window.mousse.fs.listDir('', undefined, threadId, listRoot)
       setRootEntries(entries)
     } catch (error) {
       setRootEntries([])
@@ -269,7 +271,7 @@ export function FileTree({
     } finally {
       setLoading(false)
     }
-  }, [filesRoot, threadId])
+  }, [filesRoot, listRoot, threadId])
 
   useEffect(() => {
     void refreshRoot()
@@ -314,9 +316,6 @@ export function FileTree({
 
   return (
     <div className="file-tree">
-      <div className="file-tree-root-label" title={filesRoot}>
-        {rootLabel}
-      </div>
       <div className="sr-only" role="status">{notice && !notice.error ? notice.text : ''}</div>
       {notice?.error && <div className="file-tree-error" role="alert">{notice.text}</div>}
       {loading ? (
@@ -326,6 +325,8 @@ export function FileTree({
           <span title={rootError}>Couldn’t read this folder</span>
           <button type="button" className="file-tree-retry" onClick={() => void refreshRoot()}>Retry</button>
         </div>
+      ) : rootEntries.length === 0 ? (
+        <div className="file-tree-note">Empty folder</div>
       ) : (
         rootEntries.map((entry) => (
           <TreeNode
@@ -348,7 +349,7 @@ export function FileTree({
 
 export function FileTreeToolbar({ onRefresh }: { onRefresh: () => void }) {
   return (
-    <button type="button" className="btn btn-ghost btn-sm" onClick={onRefresh} aria-label="Refresh files" title="Refresh">
+    <button type="button" className="files-icon-btn" onClick={onRefresh} aria-label="Refresh files" title="Refresh">
       <RefreshCw size={14} strokeWidth={2} />
     </button>
   )

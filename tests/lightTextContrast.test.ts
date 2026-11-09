@@ -138,8 +138,9 @@ function surfaces(accent: string): Record<string, Rgba> {
       alpha(accentColor, 100 * accentAlpha(sidebarCss, '.threads-sidebar-thread:hover')),
       strong
     ),
+    // The palette's active row is the neutral pressed fill (thread-search.css), not an accent tint.
     'palette active row': over(
-      alpha(accentColor, 100 * accentAlpha(paletteCss, '.thread-search-result.active')),
+      alpha(primary, mixPercent(required(polishCss, ':root', required(paletteCss, '.thread-search-result.active', 'background') === 'var(--ui-pressed)' ? '--ui-pressed' : '--ui-hover'), '--text-primary')),
       strong
     ),
     'selected item (--ui-selected)': over(

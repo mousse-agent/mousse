@@ -145,7 +145,7 @@ export function AgentsLibrary({
   return (
     <div className="agent-defs" data-agent-library="" data-profile-id={profileId}>
       <header className="agent-defs__header">
-        <h2>Agents</h2>
+        <h2>The crew</h2>
         {!loading && !empty && <span className="agent-defs__status">{visible.length} {visible.length === 1 ? 'agent' : 'agents'}</span>}
         <div className="agent-defs__actions">
           {activeRunsSlot}
@@ -170,6 +170,7 @@ export function AgentsLibrary({
           {tags.length > 0 || query.tag ? (
             <Select
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Filter by tag"
               value={query.tag}
@@ -180,6 +181,7 @@ export function AgentsLibrary({
           {runtimes.length > 1 || query.runtime !== 'all' ? (
             <Select<AgentLibraryQuery['runtime']>
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Filter by runtime"
               value={query.runtime}
@@ -193,6 +195,7 @@ export function AgentsLibrary({
           {models.length > 1 || query.model ? (
             <Select
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Filter by model"
               value={query.model}
@@ -207,6 +210,7 @@ export function AgentsLibrary({
           {library.length > 1 ? (
             <Select<AgentLibraryQuery['sort']>
               className="automation-filter"
+              variant="menu"
               size="small"
               ariaLabel="Sort agents"
               value={query.sort}
@@ -256,7 +260,7 @@ export function AgentsLibrary({
         </div>
       ) : empty ? (
         // New agent and Import sit in the header; the empty library adds no second create button.
-        <p className="automation-empty-line" data-library-empty="">No agents yet.</p>
+        <p className="automation-empty-line" data-library-empty="">No crew yet.</p>
       ) : visible.length === 0 ? (
         <p className="automation-empty-line" data-library-no-match="">
           No agents match.

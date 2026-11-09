@@ -22,6 +22,11 @@ export interface ComposerWorkspace {
   expiryStopsRun?: boolean
   /** `expiryMs` came from the private-chat default in Settings, so turning Private off drops it. */
   expiryFromPrivateDefault?: boolean
+  /**
+   * With `worktreeEnabled`: the branch the new worktree starts from, set only when it is not the project folder's own
+   * branch (`threads.create`'s `baseBranch`). Absent: the folder's HEAD, as a daemon without the field does anyway.
+   */
+  baseBranch?: string
 }
 
 /**
@@ -141,7 +146,7 @@ function withExpiryOf(workspace: ComposerWorkspace): Pick<ComposerWorkspace, 'ex
  * computer, Private and the expiry stay. A project of this computer replaces the one remembered for another.
  */
 export function workspaceWithProject(workspace: ComposerWorkspace, projectId: string | undefined): ComposerWorkspace {
-  const { localProjectId: _remembered, ...rest } = workspace
+  const { localProjectId: _remembered, baseBranch: _branch, ...rest } = workspace
   return { ...rest, projectId, worktreeEnabled: Boolean(projectId && workspace.worktreeEnabled) }
 }
 

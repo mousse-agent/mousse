@@ -10,6 +10,7 @@ import { browserNavigationUrl } from '../../shared/browser/validation'
 import { assertOwnedPath } from '../../mms/profiles/pathSafety'
 import { ElectronAttachedBrowserBackend, TrustedGuestRegistry, wrapElectronWebContents } from './automation'
 import type { AttachedControlState } from '../../shared/browser/attached'
+import type { InAppBrowserCursor } from '../../shared/browser/inApp'
 import type {
   BrowserAttachmentAcknowledgeClosedParams,
   BrowserAttachmentRegisterParams,
@@ -308,6 +309,13 @@ export class AttachedBrowserHost {
     backend.onControlStateChange((state) => {
       const record = [...records.values()].find((item) => item.uiTabId === state.uiTabId)
       if (record) { record.state = state; this.emitState(record, state) }
+    })
+    // The agent cursor is drawn by the window over its tab, never injected into the page.
+    backend.onAgentCursor(({ uiTabId, cursor }) => {
+      const record = [...records.values()].find((item) => item.uiTabId === uiTabId)
+      if (record && !record.sender.isDestroyed() && sameBinding(this.connection.binding(record.sender.id), record.binding)) {
+        record.sender.send('browser:agent-cursor', { uiTabId: record.localTabId, profileId: record.binding.profileId, cursor } satisfies InAppBrowserCursor)
+      }
     })
     return host
   }

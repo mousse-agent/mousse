@@ -1,59 +1,59 @@
-.composer-workspace-toolbar {
-  /* The row is the composer card's top row, not a box of its own. The Segmented control
-     reads the settings control tokens, which live on .settings-page. */
-  --space-12: 12px;
-  --settings-control-h: 28px;
-  --settings-fs-small: 12.5px;
+/* A new thread's settings sit outside the composer card: the project above its top-left edge, where it runs
+   and Private / Delete after below it. The rows span the composer's width (both live in .chat-input-area),
+   keep a fixed height so the empty-thread layout does not jump, and leave once the thread starts. */
+.new-thread-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px 6px 10px;
-  border-bottom: 1px solid var(--ui-line);
+  gap: 2px;
+  min-width: 0;
+  min-height: 26px;
   color: var(--text-secondary);
-  font-size: 12.5px;
-  min-width: 0;
+  font-size: 12px;
+  animation: new-thread-row-in 140ms ease-out;
 }
+.new-thread-row-above { margin-bottom: 4px; }
+.new-thread-row-below { flex-wrap: wrap; justify-content: space-between; margin-top: 4px; }
+.new-thread-row-group { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.new-thread-row-start { flex: 0 1 auto; }
+.new-thread-row-end { flex: 0 0 auto; margin-left: auto; }
 
-.composer-workspace-project,
-.composer-workspace-device-btn,
-.composer-workspace-device-static {
-  display: flex;
+.new-thread-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
-}
-
-.composer-workspace-project,
-.composer-workspace-device-btn {
-  flex: 0 1 auto;
-  height: 28px;
-  padding: 0 8px;
+  max-width: 240px;
+  height: 26px;
+  padding: 0 7px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: inherit;
   font: inherit;
   cursor: pointer;
-  max-width: 240px;
 }
+.new-thread-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-thread-chip svg { flex-shrink: 0; }
+.new-thread-chip > svg:last-child:not(:first-child) { opacity: 0.7; }
 /* With only this computer the item is a muted label, not a button. */
-.composer-workspace-device-static { flex: 0 1 auto; height: 28px; padding: 0 8px; color: var(--text-secondary); }
-.composer-workspace-project span,
-.composer-workspace-device-btn span,
-.composer-workspace-device-static span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-workspace-project svg,
-.composer-workspace-device-btn svg,
-.composer-workspace-device-static svg { flex-shrink: 0; }
-.composer-workspace-project { color: var(--text-primary); }
-.composer-workspace-project:hover:not(:disabled),
-.composer-workspace-project.open,
-.composer-workspace-device-btn:hover:not(:disabled),
-.composer-workspace-device-btn.open { background: var(--ui-hover); }
-.composer-workspace-project:disabled,
-.composer-workspace-device-btn:disabled { opacity: 0.5; cursor: default; }
-.composer-workspace-worktree { display: flex; margin-left: auto; flex-shrink: 0; }
-.composer-workspace-toolbar :focus-visible,
-.composer-workspace-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.new-thread-chip-static { cursor: default; }
+.new-thread-icon { justify-content: center; min-width: 26px; padding: 0 6px; }
+button.new-thread-chip:hover:not(:disabled),
+.new-thread-chip.open { background: var(--ui-hover); color: var(--text-primary); }
+.new-thread-chip.active { background: color-mix(in srgb, var(--private-tint, var(--accent)) 16%, transparent); color: var(--private-tint, var(--accent)); }
+.new-thread-chip.active:hover:not(:disabled) { background: color-mix(in srgb, var(--private-tint, var(--accent)) 24%, transparent); color: var(--private-tint, var(--accent)); }
+.new-thread-chip:disabled { opacity: 0.5; cursor: default; }
+.new-thread-chip:focus-visible,
+.composer-workspace-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.new-thread-expiry-label { font-size: 11px; font-variant-numeric: tabular-nums; }
+
+@keyframes new-thread-row-in {
+  from { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .new-thread-row { animation: none; }
+}
 
 .composer-workspace-menu {
   width: min(280px, calc(100vw - 16px));
@@ -88,8 +88,38 @@
 .composer-workspace-menu-item:disabled { opacity: 0.5; cursor: default; background: transparent; }
 .composer-workspace-menu-item[aria-checked='true'] { color: var(--accent); }
 .composer-workspace-menu-check { margin-left: auto; }
+.composer-workspace-menu-hint { color: var(--text-secondary); font-size: 12px; }
+.composer-workspace-menu-hint + .composer-workspace-menu-check { margin-left: 8px; }
+.composer-workspace-menu-item > span:first-child:not(:last-child) { flex: 1 1 auto; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }
 .composer-workspace-menu-label { padding: 6px 10px 3px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+
+/* The workspace menu: a filter, about five branches then a scroll, a separator, the two modes. */
+.new-thread-branch-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 4px;
+  color: var(--text-secondary);
+}
+.new-thread-branch-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.new-thread-branch-search input:focus { border: 0; background: transparent; box-shadow: none; outline: none; }
+.new-thread-branch-list { max-height: 162px; overflow-y: auto; }
+.composer-workspace-menu .new-thread-branch-option { height: 32px; padding-block: 0; }
+.new-thread-branch-option span { flex: 1 1 auto; }
+.new-thread-branch-option[data-active='true'] { background: rgba(var(--accent-rgb), 0.12); }
+.new-thread-branch-option[aria-selected='true'] { color: var(--accent); }
+.new-thread-branch-empty { margin: 0; padding: 6px 10px; color: var(--text-secondary); font-size: 12.5px; }
 
 /* Open project on another computer. */
 .remote-project-dialog { display: flex; flex-direction: column; gap: 12px; min-width: min(420px, 100%); }
@@ -130,7 +160,11 @@
 .remote-project-recent:focus-visible { background: rgba(var(--surface-soft-rgb), 0.9); }
 .remote-project-error { margin: 0; color: var(--danger, #e5484d); font-size: 12.5px; }
 
-@media (max-width: 600px) {
-  .composer-workspace-toolbar { flex-wrap: wrap; gap: 10px 16px; }
-  .composer-workspace-project { flex: 1 1 120px; }
+/* The branch name while it is read: a muted bar of about a short name's width, so nothing reads "loading". */
+.new-thread-branch-placeholder {
+  display: inline-block;
+  width: 44px;
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 22%, transparent);
 }

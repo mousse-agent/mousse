@@ -454,6 +454,12 @@ export type LocalTtsModelState = LocalModelState
 
 export type LocalTtsModelStatus = LocalModelStatus<LocalTtsModelId>
 
+/**
+ * One segment voiced by a native engine slot (Kokoro on onnxruntime-node, run by main), or why it
+ * could not be voiced. A slot that stopped rejects instead.
+ */
+export type NativeSpeechResult = { samples: Float32Array; sampleRate: number } | { error: string }
+
 // ---------------------------------------------------------------------------------------------
 // Provider models
 // ---------------------------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { foldersOf, type BotManifest } from '../../src/shared/bots/personal/definition'
-import { withPermission } from '../../src/shared/bots/personal/escalation'
+import { filesAsk, withPermission } from '../../src/shared/bots/personal/escalation'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { compileBotThread } from '../../src/mms/bots/grants/compile'
 import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
@@ -68,18 +68,20 @@ describe('the subset rule', () => {
       budget: { maxActiveMs: 30 * 60_000, maxTurns: 40 }
     })
     expect(manifestSubset(wider, granted)).toBe(false)
+    // File access is one permission, granted already: another folder adds nothing.
     expect(addedPermissions(wider, granted).map((line) => line.text)).toEqual([
-      'Create and overwrite files in /home/me/proj/site, /home/me/proj/docs',
+      'Create and overwrite files',
       'Use the github tool `merge_pr`',
       'Use the skill *changelog*',
-      'Read and edit files in /home/me/proj/docs',
       'Up to 30 minutes of work per run'
     ])
   })
 
-  it('write access on a granted read-only root is an addition', () => {
+  it('file access is one addition: once granted, no folder or access adds anything', () => {
     const readOnly = manifest({ workspace: { roots: ['/home/me/proj/site'], access: 'read' } })
-    expect(addedPermissions(manifest(), readOnly).map((line) => line.text)).toEqual(['Read and edit files in /home/me/proj/site'])
+    expect(addedPermissions(manifest(), readOnly)).toEqual([])
+    expect(manifestSubset(manifest({ workspace: { roots: ['/'], access: 'write' } }), readOnly)).toBe(true)
+    expect(addedPermissions(manifest(), manifest({ workspace: null })).map((line) => line.text)).toEqual(['Use files on this computer'])
   })
 
   it('dropping a limit the grant has is wider, never a subset', () => {
@@ -91,9 +93,9 @@ describe('the subset rule', () => {
   it('with nothing granted, everything is listed', () => {
     expect(addedPermissions(manifest(), null)).toEqual(describeManifest(manifest()))
     expect(describeManifest(manifest()).map((line) => line.text)).toEqual([
-      'Read and edit files in /home/me/proj/site',
-      'Read files in /home/me/proj/site',
-      'Edit files in /home/me/proj/site',
+      'Use files on this computer',
+      'Read files',
+      'Edit files',
       'Use the github tool `create_issue`',
       'Use the skill *release-notes*',
       'Up to 15 minutes of work per run'
@@ -185,36 +187,37 @@ describe('round-1 review fixes', () => {
 })
 
 describe('intersectManifest access', () => {
-  it('is read where either side says read', () => {
-    const write = { roots: ['/a'], access: 'write' as const }
+  it('keeps file access when both have it, as the grant has it, and drops it when either does not', () => {
+    const write = { roots: ['/'], access: 'write' as const }
     const read = { roots: ['/a'], access: 'read' as const }
     const base = { tools: [], appTools: [], mcp: [], skills: [], budget: { maxActiveMs: 60_000 }, audience: 'owner' as const }
     expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: read }).workspace).toEqual(read)
-    expect(intersectManifest({ ...base, workspace: read }, { ...base, workspace: write }).workspace).toEqual(read)
+    expect(intersectManifest({ ...base, workspace: read }, { ...base, workspace: write }).workspace).toEqual(write)
     expect(intersectManifest({ ...base, workspace: write }, { ...base, workspace: null }).workspace).toBeNull()
+    expect(intersectManifest({ ...base, workspace: null }, { ...base, workspace: write }).workspace).toBeNull()
   })
 })
 
-describe('round 2: per-folder access survives every answer and narrowing', () => {
+describe('file access is one permission (bot-architecture.md §3.7)', () => {
   const two = (workspace: BotManifest['workspace']): BotManifest => manifest({ tools: ['read', 'edit'], mcp: [], skills: [], workspace })
 
-  it('later answers keep each folder\'s access (the review probe, as a test)', () => {
-    const afterB = withPermission(two({ roots: ['/a'], access: 'read' }), { path: '/b', access: 'write' })
-    expect(foldersOf(afterB.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
-    // A budget answer, then another folder answer: /b stays writable.
-    expect(foldersOf(withPermission(afterB, { budget: { key: 'maxActiveMs' } }, 1000).workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
-    expect(foldersOf(withPermission(afterB, { path: '/c', access: 'read' }).workspace)).toEqual([['/a', 'read'], ['/b', 'write'], ['/c', 'read']])
-    // Two "Allow for this bot" folder answers in a row.
-    expect(foldersOf(withPermission(afterB, { path: '/c', access: 'write' }).workspace)).toEqual([['/a', 'read'], ['/b', 'write'], ['/c', 'write']])
+  it('a folder answer grants it whole: the top of the file system, read and write, whatever folder was asked about', () => {
+    const top = process.platform === 'win32' ? 'C:\\' : '/'
+    const folder = process.platform === 'win32' ? 'C:\\b' : '/b'
+    expect(withPermission(two(null), { path: folder, access: 'read' }).workspace).toEqual({ roots: [top], access: 'write' })
+    expect(withPermission(two({ roots: ['/a'], access: 'read' }), filesAsk()).workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
+    // Another answer keeps it as it is.
+    const granted = withPermission(two(null), filesAsk())
+    expect(withPermission(granted, { budget: { key: 'maxActiveMs' } }, 1000).workspace).toEqual(granted.workspace)
+    expect(withPermission(granted, { tool: 'search' }).workspace).toEqual(granted.workspace)
   })
 
-  it('an owner-written mixed workspace is granted exactly as shown, before and after a tool answer', () => {
+  it('an older build\'s folders keep their stored form, so their digest stays approved, and read as file access', () => {
     const authored = two({ roots: ['/a', '/b'], access: 'write', rootAccess: { '/a': 'read' } })
-    // One canonical form: what approval shows is what is stored and granted.
     expect(canonicalManifest(authored).workspace).toEqual({ roots: ['/a', '/b'], access: 'read', rootAccess: { '/b': 'write' } })
-    expect(describeManifest(authored).map((line) => line.text)).toEqual(['Read files in /a', 'Read and edit files in /b', 'Read files in /a, /b', 'Edit files in /b', 'Up to 15 minutes of work per run'])
-    const after = withPermission(authored, { tool: 'search' })
-    expect(foldersOf(after.workspace)).toEqual([['/a', 'read'], ['/b', 'write']])
+    expect(botManifestDigest(withPermission(authored, { tool: 'read' }))).toBe(botManifestDigest(authored))
+    expect(describeManifest(authored).map((line) => line.text)).toEqual(['Use files on this computer', 'Read files', 'Edit files', 'Up to 15 minutes of work per run'])
+    expect(describeManifest(two(null)).map((line) => line.text)).toEqual(['Read files in its files folder', 'Edit files in its files folder', 'Up to 15 minutes of work per run'])
   })
 
   it('"run commands" is one line, not tied to a folder, and an Allow adds only it', () => {
@@ -225,24 +228,22 @@ describe('round 2: per-folder access survives every answer and narrowing', () =>
     expect(describeManifest(after).map((line) => line.text)).toContain('Run commands')
   })
 
-  it('a thread\'s narrowing keeps its read-only folders read-only, through compilation and the call check', () => {
+  it('a thread\'s narrowing keeps file access whole, through compilation and the call check; only a narrowing to none removes it', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-narrow-')))
     const site = join(base, 'site')
-    const output = join(base, 'output')
+    const elsewhere = join(base, 'elsewhere')
     const profile = join(base, 'profile')
-    for (const dir of [site, output, join(profile, 'scratch')]) mkdirSync(dir, { recursive: true })
+    for (const dir of [site, elsewhere, join(profile, 'scratch')]) mkdirSync(dir, { recursive: true })
     try {
-      const grant = manifest({ tools: ['edit'], mcp: [], skills: [], workspace: { roots: [site, output], access: 'write' } })
-      const narrow = { workspace: { roots: [site, output], access: 'write' as const, rootAccess: { [site]: 'read' as const } } }
-      expect(foldersOf(narrowManifest(grant, narrow).workspace)).toEqual([[output, 'write'], [site, 'read']].sort())
-      const compiled = compileBotThread({ grant, digest: 'd', thread: { narrow }, scratch: join(profile, 'scratch'), profileHome: profile, temps: [], nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
+      const grant = manifest({ tools: ['edit'], mcp: [], skills: [], workspace: { roots: [site], access: 'write' } })
+      const narrow = { workspace: { roots: [site], access: 'read' as const } }
+      expect(narrowManifest(grant, narrow).workspace).toEqual(grant.workspace)
+      expect(narrowManifest(grant, { workspace: null }).workspace).toBeNull()
+      const compiled = compileBotThread({ grant, digest: 'd', thread: { narrow }, scratch: join(profile, 'scratch'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
       if (!compiled.ok) throw new Error(compiled.error.message)
       const authority = createBotAuthority({ activationId: 'a', role: 'context', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(site, 'file.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
-      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(output, 'file.md') } })).toEqual({ ok: true })
-      // The reverse: a write override under a read default stays writable where both say write.
-      const mixed = manifest({ tools: ['edit'], mcp: [], skills: [], workspace: { roots: [site, output], access: 'read', rootAccess: { [output]: 'write' } } })
-      expect(foldersOf(narrowManifest(mixed, { workspace: { roots: [site, output], access: 'read', rootAccess: { [output]: 'write' } } }).workspace)).toEqual([[output, 'write'], [site, 'read']].sort())
+      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(site, 'file.md') } })).toEqual({ ok: true })
+      expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(elsewhere, 'file.md') } })).toEqual({ ok: true })
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
@@ -279,7 +280,7 @@ describe('default app tools (Bot Phase 1 §5.10)', () => {
   it('the starter grant is file tools without a folder, the default app tools and 15 minutes', () => {
     const starter = botStarterManifest()
     expect(manifestProblem(starter)).toBeUndefined()
-    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 15 * 60_000 } })
+    expect(starter).toMatchObject({ tools: ['read', 'list', 'search', 'edit', 'write'], workspace: null, mcp: [], skills: [], budget: { maxActiveMs: 60 * 60_000 } })
     expect(starter.appTools).toEqual([...BOT_DEFAULT_APP_TOOLS])
   })
 })

@@ -25,27 +25,8 @@ declare const __MOUSSE_VERSION__: string | undefined
 const BUILD_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION__ : ''
 const logoIcon = channelForVersion(BUILD_VERSION) === 'nightly' ? nightlyLogoIcon : stableLogoIcon
 
-/**
- * What the title bar names while the sidebar is closed: "<thread> · <project>" for the open thread,
- * or null when the sidebar is open, no thread is open, or another view (agent chats, Usage) replaces it.
- */
-export function titlebarThreadLabel(
-  state: Pick<
-    ReturnType<typeof useAppStore.getState>,
-    'threadsSidebarOpen' | 'sidebarMode' | 'usageOpen' | 'scheduledOpen' | 'activeThreadId' | 'threads' | 'projects'
-  >
-): string | null {
-  // Usage and Automations replace the thread view, so there is no open thread to name.
-  if (state.threadsSidebarOpen || state.sidebarMode === 'chats' || state.usageOpen || state.scheduledOpen || !state.activeThreadId) return null
-  const thread = state.threads.find((candidate) => candidate.id === state.activeThreadId)
-  if (!thread) return null
-  const project = thread.projectId ? state.projects.find((candidate) => candidate.id === thread.projectId) : undefined
-  return project ? `${thread.name} · ${project.name}` : thread.name
-}
-
 export function TitleBar() {
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
-  const threadLabel = useAppStore(titlebarThreadLabel)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
@@ -126,8 +107,6 @@ export function TitleBar() {
             />
           </div>
         </div>
-        {/* Part of the drag area: the label takes no pointer events, so dragging on it moves the window. */}
-        {threadLabel && <div className="titlebar-thread-label">{threadLabel}</div>}
       </div>
       <div className="titlebar-controls">
         <div className="titlebar-app-actions">

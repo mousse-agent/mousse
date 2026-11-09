@@ -1,14 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 
 import { expiresAtAfter, expiresInLabel } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, CircleCheck, CircleDotDashed, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Clock, Layers, ListTree, Loader2, Lock, MessageQuestion, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pause, Pin, Shield, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
-import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
+import { isThreadActivityActive, type Project, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { pausedStatusLabel } from '../lib/pausedRun'
 import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
@@ -21,14 +21,16 @@ import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectProjectThread, selectThread } from '../lib/threadActions'
+import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
 import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
+import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
-import { Collapse } from './ui/Collapse'
+import { Collapse, motionAllowed } from './ui/Collapse'
+import { scaleMotionMs, useMotionScale } from '../lib/motion'
 
 import {
   ThreadsContextMenu,
@@ -45,12 +47,15 @@ import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { ThreadComputerBadge } from './ComputerBadge'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
-import { projectHues } from '../lib/projectHues'
+import { projectHueColor, projectHues } from '../lib/projectHues'
+import { ProjectIcon } from './ProjectIcon'
+import { projectIconMenuActions } from '../lib/projectIconActions'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
+import '../styles/sidebar-view-motion.css'
 
 
 
@@ -81,13 +86,22 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
+// "Other threads", the last group of the Projects tree, opens, closes and clips like a project under this id,
+// which is no project's.
+const OTHER_THREADS_ID = ':other'
 const PROJECT_ATTENTION_TITLE: Record<Exclude<ThreadAttention, 'quiet' | 'needs-me'>, string> = {
   working: 'Working',
   paused: 'Paused',
   done: 'Done'
 }
-const SIDEBAR_VIEWS = ['projects', 'threads', 'chats'] as const
-type SidebarView = (typeof SIDEBAR_VIEWS)[number]
+const SIDEBAR_TABS = [
+  { id: 'projects', label: 'Projects', icon: FolderKanban },
+  { id: 'threads', label: 'Threads', icon: ListTree },
+  { id: 'chats', label: 'Chats', icon: MessagesSquare }
+] as const satisfies readonly PillTab<string>[]
+type SidebarView = (typeof SIDEBAR_TABS)[number]['id']
+/** How long the old view fades out on a tab switch; matches the leaving rule in sidebar-view-motion.css. */
+const SIDEBAR_VIEW_OUT_MS = 140
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
@@ -244,6 +258,7 @@ function SidebarRenameInput({
 function ThreadCardBody({
   thread,
   projectName,
+  project,
   hue,
   activity,
   awaitsApproval,
@@ -260,6 +275,8 @@ function ThreadCardBody({
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
   projectName?: string
+  /** The thread's project, for its own icon in the mark. */
+  project?: Project
   /** The project's hue (`--hue-N`), shared with the row's tint. */
   hue?: number
   activity?: ThreadActivityState
@@ -286,7 +303,7 @@ function ThreadCardBody({
   return (
     <>
       {projectName ? (
-        <span className="threads-sidebar-card-mark" style={hue ? { color: `var(--hue-${hue})` } : undefined} aria-hidden="true">{projectInitials(projectName)}</span>
+        <span className="threads-sidebar-card-mark" style={hue ? { color: projectHueColor(hue) } : undefined} aria-hidden="true"><ProjectIcon project={project} size={14} fallback={projectInitials(projectName)} /></span>
       ) : (
         <span className="threads-sidebar-card-mark threads-sidebar-card-mark-empty" aria-hidden="true">
           <Folder size={13} strokeWidth={1.8} />
@@ -388,8 +405,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [deleteState, setDeleteState] = useState<{ busy: boolean; error?: string }>({ busy: false })
   const archivedHeadingRef = useRef<HTMLButtonElement>(null)
-  const [noProjectExpanded, setNoProjectExpanded] = useState(false)
-  // The row of the Projects or "No project" tree that last had focus (`project:<id>` or `thread:<id>`): its tree's Tab stop.
+  // The row of the Projects tree that last had focus (`project:<id>` or `thread:<id>`): its Tab stop.
   const [treeFocus, setTreeFocus] = useState<string | null>(null)
   // The list above the footer. `moreBelow` marks it while rows sit below its fold; `revealProject` is the project
   // just opened by the person, scrolled into view once its rows render.
@@ -408,6 +424,71 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     state.setThreadsSidebarView(view)
     if (state.sidebarMode !== nextMode) state.setSidebarMode(nextMode)
   }
+
+  // Tab switch motion (sidebar-view-motion.css). The tabs follow `sidebarView` at once; the content shows
+  // `shownView`, which trails it by the old view's fade-out, then the new view fades in as its panel unhides.
+  // Clicks during the fade-out restart nothing: the view chosen last is the one that comes in. With motion
+  // off (the setting, the OS, or no renderer) the content follows the tabs at once.
+  const instantViews = useMotionScale() === 0 || !motionAllowed()
+  const [shownView, setShownView] = useState(sidebarView)
+  const contentView = instantViews ? sidebarView : shownView
+  const viewLeaving = contentView !== sidebarView
+  useEffect(() => {
+    if (instantViews) setShownView(sidebarView)
+  }, [instantViews, sidebarView])
+  useEffect(() => {
+    if (!viewLeaving) return
+    const timer = setTimeout(() => setShownView(useAppStore.getState().threadsSidebarView), scaleMotionMs(SIDEBAR_VIEW_OUT_MS))
+    return () => clearTimeout(timer)
+  }, [viewLeaving])
+
+  // The Archived footer is not under Chats: it folds away while the old view fades out and unfolds as the
+  // new one comes in, so the list above it takes or gives the room smoothly. `footerAway` is set from the
+  // click; the footer is `hidden` once Chats shows.
+  const footerRef = useRef<HTMLDivElement>(null)
+  const footerAway = sidebarView === 'chats' || contentView === 'chats'
+  const footerHidden = contentView === 'chats'
+  const footerWasHidden = useRef(footerHidden)
+  useLayoutEffect(() => {
+    const footer = footerRef.current
+    const wasHidden = footerWasHidden.current
+    footerWasHidden.current = footerHidden
+    if (!footer || typeof footer.animate !== 'function') return
+    const running = footer.getAnimations().filter((animation) => animation.id === 'footer-swap')
+    if (footerHidden || instantViews) { for (const animation of running) animation.cancel(); return }
+    const from = wasHidden ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: Number(getComputedStyle(footer).opacity) }
+    for (const animation of running) animation.cancel()
+    const to = footerAway ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: 1 }
+    if (Math.abs(from.height - to.height) < 0.5 && Math.abs(from.opacity - to.opacity) < 0.01) return
+    const frame = (at: { height: number; opacity: number }) => ({ blockSize: `${at.height}px`, opacity: at.opacity, overflow: 'hidden' })
+    const animation = footer.animate([frame(from), frame(to)], {
+      duration: scaleMotionMs(footerAway ? SIDEBAR_VIEW_OUT_MS : 180),
+      easing: footerAway ? 'cubic-bezier(0.5, 1, 0.89, 1)' : 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: footerAway ? 'forwards' : 'none',
+    })
+    animation.id = 'footer-swap'
+  }, [footerAway, footerHidden, instantViews])
+
+  // Add project leaves with the Projects tab; the tab list then eases out over its room instead of jumping.
+  // `tabsWidth` is the list's settled width, so the layout effect still sees the width from before the change.
+  const tabsRef = useRef<HTMLDivElement>(null)
+  const tabsWidth = useRef(0)
+  useEffect(() => {
+    const tabs = tabsRef.current
+    if (!tabs || typeof ResizeObserver !== 'function') return
+    const observer = new ResizeObserver(() => { tabsWidth.current = tabs.getBoundingClientRect().width })
+    observer.observe(tabs)
+    return () => observer.disconnect()
+  }, [])
+  const addProjectShown = sidebarView === 'projects'
+  useLayoutEffect(() => {
+    const tabs = tabsRef.current
+    const before = tabsWidth.current
+    if (addProjectShown || instantViews || !tabs || !before || typeof tabs.animate !== 'function') return
+    const after = tabs.getBoundingClientRect().width
+    if (after <= before) return
+    tabs.animate([{ maxWidth: `${before}px` }, { maxWidth: `${after}px` }], { duration: scaleMotionMs(180), easing: 'cubic-bezier(0.22, 1, 0.36, 1)' })
+  }, [addProjectShown])
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -499,11 +580,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (hasLocalProjects) void loadEditors()
   }, [hasLocalProjects])
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
-  // "No project": threads without one, and threads whose project was removed from the sidebar.
-  const orphanThreads = availableThreads.filter((thread) => !groupById.has(groupIdOf(thread.projectId) ?? ''))
+  // The Projects tree group a thread lists under: its project's, else "Other threads" (threads without a project,
+  // and threads whose project was removed from the sidebar).
+  const listGroupOf = (projectId: string | undefined): string => {
+    const groupId = groupIdOf(projectId)
+    return groupId && groupById.has(groupId) ? groupId : OTHER_THREADS_ID
+  }
+  const otherThreads = availableThreads.filter((thread) => listGroupOf(thread.projectId) === OTHER_THREADS_ID)
+  // The group in focus: the open thread's (a draft's project too), whose header stays bright while the other
+  // groups dim (threads-sidebar.css). None for a Chats thread or with nothing open, and then nothing dims.
+  const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
+  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) ? listGroupOf(focusedThread.projectId) : undefined
+  // The Threads tab dims its other cards only while the open thread has a card there.
+  const feedHasActive = Boolean(focusedThread && availableThreads.some((thread) => thread.id === focusedThread.id))
 
-  // Reveal the highlighted row once per thread: open its project, show its project's whole list when it is past
-  // the first 5, or open "No project" or "Archived". A draft is revealed when it is started and gets its row.
+  // Reveal the highlighted row once per thread: open its group, show the group's whole list when it is past
+  // the first 5, or open "Archived". A draft is revealed when it is started and gets its row.
   const revealedRow = useRef<string | null>(null)
   useEffect(() => {
     // The row to reveal is the highlighted one, which for a subagent is its parent's.
@@ -516,22 +608,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       setArchivedExpanded(true)
       return
     }
-    const groupId = groupIdOf(shown.projectId)
-    if (!groupId || !groupById.has(groupId)) {
-      setNoProjectExpanded(true)
-      return
-    }
+    const groupId = listGroupOf(shown.projectId)
     setExpandedProjects((prev) => {
       if (prev.has(groupId)) return prev
       // A group opened for the thread being shown appears at once; only a group the user toggles animates.
       if (toggledProjectRef.current === groupId) toggledProjectRef.current = null
       return new Set(prev).add(groupId)
     })
-    const position = availableThreads.filter((thread) => groupIdOf(thread.projectId) === groupId).findIndex((thread) => thread.id === shownId)
+    const position = availableThreads.filter((thread) => listGroupOf(thread.projectId) === groupId).findIndex((thread) => thread.id === shownId)
     if (position >= PROJECT_THREAD_PREVIEW_LIMIT) {
       setExpandedProjectThreadLists((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)))
     }
-    // groupIdOf reads groupOf, which is listed.
+    // listGroupOf reads groupOf and groupById, which are listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId, openSubagentParentId, threads, availableThreads, agentThreadIds, groupOf, groupById])
 
@@ -607,39 +695,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     await createAndSelectProjectThread(projectId)
   }, { retry: true })
 
-  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-    event.preventDefault()
-    const index = SIDEBAR_VIEWS.indexOf(sidebarView)
-    const nextView = event.key === 'Home'
-      ? SIDEBAR_VIEWS[0]
-      : event.key === 'End'
-        ? SIDEBAR_VIEWS[2]
-        : event.key === 'ArrowRight'
-          ? SIDEBAR_VIEWS[(index + 1) % SIDEBAR_VIEWS.length]
-          : SIDEBAR_VIEWS[(index + SIDEBAR_VIEWS.length - 1) % SIDEBAR_VIEWS.length]
-    void setSidebarView(nextView)
-    const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-    buttons[SIDEBAR_VIEWS.indexOf(nextView)]?.focus()
-  }
-
-  // The Projects tree's rows in order, as the keyboard walks them: each project, and the shown threads of an open one.
-  const projectThreadsOf = (groupId: string) => availableThreads.filter((thread) => groupIdOf(thread.projectId) === groupId)
-  const treeKeys = projectGroups.flatMap((group) => {
-    const key = `project:${group.project.id}`
-    if (!expandedProjects.has(group.project.id)) return [key]
-    const shown = projectThreadsOf(group.id)
-    const visible = expandedProjectThreadLists.has(group.project.id) ? shown : shown.slice(0, PROJECT_THREAD_PREVIEW_LIMIT)
+  // The Projects tree's rows in order, as the keyboard walks them: each group (the projects, then "Other threads"
+  // when it has threads), and the shown threads of an open one.
+  const projectThreadsOf = (groupId: string) => availableThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
+  const treeGroupIds = [...projectGroups.map((group) => group.id), ...(otherThreads.length ? [OTHER_THREADS_ID] : [])]
+  const treeKeys = treeGroupIds.flatMap((groupId) => {
+    const key = `project:${groupId}`
+    if (!expandedProjects.has(groupId)) return [key]
+    const shown = projectThreadsOf(groupId)
+    const visible = expandedProjectThreadLists.has(groupId) ? shown : shown.slice(0, PROJECT_THREAD_PREVIEW_LIMIT)
     return [key, ...visible.map((thread) => `thread:${thread.id}`)]
   })
   const highlightedKey = `thread:${openSubagentParentId ?? activeThreadId}`
-  // Each tree is one Tab stop: the row last focused in it, else the open thread's row, else its first row.
-  const tabStopOf = (keys: string[]) => treeFocus && keys.includes(treeFocus)
+  // The tree is one Tab stop: the row last focused in it, else the open thread's row, else its first row.
+  const treeTabStop = treeFocus && treeKeys.includes(treeFocus)
     ? treeFocus
-    : keys.includes(highlightedKey) ? highlightedKey : keys[0]
-  const treeTabStop = tabStopOf(treeKeys)
-  // "No project" under the lists is a tree of its own, its threads one level deep, walked with the same keys.
-  const noProjectTabStop = tabStopOf(noProjectExpanded ? orphanThreads.map((thread) => `thread:${thread.id}`) : [])
+    : treeKeys.includes(highlightedKey) ? highlightedKey : treeKeys[0]
 
   /** Up and Down move between the tree's shown rows, Home and End to its ends, Right and Left open and close a project. */
   const onTreeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -656,12 +727,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         // Past the 5 shown threads of a project, the rest of its list opens.
         const next = row.closest('.threads-sidebar-thread-container')?.nextElementSibling
         if (!isProject && next?.hasAttribute('inert')) {
-          const groupId = groupIdOf(threads.find((thread) => thread.id === id)?.projectId)
-          if (groupId) {
-            flushSync(() => setExpandedProjectThreadLists((prev) => new Set(prev).add(groupId)))
-            focusRow(next.querySelector<HTMLElement>('[role="treeitem"]') ?? undefined)
-            break
-          }
+          const groupId = listGroupOf(threads.find((thread) => thread.id === id)?.projectId)
+          flushSync(() => setExpandedProjectThreadLists((prev) => new Set(prev).add(groupId)))
+          focusRow(next.querySelector<HTMLElement>('[role="treeitem"]') ?? undefined)
+          break
         }
         focusRow(rows[index + 1])
         break
@@ -929,6 +998,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     closeContextMenu()
     void runWithToast('copy the path', () => navigator.clipboard.writeText(path))
   }
+  const projectIconActions = (target: ThreadsContextMenuTarget) =>
+    projectIconMenuActions(target.type === 'project' ? projects.find((project) => project.id === target.id) : undefined, closeContextMenu)
 
   const handleRename = () => {
     if (!contextMenu) return
@@ -945,6 +1016,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (target.type === 'thread') {
       if (target.settled && !target.node) askDelete({ kind: 'one', thread: { id: target.id, name: target.name } })
     } else setRemovingProject(target)
+  }
+
+  // From an archived row's menu: every archived thread of this computer, after the same confirmation.
+  const handleDeleteAllArchived = () => {
+    closeContextMenu()
+    askDelete(clearAllRequest(archivedThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))
   }
 
   const confirmRemoveProject = () => {
@@ -1100,17 +1177,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   /**
    * `inNeedsMe`: a copy of the row in the "Needs me" group, which filters rows and so does not reorder them.
-   * `inTree`: a thread row of the Projects tree (or, with `treeLevel` 1 and `treeTabStop` of its own, of the
-   * "No project" tree), a tree item with a roving tab stop; `clipped` marks one past a project's preview of 5
-   * that is not shown, which keyboard and screen readers skip until it is.
+   * `inTree`: a thread row of the Projects tree, a tree item with a roving tab stop; `clipped` marks one past a
+   * group's preview of 5 that is not shown, which keyboard and screen readers skip until it is.
    */
-  const renderThreadRow = (thread: (typeof threads)[number], { root = false, layout = 'row', inNeedsMe = false, inTree = false, treeLevel = 2, tabStop = treeTabStop, clipped = false }: {
+  const renderThreadRow = (thread: (typeof threads)[number], { root = false, layout = 'row', inNeedsMe = false, inTree = false, clipped = false }: {
     root?: boolean
     layout?: 'row' | 'card'
     inNeedsMe?: boolean
     inTree?: boolean
-    treeLevel?: 1 | 2
-    tabStop?: string
     clipped?: boolean
   } = {}) => {
 
@@ -1160,6 +1234,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         key={thread.id}
         className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}${dropLine}`}
         inert={clipped || undefined}
+        // The row whose menu is open, however it was opened: an archived row stays lit while it is (threads-sidebar.css).
+        data-menu-open={(contextMenu?.target.type === 'thread' && contextMenu.target.id === thread.id && Boolean(contextMenu.inNeedsMe) === inNeedsMe) || undefined}
       >
 
       <button
@@ -1172,15 +1248,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
 
-        style={hue ? ({ '--project-tint': `var(--hue-${hue})` } as CSSProperties) : undefined}
+        style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
         aria-current={isActive ? 'page' : undefined}
 
         {...(inTree ? {
           role: 'treeitem',
-          'aria-level': treeLevel,
+          'aria-level': 2,
           'aria-selected': isActive || openSubagentParentId === thread.id,
-          tabIndex: tabStop === `thread:${thread.id}` ? 0 : -1,
+          tabIndex: treeTabStop === `thread:${thread.id}` ? 0 : -1,
           'data-tree-key': `thread:${thread.id}`,
           onFocus: () => setTreeFocus(`thread:${thread.id}`)
         } : {})}
@@ -1242,6 +1318,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           <ThreadCardBody
             thread={thread}
             projectName={group?.project.name}
+            project={group?.project}
             hue={hue}
             activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
             awaitsApproval={approvalThreads.has(thread.id)}
@@ -1396,51 +1473,149 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     </section>
   )
 
+  /**
+   * A group row carries its threads' state: how many finished that nobody has looked at yet, as a muted count after
+   * the name (the row then stays bright, threads-sidebar.css); and the worst state above that as a dot, with how many
+   * need the person while it is closed.
+   */
+  const renderGroupStatus = (groupThreads: Thread[], expanded: boolean) => {
+    const levels = groupThreads.map((thread) => attentionOf(thread.id))
+    const attention = worstOf(levels.filter((level) => level !== 'done'))
+    const finishedCount = levels.filter((level) => level === 'done').length
+    const needsMeCount = levels.filter((level) => level === 'needs-me').length
+    const finishedLabel = `${finishedCount} finished`
+    const title = attention === 'quiet' ? '' : attention === 'needs-me' ? needsMeLabel(needsMeCount) : PROJECT_ATTENTION_TITLE[attention]
+    return (
+      <>
+        {finishedCount > 0 && (
+          <span className="threads-sidebar-project-finished" role="img" aria-label={finishedLabel} title={finishedLabel}>{finishedCount}</span>
+        )}
+        {attention !== 'quiet' && (
+          <span
+            className={`threads-sidebar-project-status threads-sidebar-project-status--${attention}`}
+            role="img"
+            aria-label={title}
+            title={title}
+          >
+            <span className="threads-sidebar-status-dot" aria-hidden="true" />
+            {!expanded && needsMeCount > 0 && (
+              <span className="threads-sidebar-project-count" aria-hidden="true">{needsMeCount}</span>
+            )}
+          </span>
+        )}
+      </>
+    )
+  }
+
+  /** A group's thread rows: the first 5, and Show more for the rest. */
+  const renderGroupThreads = (groupId: string, groupThreads: Thread[]) => {
+    const showAll = expandedProjectThreadLists.has(groupId)
+    return (
+      <>
+        <div
+          className={`threads-sidebar-thread-list ui-collapse-items${showAll ? ' expanded' : ''}`}
+          style={{ '--project-thread-count': groupThreads.length } as CSSProperties}
+          role="none"
+        >
+          {groupThreads.map((thread, index) => renderThreadRow(thread, {
+            inTree: true,
+            clipped: !showAll && index >= PROJECT_THREAD_PREVIEW_LIMIT
+          }))}
+        </div>
+        {groupThreads.length > PROJECT_THREAD_PREVIEW_LIMIT && (
+          <button
+            type="button"
+            className="threads-sidebar-show-more"
+            tabIndex={-1}
+            onClick={() => {
+              setExpandedProjectThreadLists((prev) => {
+                const next = new Set(prev)
+                if (showAll) next.delete(groupId)
+                else next.add(groupId)
+                return next
+              })
+            }}
+          >
+            {showAll ? 'Show less' : 'Show more'}
+          </button>
+        )}
+      </>
+    )
+  }
+
+  /** "Other threads", the Projects tree's last group: the threads of no project, with no project actions. */
+  const renderOtherThreads = () => {
+    const expanded = expandedProjects.has(OTHER_THREADS_ID)
+    const treeKey = `project:${OTHER_THREADS_ID}`
+    const childrenId = `${tabsId}-other-threads`
+    return (
+      <div className="threads-sidebar-project threads-sidebar-other-threads" data-project-id={OTHER_THREADS_ID} data-active-project={activeGroupId === OTHER_THREADS_ID || undefined}>
+        <div className={`threads-sidebar-project-row${expanded ? ' expanded' : ''}`}>
+          <button
+            type="button"
+            className="threads-sidebar-project-toggle"
+            role="treeitem"
+            aria-level={1}
+            aria-expanded={expanded}
+            aria-owns={expanded ? childrenId : undefined}
+            tabIndex={treeTabStop === treeKey ? 0 : -1}
+            data-tree-key={treeKey}
+            onFocus={() => setTreeFocus(treeKey)}
+            onClick={() => toggleProject(OTHER_THREADS_ID)}
+          >
+            <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-project-chevron" aria-hidden="true" />
+            <Layers size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+            <span className="threads-sidebar-project-name">Other threads</span>
+            {renderGroupStatus(otherThreads, expanded)}
+          </button>
+          {/* The global new thread: no project, as "No project" in the composer's picker. */}
+          <button
+            type="button"
+            className="threads-sidebar-icon-btn threads-sidebar-project-new-chat"
+            title="New thread"
+            aria-label="New thread"
+            tabIndex={-1}
+            onClick={() => void runWithToast('start a thread', createAndSelectThread, { retry: true })}
+          >
+            <MessageSquarePlus size={14} strokeWidth={2} aria-hidden="true" />
+          </button>
+        </div>
+        <Collapse
+          open={expanded}
+          animate={toggledProjectRef.current === OTHER_THREADS_ID}
+          id={childrenId}
+          role="group"
+          className="threads-sidebar-children"
+          itemCount={otherThreads.length}
+        >
+          {renderGroupThreads(OTHER_THREADS_ID, otherThreads)}
+        </Collapse>
+      </div>
+    )
+  }
+
   return (
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
     <aside className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
-        <div className="threads-sidebar-tabs" role="tablist" aria-label="Sidebar" onKeyDown={onTabKeyDown}>
-          {([
-            ['projects', 'Projects', FolderKanban],
-            ['threads', 'Threads', ListTree],
-            ['chats', 'Chats', MessagesSquare]
-          ] as const).map(([view, label, Icon]) => (
-            <button
-              key={view}
-              type="button"
-              role="tab"
-              id={`${tabsId}-${view}-tab`}
-              tabIndex={sidebarView === view ? 0 : -1}
-              aria-selected={sidebarView === view}
-              aria-controls={`${tabsId}-${view}-panel`}
-              title={label}
-              aria-label={label}
-              className={`threads-sidebar-tab${sidebarView === view ? ' active' : ''}`}
-              onClick={() => void setSidebarView(view)}
-            >
-              <Icon size={15} strokeWidth={1.8} aria-hidden="true" />
-              <span className="threads-sidebar-tab-label">{label}</span>
-            </button>
-          ))}
-        </div>
+        <PillTabs tabsRef={tabsRef} tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} ariaLabel="Sidebar" idPrefix={tabsId} />
         {/* Only beside Projects; on the other tabs the tabs take the whole row. */}
-        {sidebarView === 'projects' && (
+        {addProjectShown && (
           <button type="button" className="threads-sidebar-toolbar-button threads-sidebar-add-project" onClick={() => void openProject()} title="Add project" aria-label="Add project">
             <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
       </div>
 
-      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={sidebarView} data-more-below={moreBelow || undefined}>
+      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-view-leaving={viewLeaving || undefined} data-more-below={moreBelow || undefined}>
 
-      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={sidebarView !== 'projects'}>
+      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'} inert={viewLeaving && contentView === 'projects'}>
 
-        {sidebarView === 'projects' && renderNeedsMe()}
+        {contentView === 'projects' && renderNeedsMe()}
 
-        {projectGroups.length === 0 ? (
+        {projectGroups.length === 0 && (
 
           <div className="threads-sidebar-tree">
             <div className="threads-sidebar-empty threads-sidebar-empty-projects">
@@ -1449,9 +1624,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </div>
           </div>
 
-        ) : (
+        )}
 
-        <div className="threads-sidebar-tree" role="tree" aria-label="Projects" onKeyDown={onTreeKeyDown}>
+        {treeGroupIds.length > 0 && (
+
+        <div className="threads-sidebar-tree" role="tree" aria-label="Projects" data-has-active={activeGroupId !== undefined || undefined} onKeyDown={onTreeKeyDown}>
 
           {projectGroups.map((group) => {
 
@@ -1463,15 +1640,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
               const projectThreads = projectThreadsOf(group.id)
               const projectThreadCount = projectThreads.length
-              // The project row carries its threads' state: the worst of them, and while it is closed how many need the person.
-              const projectLevels = projectThreads.map((thread) => attentionOf(thread.id))
-              const projectAttention = worstOf(projectLevels)
-              const projectNeedsMe = projectLevels.filter((level) => level === 'needs-me').length
-              const projectAttentionTitle = projectAttention === 'needs-me'
-                ? needsMeLabel(projectNeedsMe)
-                : projectAttention === 'quiet' ? '' : PROJECT_ATTENTION_TITLE[projectAttention]
-
-              const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
 
               const isRenaming = renaming?.type === 'project' && renaming.id === project.id
               const menuTarget: ThreadsContextMenuTarget = {
@@ -1504,6 +1672,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                   key={project.id}
                   className="threads-sidebar-project"
                   data-project-id={project.id}
+                  data-active-project={activeGroupId === group.id || undefined}
+                  // The folder icon's color: the group's hue, as on its threads' cards (polish.css).
+                  style={{ '--project-hue': projectHueColor(hueByGroup.get(group.id)) } as CSSProperties}
                   draggable={!isRenaming}
                   onDragStart={(event) => startDrag(event, { type: 'project', id: project.id })}
                   onDragOver={(event) => {
@@ -1518,7 +1689,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                   <div
 
-                    className={`threads-sidebar-project-row${expanded ? ' expanded' : ''}${project.pinnedAt ? ' pinned' : ''}`}
+                    className={`threads-sidebar-project-row${expanded ? ' expanded' : ''}${projectThreadCount === 0 ? ' empty' : ''}${project.pinnedAt ? ' pinned' : ''}`}
+                    // The row whose menu is open stays lit while the other groups dim (threads-sidebar.css).
+                    data-menu-open={(contextMenu?.target.type === 'project' && contextMenu.target.id === project.id) || undefined}
                     // The row's tooltips sit beside the sidebar, level with the row, never over the rows around it.
                     data-tooltip-placement="outside-left"
 
@@ -1575,11 +1748,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       {/* Says the row opens: shown on hover and focus, turned down while open. */}
                       <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-project-chevron" aria-hidden="true" />
 
-                      {expanded ? (
-                        <FolderOpen size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
-                      ) : (
-                        <Folder size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
-                      )}
+                      <ProjectIcon
+                        project={project}
+                        expanded={expanded}
+                        className="threads-sidebar-project-icon"
+                        fallback={expanded ? (
+                          <FolderOpen size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        ) : (
+                          <Folder size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        )}
+                      />
 
                       {project.pinnedAt && (
 
@@ -1623,19 +1801,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       )}
 
-                      {projectAttention !== 'quiet' && (
-                        <span
-                          className={`threads-sidebar-project-status threads-sidebar-project-status--${projectAttention}`}
-                          role="img"
-                          aria-label={projectAttentionTitle}
-                          title={projectAttentionTitle}
-                        >
-                          <span className="threads-sidebar-status-dot" aria-hidden="true" />
-                          {!expanded && projectNeedsMe > 0 && (
-                            <span className="threads-sidebar-project-count" aria-hidden="true">{projectNeedsMe}</span>
-                          )}
-                        </span>
-                      )}
+                      {renderGroupStatus(projectThreads, expanded)}
 
                       <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
 
@@ -1691,52 +1857,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       {projectThreadCount === 0 ? (
 
-                        <div className="threads-sidebar-empty threads-sidebar-empty-nested" role="none">
-                          <span>No threads</span>
-                          <button
-                            type="button"
-                            className="threads-sidebar-icon-btn threads-sidebar-empty-new-thread"
-                            title={`New thread in ${project.name}`}
-                            aria-label={`New thread in ${project.name}`}
-                            onClick={() => void createProjectThread(project.id)}
-                          >
-                            <MessageSquarePlus size={14} strokeWidth={2} aria-hidden="true" />
-                          </button>
-                        </div>
+                        <div className="threads-sidebar-empty threads-sidebar-empty-nested" role="none">No threads</div>
 
-                      ) : (
-
-                        <>
-                          <div
-                            className={`threads-sidebar-thread-list ui-collapse-items${showAllProjectThreads ? ' expanded' : ''}`}
-                            style={{ '--project-thread-count': projectThreadCount } as CSSProperties}
-                            role="none"
-                          >
-                            {projectThreads.map((thread, index) => renderThreadRow(thread, {
-                              inTree: true,
-                              clipped: !showAllProjectThreads && index >= PROJECT_THREAD_PREVIEW_LIMIT
-                            }))}
-                          </div>
-                          {projectThreadCount > PROJECT_THREAD_PREVIEW_LIMIT && (
-                            <button
-                              type="button"
-                              className="threads-sidebar-show-more"
-                              tabIndex={-1}
-                              onClick={() => {
-                                setExpandedProjectThreadLists((prev) => {
-                                  const next = new Set(prev)
-                                  if (showAllProjectThreads) next.delete(project.id)
-                                  else next.add(project.id)
-                                  return next
-                                })
-                              }}
-                            >
-                              {showAllProjectThreads ? 'Show less' : 'Show more'}
-                            </button>
-                          )}
-                        </>
-
-                      )}
+                      ) : renderGroupThreads(project.id, projectThreads)}
 
                   </Collapse>
 
@@ -1746,6 +1869,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             })}
 
+          {otherThreads.length > 0 && renderOtherThreads()}
+
         </div>
 
         )}
@@ -1754,10 +1879,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
-        {sidebarView === 'threads' && renderNeedsMe()}
+      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'} inert={viewLeaving && contentView === 'threads'}>
+        {contentView === 'threads' && renderNeedsMe()}
         <div
           className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
+          data-has-active={feedHasActive || undefined}
           // Below the last row the dragged row goes last; in the gap between two rows, where the line shows.
           onDragOver={(event) => {
             if (!draggedItem.current?.feed) return
@@ -1785,67 +1911,36 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </div>
       </div>
 
-      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
-        {sidebarView === 'chats' && <ChatsSidebar />}
+      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={contentView !== 'chats'} inert={viewLeaving && contentView === 'chats'}>
+        {contentView === 'chats' && <ChatsSidebar />}
       </div>
 
       </div>
 
-      {/* The same footer under Projects and Threads: "No project" (the Threads list already holds those threads,
-          so only Projects shows it), then one "Archived" disclosure, with Clear all. */}
-      <div className="threads-sidebar-footer" hidden={sidebarView === 'chats'}>
+      {/* The same footer under Projects and Threads: one "Archived" disclosure; the whole heading opens and closes it. */}
+      <div ref={footerRef} className="threads-sidebar-footer" hidden={contentView === 'chats'} inert={footerAway || undefined}>
 
-        <section className="threads-sidebar-section threads-sidebar-bottom-recent" aria-label="No project" hidden={sidebarView !== 'projects'}>
-          <div className="threads-sidebar-heading">
-            <button type="button" className="threads-sidebar-heading-toggle"
-              onClick={() => setNoProjectExpanded((expanded) => !expanded)} aria-expanded={noProjectExpanded}>
-              <Folder size={14} strokeWidth={2} aria-hidden="true" />
-              <span>No project · {orphanThreads.length}</span>
-            </button>
-          </div>
-          {/* The same rows and indent as a project's threads. */}
-          <Collapse open={noProjectExpanded} itemCount={orphanThreads.length}>
-            {orphanThreads.length === 0 ? (
-              <div className="threads-sidebar-tree">
-                <div className="threads-sidebar-children">
-                  <div className="threads-sidebar-empty threads-sidebar-empty-nested">No threads</div>
-                </div>
-              </div>
-            ) : (
-              <div className="threads-sidebar-tree" role="tree" aria-label="No project" onKeyDown={onTreeKeyDown}>
-                <div className="threads-sidebar-children" role="none">
-                  {orphanThreads.map((thread) => renderThreadRow(thread, { inTree: true, treeLevel: 1, tabStop: noProjectTabStop }))}
-                </div>
-              </div>
-            )}
-          </Collapse>
-        </section>
-
-        <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? '' : ' collapsed'}`} aria-label="Archived">
+        <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? ' expanded' : ' collapsed'}`} aria-label="Archived">
 
           <div className="threads-sidebar-heading">
             <button
               ref={archivedHeadingRef}
               type="button"
               className="threads-sidebar-heading-toggle"
-              onClick={() => setArchivedExpanded((expanded) => !expanded)}
+              onClick={() => {
+                // How far below the footer's top the list starts: its motion is capped to the room under it (threads-sidebar.css).
+                const footer = footerRef.current
+                const heading = archivedHeadingRef.current?.parentElement
+                if (footer && heading) footer.style.setProperty('--threads-sidebar-settled-head', `${heading.getBoundingClientRect().bottom - footer.getBoundingClientRect().top}px`)
+                setArchivedExpanded((expanded) => !expanded)
+              }}
               aria-expanded={archivedExpanded}
             >
               <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
-              <span>Archived · {archivedThreads.length}</span>
+              <span>Archived</span>
+              {archivedThreads.length > 0 && <span className="threads-sidebar-settled-count">{archivedThreads.length}</span>}
+              <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-settled-chevron" aria-hidden="true" />
             </button>
-            {localArchivedCount > 0 && (
-              <button
-                type="button"
-                className="threads-sidebar-heading-action"
-                data-testid="archived-clear-all"
-                aria-label="Delete all archived threads…"
-                title="Delete all archived threads"
-                onClick={() => askDelete(clearAllRequest(archivedThreads.map((thread) => ({ id: thread.id, name: thread.name, ...(thread.node ? { node: thread.node } : {}) }))))}
-              >
-                Clear all
-              </button>
-            )}
           </div>
 
           <Collapse open={archivedExpanded} itemCount={archivedThreads.length}>
@@ -1902,6 +1997,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onCopyPath={contextMenu.target.path ? handleCopyPath : undefined}
 
           onSetExpiry={(ms) => void handleSetExpiry(ms)}
+          onDeleteAllArchived={localArchivedCount > 0 ? handleDeleteAllArchived : undefined}
+          {...projectIconActions(contextMenu.target)}
 
         />
 

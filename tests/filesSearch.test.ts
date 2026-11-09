@@ -2,17 +2,19 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
-import { FilesSearchView, searchNotes } from '../src/renderer/components/FilesSearch'
+import { FilesSearchField, FilesSearchResults, searchNotes } from '../src/renderer/components/FilesSearch'
 import {
   DEFAULT_TEXT_TIMEOUT_MS,
   EXTENDED_TEXT_TIMEOUT_MS,
   applySearchKey,
   createFilesSearchState,
   enterAction,
+  fileMatch,
   filesSearchKeyAction,
   filesSearchReducer,
   groupGrepMatches,
   openLineDetail,
+  rankFileResults,
   rowsAreCurrent,
   searchKey,
   searchRows,
@@ -94,9 +96,11 @@ const noopHandlers = (): FilesSearchHandlers & Record<keyof FilesSearchHandlers,
   onClose: vi.fn()
 })
 
+/** The header field and the results drawn in the tree's place, as one markup. */
 function render(state: FilesSearchState): string {
+  const handlers = { onAction: () => {}, onOpenFile: () => {}, onOpenLine: () => {}, onClose: () => {} }
   return renderToStaticMarkup(
-    createElement(FilesSearchView, { state, onAction: () => {}, onOpenFile: () => {}, onOpenLine: () => {}, onClose: () => {} })
+    createElement('div', null, createElement(FilesSearchField, { state, ...handlers }), createElement(FilesSearchResults, { state, ...handlers }))
   )
 }
 
@@ -106,7 +110,8 @@ describe('quick open state', () => {
   it('shows the answer of the latest request', () => {
     const state = answeredFiles('com', filesResponse([file('src/components/Chat.tsx', [4, 5, 6]), file('src/comp.ts')]))
     expect(state.status).toBe('ready')
-    expect(state.files.map((f) => f.path)).toEqual(['src/components/Chat.tsx', 'src/comp.ts'])
+    // Ranked: a name that starts with the text comes before a folder that holds it.
+    expect(state.files.map((f) => f.path)).toEqual(['src/comp.ts', 'src/components/Chat.tsx'])
     expect(rowsAreCurrent(state)).toBe(true)
   })
 
@@ -204,7 +209,7 @@ describe('quick open state', () => {
     const state = answeredFiles('a', filesResponse([file('a.ts')], { indexing: true, source: null }))
     expect(state.status).toBe('indexing')
     expect(state.files).toHaveLength(1)
-    expect(searchNotes(state).map((n) => n.id)).toContain('indexing')
+    expect(searchNotes(state)).toEqual([{ id: 'loading', tone: 'info', text: 'Searching…' }])
   })
 
   it('shows an error verbatim and drops the rows', () => {
@@ -285,14 +290,24 @@ describe('keyboard', () => {
   })
 
   it('quick open: arrows pick the row and Enter opens that file', () => {
-    const state = answeredFiles('f', filesResponse([file('a.ts'), file('src/b.ts'), file('c.ts')]))
+    const state = answeredFiles('b', filesResponse([file('lib/b.tsx'), file('src/b.ts'), file('c.ts')]))
+    expect(state.files.map((f) => f.path)).toEqual(['src/b.ts', 'lib/b.tsx', 'c.ts'])
     const handlers = noopHandlers()
     applySearchKey({ type: 'move', key: 'ArrowDown' }, state, handlers)
     expect(handlers.onAction).toHaveBeenCalledWith({ type: 'move', key: 'ArrowDown' })
     const moved = reduce(state, { type: 'move', key: 'ArrowDown' })
     applySearchKey({ type: 'enter' }, moved, handlers)
-    expect(handlers.onOpenFile).toHaveBeenCalledWith('src/b.ts')
+    expect(handlers.onOpenFile).toHaveBeenCalledWith('lib/b.tsx')
     expect(handlers.onOpenLine).not.toHaveBeenCalled()
+  })
+
+  it('Escape clears the text first, then leaves search', () => {
+    const handlers = noopHandlers()
+    applySearchKey({ type: 'close' }, reduce(createFilesSearchState('files', SCOPE), { type: 'query', query: 'abc' }), handlers)
+    expect(handlers.onAction).toHaveBeenCalledWith({ type: 'query', query: '' })
+    expect(handlers.onClose).not.toHaveBeenCalled()
+    applySearchKey({ type: 'close' }, createFilesSearchState('files', SCOPE), handlers)
+    expect(handlers.onClose).toHaveBeenCalledTimes(1)
   })
 
   it('quick open: Enter does not open a row from an earlier query', () => {
@@ -394,9 +409,10 @@ describe('snippetHighlight', () => {
 })
 
 describe('FilesSearchView', () => {
-  it('shows the hint for an empty box in each mode', () => {
-    expect(render(createFilesSearchState('files', SCOPE))).toContain('Type to find a file by name')
-    expect(render(createFilesSearchState('text', SCOPE))).toContain('Type a word or phrase, then press Enter')
+  it('says nothing for an empty field, and asks for Enter for typed text in files; options only for text', () => {
+    expect(render(createFilesSearchState('files', SCOPE))).not.toContain('files-search-note')
+    expect(render(createFilesSearchState('text', SCOPE))).not.toContain('files-search-note')
+    expect(render(reduce(createFilesSearchState('text', SCOPE), { type: 'query', query: 'needle' }))).toContain('Press Enter to search')
     expect(render(createFilesSearchState('text', SCOPE))).toContain('aria-label="Search options"')
     expect(render(createFilesSearchState('files', SCOPE))).not.toContain('aria-label="Search options"')
   })
@@ -422,9 +438,9 @@ describe('FilesSearchView', () => {
     expect(html).not.toContain('Indexing')
   })
 
-  it('says Indexing with the results so far', () => {
+  it('says Searching with the results so far while the index builds', () => {
     const html = render(answeredFiles('a', filesResponse([file('a.ts')], { indexing: true, source: null })))
-    expect(html).toContain('Indexing… results so far')
+    expect(html).toContain('Searching…')
     expect(html).toContain('a.ts')
   })
 
@@ -433,10 +449,8 @@ describe('FilesSearchView', () => {
     expect(render(answeredText('zzz', grepResponse([])))).toContain('No matches')
   })
 
-  it('says a large project was cut short', () => {
-    expect(render(answeredFiles('a', filesResponse([file('a.ts')], { truncated: true })))).toContain(
-      'Large project: showing the first matches, keep typing'
-    )
+  it('says tersely when the results were cut short', () => {
+    expect(render(answeredFiles('a', filesResponse([file('a.ts')], { truncated: true })))).toContain('Showing first 1')
   })
 
   it('groups text results by file and highlights each match', () => {
@@ -519,9 +533,9 @@ describe('FilesSearchView', () => {
     expect(render(answeredText('a', grepResponse([match('a.ts', 1)], { skippedLongLines: 3 })))).toContain('3 very long lines were skipped')
   })
 
-  it('says a project is needed', () => {
-    const html = render(reduce(createFilesSearchState('files', SCOPE), { type: 'needs-project' }))
-    expect(html).toContain('Search needs a project')
+  it('says text search needs a project folder', () => {
+    const html = render(reduce(createFilesSearchState('text', SCOPE), { type: 'needs-project' }))
+    expect(html).toContain('Text search needs a project folder')
   })
 
   it('shows the daemon error verbatim', () => {
@@ -537,10 +551,10 @@ describe('FilesSearchView', () => {
     expect(render(answeredFiles('a', filesResponse([file('a.ts')])))).not.toContain('stale')
   })
 
-  it('offers both modes and pressed state', () => {
-    const html = render(createFilesSearchState('text', SCOPE))
-    expect(html).toMatch(/aria-pressed="false"[^>]*>Files</)
-    expect(html).toMatch(/aria-pressed="true"[^>]*>Text</)
+  it('switches between file names and text in files from the field', () => {
+    expect(render(createFilesSearchState('files', SCOPE))).toContain('aria-label="Search text in files instead"')
+    expect(render(createFilesSearchState('text', SCOPE))).toContain('aria-label="Search file names instead"')
+    expect(render(createFilesSearchState('files', SCOPE))).toContain('placeholder="Find a file"')
   })
 })
 
@@ -553,5 +567,41 @@ describe('the search box is only a background highlight', () => {
     expect(rule).not.toMatch(/border|box-shadow|outline/)
     const block = css.slice(css.indexOf('.files-search-host'))
     expect(block).not.toMatch(/box-shadow:\s*inset/)
+  })
+})
+
+describe('ranking file names', () => {
+  const ranked = (query: string, paths: string[]) => rankFileResults(query, paths.map((path) => file(path))).map((result) => result.path)
+
+  it('puts the exact name first, then a name prefix, a word in the name, anywhere in the name, then the folder', () => {
+    expect(ranked('panel', [
+      'src/panels/index.ts',
+      'src/SidePanelFrame.tsx',
+      'src/expanelist.ts',
+      'src/panelState.ts',
+      'src/panel.tsx'
+    ])).toEqual(['src/panel.tsx', 'src/panelState.ts', 'src/SidePanelFrame.tsx', 'src/expanelist.ts', 'src/panels/index.ts'])
+  })
+
+  it('prefers the shorter path within a tier, then the index score', () => {
+    expect(ranked('app', ['src/renderer/deep/App.tsx', 'App.tsx', 'src/App.tsx'])).toEqual(['App.tsx', 'src/App.tsx', 'src/renderer/deep/App.tsx'])
+    const scored = rankFileResults('zz', [{ ...file('a/x.ts'), score: 1 }, { ...file('b/y.ts'), score: 9 }])
+    expect(scored.map((result) => result.path)).toEqual(['b/y.ts', 'a/x.ts'])
+  })
+
+  it('ignores case and treats camelCase, dashes, dots and underscores as word starts', () => {
+    expect(fileMatch('PANEL', 'src/SidePanel.tsx').tier).toBe(2)
+    expect(fileMatch('panel', 'src/side-panel.tsx').tier).toBe(2)
+    expect(fileMatch('panel', 'src/side_panel.tsx').tier).toBe(2)
+    expect(fileMatch('anel', 'src/side-panel.tsx').tier).toBe(3)
+  })
+
+  it('marks the matched characters of the name, or of the folder for a folder match', () => {
+    expect(fileMatch('pan', 'src/SidePanel.tsx').positions).toEqual([8, 9, 10])
+    expect(fileMatch('src/side', 'src/SidePanel.tsx')).toEqual({ tier: 4, positions: [0, 1, 2, 3, 4, 5, 6, 7] })
+  })
+
+  it('keeps the index order and marks for a loose match', () => {
+    expect(fileMatch('sdpn', 'src/SidePanel.tsx', [4, 6, 8, 10])).toEqual({ tier: 5, positions: [4, 6, 8, 10] })
   })
 })

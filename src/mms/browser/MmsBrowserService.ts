@@ -1,3 +1,4 @@
+import { workspaceUserDataDir } from '../../browser-worker/lifecycle/paths'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { ExecutionContext } from '../../shared/execution/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
@@ -147,6 +148,11 @@ export class MmsBrowserService {
     this.workflow = new ManagedBrowserWorkflowAdapter({
       invoke: (name, args, context) => this.dispatch(context, name, args)
     } as BrowserToolDispatcher)
+  }
+
+  /** Where the managed browser keeps a persistent workspace's profile (its sign-ins and site data). */
+  workspaceDataDir(workspaceId: string): string {
+    return workspaceUserDataDir(this.options.installationBrowserRoot, this.options.profileId, requireIdentifier(workspaceId, 'workspaceId'))
   }
 
   get managedBrokerStarted(): boolean { return this.managed.started }

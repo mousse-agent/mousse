@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EmptyThreadHeading } from '../../src/renderer/components/EmptyThreadHeading'
-import { EMPTY_THREAD_HEADLINES, daySlot, emptyThreadHeadline } from '../../src/renderer/utils/emptyThreadHeadline'
+import { EMPTY_THREAD_HEADLINES, PRIVATE_THREAD_HEADLINES, daySlot, emptyThreadHeadline } from '../../src/renderer/utils/emptyThreadHeadline'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -43,7 +43,7 @@ describe('the empty chat headline', () => {
   })
 
   it('keeps every line short, plain and calm', () => {
-    for (const line of Object.values(EMPTY_THREAD_HEADLINES).flat()) {
+    for (const line of [...Object.values(EMPTY_THREAD_HEADLINES).flat(), ...PRIVATE_THREAD_HEADLINES]) {
       expect(line.length).toBeLessThanOrEqual(40)
       expect(line).not.toContain('!')
       expect(line).toMatch(/^[\x20-\x7e]+$/)
@@ -64,12 +64,47 @@ describe('an empty chat', () => {
     act(() => root!.render(createElement(EmptyThreadHeading, { headline: "What's next?" })))
     expect(host.querySelector('.chat-empty-logo[role="img"][aria-label="Mousse"] svg')).not.toBeNull()
     expect(host.querySelector('h1.chat-empty-title')?.textContent).toBe("What's next?")
+    expect(host.querySelector('.incognito-glasses[data-on]')).toBeNull()
+  })
+
+  it('puts sunglasses on the logo in a private chat', () => {
+    const host = document.body.appendChild(document.createElement('div'))
+    root = createRoot(host)
+    act(() => root!.render(createElement(EmptyThreadHeading, { headline: "What's next?", incognito: true })))
+    expect(host.querySelector('.chat-empty-logo[aria-label="Mousse, incognito"] .incognito-glasses[data-on]')).not.toBeNull()
+    // No "Incognito" word: the headline itself says the chat is private.
+    expect(host.textContent).not.toContain('Incognito')
+    expect(PRIVATE_THREAD_HEADLINES).toContain(host.querySelector('h1.chat-empty-title')?.textContent)
   })
 
   it('renders them above the composer, picked once per chat', () => {
     const chat = readFileSync(resolve(__dirname, '../../src/renderer/components/OrchestratorChat.tsx'), 'utf8')
     expect(chat).toContain('{emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}')
-    expect(chat.indexOf('<EmptyThreadHeading')).toBeLessThan(chat.indexOf('<ComposerWorkspaceToolbar'))
+    expect(chat.indexOf('<EmptyThreadHeading')).toBeLessThan(chat.indexOf('<ComposerProjectPicker'))
     expect(chat).toMatch(/useMemo\(\(\) => emptyThreadHeadline\(new Date\(\), activeThreadId \?\? '__blank__'\), \[activeThreadId\]\)/)
+  })
+})
+
+describe('the headline swap', () => {
+  let root: Root | undefined
+  afterEach(() => {
+    act(() => root?.unmount())
+    document.body.innerHTML = ''
+    vi.useRealTimers()
+  })
+
+  it('blurs the old line away and brings the new one in, in the same place', async () => {
+    vi.useFakeTimers()
+    const { AnimatedHeadline } = await import('../../src/renderer/components/AnimatedHeadline')
+    const host = document.body.appendChild(document.createElement('div'))
+    root = createRoot(host)
+    act(() => root!.render(createElement(AnimatedHeadline, { text: "What's next?" })))
+    expect(host.querySelector('.is-entering, .is-leaving')).toBeNull()
+    act(() => root!.render(createElement(AnimatedHeadline, { text: "Off the record. What's up?" })))
+    expect(host.querySelector('h1')!.getAttribute('aria-label')).toBe("Off the record. What's up?")
+    expect(host.querySelector('.is-leaving')!.textContent).toBe("What's next?")
+    expect(host.querySelector('.is-entering')!.textContent).toBe("Off the record. What's up?")
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(host.querySelector('.is-leaving')).toBeNull()
   })
 })

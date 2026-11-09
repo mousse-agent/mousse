@@ -603,7 +603,7 @@ describe('comment text is rendered safely', () => {
 describe('the Pull request surface', () => {
   it('has a tab and a menu entry with its own command', () => {
     const items = surfaceTabItems({ opened: ['git', 'pullRequest'], terminals: [], browsers: [], documents: [] })
-    expect(items.map((item) => [item.key, item.view, item.label])).toEqual([['git', 'git', 'Diff'], ['pullRequest', 'pullRequest', 'Pull request']])
+    expect(items.map((item) => [item.key, item.view, item.label])).toEqual([['git', 'git', 'Changes'], ['pullRequest', 'pullRequest', 'Pull request']])
     expect(SURFACE_CHOICES).toContainEqual({ id: 'pullRequest', label: 'Pull request', commandId: 'surface.pullRequest' })
   })
 

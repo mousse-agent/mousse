@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLIP_GAP_SECONDS,
   LEAD_SECONDS,
+  MAX_START_DELAY_SECONDS,
   TRAIL_SECONDS,
   startDelaySeconds,
   trimSilence,
   type SegmentTiming
 } from '../src/renderer/readAloud/localPlayback'
 import { PauseGate } from '../src/renderer/readAloud/playback'
-import { FIRST_SEGMENT_CHARS, MAX_SEGMENT_CHARS, splitSpeechSegments } from '../src/renderer/readAloud/speechText'
+import { FIRST_SEGMENT_CHARS, MAX_SEGMENT_CHARS, splitSpeechChunks, splitSpeechSegments } from '../src/renderer/readAloud/speechText'
 
 const RATE = 1000
 
@@ -80,7 +82,158 @@ describe('splitSpeechSegments', () => {
     expect(segments.at(-2)!.length).toBeGreaterThan(segments[0].length)
     expect(segments.join(' ')).toBe(sentence.repeat(40).trim())
   })
+
+  it('joins short sentences into the first segment', () => {
+    expect(
+      splitSpeechSegments(
+        'Hi there. This is short. And so on. But this last one is too long for the first.'
+      )
+    ).toEqual(['Hi there. This is short. And so on.', 'But this last one is too long for the first.'])
+  })
+
+  it('joins a "Sure." opener to the long sentence after it and cuts that sentence', () => {
+    const text =
+      'Sure. The engine that was still voicing the old text is shut down and replaced right away, so the next read does not wait behind it and starts within seconds. ' +
+      'The replacement loads the model in the background while you read. After that, every read starts quickly.'
+    const segments = splitSpeechSegments(text)
+    expect(segments).toEqual([
+      'Sure. The engine that was still voicing,',
+      'the old text is shut down and replaced right away,',
+      'so the next read does not wait behind it and starts within seconds.',
+      'The replacement loads the model in the background while you read. After that, every read starts quickly.'
+    ])
+    expect(segments.map((segment) => segment.length)).toEqual([40, 50, 67, 104])
+    expect(modelledStart(segments).hold).toBeLessThanOrEqual(0.5)
+  })
+
+  it('cuts a long first sentence at a clause break, else at a word', () => {
+    expect(
+      splitSpeechSegments('When the model is ready, the first part plays at once. Then more.')
+    ).toEqual(['When the model is ready,', 'the first part plays at once. Then more.'])
+    // A cut between words ends with a comma, so the voice does not close the sentence there.
+    expect(
+      splitSpeechSegments('The voice model keeps running in its own process until it exits. Then more.')
+    ).toEqual(['The voice model keeps running in its,', 'own process until it exits. Then more.'])
+  })
+
+  it('counts a paragraph break as a sentence end, so a short opening paragraph is joined too', () => {
+    expect(
+      splitSpeechSegments(
+        'Summary.\n\nThe engine that was still voicing the old text is shut down and replaced right away, so the next read does not wait behind it. That is all.'
+      )
+    ).toEqual([
+      'Summary. The engine that was still,',
+      'voicing the old text is shut down and replaced right,',
+      'away, so the next read does not wait behind it. That is all.'
+    ])
+  })
+
+  it('keeps the segment after a 30-character first sentence within 1.5 times its length', () => {
+    const text =
+      'So here is what changed today. ' +
+      'The engine that was still voicing the old text is now shut down at once, so a new read never waits. ' +
+      'The replacement loads in the background, which takes about a second, and is ready before you click again. Everything else stays the same as before.'
+    const segments = splitSpeechSegments(text)
+    expect(segments.map((segment) => segment.length)).toEqual([30, 42, 57, 99, 48])
+    expect(segments[1].length).toBeLessThanOrEqual(45)
+    // Even sized from a 30-character first segment, the ramp keeps every segment in time: no hold.
+    const { hold, stall } = modelledStart(segments)
+    expect(hold).toBe(0)
+    expect(stall).toBe(0)
+  })
+
+  it('does not cut sentences of 80 to 99 characters once the ramp is over', () => {
+    const sentences = [
+      'The first segment plays right away.',
+      'Nothing else about the voices changes for you.',
+      'Later segments are longer, so they stay ahead.',
+      'The engine that was still voicing the old text is shut down and replaced at once.',
+      'A replacement is started straight away, so it has already loaded the model when you click again.'
+    ]
+    const tail = 'Later segments grow to the largest size, which keeps synthesis well ahead of playback for the rest of the reply. That is all.'
+    const text = `${sentences.join(' ')}\n\n${tail}`
+    const segments = splitSpeechSegments(text)
+    expect(segments).toEqual([
+      sentences[0],
+      sentences[1],
+      sentences[2],
+      sentences[3],
+      sentences[4],
+      tail
+    ])
+    expect(sentences[3].length).toBe(81)
+    expect(sentences[4].length).toBe(96)
+  })
+
+  it('starts a typical three-paragraph reply without holding the first clip', () => {
+    const reply = [
+      'Sure. The read aloud button now starts speaking much sooner, because the voice model runs natively instead of in WebAssembly.',
+      'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it. The replacement loads the model in the background, which takes about a second.',
+      'The first segment is kept short so the first sound arrives in about two seconds. Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
+    ].join('\n\n')
+    const segments = splitSpeechSegments(reply)
+    expect(segments).toEqual([
+      'Sure. The read aloud button now starts,',
+      'speaking much sooner,',
+      'because the voice model runs natively instead of in WebAssembly.',
+      'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it.',
+      'The replacement loads the model in the background, which takes about a second. The first segment is kept short so the first sound arrives in about two seconds.',
+      'Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
+    ])
+    const { firstAudio, hold, stall } = modelledStart(segments)
+    expect(firstAudio).toBeLessThan(2.5)
+    expect(hold).toBeLessThanOrEqual(0.5)
+    expect(stall).toBe(0)
+  })
 })
+
+/**
+ * When local playback would start and how long it would stall, for the native engine measured in
+ * the app with both slots busy: 0.4 s + 0.05 s per character of compute and 0.055 s of audio per
+ * character (after trimming silence), on two slots. The first clip is held as `localEngine` does: `startDelaySeconds` is checked whenever
+ * a segment arrives, until it allows playing or its timer runs out.
+ */
+function modelledStart(segments: readonly string[], slots = 2): { firstAudio: number; hold: number; stall: number } {
+  const states = segments.map((segment) => ({ chars: segment.length, startedAt: 0, finishedAt: 0, seconds: 0 }))
+  const free = Array.from({ length: slots }, () => 0)
+  for (const state of states) {
+    free.sort((a, b) => a - b)
+    state.startedAt = free[0]
+    state.finishedAt = free[0] + 0.4 + 0.05 * state.chars
+    state.seconds = 0.055 * state.chars + CLIP_GAP_SECONDS
+    free[0] = state.finishedAt
+  }
+  const firstAudio = states[0].finishedAt
+  const arrivals = [...new Set(states.map((state) => state.finishedAt))].filter((at) => at >= firstAudio).sort((a, b) => a - b)
+  let start: number | null = null
+  let timer: number | null = null
+  for (const at of arrivals) {
+    if (timer !== null && at >= timer) break
+    const known: SegmentTiming[] = states.map((state) => ({
+      chars: state.chars,
+      startedAt: state.startedAt <= at ? state.startedAt : undefined,
+      finishedAt: state.finishedAt <= at ? state.finishedAt : undefined,
+      seconds: state.finishedAt <= at ? state.seconds : undefined
+    }))
+    const delay = Math.min(startDelaySeconds(known, slots, at), MAX_START_DELAY_SECONDS - (at - firstAudio))
+    if (delay <= 0.05) {
+      start = at
+      break
+    }
+    timer ??= at + delay
+  }
+  start ??= timer ?? firstAudio
+  let playAt = start
+  let stall = 0
+  for (const state of states) {
+    if (state.finishedAt > playAt) {
+      stall += state.finishedAt - playAt
+      playAt = state.finishedAt
+    }
+    playAt += state.seconds
+  }
+  return { firstAudio, hold: start - firstAudio, stall }
+}
 
 describe('PauseGate', () => {
   it('notifies listeners and releases waiters on resume', async () => {

@@ -64,13 +64,6 @@ export function changedFileCount(status: GitStatusSnapshot | null): number {
   return new Set(status?.changes.filter((change) => change.status !== 'ignored').map((change) => change.path)).size
 }
 
-/** Left side of the changes row: how many files differ from the last commit. */
-export function changesSummary(status: GitStatusSnapshot | null): string {
-  const count = changedFileCount(status)
-  if (count === 0) return 'No changes'
-  return count === 1 ? '1 file changed' : `${count} files changed`
-}
-
 /** Compact age for a date: "now", "5m", "3h", "2d", "6w", "4mo", "2y". Empty when the date is unreadable. */
 export function relativeTime(date: string, now: number): string {
   const then = Date.parse(date)
@@ -835,91 +828,6 @@ export function canAmendCommit(commits: readonly GitCommit[]): boolean {
   return head !== undefined && !head.onRemote
 }
 
-export interface CommitMenuState {
-  canAmend: boolean
-  /** The Commit button opens the menu when there is something to commit or amend. */
-  triggerEnabled: boolean
-  /** No file changes: the only possible commit is an amend, and only once the user turns it on. */
-  nothingToCommit: boolean
-  /** Whether the commit amends. Only the user's own choice turns it on. */
-  amend: boolean
-  amendDisabled: boolean
-  /** Why the checkbox is disabled; null when it can be toggled. */
-  amendTitle: string | null
-  /** Why the commit buttons stay disabled whatever the message says; null when a commit is possible. */
-  submitReason: string | null
-  shortHash: string | null
-}
-
-/**
- * `inThread` is a thread's own worktree: a commit there takes every change, so the daemon
- * refuses an amend there and the switch says why instead of failing later.
- */
-export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, inThread = false): CommitMenuState {
-  const canAmend = !inThread && canAmendCommit(commits)
-  const hasChanges = fileCount > 0
-  const amendTitle = canAmend ? null : inThread ? THREAD_WORKTREE_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
-  const amend = canAmend && amendChecked
-  const shortHash = commits[0]?.shortHash ?? null
-  return {
-    canAmend,
-    triggerEnabled: hasChanges || canAmend,
-    nothingToCommit: !hasChanges,
-    amend,
-    amendDisabled: amendTitle !== null,
-    amendTitle,
-    submitReason: hasChanges || amend ? null : `No changes to commit. Turn on Amend last commit to change ${shortHash ?? 'it'}`,
-    shortHash
-  }
-}
-
-/** The Commit button's own words: what a commit would take, counted, and its tooltip saying it in full. */
-export interface CommitTrigger {
-  label: string
-  title: string
-}
-
-/**
- * Names on the Commit button exactly what it commits: "Commit all (N)" when every change goes in (untracked files
- * included), "Commit staged (M of N)" when only the staged files do. With no changes it still says Commit: the popover
- * offers an amend, which stays off until the user turns it on. With nothing to amend either, the button is disabled.
- */
-export function commitTrigger(menu: Pick<CommitMenuState, 'triggerEnabled' | 'nothingToCommit' | 'shortHash'>, commit: CommitAvailability): CommitTrigger {
-  if (!menu.triggerEnabled) return { label: 'Commit', title: 'No changes to commit' }
-  if (menu.nothingToCommit) {
-    return { label: 'Commit', title: `No changes to commit. You can amend ${menu.shortHash ?? 'the last commit'} to change its message` }
-  }
-  const total = commit.changedCount
-  const untracked = commit.untrackedCount > 0 ? `, including ${plural(commit.untrackedCount, 'untracked file')}` : ''
-  switch (commit.mode) {
-    case 'conflicted':
-      return { label: 'Commit', title: commit.blockedReason ?? 'Resolve the conflicted files first' }
-    case 'finish-merge':
-      // With nothing staged the commit stages everything first (`add -A`), as a plain commit does.
-      if (commit.stagedCount > 0) return { label: `Commit merge (${commit.stagedCount} of ${total} staged)`, title: `Finish the merge with only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
-      if (total > 0) return { label: `Commit merge (all ${total})`, title: `Finish the merge, staging and committing all ${plural(total, 'changed file')}${untracked}` }
-      return { label: 'Commit merge', title: 'Finish the merge' }
-    case 'staged':
-      return { label: `Commit staged (${commit.stagedCount} of ${total})`, title: `Commit only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
-    case 'thread':
-      return { label: `Commit all (${total})`, title: `Commit all ${plural(total, 'changed file')} on this thread's branch${untracked}` }
-    default:
-      return { label: `Commit all (${total})`, title: `Stage and commit all ${plural(total, 'changed file')}${untracked}` }
-  }
-}
-
-/**
- * What a staged-only commit leaves out, counted from the unstaged side: a file staged and then edited again goes in
- * with its staged part only, so its unstaged part is named as staying out. Nothing when everything is staged.
- */
-function unstagedStaysOut(commit: Pick<CommitAvailability, 'unstagedCount' | 'partlyStagedCount'>): string {
-  const { unstagedCount: unstaged, partlyStagedCount: partly } = commit
-  if (unstaged === 0) return ''
-  if (partly === unstaged) return `; the unstaged part of ${partly === 1 ? 'the partly staged file' : `the ${partly} partly staged files`} stays out`
-  const including = partly > 0 ? `, including the unstaged part of ${plural(partly, 'partly staged file')}` : ''
-  return `; unstaged changes in ${plural(unstaged, 'file')} stay out${including}`
-}
-
 /** A merge method in GitHub's own words, for the button that confirms it. */
 const MERGE_METHOD_ACTIONS: Record<PullRequestMergeMethod, string> = {
   merge: 'Create a merge commit',
@@ -958,115 +866,11 @@ export function mergeConfirmation(number: string, base: string, method: PullRequ
   return { text, action: MERGE_METHOD_ACTIONS[method] }
 }
 
-/**
- * Footer hint of the commit menu. With `commit` it says what the commit includes: only the staged
- * files when anything is staged, everything otherwise, all changes in a thread's worktree.
- * Without it the hint assumes everything is staged first.
- */
-export function commitHint(amend: boolean, shortHash: string | null, fileCount: number, commit?: CommitAvailability): string {
-  if (commit?.blockedReason) return commit.blockedReason
-  const files = plural(fileCount, 'file')
-  if (!amend) {
-    if (fileCount === 0) return 'No changes to commit'
-    if (commit?.mode === 'thread') return "Commits all changes on this thread's branch"
-    if (commit?.mode === 'finish-merge') return 'Finishes the merge'
-    if (commit?.mode === 'staged') return `Commits ${plural(commit.stagedCount, 'staged file')}`
-    return `Stages ${files}`
-  }
-  const target = shortHash ? `Amends ${shortHash}` : 'Amends the last commit'
-  if (fileCount === 0) return target
-  if (commit && commit.mode !== 'all' && commit.stagedCount > 0) return `${target} · adds ${plural(commit.stagedCount, 'staged file')}`
-  return `${target} · stages ${files}`
-}
-
-export function commitButtonLabels(amend: boolean): { commit: string; commitAndPush: string; commitPushAndOpenPr: string } {
-  return amend
-    ? { commit: 'Amend', commitAndPush: 'Amend and push', commitPushAndOpenPr: 'Amend, push and open PR' }
-    : { commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' }
-}
-
 /** What a commit button does: only commit, also push, or also push and open a pull request. */
 export type CommitFlow = 'commit' | 'push' | 'push-pr'
 
-export interface CommitFlowButton {
-  flow: CommitFlow
-  label: string
-  /** The plain commit is the primary button; the ones that go on to push are quiet. */
-  quiet: boolean
-}
-
-/**
- * The buttons of the commit popover, in the order shown. "Commit and push" needs somewhere to push and a branch that
- * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides.
- */
-export function commitFlowButtons(input: { pushable: boolean; openPullRequest: boolean; amend: boolean }): CommitFlowButton[] {
-  const labels = commitButtonLabels(input.amend)
-  return [
-    ...(input.pushable && input.openPullRequest ? [{ flow: 'push-pr' as const, label: labels.commitPushAndOpenPr, quiet: true }] : []),
-    ...(input.pushable ? [{ flow: 'push' as const, label: labels.commitAndPush, quiet: true }] : []),
-    { flow: 'commit', label: labels.commit, quiet: false }
-  ]
-}
-
 export function commitPhaseLabel(phase: CommitPhase): string {
   return phase === 'committing' ? 'Committing…' : phase === 'pushing' ? 'Pushing…' : 'Opening PR…'
-}
-
-export interface CommitDraft {
-  message: string
-  /** The text filled in from the last commit, so turning amend off can take it back out. */
-  prefilled: string | null
-}
-
-export const EMPTY_COMMIT_DRAFT: CommitDraft = { message: '', prefilled: null }
-
-/** Fill an empty message with the last commit's message once amend is on. */
-export function prefillAmendDraft(draft: CommitDraft, last: string | null): CommitDraft {
-  if (!last || draft.message.trim()) return draft
-  return { message: last, prefilled: last }
-}
-
-/** Drop the prefilled message again when amend goes off, unless it has been edited since. */
-export function clearAmendPrefill(draft: CommitDraft): CommitDraft {
-  if (draft.prefilled === null) return draft
-  return draft.message === draft.prefilled ? EMPTY_COMMIT_DRAFT : { message: draft.message, prefilled: null }
-}
-
-/** What a commit message and its amend choice belong to: a branch and the HEAD commit on it. */
-export interface CommitScope {
-  branch: string
-  head: string
-}
-
-export function commitScope(branch: string | null, commits: readonly GitCommit[]): CommitScope {
-  return { branch: branch ?? '', head: commits[0]?.hash ?? '' }
-}
-
-/** The commit popover's inputs, tagged with the branch and HEAD they were entered for. */
-export interface CommitForm extends CommitScope {
-  draft: CommitDraft
-  /** Only ever set by the user's own choice. */
-  amendChecked: boolean
-}
-
-export function emptyCommitForm(scope: CommitScope): CommitForm {
-  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false }
-}
-
-/**
- * The form as it applies to a scope. Another branch drops everything, so text typed there
- * can never be submitted here. A new HEAD on the same branch drops the amend choice and an
- * unedited prefill, which belonged to the old HEAD, but keeps typed text.
- */
-export function commitFormFor(form: CommitForm, scope: CommitScope): CommitForm {
-  if (form.branch !== scope.branch) return emptyCommitForm(scope)
-  if (form.head === scope.head) return form
-  return { ...emptyCommitForm(scope), draft: clearAmendPrefill(form.draft) }
-}
-
-/** The user's own amend choice. */
-export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
-  return { ...form, amendChecked: checked }
 }
 
 /** Why mutating Git controls are disabled while one action runs. */

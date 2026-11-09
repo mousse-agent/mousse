@@ -16,6 +16,8 @@ export interface ChatReference {
   comment?: string
   /** `review-comment` selected lines of the modified side, capped (see `capReviewExcerpt`). */
   excerpt?: string
+  /** `old`: the `review-comment` lines are removed lines, numbered in the file before the change. */
+  side?: 'old'
   /** Version a `review-comment` was made on: `turn:<turnId>`, `thread`, `worktree:staged` or `worktree:unstaged`. */
   reviewScope?: string
   /** Human label of `reviewScope` for the agent and the pill: "Turn 3" or "Working tree". */
@@ -136,6 +138,7 @@ export function parseChatReference(value: unknown): ChatReference | null {
     if (typeof raw.reviewScope === 'string' && REVIEW_SCOPE_RE.test(raw.reviewScope)) reference.reviewScope = raw.reviewScope
     const scopeLabel = cleanString(raw.scopeLabel, 128)
     if (scopeLabel) reference.scopeLabel = scopeLabel
+    if (raw.side === 'old') reference.side = 'old'
     if (!reference.path || !reference.line || !reference.comment || !reference.reviewScope) return null
   }
   if (kind === 'file' && !reference.path) return null
@@ -182,7 +185,7 @@ function reviewCommentLines(reference: ChatReference): string[] {
   const lines = [
     `- review-comment: ${JSON.stringify(reference.title)}`,
     path ? `  Path: ${path}` : '',
-    endLine && endLine > line ? `  Lines: ${line}–${endLine}` : `  Line: ${line}`,
+    `  ${endLine && endLine > line ? `Lines: ${line}–${endLine}` : `Line: ${line}`}${reference.side === 'old' ? ' (removed; numbered in the file before the change)' : ''}`,
     reference.scopeLabel || reference.reviewScope ? `  Scope: ${reference.scopeLabel ?? reference.reviewScope}` : '',
     `  Comment: ${first}`,
     ...rest.map((text) => `    ${text}`)
@@ -281,8 +284,10 @@ export function createReviewComment(input: {
   excerpt?: string
   reviewScope: string
   scopeLabel?: string
+  /** The lines are removed lines, numbered in the file before the change. */
+  side?: 'old'
 }): ChatReference {
-  const { root, path, line, endLine, reviewScope, scopeLabel } = input
+  const { root, path, line, endLine, reviewScope, scopeLabel, side } = input
   // The composer drops a reference that fails to parse without a trace, so a bad scope fails here instead.
   if (!REVIEW_SCOPE_RE.test(reviewScope)) throw new Error(`Invalid review scope: ${JSON.stringify(reviewScope)}`)
   const name = path.split(/[\\/]/).pop() || path
@@ -298,7 +303,8 @@ export function createReviewComment(input: {
     comment: neutralizeBlockMarkers(input.comment).slice(0, REVIEW_COMMENT_MAX_CHARS).trim(),
     ...(input.excerpt ? { excerpt: capReviewExcerpt(input.excerpt) } : {}),
     reviewScope,
-    ...(scopeLabel ? { scopeLabel } : {})
+    ...(scopeLabel ? { scopeLabel } : {}),
+    ...(side ? { side } : {})
   }
 }
 

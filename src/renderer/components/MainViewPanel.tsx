@@ -1,8 +1,7 @@
 import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
-import { GitPanel } from './GitPanel'
-import { ReviewPanel } from './review/ReviewPanel'
+import { ChangesPanel } from './changes/ChangesPanel'
 import { PullRequestPanel } from './PullRequestPanel'
 import { DocumentPanel } from './DocumentPanel'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
@@ -14,7 +13,7 @@ import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 export function MainViewPanel() {
   const selectedView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
-  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen)
+  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.usageOpen)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const opened = useAppStore((s) => s.openedSurfaceKinds)
   const terminals = useAppStore((s) => s.projectTerminalTabs)
@@ -36,8 +35,7 @@ export function MainViewPanel() {
   const transientPanel = (() => {
     if (empty) return <OpenSurfacePicker />
     switch (mainView) {
-      case 'git': return <GitPanel />
-      case 'review': return <ReviewPanel />
+      case 'git': return <ChangesPanel />
       case 'pullRequest': return <PullRequestPanel />
       case 'documents': return <DocumentPanel />
       default: return null

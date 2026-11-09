@@ -31,6 +31,8 @@ export const GIT_ACCESS = {
   'projects.pin': 'none',
   'projects.reorder': 'none',
   'projects.trustGitSettings': 'read',
+  'projects.icon': 'none',
+  'projects.setIcon': 'none',
   'threads.list': 'none',
   'threads.get': 'none',
   'threads.create': 'owned',
@@ -196,6 +198,7 @@ export const GIT_ACCESS = {
   'files.write': 'owned',
   'files.stat': 'owned',
   'files.root': 'owned',
+  'files.drives': 'none',
   'files.readAsset': 'owned',
   'files.writeDirect': 'owned',
   'files.search': 'owned',
@@ -223,6 +226,15 @@ export const GIT_ACCESS = {
   'git.deleteBranch': 'userRequested',
   'git.init': 'userRequested',
   'git.cancelOperation': 'none',
+  // Reads, and may restore a retired worktree first, like `git.status`. Stores blobs of the files it reads.
+  'git.changes': 'owned',
+  'git.include': 'userRequested',
+  'git.undoLastCommit': 'userRequested',
+  // Writes the files back to HEAD (or the kept copy back) for the person, with a copy kept first.
+  'git.revert': 'userRequested',
+  'git.restoreReverted': 'userRequested',
+  // Reads the owner's journal and the kept refs; may restore a retired worktree first, like `git.status`.
+  'git.revertedList': 'owned',
   'github.status': 'read',
   'github.createRepository': 'userRequested',
   'github.cloneRepository': 'userRequested',

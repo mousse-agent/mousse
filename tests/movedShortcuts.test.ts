@@ -33,7 +33,6 @@ const SURFACES: Array<[string, CommandId]> = [
   ['T', 'surface.terminal'],
   ['F', 'surface.files'],
   ['D', 'surface.git'],
-  ['R', 'surface.review'],
   ['P', 'surface.pullRequest']
 ]
 const MODEL_SLOTS: CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
@@ -119,7 +118,7 @@ describe('each moved shortcut can be rebound and is listed', () => {
   it('follows an override and drops the old chord, and an unbind', () => {
     const overrides: ShortcutOverrides = {
       'surface.browser': 'X',
-      'surface.review': 'CommandOrControl+Shift+R',
+      'surface.git': 'CommandOrControl+Shift+R',
       'model.pick1': 'CommandOrControl+9',
       'workflow.save': 'CommandOrControl+Shift+S',
       'workflow.delete': null
@@ -136,7 +135,9 @@ describe('each moved shortcut can be rebound and is listed', () => {
   it('is saved as an override like any other command', () => {
     const overrides = Object.fromEntries(MOVED.map((id) => [id, null]))
     expect(normalizeShortcuts(overrides, 'win32')).toEqual(overrides)
-    expect(normalizeShortcuts({ 'surface.review': 'Q' }, 'win32')).toEqual({ 'surface.review': 'Q' })
+    expect(normalizeShortcuts({ 'surface.git': 'Q' }, 'win32')).toEqual({ 'surface.git': 'Q' })
+    // The Review tab is gone; an override saved for it is dropped.
+    expect(normalizeShortcuts({ 'surface.review': 'Q', 'surface.files': 'Y' }, 'win32')).toEqual({ 'surface.files': 'Y' })
   })
 
   it('has a row in the Shortcuts section: a command that is not fixed, with its scope', () => {

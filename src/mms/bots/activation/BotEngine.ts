@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
@@ -9,6 +9,8 @@ import {
   BOT_ASK_DENY_COOLDOWN_MS,
   MAX_BOT_WALLS,
   askProblem,
+  filesAsk,
+  filesAskOf,
   isSpecialAsk,
   permissionText,
   withPermission,
@@ -17,9 +19,10 @@ import {
   type BotEscalationAnswer,
   type BotEscalationSummary,
   type BotPermissionRequest,
-  type BotWallKind
+  type BotWallKind,
+  grantRequestOf
 } from '../../../shared/bots/personal/escalation'
-import { BOT_APP_TOOLS, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -27,6 +30,8 @@ import { isNeutralTool } from '../../../shared/harness/tools'
 import {
   ACTIVE_TIME_CHUNK_MS,
   BOT_DELETE_PURGE_MS,
+  DEFAULT_BOT_ACTIVE_MS,
+  OLD_DEFAULT_BOT_ACTIVE_MS,
   BOT_DEPTHS,
   ENDED_ACTIVATION_STATUSES,
   MAX_BOT_SCHEDULES,
@@ -60,7 +65,8 @@ import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispat
 import type { BotActivationRow, BotDispatchRow, BotEscalationRow, BotMessageRow, BotStore, BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { firstOccurrence, nextOccurrence, scheduleProblem, scheduleSpec } from '../triggers/scheduler'
-import { BotReloadAbort, BotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
+import { isConnectionFailure, type BotConnectivity } from './connectivity'
+import { BotReloadAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type PreparedBotTurn } from './dispatcher'
 
 /**
  * The personal bot engine (PR 6 §4, unit 6c-1): one-time approval with the subset rule, manual
@@ -154,6 +160,17 @@ export interface BotEngineHost {
    * does not (the card would show the bot's own words). Absent: every name is taken as it is.
    */
   knownAsk?(permission: { skill: string } | { mcp: { serverId: string; tool: string } }): boolean
+  /**
+   * The bot's own browser (`BotBrowsers`): a turn whose grant holds "use the browser" gets its
+   * browser tools on it, and an ended activation's tabs close. Absent: no bot gets the browser.
+   */
+  browser?: BotBrowserHost
+  /**
+   * Whether the internet is there for the bot's provider (`createBotConnectivity`): checked before
+   * a dispatch is sent, while one makes no progress, and while an activation waits for it. Absent:
+   * always online, never checked.
+   */
+  connectivity?: BotConnectivity
 }
 
 export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
@@ -162,6 +179,8 @@ export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } f
 export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped.'
 /** What a run's call or `escalate` is refused with once its asks reached their cap: no new ask is written. */
 export const BOT_ASK_ENOUGH_TEXT = 'You have asked the owner enough for now. Carry on without it and say in your report what you skipped.'
+/** What `escalate` for a folder answers a bot that may already use files on this computer. */
+export const BOT_FILES_HELD_TEXT = 'You can already use files anywhere on this computer, except Mousse\'s own data. Go ahead without asking.'
 /** What a run's ask for a skill or MCP tool that is not here is refused with. */
 export const BOT_ASK_UNKNOWN_TEXT = 'There is no such skill or tool here. Carry on without it.'
 /** New asks one run may write; later ones are refused without asking. */
@@ -182,6 +201,17 @@ const REPLY_WAIT_MS = 5_000
 const MAX_USAGE_RETRIES = 2
 /** How often deleted bots are swept for the 30-day purge. */
 const SWEEP_EVERY_MS = 24 * 60 * 60_000
+/** The chat's one notice while an activation waits for the internet. */
+export const BOT_OFFLINE_TEXT = 'Waiting for internet. I\'ll carry on when it\'s back.'
+/** How long a dispatch may go without a call before Mousse checks whether the internet is there. */
+export const BOT_OFFLINE_STALL_MS = 60_000
+/** How often a live dispatch is looked at for that. */
+export const BOT_OFFLINE_WATCH_MS = 20_000
+/** Failed checks in a row, one watch apart, that end a dispatch to wait for the internet. */
+const OFFLINE_CHECKS_TO_STOP = 2
+/** The first wait before a waiting activation checks the internet again; it doubles up to the maximum. */
+export const BOT_OFFLINE_POLL_MS = 15_000
+export const BOT_OFFLINE_POLL_MAX_MS = 60_000
 
 interface LiveDispatch {
   controller: AbortController
@@ -197,6 +227,14 @@ interface LiveDispatch {
   spend: SpendScope | null
   /** The main dispatch's id (`bot_dispatches.client_request_id`, `<activationId>:d<n>`): supervision's and the activity chips'. */
   dispatchId: string
+  /** The last call of the dispatch (or its consults), on the monotonic clock: what "no progress" is measured from. */
+  lastProgressMono: number
+  /** Failed internet checks in a row while the dispatch made no progress. */
+  offlineChecks: number
+  /** The watch for no progress (only with `connectivity`). */
+  watch?: { clear(): void }
+  /** Set when the dispatch was ended to wait for the internet: only the time it worked is charged. */
+  offline?: { chargeMs: number }
 }
 
 /** An activation that runs or waits for its owner's answer holds its bot: the next one waits. */
@@ -215,6 +253,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Consult dispatches whose executor took them: the executor's settle carries the final message. */
   private readonly executing = new Set<string>()
   private readonly expiryTimers = new Map<string, { clear(): void }>()
+  /** Each waiting activation's next internet check. */
+  private readonly offlineTimers = new Map<string, { clear(): void }>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -379,6 +419,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
     if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
     for (const row of live) this.packs.delete(row.id)
+    // Its browser closes now; its sign-ins go with the purge.
+    try {
+      await this.host.browser?.removeBot?.(botId, false)
+    } catch (error) {
+      console.warn('a deleted bot\'s browser could not be closed', { botId, error: error instanceof Error ? error.message : String(error) })
+    }
     await this.archiveThreads(botId)
     this.changed({ botId })
     try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
@@ -445,6 +491,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     }
     await this.host.memory?.purge(botId)
+    await this.host.browser?.removeBot?.(botId, true)
     // Its definition and files first: a failure leaves the purge unfinished, and the next sweep tries again.
     this.host.definitions.remove(botId)
     rmSync(this.filesFolder(botId), { recursive: true, force: true })
@@ -615,9 +662,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether a thread can hold `grant` at all: it compiles (no MCP, no folder that
-   * overlaps Mousse's data). Which runtime holds it is decided per activation, from the providers
-   * that can (`BotModelResolver`), and checked again at each dispatch.
+   * Whether a thread can hold `grant` at all: it compiles (no MCP, no app tool a bot may not
+   * hold). Which runtime holds it is decided per activation, from the providers that can
+   * (`BotModelResolver`), and checked again at each dispatch.
    */
   private checkThread(thread: BotThreadSpec, grant: BotManifest, botId?: string): BotThreadCheck {
     const base = { key: thread.key, instanceId: '', model: '' }
@@ -871,6 +918,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (admitted && !skip) {
           if (this.store.laneActivations(botId, 'run', ['waiting_grant']).length) skip = 'bot_waiting_for_owner'
           else if (this.store.laneActivations(botId, 'run', ['queued']).some((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === schedule.id)) skip = 'previous_run_still_queued'
+          // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
+          else if (this.store.laneActivations(botId, 'run', ['running']).some((row) => row.offline && row.trigger.kind === 'schedule' && row.trigger.scheduleId === schedule.id)) skip = 'waiting_for_internet'
         }
         if (admitted && !skip) {
           made = this.store.insertActivationOnce({
@@ -923,8 +972,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.moveActivation(activationId, [row.status], 'cancelled', { endReason: 'stopped' })
       this.store.closeEscalations(activationId, 'cancelled')
     })
+    this.clearInternetCheck(activationId)
     await this.stopRun(row)
+    // A run waiting for the internet has no turn whose end would clean up after it.
     if (row.status !== 'running') this.cleanup(row)
+    else if (row.offline && !this.live.has(activationId)) {
+      this.cleanup(this.store.activation(activationId) ?? row)
+      this.packs.delete(activationId)
+    }
     this.changed({ botId: row.botId, activationId })
     await this.pump(row.botId)
     return this.activationSummary(this.store.activation(activationId)!)
@@ -1174,6 +1229,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
+    this.clearInternetCheck(row.id)
     this.cleanup(row)
     this.packs.delete(row.id)
     this.clearLiveChip(row)
@@ -1320,7 +1376,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const deadline = startedAt + remainingMs
     // At the deadline the dispatch ends at a budget wall: the owner may allow more time. The timer
     // runs on the daemon loop; the supervisor (outside it) kills what is left of the process group.
+    // A dispatch that made no progress for a while is checked first: with no internet it waits
+    // instead, as its time went on waiting, not on work.
     const timer = (this.host.setTimer ?? defaultTimer)(() => {
+      const live = this.live.get(row.id)
+      if (this.host.connectivity && live?.n === dispatch.n && this.monotonic() - live.lastProgressMono >= BOT_OFFLINE_STALL_MS) {
+        void this.deadlineOffline(row.id, dispatch.n, effective).catch((error: unknown) => {
+          console.warn('a bot dispatch\'s internet check failed at its deadline', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+          this.raiseWall(row.id, this.timeWall(dispatch.n, effective))
+        })
+        return
+      }
       this.raiseWall(row.id, this.timeWall(dispatch.n, effective))
     }, remainingMs)
     // Armed before the runtime starts: a process reported on a thread with nothing armed is refused.
@@ -1332,7 +1398,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const counterScope = this.wallingCounters(new BotCounterScope(this.store, row.id), row.id, dispatch.n)
     const spendLimited = spendLimits(effective)
     const spendScope = Object.keys(spendLimited).length ? this.wallingSpend(new BotSpendScope(this.store, row.id, payload.runId), row.id, dispatch.n) : null
-    this.live.set(row.id, { controller, timer, startedMono: this.monotonic(), n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId })
+    const startedMono = this.monotonic()
+    this.live.set(row.id, { controller, timer, startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId, lastProgressMono: startedMono, offlineChecks: 0 })
+    this.watchOffline(row.id, dispatch.n)
     const authority = this.authorityFor({
       row, mainN: dispatch.n, role: 'activation', permissions: compiled.permissions, grantDigest: grant.digest,
       controller, deadline, counters: counterScope, spend: spendScope,
@@ -1340,6 +1408,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dispatchId: dispatch.clientRequestId
     })
     const pack = this.packs.get(row.id)
+    const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     return {
       activationId: row.id,
       dispatchN: dispatch.n,
@@ -1353,7 +1422,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
       lane: row.lane,
-      ...(pack ? { preamble: pack } : {})
+      ...(pack ? { preamble: pack } : {}),
+      ...(browser ? { browser } : {})
+    }
+  }
+
+  /** The bot's own browser for one dispatch; none when it can't be offered (never a failed turn). */
+  private browserTurn(row: BotActivationRow, runId: string, signal: AbortSignal): PreparedBotTurn['browser'] {
+    const homeThreadId = this.store.registry(row.botId)?.homeThreadId
+    if (!homeThreadId || !this.host.browser) return undefined
+    try {
+      return this.host.browser.turn({ botId: row.botId, activationId: row.id, lane: row.lane, homeThreadId, runId, signal })
+    } catch (error) {
+      console.warn('the bot browser could not be offered to a turn', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      return undefined
     }
   }
 
@@ -1520,6 +1602,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     }
     const check = (call: NormalisedCall): BotCheck => {
+      this.progress(row.id)
       const decided = base.check(call)
       if (decided.ok) {
         observe(call)
@@ -1527,7 +1610,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if ('refused' in decided || !ESCALATABLE.has(decided.wall.kind)) return decided
       // Only app tools a bot can be granted are worth asking for; any other is just refused.
-      if (call.kind === 'app' && !BOT_APP_TOOLS.has(call.tool)) return decided
+      if (call.kind === 'app' && !BOT_APP_TOOLS.has(botGrantTool(call.tool))) return decided
       const permission = permissionOfWall(call, decided.wall)
       if (!permission) return decided
       if (row.lane === 'run') return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
@@ -1537,6 +1620,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...base,
       check,
       checkAny: (calls: readonly NormalisedCall[]) => {
+        this.progress(row.id)
         let refused: BotCheckDenied | undefined
         for (const call of calls) {
           const decided = base.check(call)
@@ -1550,11 +1634,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return calls.length ? check(calls[0]) : refused ?? { ok: false, wall: { kind: 'ended' } }
       },
       escalate: (request) => {
+        this.progress(row.id)
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, a folder, a skill, an MCP tool, a limit, or to export your memory.`
+        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, an MCP tool, a limit, or to export your memory.`
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
         if (!live.ok && ('refused' in live || live.wall.kind !== 'tool')) return checkMessage(live)
-        const asked = request.permission as BotAskRequest
+        // An ask for any browser tool is the one "use the browser" ask.
+        const asked = grantRequestOf(request.permission as BotAskRequest)
+        // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
+        if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
+          return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
+        // File access is one permission: a bot that has it has every folder already.
+        if ('path' in asked && base.workspace?.computer) return BOT_FILES_HELD_TEXT
+        // What the bot already holds is no ask: a card for it would grant nothing.
+        if (heldAlready(base, asked)) return `The owner already allowed this (${askText(asked).title}). Use it now.`
         const reason = request.reason.trim() || 'The bot did not say why.'
         if (row.lane === 'run') {
           const refused = this.raiseAsk(row, input.mainN, 'escalate', asked, reason, request.toolCallId)
@@ -1574,6 +1667,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private wallingCounters(scope: CounterScope, activationId: string, mainN: number): CounterScope {
     return {
       charge: (kind: CountKind, limit?: number): ChargeResult => {
+        this.progress(activationId)
         const charged = scope.charge(kind, limit)
         if (!charged.ok) {
           const key: BotBudgetWallKey = kind === 'request' ? 'maxTurns' : 'maxToolCalls'
@@ -1588,6 +1682,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private wallingSpend(scope: BotSpendScope, activationId: string, mainN: number): SpendScope {
     return {
       reserve: (request: SpendRequest, limits: SpendLimits): ReserveResult => {
+        this.progress(activationId)
         const reserved = scope.reserve(request, limits)
         if (!reserved.ok) {
           const key: BotBudgetWallKey = reserved.limit.kind === 'input_tokens' ? 'maxInputTokens' : reserved.limit.kind === 'output_tokens' ? 'maxOutputTokens' : 'maxUsd'
@@ -1595,8 +1690,186 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         return reserved
       },
-      settle: (id, outcome) => scope.settle(id, outcome)
+      settle: (id, outcome) => {
+        this.progress(activationId)
+        return scope.settle(id, outcome)
+      }
     }
+  }
+
+  // -- No internet (docs/bots.md) ----------------------------------------------------------------
+
+  /** The live dispatch did something (a call, a model request): it is making progress. */
+  private progress(activationId: string): void {
+    const live = this.live.get(activationId)
+    if (!live) return
+    live.lastProgressMono = this.monotonic()
+    live.offlineChecks = 0
+  }
+
+  /** Whether the internet is there for the activation's provider; always, without `connectivity`. Never throws. */
+  private async online(row: BotActivationRow): Promise<boolean> {
+    const connectivity = this.host.connectivity
+    if (!connectivity) return true
+    try {
+      return await connectivity.online({ ...(row.selection ? { instanceId: row.selection.instanceId } : {}) })
+    } catch {
+      return false
+    }
+  }
+
+  /** Looks at the live main dispatch `n` once a watch from now (only with `connectivity`). */
+  private watchOffline(activationId: string, n: number): void {
+    const live = this.live.get(activationId)
+    if (!this.host.connectivity || !live || live.n !== n || live.controller.signal.aborted) return
+    live.watch?.clear()
+    live.watch = (this.host.setTimer ?? defaultTimer)(() => {
+      void this.checkStalled(activationId, n).catch((error: unknown) => {
+        console.warn('a bot dispatch\'s internet check failed', { activationId, error: error instanceof Error ? error.message : String(error) })
+      })
+    }, BOT_OFFLINE_WATCH_MS)
+  }
+
+  /**
+   * A dispatch that made no call for `BOT_OFFLINE_STALL_MS` is checked: two failed checks in a
+   * row end it to wait for the internet. Any call in between starts the count again.
+   */
+  private async checkStalled(activationId: string, n: number): Promise<void> {
+    const live = this.live.get(activationId)
+    if (!live || live.n !== n || live.controller.signal.aborted) return
+    if (this.monotonic() - live.lastProgressMono < BOT_OFFLINE_STALL_MS) {
+      live.offlineChecks = 0
+      return this.watchOffline(activationId, n)
+    }
+    const row = this.store.activation(activationId)
+    if (!row || row.status !== 'running') return
+    const online = await this.online(row)
+    if (this.live.get(activationId) !== live || live.controller.signal.aborted) return
+    if (online || this.monotonic() - live.lastProgressMono < BOT_OFFLINE_STALL_MS) {
+      live.offlineChecks = 0
+      return this.watchOffline(activationId, n)
+    }
+    live.offlineChecks += 1
+    if (live.offlineChecks < OFFLINE_CHECKS_TO_STOP) return this.watchOffline(activationId, n)
+    this.stopForInternet(row, live)
+  }
+
+  /** The deadline of a dispatch that made no progress: with no internet it waits; otherwise the time wall. */
+  private async deadlineOffline(activationId: string, n: number, effective: BotManifest): Promise<void> {
+    const row = this.store.activation(activationId)
+    const live = this.live.get(activationId)
+    if (!row || row.status !== 'running' || !live || live.n !== n || live.controller.signal.aborted) return
+    const online = await this.online(row)
+    if (this.live.get(activationId) !== live || live.controller.signal.aborted) return
+    if (online) {
+      // A run that made no call at all in its whole time was stuck, not working: it ends without
+      // asking for more time. One that worked asks, as before.
+      if (row.lane === 'run' && live.lastProgressMono === live.startedMono) {
+        this.budgetEnd(row, { ...this.timeWall(n, effective), reason: 'This bot made no progress.' }, { stuck: true })
+        return
+      }
+      this.raiseWall(activationId, this.timeWall(n, effective))
+      return
+    }
+    this.stopForInternet(this.store.activation(activationId) ?? row, live)
+  }
+
+  /**
+   * Ends a live dispatch to wait for the internet: only the time up to its last call is charged,
+   * the activation waits (its one notice is posted), and its run ends as at a wall. `advance`
+   * then waits for the internet and continues the turn once it is back.
+   */
+  private stopForInternet(row: BotActivationRow, live: LiveDispatch): void {
+    live.watch?.clear()
+    if (!this.enterOffline(row)) return
+    live.offline = { chargeMs: Math.max(0, Math.ceil(live.lastProgressMono - live.startedMono)) }
+    live.controller.abort(new BotWallAbort('bot_offline'))
+  }
+
+  /**
+   * The activation waits for the internet: its `end_reason` says so and its chat gets one notice
+   * (once per activation, however often it waits). No error row, no failure, no time.
+   */
+  private enterOffline(row: BotActivationRow): boolean {
+    const entered = this.recorded(row, () => {
+      if (!this.store.setOffline(row.id, true)) return false
+      this.chat.post({ id: `bm_${row.id}_offline`, botId: row.botId, author: 'bot', kind: 'notice', text: BOT_OFFLINE_TEXT, activationId: row.id, lane: row.lane })
+      return true
+    }) ?? false
+    if (entered) this.changed({ botId: row.botId, activationId: row.id })
+    return entered
+  }
+
+  /** The activation waits for the internet, and checks again later. */
+  private awaitInternet(row: BotActivationRow): void {
+    if (!this.enterOffline(row)) return
+    this.armInternetCheck(row.id)
+  }
+
+  /** The next internet check of a waiting activation: after 15 s, then 30 s, then every minute. */
+  private armInternetCheck(activationId: string, attempt = 0): void {
+    if (this.offlineTimers.has(activationId)) return
+    const delay = Math.min(BOT_OFFLINE_POLL_MAX_MS, BOT_OFFLINE_POLL_MS * 2 ** attempt)
+    const timer = (this.host.setTimer ?? defaultTimer)(() => {
+      if (this.offlineTimers.get(activationId) === timer) this.offlineTimers.delete(activationId)
+      void this.checkInternet(activationId, attempt).catch((error: unknown) => {
+        console.warn('a waiting bot could not check the internet', { activationId, error: error instanceof Error ? error.message : String(error) })
+        this.armInternetCheck(activationId, attempt + 1)
+      })
+    }, delay)
+    this.offlineTimers.set(activationId, timer)
+  }
+
+  private clearInternetCheck(activationId: string): void {
+    this.offlineTimers.get(activationId)?.clear()
+    this.offlineTimers.delete(activationId)
+  }
+
+  /** A waiting activation checks the internet: back, it carries on; still gone, it checks again later. */
+  private async checkInternet(activationId: string, attempt: number): Promise<void> {
+    const row = this.store.activation(activationId)
+    if (!row || row.status !== 'running' || !row.offline) return
+    if (!(await this.online(row))) return this.armInternetCheck(activationId, attempt + 1)
+    await this.resumeOnline(activationId)
+  }
+
+  /**
+   * The internet is back: a dispatch that was never sent is sent now; one that ended while the
+   * internet was gone is continued (`advance`, then a continuation on the same thread).
+   */
+  private async resumeOnline(activationId: string): Promise<void> {
+    const row = this.store.activation(activationId)
+    if (!row || row.status !== 'running' || !row.offline) return
+    if (this.live.has(row.id)) return
+    const main = this.store.lastMainDispatch(row.id)
+    if (main && main.runId === null && main.startedAt === null && !this.receiptRun(main.clientRequestId)) {
+      await this.sendDispatch(row, main)
+      return
+    }
+    await this.advance(row.id)
+  }
+
+  /**
+   * In `advance`: a main dispatch that ended while the internet was gone (Mousse ended it, or its
+   * provider could not be reached) waits for the internet instead of failing, and continues when
+   * it is back. True when handled; false when the internet is there and the failure is the
+   * provider's own (it fails as before).
+   */
+  private async offlineEnd(row: BotActivationRow, main: BotDispatchRow): Promise<boolean> {
+    if (!this.host.connectivity) return false
+    const online = await this.online(row)
+    const current = this.store.activation(row.id)
+    if (!current || current.status !== 'running') return true
+    if (online && !current.offline) return false
+    // The ended dispatch's own message is not posted: its turn goes on in the continuation.
+    this.drained.delete(`${row.id}:${main.n}`)
+    if (online) {
+      this.clearInternetCheck(row.id)
+      await this.continueWith(row.id, ['running'], { network: true })
+      return true
+    }
+    this.awaitInternet(current)
+    return true
   }
 
   // -- Walls and asks ---------------------------------------------------------------------------
@@ -1657,18 +1930,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * A run reached a limit (§5.7): nobody is there to allow more, so the run ends failed (it counts
    * toward the failure streak) and one ask offers the higher limit for later runs ("work for up to
-   * 30 minutes per run"). The dispatch ends now; its scratch goes once its run has stopped.
+   * 2 hours per run"). `stuck`: the run made no call in its whole time, with the internet there; it
+   * ends the same way, with an error row and no ask (more time would not help). The dispatch ends
+   * now; its scratch goes once its run has stopped.
    */
-  private budgetEnd(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string }): WallReason {
+  private budgetEnd(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string }, options: { stuck?: boolean } = {}): WallReason {
     if (row.status !== 'running') return row.status === 'waiting_grant' ? { kind: 'waiting' } : { kind: 'ended' }
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
     let ended = false
     try {
       ended = this.store.db.transaction(() => {
-        if (!this.store.moveActivation(row.id, ['running'], 'failed', { endReason: 'budget_exhausted' })) return false
+        if (!this.store.moveActivation(row.id, ['running'], 'failed', { endReason: options.stuck ? 'no_progress' : 'budget_exhausted' })) return false
         const fingerprint = askFingerprintOf(input.permission)
         const open = this.store.openAsk(row.botId, fingerprint) ?? this.store.coolingAsk(row.botId, fingerprint, this.store.now())
-        if (!open) {
+        if (options.stuck) {
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('no_progress') }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
+        } else if (!open) {
           const permission = this.limitAsk(row.botId, input.permission)
           const text = this.askCardText(row, permission)
           const id = `esc_${randomUUID()}`
@@ -1680,7 +1957,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else {
           this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: 'I ran out of room on this run, so I stopped.' }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         }
-        this.journalEnd(row, 'budget_exhausted')
+        this.journalEnd(row, options.stuck ? 'no_progress' : 'budget_exhausted')
         return true
       })
     } catch (error) {
@@ -1726,12 +2003,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
   private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    return askText(permission, { home: this.chat.home, ...(budget ? { budget } : {}) })
+    return askText(permission, budget ? { budget } : {})
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
   private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
-    const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
+    const input = { ...asked, permission: this.limitAsk(row.botId, filesAskOf(asked.permission)) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
     if (open) {
@@ -1820,7 +2097,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours. Later runs get the same refusal and no new ask.
    */
   private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
-    const permission = this.limitAsk(row.botId, asked)
+    const permission = this.limitAsk(row.botId, filesAskOf(asked))
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
     try {
@@ -1943,8 +2220,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.expiryTimers.get(escalation.id)?.clear()
     this.expiryTimers.delete(escalation.id)
     this.republishAsk(escalation.id)
+    const held = input.answer === 'allow_bot' && !special ? this.settleHeldAsks(row.botId) : []
     this.changed({ botId: row.botId, activationId: row.id })
     await this.advance(row.id)
+    for (const activationId of held) if (activationId !== row.id) await this.advance(activationId)
     return { escalation: this.escalationSummary(this.store.escalation(escalation.id)!), activation: this.activationSummary(this.store.activation(row.id)!) }
   }
 
@@ -1978,9 +2257,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     if (!answered) throw new BotEngineError('ask_answered', 'This was already answered.')
     const message = this.republishAsk(escalation.id)
+    const held = answer === 'allow' ? this.settleHeldAsks(botId) : []
     this.changed({ botId, activationId: escalation.activationId })
     if (escalation.mode === 'wall') await this.advance(escalation.activationId)
+    for (const activationId of held) if (activationId !== escalation.activationId) await this.advance(activationId)
     return message
+  }
+
+  /**
+   * The bot's open asks its grant now holds, settled as allowed with their cards updated: after an
+   * Allow (the other cards of the one file ask), and at startup for an older build's folder asks
+   * of a bot that has file access. Returns the activations whose walls this answered, to go on.
+   */
+  private settleHeldAsks(botId: string): string[] {
+    const grant = this.store.activeGrant(botId)
+    if (!grant) return []
+    const walls = new Set<string>()
+    for (const ask of this.store.openAsks(botId)) {
+      if (isSpecialAsk(ask.permission) || 'budget' in ask.permission) continue
+      if (!manifestSubset(withPermission(grant.manifest, ask.permission), grant.manifest)) continue
+      if (!this.store.answerEscalation(ask.id, 'allowed_bot')) continue
+      if (ask.mode === 'wall') walls.add(ask.activationId)
+      this.republishAsk(ask.id)
+    }
+    return [...walls]
+  }
+
+  /**
+   * An older build asked for one folder at a time; file access is now one permission (§3.7). Each
+   * open folder ask is worded as the one file ask, so its card and the bot's continuation say what
+   * Allow grants. A bot that has file access already has it: its folder asks are settled as allowed,
+   * and the startup pass continues the walls among them. Otherwise one stays open (the wall the
+   * chat waits at, else the oldest) and the rest are withdrawn: one ask per permission is open.
+   */
+  upgradeFileAsks(): void {
+    const ask = filesAsk()
+    const fingerprint = askFingerprintOf(ask)
+    const text = askText(ask)
+    const reworded = { permission: ask, fingerprint, title: text.title, note: text.note }
+    this.store.db.transaction(() => {
+      const older = this.store.escalations({ status: 'open' }).filter((row) => 'path' in row.permission && row.fingerprint !== fingerprint)
+      for (const botId of new Set(older.map((row) => row.botId))) {
+        const mine = older.filter((row) => row.botId === botId)
+        if (this.store.activeGrant(botId)?.manifest.workspace) {
+          // Settled first: only an open ask's fingerprint is unique.
+          for (const row of mine) if (this.store.answerEscalation(row.id, 'allowed_bot')) this.store.reword(row.id, reworded)
+          continue
+        }
+        const keep = this.store.openAsk(botId, fingerprint) ? undefined : mine.find((row) => row.mode === 'wall') ?? mine[0]
+        for (const row of mine) if (row !== keep) this.store.answerEscalation(row.id, 'withdrawn')
+        if (keep) this.store.reword(keep.id, reworded)
+      }
+    })
   }
 
   /** Every chat row carrying an ask's card, again (its status changed); the newest one is returned. */
@@ -2196,6 +2524,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (!unknown) {
           const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
+          // Ended while the internet was gone: it waits and continues, never a failure.
+          if ((row.offline || (run.status === 'failed' && isConnectionFailure(error))) && await this.offlineEnd(row, main)) return
           return this.failActivation(row, error ?? run.status)
         }
       }
@@ -2364,7 +2694,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -2423,6 +2753,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       for (const answer of answers) this.store.markApplied(answer.id)
       this.store.setLimits(row.id, limitsOf(effective))
       if (input.restart) this.store.setAutoRestarts(row.id, current.autoRestarts + 1)
+      if (input.network) this.store.setOffline(row.id, false)
       this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })
       return { kind: 'sent', dispatch: this.store.dispatch(row.id, n)! }
     })
@@ -2455,7 +2786,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -2468,7 +2799,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const lead = input.answers.length
       ? input.answers.map(answerLine).join(' ')
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
-        : input.restart ? 'Mousse restarted while you were working.' : 'The owner asked you to continue.'
+        : input.restart ? 'Mousse restarted while you were working.'
+          : input.network ? 'The internet connection dropped while you were working; it is back now.' : 'The owner asked you to continue.'
     const calls = this.store.unknownCalls(row.id)
     const interrupted = calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${call.role} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
@@ -2487,7 +2819,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async sendDispatch(row: BotActivationRow, dispatch: BotDispatchRow): Promise<void> {
     try {
       if (!(await this.ready(row, dispatch))) return
-      await this.sendOnly(this.store.activation(row.id) ?? row, dispatch)
+      let current = this.store.activation(row.id) ?? row
+      // With no internet the dispatch is not sent: the activation waits, charged nothing, and
+      // sends it once the internet is back. A consult runs inside its live main dispatch.
+      if (dispatch.kind !== 'consult' && this.host.connectivity) {
+        const online = await this.online(current)
+        current = this.store.activation(row.id) ?? current
+        if (current.status !== 'running') return
+        if (!online) return this.awaitInternet(current)
+        if (current.offline) {
+          this.clearInternetCheck(row.id)
+          this.store.setOffline(row.id, false)
+          this.changed({ botId: row.botId, activationId: row.id })
+        }
+      }
+      await this.sendOnly(this.store.activation(row.id) ?? current, dispatch)
     } catch (error) {
       const reason = error instanceof BotEngineError ? error.code : 'bot_start_failed'
       console.warn('bot dispatch could not be sent', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
@@ -2686,11 +3032,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (live) {
       this.live.delete(row.id)
       live.timer?.clear()
+      live.watch?.clear()
       live.controller.abort(new Error('dispatch_ended'))
     }
     // Measured on the monotonic clock of the process that ran the dispatch. Without that measure
     // (another process started it), nothing is refunded: the whole prepaid allowance stays charged.
-    const measured = live ? this.monotonic() - live.startedMono : undefined
+    // A dispatch ended to wait for the internet is charged up to its last call only.
+    const measured = live ? live.offline?.chargeMs ?? this.monotonic() - live.startedMono : undefined
     this.store.db.transaction(() => {
       // Time: the measured window, never above the deadline, applied once as a signed difference.
       // `exit_at` is the supervisor's evidence that the processes are gone, never written here.
@@ -2870,7 +3218,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
-    if (!ENDED_ACTIVATION_STATUSES.has(row.status) || !row.scratch) return
+    if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    // Its browser tabs close too, and the bot's browser once nothing else uses it.
+    try {
+      this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
+    } catch (error) {
+      console.warn('the bot browser could not let go of an activation', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    if (!row.scratch) return
     try {
       rmSync(row.scratch, { recursive: true, force: true })
     } catch (error) {
@@ -3235,6 +3590,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await this.sendDispatch(row, this.store.dispatch(row.id, n)!)
       return
     }
+    // A run that ended while the activation waited for the internet: it waits again, and carries
+    // on once the internet is back (`advance`); never an automatic restart or a budget wall.
+    if (row.offline && (run.status === 'interrupted' || run.status === 'failed')) {
+      await this.advance(row.id)
+      return
+    }
     // Rows 8 and 9: the run ended before bots.db was updated.
     if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
       if (run.status === 'cancelled') return end('cancelled', typeof run.outcome?.error === 'string' ? run.outcome.error : 'cancelled')
@@ -3570,6 +3931,47 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /**
+   * The base work time went from 15 minutes to an hour: a bot whose grant still holds the old
+   * default gets the new one, once, when the profile opens (a grant the owner raised stays). Like
+   * Allow, a revision with the longer time is published and its grant approved; unfinished
+   * activations move to it. Only the old default is changed, so this runs again harmlessly.
+   */
+  upgradeWorkTime(): string[] {
+    const upgraded: string[] = []
+    for (const botId of this.host.definitions.ids()) {
+      try {
+        if (this.store.registry(botId)?.deletedAt) continue
+        const grant = this.store.activeGrant(botId)
+        if (grant?.manifest.budget.maxActiveMs !== OLD_DEFAULT_BOT_ACTIVE_MS) continue
+        const entry = this.host.definitions.get(botId)
+        const published = entry?.published
+        if (!entry || !published) continue
+        const longer = (manifest: BotManifest): BotManifest => manifest.budget.maxActiveMs <= OLD_DEFAULT_BOT_ACTIVE_MS
+          ? { ...manifest, budget: { ...manifest.budget, maxActiveMs: DEFAULT_BOT_ACTIVE_MS } }
+          : manifest
+        const wider = longer(grant.manifest)
+        const revision = this.host.definitions.publishRevision({ ...published, permissions: longer(published.permissions) })
+        const digest = botManifestDigest(wider)
+        this.store.db.transaction(() => {
+          this.store.setPublished(botId, revision.revision!)
+          this.store.approve(botId, digest, wider)
+          this.store.regrant(botId, grant.digest, digest, revision.revision!)
+        })
+        try {
+          const draft = entry.draftHash === published.revision ? revision : { ...entry.draft, permissions: longer(entry.draft.permissions) }
+          this.host.definitions.save(draft, entry.draftHash)
+        } catch (error) {
+          console.warn('the bot draft was left as it was', { botId, error: error instanceof Error ? error.message : String(error) })
+        }
+        upgraded.push(botId)
+      } catch (error) {
+        console.warn('a bot\'s work time could not be upgraded', { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return upgraded
+  }
+
   private upgradeOne(botId: string): void {
     const entry = this.host.definitions.get(botId)
     if (!entry) return
@@ -3630,10 +4032,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** Stops the active-time timers (profile shutdown). */
   close(): void {
-    for (const live of this.live.values()) live.timer?.clear()
+    for (const live of this.live.values()) {
+      live.timer?.clear()
+      live.watch?.clear()
+    }
     this.live.clear()
     for (const timer of this.expiryTimers.values()) timer.clear()
     this.expiryTimers.clear()
+    for (const timer of this.offlineTimers.values()) timer.clear()
+    this.offlineTimers.clear()
     for (const reply of this.pendingReplies.values()) reply.timer.clear()
     this.pendingReplies.clear()
   }
@@ -3674,23 +4081,29 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
 }
 
 
+/** Whether `authority` already holds the tool, skill or MCP tool `asked` names (a folder or a limit never counts). */
+function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skills' | 'mcp'>, asked: BotAskRequest): boolean {
+  if ('tool' in asked) {
+    if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool)
+    // The browser is held as its tools.
+    return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
+  }
+  if ('skill' in asked) return authority.skills.has(asked.skill)
+  if ('mcp' in asked) return authority.mcp.has(`${asked.mcp.serverId}::${asked.mcp.tool}`)
+  return false
+}
+
 /** What a gate refusal asks the owner for. */
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {
   switch (wall.kind) {
-    // A folder is asked for only by its absolute path: a relative one is refused, never resolved.
-    case 'path': {
-      // Only an absolute path is asked for, shown resolved (`..` removed); a relative one is refused.
-      if (!isAbsolute(wall.path)) return undefined
-      const path = resolve(wall.path)
-      // A file is asked for by its folder ("read files in ~/Documents/Invoices"), a folder as itself.
-      const folder = isDirectory(path) ? path : dirname(path)
-      return isAbsolutePath(folder) && folder !== dirname(folder) ? { path: folder, access: wall.access } : undefined
-    }
+    // File access is one permission (§3.7): any folder asks for all of them, once.
+    case 'path': return filesAsk()
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':
       if (call.kind === 'builtin') return { tool: call.tool }
-      return isNeutralTool(wall.tool) || BOT_APP_TOOLS.has(wall.tool) ? { tool: wall.tool } : undefined
+      // A browser tool asks for the browser as a whole.
+      return isNeutralTool(wall.tool) || BOT_APP_TOOLS.has(botGrantTool(wall.tool)) ? { tool: botGrantTool(wall.tool) } : undefined
     default: return undefined
   }
 }
@@ -3718,14 +4131,6 @@ function contextKey(stored: string): [string, number] {
   return at > 0 && Number.isSafeInteger(gen) ? [stored.slice(0, at), gen] : [stored, 1]
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
-}
-
 /** A journal that cannot be written (bot-context.md §4): capture's `bot_journal_failed`, or a full disk. */
 function isJournalFailure(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
@@ -3747,6 +4152,7 @@ function failureText(reason: string): string {
     case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
+    case 'no_progress': return 'I couldn\'t get anything done on this run, so I stopped.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }
 }

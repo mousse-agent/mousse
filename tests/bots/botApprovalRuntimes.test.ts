@@ -9,7 +9,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { ClaudeLockedGate, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { ClaudeLockedGate, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
@@ -47,6 +48,50 @@ async function run(id: string) {
   return { activation, ...(await start(f, activation.id)) }
 }
 
+describe('Claude Code\'s own storage never asks (bot-architecture.md §3.7)', () => {
+  /** The gate of a turn whose Claude home is `home`: its project folder for the bot's files folder. */
+  function gateWithOwn(authority: BotAuthority, home: string): ClaudeLockedGate {
+    const cwd = authority.workspace!.files!
+    const turn: ClaudeLockedTurn = { authority, ownerEntry: true, ledger, cwd, shellContained: false, shellOpen: true, temps: [], systemPrompt: '', own: claudeOwnStorage(home, cwd) }
+    return new ClaudeLockedGate(turn, true)
+  }
+
+  it('reading back its saved tool output needs no file access, in a run and in the chat, and writes no ask', async () => {
+    const home = join(f.base, 'claude-home')
+    for (const [lane, started] of [['run', () => run('r1')], ['chat', () => chat('Search the web', 'm1')]] as const) {
+      const { activation, prepared, payload } = await started()
+      const gate = gateWithOwn(prepared.authority, home)
+      // As Claude Code names it: `<home>/projects/<files folder as a name>/<session>/tool-results/<id>.txt`.
+      const saved = join(home, 'projects', claudeProjectName(prepared.authority.workspace!.files!), '7ec7e746-78f2-47fb-b3f6-58781eecebc3', 'tool-results', 'toolu_1.txt')
+      expect(gate.canUse('Read', { file_path: saved }, `tu-${lane}-1`)).toEqual({ ok: true })
+      expect(gate.canUse('Grep', { pattern: 'price', path: join(saved, '..') }, `tu-${lane}-2`)).toEqual({ ok: true })
+      // Another bot's sessions, or Claude Code's other folders, are not its own storage.
+      const another = join(home, 'projects', claudeProjectName(join(f.base, 'other-bot')), 's', 'tool-results', 'x.txt')
+      expect(gate.canUse('Read', { file_path: another }, `tu-${lane}-3`)).toMatchObject({ ok: false })
+      expect(f.store.openAsks(botId).map((ask) => ask.permission)).toEqual([filesAsk()])
+      expect(f.store.activation(activation.id)!.status).toBe(lane === 'run' ? 'running' : 'waiting_grant')
+      await finish(f, payload, lane === 'run' ? 'completed' : 'interrupted', { text: 'Done.', ...(lane === 'chat' ? { outcome: { interruptedBy: 'bot_wall' } } : {}) })
+      for (const ask of f.store.openAsks(botId)) f.store.answerEscalation(ask.id, 'withdrawn')
+    }
+  })
+
+  it('names project folders as Claude Code does, and matches a cut name by its cut part', () => {
+    expect(claudeProjectName('/home/aeon/.mousse/profiles/ea94983f-8da5-449f-af74-d5e9d338c430/bots/files/bot-14007dd649d7'))
+      .toBe('-home-aeon--mousse-profiles-ea94983f-8da5-449f-af74-d5e9d338c430-bots-files-bot-14007dd649d7')
+    const home = join(f.base, 'claude-home')
+    const long = join(f.base, 'x'.repeat(240))
+    const own = claudeOwnStorage(home, long)
+    const cut = `${claudeProjectName(long).slice(0, 200)}-1a2b3c`
+    expect(own.holds(join(home, 'projects', cut, 's', 'tool-results', 'a.txt'))).toBe(true)
+    expect(own.holds(join(home, 'projects', claudeProjectName(long).slice(0, 200), 's', 'a.txt'))).toBe(false)
+    // The project folder itself, and anything beside it, is not a session's storage.
+    const short = claudeOwnStorage(home, join(f.base, 'files'))
+    expect(short.holds(join(home, 'projects', claudeProjectName(join(f.base, 'files'))))).toBe(false)
+    expect(short.holds(join(home, 'settings.json'))).toBe(false)
+    expect(short.folders).toEqual([join(home, 'projects', claudeProjectName(join(f.base, 'files')))])
+  })
+})
+
 describe('approvals on the owner\'s entries are answered by the bot\'s authority', () => {
   it('allows what the grant holds: a change in its files folder, a read there', async () => {
     const { prepared, payload } = await chat('Write a note', 'm1')
@@ -81,7 +126,8 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
     expect(codexBotFileChange(prepared.authority, { changes: [{ path: join(invoices, 'a.pdf'), kind: 'update' }], cwd: files })).toEqual({ decision: 'decline', reason: BOT_ASK_REFUSED_TEXT })
     expect(claudeGate(prepared.authority).canUse('Read', { file_path: join(invoices, 'b.pdf') }, 'tu-1')).toEqual({ ok: false, reason: BOT_ASK_REFUSED_TEXT })
     expect(f.store.activation(activation.id)!.status).toBe('running')
-    expect(f.store.openAsks(botId).map((ask) => ask.mode)).toEqual(['ask', 'ask'])
+    // Codex's change and Claude Code's read need the same permission: one ask for file access.
+    expect(f.store.openAsks(botId).map((ask) => ask.mode)).toEqual(['ask'])
     // Still allowed afterwards: the run goes on.
     expect(codexBotFileChange(prepared.authority, { changes: [{ path: 'report.md', kind: 'add' }], cwd: files })).toEqual({ decision: 'accept' })
     await finish(f, payload, 'completed', { text: 'Report: I skipped the invoices.' })

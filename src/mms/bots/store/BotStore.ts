@@ -268,6 +268,9 @@ ${BOT_MEMORY_SCHEMA_SQL}
   }
 ]
 
+/** The `end_reason` of a running activation that waits for the internet. */
+export const BOT_OFFLINE_REASON = 'waiting_for_internet'
+
 /** The `bots.db` schema version this build writes. */
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
 /** How many `bots.db.pre-v<n>` copies are kept beside the database. */
@@ -403,6 +406,11 @@ export interface BotActivationRow {
   reloadPending: boolean
   /** The model this activation runs on, resolved at its first dispatch (internal; never in a payload). */
   selection: ProviderSelection | null
+  /**
+   * A running activation waits for the internet (docs/bots.md, "No internet"): kept as its
+   * `end_reason` while it runs, so `bots.db` needs no new column and older builds still read it.
+   */
+  offline: boolean
 }
 
 export interface BotDispatchRow {
@@ -515,7 +523,8 @@ function activationOf(row: Row): BotActivationRow {
     lane: (str(row.lane) ?? 'run') as BotLane,
     modelOverride: json<BotModelChoice>(row.model_override_json),
     reloadPending: num(row.reload_pending) === 1,
-    selection: json<ProviderSelection>(row.selection_json)
+    selection: json<ProviderSelection>(row.selection_json),
+    offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON
   }
 }
 
@@ -773,20 +782,27 @@ export class BotStore {
     this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
   }
 
-  /** Compare-and-set of an activation's status; false when it was not in `from`. */
+  /** A running activation waits for the internet, or no longer does. False when it is not running (or did not wait). */
+  setOffline(id: string, offline: boolean): boolean {
+    return offline
+      ? this.run("UPDATE bot_activations SET end_reason = ? WHERE id = ? AND status = 'running'", BOT_OFFLINE_REASON, id) > 0
+      : this.run("UPDATE bot_activations SET end_reason = NULL WHERE id = ? AND status = 'running' AND end_reason = ?", id, BOT_OFFLINE_REASON) > 0
+  }
+
+  /** Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the internet. */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
     const marks = from.map(() => '?').join(', ')
     const ended = to === 'done' || to === 'failed' || to === 'cancelled'
     return this.run(
       `UPDATE bot_activations SET status = ?,
-         end_reason = CASE WHEN ? THEN ? ELSE end_reason END,
+         end_reason = CASE WHEN ? THEN ? WHEN end_reason = ? AND ? != 'running' THEN NULL ELSE end_reason END,
          result = CASE WHEN ? THEN ? ELSE result END,
          thread_id = COALESCE(?, thread_id),
          scratch = COALESCE(?, scratch),
          ended_at = CASE WHEN ? THEN ? ELSE ended_at END
        WHERE id = ? AND status IN (${marks})`,
       to,
-      patch.endReason !== undefined ? 1 : 0, patch.endReason ?? null,
+      patch.endReason !== undefined ? 1 : 0, patch.endReason ?? null, BOT_OFFLINE_REASON, to,
       patch.result !== undefined ? 1 : 0, patch.result ?? null,
       patch.threadId ?? null,
       patch.scratch ?? null,
@@ -959,6 +975,14 @@ export class BotStore {
 
   setEscalationMessage(id: string, messageId: string): void {
     this.run('UPDATE bot_escalations SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
+  }
+
+  /**
+   * An ask in its current form (an older build's folder ask worded as the one file ask): what it
+   * asks for, its fingerprint and its card's words. Only one open ask may hold a fingerprint.
+   */
+  reword(id: string, ask: { permission: BotAskRequest; fingerprint: string; title: string; note: string }): boolean {
+    return this.run('UPDATE bot_escalations SET permission_json = ?, fingerprint = ?, title = ?, note = ? WHERE id = ?', JSON.stringify(ask.permission), ask.fingerprint, ask.title, ask.note, id) > 0
   }
 
   /** Compare-and-set from `open`: false when it was already answered, expired or cancelled. */

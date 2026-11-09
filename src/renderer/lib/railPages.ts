@@ -4,7 +4,7 @@ import { hasOpenDialog } from '../components/ui/Modal'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 
-/** The pages the navigation rail opens over the workspace. The workspace itself has no rail item. */
+/** The pages the navigation rail opens over the workspace. The rail's Home item returns to the workspace. */
 export type RailPage = 'automations' | 'usage' | 'settings'
 
 type RailState = Pick<ReturnType<typeof useAppStore.getState>, 'scheduledOpen' | 'usageOpen' | 'settingsOpen'>

@@ -59,17 +59,17 @@ describe('bots.chat.send', () => {
     await send('Read my notes', 'm1')
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    // The folder named by the call is what is asked for.
+    // A folder outside its own asks for file access as a whole.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'list', nativeName: 'ls', args: { path: docs } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     expect(f.store.activation(activation.id)?.status).toBe('waiting_grant')
     await finish(f, payload, 'interrupted', { text: 'Let me look.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: `read files in ${docs}`, status: 'open', kind: 'permission' } })
+    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: 'use files on this computer', status: 'open', kind: 'permission' } })
     const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'allow')
     expect(message.ask?.status).toBe('allowed')
     await flush()
     const continuation = f.store.dispatch(activation.id, 2)!
-    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: `[Mousse] The owner allowed: read files in ${docs}. Continue.` } })
+    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: '[Mousse] The owner allowed: use files on this computer. Continue.' } })
     const next = await start(f, activation.id, 2)
     // Read again for the continuation: the provider keeps it frozen (a forget drops it).
     expect(next.prepared).toMatchObject({ history: 'thread', preamble: prepared.preamble })
@@ -89,7 +89,7 @@ describe('bots.chat.send', () => {
     expect(chatOf(f, botId).find((message) => message.ask?.askId === askId)?.ask?.status).toBe('not_now')
     // No new activation: the walled one goes on with the owner's message as its input.
     expect(f.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).map((row) => row.id)).toEqual([activation.id])
-    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: read files in .*\n\nNever mind, just say hi$/)
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: use files on this computer\. Carry on without it\.\n\nNever mind, just say hi$/)
   })
 
   it('a message saved just before Mousse stops is still answered: its activation is queued with it', async () => {
@@ -116,6 +116,7 @@ describe('bots.chat.send', () => {
       await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
       const continueChatWith = f.bots.continueChatWith.bind(f.bots)
       f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
+      writeFileSync(join(f.base, 'list.txt'), 'milk, eggs')
       const attachments = [{ name: 'list.txt', path: join(f.base, 'list.txt') }]
       await expect(f.bots.service.chatSend({ botId, text: 'Use this list instead', attachments, clientRequestId: `${recover}-2` })).rejects.toThrow('Mousse stopped')
       f.bots.continueChatWith = continueChatWith

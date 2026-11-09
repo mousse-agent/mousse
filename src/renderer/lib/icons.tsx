@@ -73,14 +73,17 @@ import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
 import GitPullRequestClosedIcon from '@hugeicons/core-free-icons/GitPullRequestClosedIcon'
 import Globe02Icon from '@hugeicons/core-free-icons/Globe02Icon'
+import ArrowExpandDiagonal01Icon from '@hugeicons/core-free-icons/ArrowExpandDiagonal01Icon'
 import GridViewIcon from '@hugeicons/core-free-icons/GridViewIcon'
 import HammerIcon from '@hugeicons/core-free-icons/HammerIcon'
 import HashtagIcon from '@hugeicons/core-free-icons/HashtagIcon'
 import HistoryIcon from '@hugeicons/core-free-icons/HistoryIcon'
+import HardDriveIcon from '@hugeicons/core-free-icons/HardDriveIcon'
 import Home01Icon from '@hugeicons/core-free-icons/Home01Icon'
 import Image01Icon from '@hugeicons/core-free-icons/Image01Icon'
 import InboxIcon from '@hugeicons/core-free-icons/InboxIcon'
 import Infinity01Icon from '@hugeicons/core-free-icons/Infinity01Icon'
+import IncognitoIcon from '@hugeicons/core-free-icons/IncognitoIcon'
 import InformationCircleIcon from '@hugeicons/core-free-icons/InformationCircleIcon'
 import JavaScriptIcon from '@hugeicons/core-free-icons/JavaScriptIcon'
 import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
@@ -232,13 +235,16 @@ export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
 export const GitPullRequestClosed = /* @__PURE__ */ createIcon('GitPullRequestClosed', GitPullRequestClosedIcon)
 export const Globe = /* @__PURE__ */ createIcon('Globe', Globe02Icon)
+export const Maximize = /* @__PURE__ */ createIcon('Maximize', ArrowExpandDiagonal01Icon)
 export const GripVertical = /* @__PURE__ */ createIcon('GripVertical', DragDropVerticalIcon)
 export const Hammer = /* @__PURE__ */ createIcon('Hammer', HammerIcon)
 export const Hash = /* @__PURE__ */ createIcon('Hash', HashtagIcon)
 export const History = /* @__PURE__ */ createIcon('History', HistoryIcon)
+export const HardDrive = /* @__PURE__ */ createIcon('HardDrive', HardDriveIcon)
 export const House = /* @__PURE__ */ createIcon('House', Home01Icon)
 export const Inbox = /* @__PURE__ */ createIcon('Inbox', InboxIcon)
 export const Infinity = /* @__PURE__ */ createIcon('Infinity', Infinity01Icon)
+export const Incognito = /* @__PURE__ */ createIcon('Incognito', IncognitoIcon)
 export const Info = /* @__PURE__ */ createIcon('Info', InformationCircleIcon)
 export const Keyboard = /* @__PURE__ */ createIcon('Keyboard', KeyboardIcon)
 export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)

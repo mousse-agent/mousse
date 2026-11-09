@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { modelPickerRunSettings, PermissionChip, runFasterSpeed, runLevelText } from './ComposerEffortPicker'
 import type { PermissionControl } from './ComposerPermissionPicker'
-import { FloatingPortal, useClosestAnchor, useFloatingPosition } from '../lib/floatingLayer'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { motionScale, scaleMotionMs } from '../lib/motion'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
@@ -16,6 +17,9 @@ import { useAppStore } from '../stores/appStore'
 
 /** Alt+Enter in the composer while a run is going sends the text as a steer. */
 export const STEER_BINDING = 'Alt+Enter'
+
+/** The model picker's fade-out, before the speed scale; matches its close animation in composer-run-controls.css. */
+const MODEL_PICKER_EXIT_MS = 90
 
 function useMenuScrollFade() {
   const scrollFadeTimerRef = useRef<number | null>(null)
@@ -43,7 +47,11 @@ function useMenuScrollFade() {
   return handleMenuScroll
 }
 
-export interface ComposerFooterProps {
+/**
+ * A thread's run settings in the footer: the model picker (with the permission chip) and the context
+ * ring. A bot's composer has none: a bot picks its own model.
+ */
+export interface ComposerRunProps {
   /** Picker entries; `caps` and `status` come from the instance snapshots. */
   providers: ProviderWithStatus[]
   selectedProviderId: string
@@ -60,6 +68,21 @@ export interface ComposerFooterProps {
   contextCompactionSetting?: ContextSettings
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
+}
+
+/** The thread's permission mode and how to change it; it shows beside the model button. */
+export interface ComposerPermissionProps {
+  mode: PermissionMode
+  /** The most the picker offers: a subagent's lineage ceiling, or the limit a thread's computer gives this device. */
+  ceiling?: PermissionMode
+  /** Why nothing above `ceiling` is offered, when it is not a lineage. */
+  ceilingReason?: string
+  onSelect: (mode: PermissionMode) => void
+}
+
+export interface ComposerFooterProps {
+  /** The model picker and context ring; without it the footer has neither (a bot's composer). */
+  run?: ComposerRunProps
   onAttachClick: () => void
   loading?: boolean
   /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
@@ -81,67 +104,43 @@ export interface ComposerFooterProps {
   implementPlanDisabled?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
-  /** The thread's permission mode and how to change it; without it the footer has no such control. */
-  permission?: {
-    mode: PermissionMode
-    /** The most the picker offers: a subagent's lineage ceiling, or the limit a thread's computer gives this device. */
-    ceiling?: PermissionMode
-    /** Why nothing above `ceiling` is offered, when it is not a lineage. */
-    ceilingReason?: string
-    onSelect: (mode: PermissionMode) => void
-  }
+  /** The thread's permission mode and how to change it; without it (or `run`) the footer has no such control. */
+  permission?: ComposerPermissionProps
 }
 
-export function ComposerFooter({
-  providers,
-  selectedProviderId,
-  selectedInstanceId,
-  selectedModelId,
-  modelMenuOpen,
-  onModelMenuOpenChange,
-  onModelSelect,
-  modelReadOnly = false,
-  onOpenSettings,
-  contextUsage,
-  contextCompactionSetting,
-  contextOpen,
-  onContextOpenChange,
-  onAttachClick,
-  loading = false,
-  stoppable = loading,
-  disabled = false,
-  canSend = false,
-  isRecording = false,
-  recordingPending = false,
-  transcribing = false,
-  onSend,
-  onStop,
-  onStartRecording,
-  onStopRecording,
-  primaryAction = 'send',
-  onImplementPlan,
-  implementPlanDisabled = false,
-  allowAttachWhileLoading = false,
-  permission,
-  sendLabel
-}: ComposerFooterProps) {
+/** The permission chip and the model button with its picker. */
+function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permission?: ComposerPermissionProps }) {
+  const {
+    providers,
+    selectedProviderId,
+    selectedInstanceId,
+    selectedModelId,
+    modelMenuOpen,
+    onModelMenuOpenChange,
+    onModelSelect,
+    modelReadOnly = false,
+    onOpenSettings
+  } = run
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
-  // The picker opens above the whole composer, as wide as it at most, so it never covers the draft.
-  const composerAnchorRef = useClosestAnchor(modelButtonRef, '.composer')
-  const contextBtnRef = useRef<HTMLButtonElement>(null)
+  // After closing, the picker stays a moment to fade out (none with motion off). Set while rendering, so
+  // it never unmounts for a frame in between.
+  const [modelMenuLeaving, setModelMenuLeaving] = useState(false)
+  const [modelMenuWasOpen, setModelMenuWasOpen] = useState(modelMenuOpen)
+  if (modelMenuWasOpen !== modelMenuOpen) {
+    setModelMenuWasOpen(modelMenuOpen)
+    setModelMenuLeaving(!modelMenuOpen && motionScale() > 0)
+  }
+  useEffect(() => {
+    if (!modelMenuLeaving) return
+    const timer = window.setTimeout(() => setModelMenuLeaving(false), scaleMotionMs(MODEL_PICKER_EXIT_MS))
+    return () => window.clearTimeout(timer)
+  }, [modelMenuLeaving])
   const handleMenuScroll = useMenuScrollFade()
   const namedParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
-  // No ring while the context's fill is unknown: a new chat, a provider that reports none, no capacity.
-  const contextShown = showsContextGauge(selectedProvider) && contextUsageKnown(contextUsage)
-  const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
-  // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
-  useEffect(() => {
-    if (!contextShown && contextOpen) onContextOpenChange(false)
-  }, [contextShown, contextOpen, onContextOpenChange])
   // A selected instance that needs a step (signed out, not found) says so on the model button.
   const providerAttention = selectedProvider?.status && selectedProvider.status.tone !== 'ready' ? selectedProvider.status : null
   // The permission mode belongs to the thread; what it can be depends on the agent serving the model.
@@ -160,11 +159,6 @@ export function ComposerFooter({
   const modelButtonTitle = providerAttention ? `${buttonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : buttonLabel
   // An assigned model (a subagent's) cannot change: the button only names it. Its permission mode still can, on the chip.
   const pickerDisabled = modelReadOnly
-  const bindings = useCommandBindings()
-  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
-  const stopBinding = bindings['run.stop']
-  const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
-  const queueTitle = `Queue · ${formatBinding('Enter', platform)} — Steer · ${formatBinding(STEER_BINDING, platform)}`
   const closePicker = () => {
     onModelMenuOpenChange(false)
     modelButtonRef.current?.focus()
@@ -209,6 +203,143 @@ export function ComposerFooter({
     onModelMenuOpenChange(!modelMenuOpen)
   }
 
+  return (
+    <div className="composer-run-controls">
+      {permissionControl ? <PermissionChip control={permissionControl} /> : null}
+      <div className="composer-model-picker" ref={modelPickerRef}>
+        {!modelReadOnly && (modelMenuOpen || modelMenuLeaving) && (
+          <>
+            {providers.length === 0 ? (modelMenuOpen &&
+              <FloatingPortal>
+                <div
+                  ref={modelMenuContentRef}
+                  className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
+                  role="listbox"
+                  aria-label="Select model"
+                  style={emptyModelMenuStyle}
+                >
+                  <div className="composer-model-menu scrollbar-ultra-thin">
+                    <div className="composer-model-menu-empty">
+                      <p>No providers connected.</p>
+                      <button
+                        type="button"
+                        className="composer-model-menu-settings"
+                        onClick={() => {
+                          onModelMenuOpenChange(false)
+                          onOpenSettings()
+                        }}
+                      >
+                        Open Settings
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </FloatingPortal>
+            ) : (
+              <ModelFamilyMenu
+                providers={providers}
+                selectedProviderId={selectedProviderId}
+                selectedInstanceId={selectedInstanceId}
+                selectedModelId={selectedModelId}
+                onSelect={onModelSelect}
+                onMenuScroll={handleMenuScroll}
+                anchorRef={modelButtonRef}
+                contentRef={modelMenuContentRef}
+                closing={!modelMenuOpen}
+                runSettings={runSettings}
+              />
+            )}
+          </>
+        )}
+        <button
+          ref={modelButtonRef}
+          type="button"
+          className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
+          aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
+          aria-haspopup={pickerDisabled ? undefined : 'listbox'}
+          aria-label={buttonLabel}
+          title={modelButtonTitle}
+          disabled={pickerDisabled}
+          onClick={pickerDisabled ? undefined : handleModelMenuToggle}
+        >
+          {selectedProviderId ? (
+            <ProviderIcon providerId={selectedProviderId} size={14} />
+          ) : null}
+          <span className="composer-model-btn-label">
+            <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
+            {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
+            {fasterSpeed ? <Zap size={12} aria-hidden="true" className="composer-model-btn-speed" /> : null}
+            {levelText ? <span className="composer-model-btn-level">{levelText}</span> : null}
+          </span>
+          {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
+            <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
+          ) : null}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The context ring and its popover, while the context's fill is known. */
+function ComposerContextRing({ run }: { run: ComposerRunProps }) {
+  const { providers, selectedProviderId, contextUsage, contextCompactionSetting, contextOpen, onContextOpenChange } = run
+  const contextBtnRef = useRef<HTMLButtonElement>(null)
+  const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
+  // No ring while the context's fill is unknown: a new chat, a provider that reports none, no capacity.
+  const contextShown = showsContextGauge(selectedProvider) && contextUsageKnown(contextUsage)
+  const compaction = contextCompactionSetting ? contextCompaction(contextCompactionSetting, contextUsage) : undefined
+  // The popover goes with the ring, so it does not reopen by itself when the ring comes back.
+  useEffect(() => {
+    if (!contextShown && contextOpen) onContextOpenChange(false)
+  }, [contextShown, contextOpen, onContextOpenChange])
+  if (!contextShown) return null
+  return (
+    <div className="composer-context-anchor">
+      <ContextUsageRing
+        usage={contextUsage}
+        onClick={() => onContextOpenChange(!contextOpen)}
+        active={contextOpen}
+        ref={contextBtnRef}
+      />
+      <ContextUsagePopover
+        open={contextOpen}
+        onClose={() => onContextOpenChange(false)}
+        usage={contextUsage}
+        compaction={compaction}
+        providerId={selectedProviderId}
+        anchorRef={contextBtnRef}
+      />
+    </div>
+  )
+}
+
+export function ComposerFooter({
+  run,
+  onAttachClick,
+  loading = false,
+  stoppable = loading,
+  disabled = false,
+  canSend = false,
+  isRecording = false,
+  recordingPending = false,
+  transcribing = false,
+  onSend,
+  onStop,
+  onStartRecording,
+  onStopRecording,
+  primaryAction = 'send',
+  onImplementPlan,
+  implementPlanDisabled = false,
+  allowAttachWhileLoading = false,
+  permission,
+  sendLabel
+}: ComposerFooterProps) {
+  const bindings = useCommandBindings()
+  const platform = useAppStore((state) => state.appInfo?.platform) ?? ''
+  const stopBinding = bindings['run.stop']
+  const stopTitle = stopBinding ? `Stop · ${formatBinding(stopBinding, platform)}` : 'Stop'
+  const queueTitle = `Queue · ${formatBinding('Enter', platform)} — Steer · ${formatBinding(STEER_BINDING, platform)}`
+
   const handleActionClick = () => {
     if (primaryAction === 'implement-plan') {
       onImplementPlan?.()
@@ -228,97 +359,11 @@ export function ComposerFooter({
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
-        <div className="composer-run-controls">
-          {permissionControl ? <PermissionChip control={permissionControl} /> : null}
-          <div className="composer-model-picker" ref={modelPickerRef}>
-            {!modelReadOnly && modelMenuOpen && (
-              <>
-                {providers.length === 0 ? (
-                  <FloatingPortal>
-                    <div
-                      ref={modelMenuContentRef}
-                      className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
-                      role="listbox"
-                      aria-label="Select model"
-                      style={emptyModelMenuStyle}
-                    >
-                      <div className="composer-model-menu scrollbar-ultra-thin">
-                        <div className="composer-model-menu-empty">
-                          <p>No providers connected.</p>
-                          <button
-                            type="button"
-                            className="composer-model-menu-settings"
-                            onClick={() => {
-                              onModelMenuOpenChange(false)
-                              onOpenSettings()
-                            }}
-                          >
-                            Open Settings
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </FloatingPortal>
-                ) : (
-                  <ModelFamilyMenu
-                    providers={providers}
-                    selectedProviderId={selectedProviderId}
-                    selectedInstanceId={selectedInstanceId}
-                    selectedModelId={selectedModelId}
-                    onSelect={onModelSelect}
-                    onMenuScroll={handleMenuScroll}
-                    anchorRef={composerAnchorRef}
-                    contentRef={modelMenuContentRef}
-                    runSettings={runSettings}
-                  />
-                )}
-              </>
-            )}
-            <button
-              ref={modelButtonRef}
-              type="button"
-              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
-              aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
-              aria-haspopup={pickerDisabled ? undefined : 'listbox'}
-              aria-label={buttonLabel}
-              title={modelButtonTitle}
-              disabled={pickerDisabled}
-              onClick={pickerDisabled ? undefined : handleModelMenuToggle}
-            >
-              {selectedProviderId ? (
-                <ProviderIcon providerId={selectedProviderId} size={14} />
-              ) : null}
-              <span className="composer-model-btn-label">
-                <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
-                {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
-                {fasterSpeed ? <Zap size={12} aria-hidden="true" className="composer-model-btn-speed" /> : null}
-                {levelText ? <span className="composer-model-btn-level">{levelText}</span> : null}
-              </span>
-              {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
-                <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
-              ) : null}
-            </button>
-          </div>
-        </div>
+        {run ? <ComposerRunControls run={run} permission={permission} /> : null}
       </div>
 
       <div className="composer-footer-right">
-        {contextShown && <div className="composer-context-anchor">
-          <ContextUsageRing
-            usage={contextUsage}
-            onClick={() => onContextOpenChange(!contextOpen)}
-            active={contextOpen}
-            ref={contextBtnRef}
-          />
-          <ContextUsagePopover
-            open={contextOpen}
-            onClose={() => onContextOpenChange(false)}
-            usage={contextUsage}
-            compaction={compaction}
-            providerId={selectedProviderId}
-            anchorRef={contextBtnRef}
-          />
-        </div>}
+        {run ? <ComposerContextRing run={run} /> : null}
 
         <button
           type="button"

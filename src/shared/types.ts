@@ -4,7 +4,7 @@ import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -953,7 +953,12 @@ export interface ContextUsageSnapshot {
 
 export interface PtyCreateRequest {
   agentId: string
-  cwd: string
+  /** Absent: the service starts the shell in the thread's own folder. */
+  cwd?: string
+  /**
+   * The thread the terminal belongs to; null for a terminal of no thread. Absent: the thread the window shows.
+   */
+  threadId?: string | null
   command?: string
   env?: Record<string, string>
   shellArgs?: string[]
@@ -984,6 +989,16 @@ export interface Project {
   offline?: true
   /** Set while the computer that holds the project has stopped sharing its threads with this one (it blocked this computer or turned sharing off). */
   notShared?: true
+  /** The icon file the user chose: relative to `path` when inside the folder, else absolute. Overrides the found one. */
+  iconPath?: string
+  /** The user turned icons off for this project: it always shows the folder glyph. */
+  iconOff?: true
+  /** The icon found at a standard place in the folder, relative to it; absent when none was found. */
+  detectedIconPath?: string
+  /** When the folder was last looked at for an icon; absent until then, and cleared when the project is opened again. */
+  iconDetectedAt?: string
+  /** The version of the detection rules that looked; a result of older rules is looked for again at once. */
+  iconDetector?: number
 }
 
 /**
@@ -1114,6 +1129,13 @@ export interface Thread {
    * workspace is provisioned or the thread has started.
    */
   worktreeEnabled?: boolean
+  /**
+   * The commit a new worktree for this thread starts at, instead of the project folder's HEAD: the tip of the branch
+   * picked for it in the new-thread menu, read when the thread was created. Its own branch is still named as usual.
+   */
+  worktreeStartSha?: string
+  /** The branch `worktreeStartSha` was read from, for display. */
+  worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
   /** Explicit sidebar position within this thread's project (or standalone group). */
@@ -1504,6 +1526,127 @@ export interface GitCommitOptions {
   expectedBranch?: string
   /** Names the action so its live output reaches the caller and Cancel can find it. */
   operationId?: string
+  /**
+   * What the commit takes. `all`: every change (`add -A`, leaving out `.mousse/`). `chosen`: exactly the selection
+   * (`git.changes`), refused with `stale` when `token` is not the current selection's. Unset: the older rule above.
+   */
+  selection?: GitCommitSelection
+}
+
+/** What a commit takes when the client says so (`GitCommitOptions.selection`). */
+export type GitCommitSelection = { mode: 'all' } | { mode: 'chosen'; token: string }
+
+/** One line of a hunk: context, removed from HEAD, or added in the working tree. Numbers are 1-based. */
+export interface GitChangeLine {
+  kind: ' ' | '-' | '+'
+  text: string
+  oldNo?: number
+  newNo?: number
+}
+
+/** Whether a hunk or file goes into the next commit. */
+export type GitIncluded = 'yes' | 'no' | 'partial'
+
+/** One hunk of HEAD → working tree, in Git's clean form, with 3 lines of context. */
+export interface GitChangeHunk {
+  /** A hash of `oldStart` and the hunk's lines; unique within the file. */
+  id: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: GitChangeLine[]
+  included: GitIncluded
+}
+
+/** One changed file of `git.changes`. A rename is one entry covering both paths. */
+export interface GitChangedFile {
+  path: string
+  oldPath?: string
+  change: 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict'
+  kind: 'file' | 'symlink' | 'submodule'
+  binary: boolean
+  /** Set when the mode changed; such a change has no hunks of its own. */
+  mode?: { old: string; new: string }
+  /** Only the whole file can be included or left out (binary, link, submodule, mode, rename, too large, conflict, diverged, or bytes that may not round-trip). */
+  wholeFileOnly: boolean
+  /** The selection holds content that is neither HEAD nor HEAD plus some of these hunks, or was chosen against an older HEAD. */
+  indexDiverged: boolean
+  /** Listed without hunks: a side is over the size or line limit, or the answer already carries as many hunk lines as one answer holds. */
+  tooLarge: boolean
+  /** Changes whenever this path's HEAD entry, selection entries, working-tree content or the selection state change. */
+  version: string
+  hunks: GitChangeHunk[]
+  included: GitIncluded
+}
+
+/** The selection a commit with `selection: { mode: 'chosen' }` takes. `untouched`: nothing chosen yet, so everything is included. */
+export interface GitSelectionState {
+  state: 'untouched' | 'chosen'
+  token: string
+}
+
+/** `git.changes`' answer. */
+export interface GitChangesResult {
+  files: GitChangedFile[]
+  selection: GitSelectionState
+  /** More files changed than are listed. */
+  truncated: boolean
+}
+
+/** `git.include` for one path: which hunks or lines (by index into `hunk.lines`) of it; neither means the whole file. */
+export interface GitIncludeRequest {
+  path: string
+  version: string
+  include: boolean
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.include`'s answer for one path. */
+export interface GitIncludeResult {
+  path: string
+  version: string
+  included: GitIncluded
+  selection: GitSelectionState
+}
+
+/** `git.revert`: which hunks or lines (by index into `hunk.lines`) of a file go back to HEAD; neither means the whole file (both paths of a rename). */
+export interface GitRevertRequest {
+  path: string
+  version: string
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.revert`'s answer: what to restore it by, until when its copy is kept (ms since the epoch), and the file's version now. */
+export interface GitRevertResult {
+  revertId: string
+  keptUntil: number
+  path: string
+  /** The file's version after the revert; empty when it no longer differs from HEAD. */
+  version: string
+  /** Paths of a whole-file revert left as they were, and why, in a sentence. */
+  left?: string
+}
+
+/**
+ * `git.restoreReverted`'s answer. `changed`: the files are no longer what the revert left; nothing was written, and the
+ * blob ids (the file now, and as kept) let the tab show the difference. `expired`: the kept copy is gone.
+ */
+export type GitRestoreRevertedResult =
+  | { restored: true }
+  | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }
+
+/** One revert `git.restoreReverted` can still put back. Times are ms since the epoch. */
+export interface GitRevertedItem {
+  revertId: string
+  path: string
+  oldPath?: string
+  at: number
+  keptUntil: number
+  /** What was reverted, in a few words: `2 hunks of src/a.ts`. */
+  summary: string
 }
 
 /** A proposed commit message; the user edits it before committing. */

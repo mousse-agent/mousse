@@ -1,0 +1,52 @@
+/* The agent cursor: a layer over the page that takes no events. */
+.agent-cursor-layer { position: absolute; inset: 0; z-index: 4; overflow: hidden; pointer-events: none; }
+.agent-cursor {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  transition: opacity .4s ease;
+}
+.agent-cursor.is-shown { opacity: 1; }
+.agent-cursor.glides { transition: left var(--agent-cursor-glide, 220ms) cubic-bezier(.3, .7, .3, 1), top var(--agent-cursor-glide, 220ms) cubic-bezier(.3, .7, .3, 1), opacity .4s ease; }
+.agent-cursor-pointer {
+  position: absolute;
+  left: -3px;
+  top: -2px;
+  overflow: visible;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .35)) drop-shadow(0 0 6px rgba(167, 133, 199, .55));
+}
+.agent-cursor-pointer path { fill: #a785c7; stroke: #fff; stroke-width: 1.6; stroke-linejoin: round; }
+.agent-cursor-ripple {
+  position: absolute;
+  left: -16px;
+  top: -16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid rgba(167, 133, 199, .9);
+  background: rgba(167, 133, 199, .25);
+  opacity: 0;
+  animation: agent-cursor-ripple .55s ease-out var(--agent-cursor-glide, 220ms) 1 both;
+}
+.agent-cursor-label {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: #a785c7;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .25);
+}
+@keyframes agent-cursor-ripple {
+  0% { opacity: .9; transform: scale(.35); }
+  100% { opacity: 0; transform: scale(1.4); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-cursor, .agent-cursor.glides { transition: opacity .2s ease; }
+  .agent-cursor-ripple { animation-duration: .01s; }
+}

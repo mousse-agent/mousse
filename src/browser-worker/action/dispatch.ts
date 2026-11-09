@@ -1,4 +1,4 @@
-import type { BrowserAction } from '../../shared/browser/types'
+import type { BrowserAction, BrowserHumanInput } from '../../shared/browser/types'
 import type { CdpTransport } from '../cdp/transport'
 import { BrowserWorkerError, fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
@@ -168,6 +168,49 @@ export async function dispatchAction(
       return
     default:
       fail('unsupported', 'Unsupported action')
+  }
+}
+
+/** Keys a person may press in a managed tab, with the codes Chromium needs to act on them. */
+const HUMAN_KEYS: Record<string, { code: string; keyCode: number; text?: string }> = {
+  Enter: { code: 'Enter', keyCode: 13, text: '\r' },
+  Tab: { code: 'Tab', keyCode: 9 },
+  Backspace: { code: 'Backspace', keyCode: 8 },
+  Delete: { code: 'Delete', keyCode: 46 },
+  Escape: { code: 'Escape', keyCode: 27 },
+  ArrowUp: { code: 'ArrowUp', keyCode: 38 },
+  ArrowDown: { code: 'ArrowDown', keyCode: 40 },
+  ArrowLeft: { code: 'ArrowLeft', keyCode: 37 },
+  ArrowRight: { code: 'ArrowRight', keyCode: 39 },
+  Home: { code: 'Home', keyCode: 36 },
+  End: { code: 'End', keyCode: 35 },
+  PageUp: { code: 'PageUp', keyCode: 33 },
+  PageDown: { code: 'PageDown', keyCode: 34 }
+}
+
+/**
+ * A person's pointer or keyboard input while they hold a managed tab (`BrowserHumanInput`), sent as
+ * trusted input at viewport CSS pixels. Navigation is the session's: it waits for the page.
+ */
+export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string, input: Exclude<BrowserHumanInput, { kind: 'navigate' | 'back' | 'forward' | 'reload' }>, signal?: AbortSignal): Promise<void> {
+  switch (input.kind) {
+    case 'click':
+      await mouseClick(cdp, cdpSessionId, input.x, input.y, 'left', 1, signal)
+      return
+    case 'scroll':
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: input.x, y: input.y, deltaX: input.deltaX, deltaY: input.deltaY }, { sessionId: cdpSessionId, signal })
+      return
+    case 'type':
+      await cdp.send('Input.insertText', { text: input.text }, { sessionId: cdpSessionId, signal })
+      return
+    case 'key': {
+      const known = HUMAN_KEYS[input.key]
+      const text = known?.text ?? (input.key.length === 1 ? input.key : undefined)
+      const codes = known ? { code: known.code, windowsVirtualKeyCode: known.keyCode, nativeVirtualKeyCode: known.keyCode } : {}
+      await cdp.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key: input.key, ...codes, ...(text ? { text } : {}) }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: input.key, ...codes }, { sessionId: cdpSessionId, signal })
+      return
+    }
   }
 }
 

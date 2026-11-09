@@ -12,6 +12,7 @@ import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
+import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
@@ -19,10 +20,12 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell, utilityProcess } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
+import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams } from './daemonGitParams'
+import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -59,6 +62,7 @@ import {
   type ProviderTranscriptionResult
 } from '../../shared/dictation'
 import { LocalModelManager, defaultLocalModelsRoot } from '../localModels/LocalModelManager'
+import { NativeTtsSlots, nativeTtsHostScript } from '../readAloud/NativeTtsSlots'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -75,6 +79,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
+import { stageBotAttachment } from './botAttachments'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -114,6 +119,9 @@ import type {
   GitCheckoutOptions,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitIncludeRequest,
+  GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
   GitDeleteBranchOptions,
@@ -198,6 +206,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
+  ...BOTS_BROWSER_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -1426,6 +1435,38 @@ export function registerGuiIpc(
   registerHandler('projects:trustGitSettings', async (_e, projectId: string) =>
     guiMms.request<{ filters: string[] }>('projects.trustGitSettings', { projectId })
   )
+  // A project's icon: the daemon reads and checks the file and answers a data URL, so the window never reads files.
+  registerHandler('projects:icon', async (_e, projectId: string) => {
+    try {
+      const res = await guiMms.request<{ icon: ProjectIconImage | null }>('projects.icon', { projectId })
+      return res.icon ?? null
+    } catch (error) {
+      // A daemon from before project icons: the folder glyph.
+      if ((error as { code?: unknown } | null)?.code === 'method_not_allowed') return null
+      throw error
+    }
+  })
+  registerHandler('projects:setIcon', async (_e, projectId: string, choice: ProjectIconChoice) => {
+    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>('projects.setIcon', {
+      projectId,
+      mode: choice?.mode,
+      ...(choice?.mode === 'custom' ? { path: choice.path } : {})
+    })
+    broadcast('projects:updated', res.projects)
+    return res.project
+  })
+  /** The icon file picker, starting in the project's folder. */
+  registerHandler('projects:pickIcon', async (_e, defaultPath: unknown) => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an icon',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: [...PROJECT_ICON_EXTENSIONS] }],
+      ...(typeof defaultPath === 'string' && defaultPath.length <= 4096 ? { defaultPath } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds
@@ -1563,17 +1604,19 @@ export function registerGuiIpc(
   }
 
   /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
-  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean } | undefined) => ({
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
     ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
     ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {}),
     // A private thread stays on this computer; the daemon refuses one sent to another computer.
     ...(opts?.localOnly === true ? { localOnly: true } : {}),
-    ...(typeof opts?.expiresAt === 'string' ? { expiresAt: opts.expiresAt, ...(opts.expiryStopsRun === true ? { expiryStopsRun: true } : {}) } : {})
+    ...(typeof opts?.expiresAt === 'string' ? { expiresAt: opts.expiresAt, ...(opts.expiryStopsRun === true ? { expiryStopsRun: true } : {}) } : {}),
+    // A worktree started from another branch is made on this computer only.
+    ...(typeof opts?.baseBranch === 'string' && opts.baseBranch && !opts.node ? { baseBranch: opts.baseBranch } : {})
   })
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
       createParams(name, projectId, opts)
@@ -1584,7 +1627,7 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string; localOnly?: boolean; expiresAt?: string; expiryStopsRun?: boolean; baseBranch?: string }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
         createParams(name, projectId, opts)
@@ -1861,14 +1904,19 @@ export function registerGuiIpc(
       request: {
         agentId: string
         cwd?: string
+        threadId?: unknown
         command?: string
         env?: Record<string, string>
         shellArgs?: string[]
       }
     ) => {
-      // Project terminals also exist before a thread is selected. Keep those
-      // sessions explicitly unbound instead of making the terminal silently fail.
-      const threadId = currentPresentation().getActiveThreadId() ?? '__unbound__'
+      // The terminal belongs to the thread its tab names, not to whichever thread the window shows when it starts.
+      // Project terminals also exist with no thread (null, or no thread selected). Keep those sessions explicitly
+      // unbound instead of making the terminal silently fail.
+      const named = request.threadId
+      if (named !== undefined && named !== null && (typeof named !== 'string' || !named || named.length > 256))
+        throw new Error('Invalid terminal thread')
+      const threadId = (named === undefined ? currentPresentation().getActiveThreadId() : named) ?? '__unbound__'
       // On another computer the terminal starts in the thread's own folder, in that computer's default shell:
       // this window names no folder of its own, no shell arguments and no environment.
       const remote = isQualifiedId(threadId)
@@ -2172,23 +2220,32 @@ export function registerGuiIpc(
     return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id))).root
   })
 
+  // `root` is a folder the Files panel browses instead of the thread's; the daemon accepts it from this computer's
+  // window only. It is sent only to a service that understands it: an older one would answer for the thread's folder.
+  const browseSupported = browseSupport(() => guiMms.hello?.instanceId, () => guiMms.request('capabilities'))
+  const browsedRoot = (root: unknown) => browsedRootParams(root, browseSupported)
+
+  registerHandler('fs:listDrives', () => guiMms.request<{ home: string; drives: Array<{ path: string; label: string }> }>('files.drives'))
+
   registerHandler(
     'fs:listDir',
-    async (_e, dirPath?: string, projectId?: string, threadId?: string | null) =>
-      (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), path: dirPath ?? '' })).entries
+    async (_e, dirPath?: string, projectId?: string, threadId?: string | null, root?: string) =>
+      (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: dirPath ?? '' })).entries
   )
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
+      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
   )
   registerHandler(
     'fs:readAsset',
     // The daemon sends a preview in pieces that fit a message; they are joined here.
-    (_e, filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
-      readAssetInPieces((offset, length) =>
-        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), path: filePath, offset, length })
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
+      const browsed = await browsedRoot(root)
+      return readAssetInPieces((offset, length) =>
+        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
+    }
   )
   registerHandler(
     'fs:writeFile',
@@ -2197,12 +2254,14 @@ export function registerGuiIpc(
       filePath: string,
       content: string,
       projectId?: string,
-      threadId?: string | null
+      threadId?: string | null,
+      root?: string
     ) => {
       // A request to the daemon is one frame of at most 4 MiB; say so before sending rather than fail inside the transport.
       if (saveExceedsRequest(content)) throw new Error(SAVE_TOO_LARGE_MESSAGE)
       await guiMms.request('files.writeDirect', {
         ...filesScope(projectId, threadId),
+        ...await browsedRoot(root),
         path: filePath,
         content,
         expectedProfileId: guiMms.getWindowBinding()?.profileId
@@ -2287,9 +2346,17 @@ export function registerGuiIpc(
     )
   }
   gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty, operationId: options?.operationId }))
-  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId, selection: options?.selection }))
   // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
-  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string; selection?: GitCommitSelection }) => ({ expectedBranch: options?.expectedBranch, selection: options?.selection }))
+  // What the next commit takes: read as hunks, include or leave out, and undo the last commit of a project folder.
+  gitMutation('git:changes', 'git.changes', (options?: { paths?: string[] }) => ({ paths: options?.paths }))
+  gitMutation('git:include', 'git.include', (input: GitIncludeRequest | { all: true; include: boolean }) => ({ ...input }))
+  gitMutation('git:undoLastCommit', 'git.undoLastCommit', (expectedHead: string) => ({ expectedHead }))
+  // Revert hunks or files with a kept copy, put one back, and list those that can be.
+  gitMutation('git:revert', 'git.revert', (input: GitRevertRequest) => ({ ...input }))
+  gitMutation('git:restoreReverted', 'git.restoreReverted', (revertId: string) => ({ revertId }))
+  gitMutation('git:revertedList', 'git.revertedList')
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
@@ -2586,6 +2653,17 @@ export function registerGuiIpc(
   registerHandler('readAloud:readLocalModelFile', (_e, modelId: string, path: string) =>
     localTtsModels.readFile(modelId, path)
   )
+  // Kokoro on onnxruntime-node, one utility process per slot (see NativeTtsSlots).
+  const nativeTts = new NativeTtsSlots({
+    fork: () => utilityProcess.fork(nativeTtsHostScript(), [], { serviceName: 'Mousse voice engine' }),
+    readFile: (modelId, path) => localTtsModels.readFile(modelId, path),
+    isDownloaded: async (modelId) => (await localTtsModels.status(modelId)).state.status === 'downloaded'
+  })
+  registerHandler('readAloud:nativeOpen', (event, modelId: unknown) => nativeTts.open(event.sender, modelId))
+  registerHandler('readAloud:nativeSpeak', (event, slotId: unknown, text: unknown, voice: unknown, speed: unknown) =>
+    nativeTts.speak(event.sender, slotId, text, voice, speed)
+  )
+  registerHandler('readAloud:nativeClose', (event, slotId: unknown) => nativeTts.close(event.sender, slotId))
   registerHandler('readAloud:synthesizeWithProvider', async (_e, request: ProviderSpeechRequest): Promise<ProviderSpeechResult> => {
     const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
       providerId: request?.providerId,
@@ -2716,13 +2794,10 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  registerHandler('dialog:pickFiles', async (event, request: unknown) => {
-    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
-    const title = (request as { title?: unknown } | null)?.title
-    const options: Electron.OpenDialogOptions = { ...(typeof title === 'string' ? { title } : {}), properties: ['openFile', 'multiSelections'] }
-    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    return result.canceled ? [] : result.filePaths
-  })
+  // A file pasted into a bot's composer has no path: it waits in the temporary folder until the service copies it.
+  registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
+    stageBotAttachment(app.getPath('temp'), name, bytes)
+  )
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
