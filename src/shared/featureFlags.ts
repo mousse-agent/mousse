@@ -2,7 +2,6 @@ export interface MousseFeatureFlags {
   subagentLifecycleV2: boolean
   repositoryCoordination: boolean
   externalThreadStorage: boolean
-  transactionalThreadStore: boolean
   threadWorkspaces: boolean
   turnCheckpoints: boolean
   publish: boolean
@@ -18,7 +17,6 @@ export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
   subagentLifecycleV2: false,
   repositoryCoordination: false,
   externalThreadStorage: false,
-  transactionalThreadStore: false,
   threadWorkspaces: false,
   turnCheckpoints: false,
   publish: false,
@@ -26,14 +24,13 @@ export const DEFAULT_FEATURE_FLAGS: MousseFeatureFlags = {
   conversationBranches: false,
   codeRevertRedo: false,
   threadTrashGc: false,
-  sqliteThreadStore: false
+  sqliteThreadStore: true
 }
 
 const PREDECESSORS: Array<[keyof MousseFeatureFlags, keyof MousseFeatureFlags]> = [
   ['repositoryCoordination', 'subagentLifecycleV2'],
   ['externalThreadStorage', 'repositoryCoordination'],
-  ['transactionalThreadStore', 'externalThreadStorage'],
-  ['threadWorkspaces', 'transactionalThreadStore'],
+  ['threadWorkspaces', 'externalThreadStorage'],
   ['turnCheckpoints', 'threadWorkspaces'],
   ['publish', 'turnCheckpoints'],
   ['latestTurnUndo', 'publish'],

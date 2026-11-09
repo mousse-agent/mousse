@@ -43,7 +43,6 @@ import type { ProjectManager } from './ProjectManager'
 import { getMousseHomeDir } from './paths'
 import { atomicWriteJsonSync, fsyncDirectorySync } from './AtomicFs'
 import { ThreadGenerationStore } from './ThreadGenerationStore'
-import { ThreadJournal } from './ThreadJournal'
 import { ThreadRecoveryService } from './ThreadRecoveryService'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
@@ -224,7 +223,6 @@ export class ThreadDataStore extends EventEmitter {
   private projectListCache = new Map<string, Thread[]>()
   private readonly storageLayout: ThreadStorageLayout
   private readonly storageMigration: ThreadStorageMigration
-  private transactionalOverride?: boolean
   readonly lifecycleStore: ResourceLifecycleStore
   private lifecycleMigrationDiagnostics: LegacyTrashDiagnostic[] = []
 
@@ -357,6 +355,7 @@ export class ThreadDataStore extends EventEmitter {
 
   /** Writes back and closes the thread databases at shutdown; the next use opens them again. */
   closeThreadStorage(): void {
+    this.stopBackgroundImport()
     this.flushMetaTouches()
     this.stopSearchIndexSweep()
     const store = this.threadDbStore
@@ -412,19 +411,20 @@ export class ThreadDataStore extends EventEmitter {
   private async runImport(id: string): Promise<ThreadImportOutcome> {
     const threadDir = this.getThreadDir(id)
     const errorPath = join(threadDir, 'thread-db-import-error.json')
-    const transactional = this.transactionalStoreEnabled()
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
         if (ThreadDbStore.usesDb(threadDir)) return { status: 'already' }
         const fingerprint: FileStamp[] = withThreadDataMutationLock(threadDir, () => {
           removeAbandonedImports(threadDir)
-          if (transactional && existsSync(join(threadDir, 'manifest.json'))) {
+          // A thread that once used the transactional store: finish what a crash left unfinished, so the import
+          // reads the generation that was meant to be current.
+          if (existsSync(join(threadDir, 'manifest.json'))) {
             new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
           }
           return legacyFingerprint(threadDir)
         })
         const tmpName = `${THREAD_DB_FILE}.import-${process.pid}-${uuidv4()}`
-        const built = await this.threadDb().client.call('build', threadDir, { tmpName, transactional, fingerprint })
+        const built = await this.threadDb().client.call('build', threadDir, { tmpName, fingerprint })
         if (!built.ok) continue
         const published = withThreadDataMutationLock(threadDir, () => {
           const tmp = join(threadDir, tmpName)
@@ -461,6 +461,51 @@ export class ThreadDataStore extends EventEmitter {
       this.emit('thread-storage-import-failed', { id, reason })
       return { status: 'failed', reason }
     }
+  }
+
+  private backgroundImport?: { stopped: boolean }
+
+  /**
+   * Imports every listed thread that is still on JSON files, one at a time in the background, starting after
+   * `delayMs`. Each import runs in the read worker; a failure leaves the thread on JSON and is retried later.
+   */
+  startBackgroundImport(options: { delayMs?: number; pauseMs?: number } = {}): void {
+    if (this.backgroundImport || !this.sqliteStoreEnabled()) return
+    const run = { stopped: false }
+    this.backgroundImport = run
+    const pause = (ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.() })
+    void (async () => {
+      await pause(options.delayMs ?? 10_000)
+      for (const thread of this.listAllThreads()) {
+        if (run.stopped) return
+        let threadDir: string
+        try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
+        if (ThreadDbStore.usesDb(threadDir) || existsSync(join(threadDir, EXPORTED_MARKER))) continue
+        const state = this.importState.get(thread.id)
+        if (state && (state.running || Date.now() < state.retryAt)) continue
+        await this.importThreadStorage(thread.id).catch(() => undefined)
+        await pause(options.pauseMs ?? 50)
+      }
+    })()
+  }
+
+  stopBackgroundImport(): void {
+    if (this.backgroundImport) this.backgroundImport.stopped = true
+    this.backgroundImport = undefined
+  }
+
+  /** How many listed threads use thread.db, are still on JSON, or failed to import (with the reason). */
+  threadStorageStatus(): { database: number; json: number; failed: Array<{ threadId: string; reason: string }> } {
+    const status = { database: 0, json: 0, failed: [] as Array<{ threadId: string; reason: string }> }
+    for (const thread of this.listAllThreads()) {
+      let threadDir: string
+      try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
+      if (ThreadDbStore.usesDb(threadDir)) { status.database += 1; continue }
+      status.json += 1
+      const error = readJsonFile<{ reason?: string } | undefined>(join(threadDir, 'thread-db-import-error.json'), undefined)
+      if (error?.reason) status.failed.push({ threadId: thread.id, reason: error.reason })
+    }
+    return status
   }
 
   private readonly downgradeChecked = new Set<string>()
@@ -505,7 +550,7 @@ export class ThreadDataStore extends EventEmitter {
     return withThreadDataMutationLock(threadDir, () => {
       if (!ThreadDbStore.usesDb(threadDir)) return { exported: false }
       const data = this.threadDb().load(threadDir)
-      this.writeCompatibilityProjection(threadDir, { ...data, messageQueue: undefined })
+      this.writeJsonFiles(threadDir, { ...data, messageQueue: undefined }, { conversationState: true })
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const manifest = join(threadDir, 'manifest.json')
       if (existsSync(manifest)) renameSync(manifest, `${manifest}.before-export-${stamp}`)
@@ -520,16 +565,6 @@ export class ThreadDataStore extends EventEmitter {
       this.downgradeChecked.delete(threadDir)
       return { exported: true, databaseKeptAs: kept }
     })
-  }
-
-  setTransactionalStoreEnabled(enabled: boolean): void {
-    this.transactionalOverride = enabled
-  }
-
-  private transactionalStoreEnabled(): boolean {
-    if (this.transactionalOverride !== undefined) return this.transactionalOverride
-    const value = process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE
-    return value === '1' || value === 'true'
   }
 
   private projectsCacheKey(): string {
@@ -1131,14 +1166,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   loadThreadData(id: string): ThreadData {
-    const threadDir = this.getThreadDir(id)
-    if (ThreadDbStore.usesDb(threadDir)) return this.loadThreadDataFromDir(threadDir, id)
-    if (!this.transactionalStoreEnabled()) return this.loadThreadDataFromDir(threadDir, id)
-    return withThreadDataMutationLock(threadDir, () => {
-      if (ThreadDbStore.usesDb(threadDir)) return this.loadThreadDataFromDir(threadDir, id)
-      new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
-      return this.loadThreadDataFromDir(threadDir, id)
-    })
+    return this.loadThreadDataFromDir(this.getThreadDir(id), id)
   }
 
   /**
@@ -1161,7 +1189,7 @@ export class ThreadDataStore extends EventEmitter {
       this.checkForDowngradeWrites(threadDir, id)
       return { ...this.threadDb().load(threadDir), messageQueue: this.readMessageQueueFile(threadDir, id) }
     }
-    const data = readLegacyThreadData(threadDir, { transactional: this.transactionalStoreEnabled() })
+    const data = readLegacyThreadData(threadDir)
     this.scheduleImport(id)
     return { ...data, mousseAgentSessions: data.mousseAgentSessions, messageQueue: this.readMessageQueueFile(threadDir, id) }
   }
@@ -1200,9 +1228,6 @@ export class ThreadDataStore extends EventEmitter {
           mousseAgentSessions: patch.mousseAgentSessions === null ? undefined : patch.mousseAgentSessions ?? current.mousseAgentSessions,
           messageQueue: current.messageQueue
         }
-      }
-      if (this.transactionalStoreEnabled()) {
-        new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
       }
       const current = this.loadThreadDataFromDir(threadDir, id)
       const patch = mutator(current)
@@ -1283,9 +1308,6 @@ export class ThreadDataStore extends EventEmitter {
   ): void {
     const threadDir = this.getThreadDir(id)
     withThreadDataMutationLock(threadDir, () => {
-      if (this.transactionalStoreEnabled() && !ThreadDbStore.usesDb(threadDir)) {
-        new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
-      }
       this.saveThreadDataUnlocked(id, data, terminalScrollbacks)
     })
   }
@@ -1315,108 +1337,10 @@ export class ThreadDataStore extends EventEmitter {
       this.touchAfterSave(threadDir, data.messages.length > 0, { throttle: true })
       return
     }
-    const transactional = this.transactionalStoreEnabled()
-    const journal = transactional ? new ThreadJournal(threadDir) : undefined
-    const operationId = transactional ? uuidv4() : undefined
-    const generationStore = transactional ? new ThreadGenerationStore(threadDir) : undefined
-    const expectedManifest = generationStore?.getManifest()
-    const intent = journal?.append({
-      operationId: operationId!,
-      operationType: 'thread-data-save',
-      state: 'planned',
-      expectedPreState: expectedManifest
-    })
-    let committed = false
-
-    try {
-      if (transactional) {
-        journal!.append({
-          operationId: operationId!,
-          operationType: 'thread-data-save',
-          state: 'running',
-          details: { intentSequence: intent!.sequence }
-        })
-        // queue.json is authoritative and is only observed here. Actions,
-        // branches and workspace are owned by their domain services, so an
-        // unrelated transcript save must carry them forward rather than
-        // replacing them with empty placeholders.
-        const queue = this.readMessageQueueFile(threadDir, id)
-        const generation = generationStore!.createGeneration({
-          messages: data.messages,
-          agents: data.agents,
-          tasks: data.tasks,
-          llmContext: data.llmContext,
-          queue,
-          mousseAgentSessions: data.mousseAgentSessions,
-          workspace: this.readJsonFile<unknown>(join(threadDir, 'workspace.json'), undefined),
-          conversationBranches: this.validateArray<unknown>(
-            this.readJsonFile<unknown>(join(threadDir, 'conversation-branches.json'), []),
-            'conversation-branches',
-            threadDir
-          ),
-          actions: this.validateArray<unknown>(
-            this.readJsonFile<unknown>(join(threadDir, 'actions.json'), []),
-            'actions',
-            threadDir
-          )
-        }, intent!.sequence)
-        journal!.append({
-          operationId: operationId!,
-          operationType: 'thread-data-save',
-          state: 'running',
-          resultGenerationId: generation.generationId,
-          details: { intentSequence: intent!.sequence, generationDurable: true }
-        })
-        generationStore!.selectExistingGeneration(generation.generationId, {
-          expectedCurrentGenerationId: expectedManifest?.currentGenerationId ?? null
-        })
-        journal!.append({
-          operationId: operationId!,
-          operationType: 'thread-data-save',
-          state: 'completed',
-          resultGenerationId: generation.generationId,
-          details: { intentSequence: intent!.sequence }
-        })
-        committed = true
-
-        // Flat files are a compatibility projection, never the transaction
-        // authority. A projection failure cannot turn a committed checkpoint
-        // into a failed/ambiguous operation.
-        try {
-          this.writeCompatibilityProjection(threadDir, data)
-        } catch (projectionError) {
-          journal!.append({
-            operationId: operationId!,
-            operationType: 'thread-data-save',
-            state: 'completed',
-            resultGenerationId: generation.generationId,
-            details: {
-              intentSequence: intent!.sequence,
-              compatibilityProjectionError:
-                projectionError instanceof Error ? projectionError.message : String(projectionError)
-            }
-          })
-        }
-      } else {
-        this.writeCompatibilityProjection(threadDir, data)
-      }
-
-      this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
-      this.touchAfterSave(threadDir, data.messages.length > 0)
-    } catch (error) {
-      if (!committed) {
-        journal?.append({
-          operationId: operationId!,
-          operationType: 'thread-data-save',
-          state: 'failed',
-          details: {
-            intentSequence: intent?.sequence,
-            error: error instanceof Error ? error.message : String(error)
-          }
-        })
-      }
-      throw error
-    }
+    // A thread still on JSON files (its import failed, or the store is off): only the plain files, written whole.
+    this.writeJsonFiles(threadDir, data)
+    this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
+    this.touchAfterSave(threadDir, data.messages.length > 0)
   }
 
   private writeTerminalScrollbacks(threadDir: string, terminalScrollbacks?: Record<string, string>): void {
@@ -1481,7 +1405,12 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
-  private writeCompatibilityProjection(threadDir: string, data: ThreadData): void {
+  /**
+   * A thread's data as the JSON files every earlier build read. `conversationState` also writes
+   * `conversation-state.json` (the export for going back to an older version); a plain save instead removes a
+   * leftover one, which would otherwise hold an older copy of the same messages.
+   */
+  private writeJsonFiles(threadDir: string, data: ThreadData, options: { conversationState?: boolean } = {}): void {
     this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
     this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
     this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
@@ -1491,13 +1420,13 @@ export class ThreadDataStore extends EventEmitter {
     const sessionsPath = join(threadDir, 'mousse-agent-sessions.json')
     if (data.mousseAgentSessions === undefined) rmSync(sessionsPath, { force: true })
     else this.writeJsonAtomic(sessionsPath, data.mousseAgentSessions)
-    // Publish the transcript + native context pair last. Readers prefer this
-    // single atomic unit; the preceding files remain compatibility projections.
-    this.writeJsonAtomic(join(threadDir, 'conversation-state.json'), {
-      schemaVersion: 1,
-      messages: data.messages,
-      llmContext: data.llmContext
-    })
+    const conversationState = join(threadDir, 'conversation-state.json')
+    if (options.conversationState) {
+      // Written last: older builds prefer it when it is at least as new as messages.json.
+      this.writeJsonAtomic(conversationState, { schemaVersion: 1, messages: data.messages, llmContext: data.llmContext })
+    } else {
+      rmSync(conversationState, { force: true })
+    }
     // Intentionally do not write queue.json here.
   }
 

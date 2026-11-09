@@ -120,8 +120,23 @@ export function loadMousseAgentSessions(threadDir: string): MousseAgentSessionSn
  * the current generation wins; otherwise a `conversation-state.json` at least as new as `messages.json` and
  * `llm-context.json` wins over them. The queue is not part of it (`queue.json` is read on its own).
  */
-export function readLegacyThreadData(threadDir: string, options: { transactional: boolean }): StoredThreadData {
-  if (options.transactional) {
+/**
+ * True when a thread's current generation (the transactional store, an opt-in of earlier builds) is at least as new
+ * as its flat files. Those builds wrote the generation first and the flat files after, so flat files that are newer
+ * were written by a build that had the store off again.
+ */
+function generationIsCurrent(threadDir: string): boolean {
+  try {
+    const manifest = statSync(join(threadDir, 'manifest.json')).mtimeMs
+    const flat = existsSync(join(threadDir, 'messages.json')) ? statSync(join(threadDir, 'messages.json')).mtimeMs : 0
+    return manifest >= flat
+  } catch {
+    return false
+  }
+}
+
+export function readLegacyThreadData(threadDir: string, options: { transactional?: boolean } = {}): StoredThreadData {
+  if (options.transactional ?? generationIsCurrent(threadDir)) {
     const current = new ThreadGenerationStore(threadDir).loadCurrent()
     if (current) {
       const generationDir = join(threadDir, 'generations', current.descriptor.generationId)

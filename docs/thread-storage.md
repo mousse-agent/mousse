@@ -2,7 +2,9 @@
 
 Each thread keeps its history in one SQLite database, `thread.db`, inside the thread's folder (`<profile>/thread-data/{standalone,repositories/<project>}/<thread>/`). Trash, restore, purge, retirement, copies between computers and backups still move whole folders, and deleting a thread's folder frees all of its space at once.
 
-Threads made before this keep their JSON files until they are imported (see [Moving a thread from JSON](#moving-a-thread-from-json)). While the `sqliteThreadStore` feature is off, new threads still start on JSON; a thread that already has a `thread.db` always uses it.
+New threads start with a `thread.db`. Threads made before it are imported in the background, one at a time, starting shortly after the daemon starts (see [Moving a thread from JSON](#moving-a-thread-from-json)). The `sqliteThreadStore` feature is on by default. Turning it off stops new imports only: a thread that already has a `thread.db` always uses it.
+
+A thread whose import failed keeps working from its JSON files. A save rewrites them whole, as before, but writes only the plain files: no `conversation-state.json` (an older copy left behind is removed) and no `generations/`. The opt-in transactional store of earlier versions is gone; a thread that used it is imported from its current generation, after unfinished generations are reconciled.
 
 ## What a thread database holds
 

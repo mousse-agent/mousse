@@ -150,59 +150,6 @@ describe('transactional thread generations', () => {
     expect(result.recoveryRequired).toEqual(['running'])
   })
 
-  it('projects ThreadDataStore saves into a current immutable generation behind the flag', () => {
-    const home = root()
-    const previousHome = process.env.MOUSSE_HOME
-    const previousFlag = process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE
-    process.env.MOUSSE_HOME = home
-    process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE = '1'
-    try {
-      const projects = new ProjectManager()
-      const threads = new ThreadDataStore(projects)
-      projects.setThreadStore(threads)
-      const thread = threads.createThread('transactional')
-      threads.saveThreadData(thread.id, {
-        messages: [{ id: 'm', role: 'user', content: 'durable', timestamp: new Date().toISOString() }],
-        agents: [],
-        tasks: [],
-        messageQueue: []
-      })
-      expect(threads.loadThreadData(thread.id).messages[0]?.content).toBe('durable')
-      const directory = threads.getThreadDir(thread.id)
-      expect(new ThreadGenerationStore(directory).getManifest()?.generationCounter).toBe(1)
-      expect(new ThreadJournal(directory).latestByOperation().values().next().value?.state).toBe('completed')
-    } finally {
-      if (previousHome === undefined) delete process.env.MOUSSE_HOME
-      else process.env.MOUSSE_HOME = previousHome
-      if (previousFlag === undefined) delete process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE
-      else process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE = previousFlag
-    }
-  })
-
-  it('uses live queue authority and preserves action/branch/workspace collections', () => {
-    const home = root()
-    const projects = new ProjectManager()
-    const threads = new ThreadDataStore(projects, home)
-    projects.setThreadStore(threads)
-    threads.setTransactionalStoreEnabled(true)
-    const thread = threads.createThread('collections')
-    const directory = threads.getThreadDir(thread.id)
-    atomicWriteJsonSync(join(directory, 'workspace.json'), { lifecycle: 'ready' })
-    atomicWriteJsonSync(join(directory, 'actions.json'), [{ id: 'action-1' }])
-    atomicWriteJsonSync(join(directory, 'conversation-branches.json'), [{ id: 'branch-1' }])
-    threads.saveThreadData(thread.id, { messages: [], agents: [], tasks: [] })
-    threads.saveMessageQueue(thread.id, [{
-      id: 'q1', threadId: thread.id, content: 'live', enqueuedAt: new Date().toISOString(),
-      order: 0, intent: 'normal', state: 'pending'
-    }])
-
-    expect(threads.loadThreadData(thread.id).messageQueue.map((item) => item.id)).toEqual(['q1'])
-    const current = new ThreadGenerationStore(directory).loadCurrent()!.data
-    expect(current.actions).toEqual([{ id: 'action-1' }])
-    expect(current.conversationBranches).toEqual([{ id: 'branch-1' }])
-    expect(current.workspace).toEqual({ lifecycle: 'ready' })
-  })
-
   it('fails closed on corrupt thread JSON and preserves the original bytes', () => {
     const home = root()
     const projects = new ProjectManager()

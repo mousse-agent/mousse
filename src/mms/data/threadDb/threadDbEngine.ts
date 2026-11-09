@@ -43,7 +43,7 @@ export interface SaveRequest {
 }
 export type SaveResult = { ok: true; info: DbInfo; rids: number[] } | { ok: false; conflict: true; info: DbInfo }
 
-export interface BuildRequest { tmpName: string; transactional: boolean; fingerprint: FileStamp[] }
+export interface BuildRequest { tmpName: string; fingerprint: FileStamp[] }
 export type BuildResult =
   | { ok: true; tmpName: string; messages: number; rows: number }
   | { ok: false; stale: true }
@@ -592,7 +592,7 @@ export class ThreadDbEngine {
       rmSync(stage, { recursive: true, force: true })
     }
     try {
-      const source = readLegacyThreadData(dir, { transactional: request.transactional })
+      const source = readLegacyThreadData(dir)
       const db = new DatabaseSync(tmp)
       let rows: number
       try {

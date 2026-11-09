@@ -7,6 +7,7 @@ import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 import { readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
+import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 
 const homes: string[] = []
@@ -69,7 +70,7 @@ describe('threads kept in thread.db', () => {
   it('imports a JSON thread, checks it, and keeps the JSON files untouched as a backup', async () => {
     const path = home()
     const { id, dir } = jsonThread(path, [message('m1', 'one'), message('m2', 'two')])
-    const before = Object.fromEntries(['messages.json', 'agents.json', 'conversation-state.json'].map((name) => [name, readFileSync(join(dir, name), 'utf8')]))
+    const before = Object.fromEntries(['messages.json', 'agents.json', 'llm-context.json'].map((name) => [name, readFileSync(join(dir, name), 'utf8')]))
     const { threads } = open(path)
     const legacy = threads.loadThreadData(id)
     expect(await threads.importThreadStorage(id)).toEqual({ status: 'imported', messages: 2 })
@@ -80,6 +81,41 @@ describe('threads kept in thread.db', () => {
     expect(open(path).threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3'])
     expect(await threads.importThreadStorage(id)).toEqual({ status: 'already' })
     expect(readdirSync(dir).filter((name) => name.startsWith('thread.db.'))).toEqual([])
+  })
+
+  it('imports a thread that used the transactional store from its current generation', async () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('flat', 'older flat copy')])
+    // The generation is newer than the flat files, as the transactional store left it.
+    new ThreadGenerationStore(dir).publish({ messages: [message('gen', 'from the generation')], agents: [], tasks: [], queue: [] }, 1)
+    const { threads } = open(path)
+    expect(await threads.importThreadStorage(id)).toMatchObject({ status: 'imported' })
+    expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['gen'])
+  })
+
+  it('writes only the plain files for a thread still on JSON', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    // What an earlier build left: the same messages a second time.
+    writeFileSync(join(dir, 'conversation-state.json'), JSON.stringify({ schemaVersion: 1, messages: [message('m1', 'one')], llmContext }))
+    const { threads } = open(path, false)
+    threads.mutateThreadData(id, (current) => ({ messages: [...current.messages, message('m2', 'two')] }))
+    expect(existsSync(join(dir, 'conversation-state.json'))).toBe(false)
+    expect(existsSync(join(dir, 'generations'))).toBe(false)
+    expect(threads.loadThreadData(id).messages).toHaveLength(2)
+  })
+
+  it('imports every listed JSON thread in the background', async () => {
+    const path = home()
+    const first = jsonThread(path, [message('a', 'a')])
+    const second = jsonThread(path, [message('b', 'b')])
+    const { threads } = open(path)
+    expect(threads.threadStorageStatus()).toMatchObject({ database: 0, json: 2 })
+    threads.startBackgroundImport({ delayMs: 0, pauseMs: 0 })
+    for (let i = 0; i < 100 && threads.threadStorageStatus().database < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+    threads.stopBackgroundImport()
+    expect(threads.threadStorageStatus()).toEqual({ database: 2, json: 0, failed: [] })
+    expect(existsSync(join(first.dir, 'thread.db')) && existsSync(join(second.dir, 'thread.db'))).toBe(true)
   })
 
   it('a thread whose import fails keeps working from JSON and says why', async () => {

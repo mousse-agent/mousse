@@ -326,7 +326,9 @@ config.getPath() // ~/.mousse/mousse.conf
 
 ## Thread workspace rollout flags
 
-`mousse.conf.features` contains gated flags in dependency order: `subagentLifecycleV2`, `repositoryCoordination`, `externalThreadStorage`, `transactionalThreadStore`, `threadWorkspaces`, `turnCheckpoints`, `publish`, `latestTurnUndo`, `conversationBranches`, `codeRevertRedo`, and `threadTrashGc`. Configuration loading rejects a flag whose predecessor is disabled.
+`mousse.conf.features` contains gated flags in dependency order: `subagentLifecycleV2`, `repositoryCoordination`, `externalThreadStorage`, `threadWorkspaces`, `turnCheckpoints`, `publish`, `latestTurnUndo`, `conversationBranches`, `codeRevertRedo`, and `threadTrashGc`. Configuration loading rejects a flag whose predecessor is disabled.
+
+`sqliteThreadStore` (on by default, no predecessor) keeps each thread's history in its own SQLite database and imports threads still on JSON files in the background; see [thread storage](thread-storage.md). Turning it off stops new imports only: a thread that already has a `thread.db` keeps using it. The opt-in `transactionalThreadStore` flag of earlier versions is gone; threads that used it are imported from their current generation.
 
 Repository-backed runtime data is stored beneath `$MOUSSE_HOME/thread-data/repositories/<repositoryId>/`; standalone data is beneath `$MOUSSE_HOME/thread-data/standalone/`. Legacy project `.mousse/.data` directories migrate lazily through copy/hash verification and recoverable migration trash.
 
