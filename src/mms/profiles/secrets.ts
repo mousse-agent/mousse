@@ -35,18 +35,23 @@ export function createProfileSecretAdapter(options: {
     }
   }
 
-  const adapter: IntegrationSecretAdapter = {
-    // `${secret:NAME}` in a tool's settings reads the profile's secret store (a saved key), then the inherited overlay.
+  // `${secret:NAME}` in a tool's settings reads only a saved key (a key name) from the profile's secret store; any other
+  // ref, such as an automation's webhook signing secret (`scheduled-webhook-<id>`), reads the inherited overlay only.
+  const toolSecrets: IntegrationSecretAdapter = {
+    resolveEnv: (value) => value,
+    resolveSecretRef: (ref) => (isKeyName(ref) ? readFileSecrets()[ref] : undefined) ?? environment[ref]
+  }
+  return {
     resolveEnv(value: string): string {
-      return resolveEnvValue(value, environment, adapter)
+      return resolveEnvValue(value, environment, toolSecrets)
     },
+    // The daemon's own lookups (a webhook's secret by its ref) read the whole store.
     resolveSecretRef(ref: string): string | undefined {
       const fromFile = readFileSecrets()[ref]
       if (fromFile !== undefined) return fromFile
       return environment[ref]
     }
   }
-  return adapter
 }
 
 /** The saved keys' names in the profile's secret store (never their values); other entries, such as webhook secrets, are left out. */

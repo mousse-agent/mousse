@@ -75,6 +75,15 @@ describe('saved keys', () => {
     expect(resolveRecord({ GITHUB_TOKEN: '${secret:GITHUB_TOKEN}', OTHER: '${secret:MISSING}' }, secrets)).toEqual({ GITHUB_TOKEN: VALUE, OTHER: '' })
   })
 
+  it('never gives a tool an automation’s webhook signing secret, which the daemon still reads', () => {
+    writeProfileSecret(home, 'GITHUB_TOKEN', VALUE)
+    writeProfileSecret(home, 'scheduled-webhook-j1', 'whsec_x')
+    const secrets = createProfileSecretAdapter({ profileRoot: home, inheritProcessEnv: false })
+    expect(secrets.resolveEnv('Bearer ${secret:scheduled-webhook-j1}')).toBe('Bearer ')
+    expect(resolveRecord({ A: '${secret:scheduled-webhook-j1}', B: '${secret:GITHUB_TOKEN}' }, secrets)).toEqual({ A: '', B: VALUE })
+    expect(secrets.resolveSecretRef?.('scheduled-webhook-j1')).toBe('whsec_x')
+  })
+
   it('ends a run Incomplete with "Add key <name>" when a key it names is not stored, and runs it once the key is there', async () => {
     const store = new ScheduledJobStore(MousseConfigStore.load(home))
     const prompts: Array<{ prompt: string; ingress: unknown }> = []
