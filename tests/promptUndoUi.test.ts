@@ -93,6 +93,16 @@ it('shows backend failure and leaves the prompt available rather than deleting i
   expect(undoLatest).toHaveBeenCalledTimes(1)
 })
 
+it('says why when the daemon asks for a review the app cannot show, instead of doing nothing', async () => {
+  const review = { requiresReview: true, diff: '', diffSha: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', actionId: target.actionId }
+  const { undoLatest } = await mount(vi.fn().mockResolvedValue(history), vi.fn().mockResolvedValue(review))
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(hooks.states[2]).toMatch(/^Undo didn't change anything\./))
+  render()
+  expect(notice()!.tone).toBe('error')
+  expect(undoLatest).toHaveBeenCalledTimes(1)
+})
+
 it('uses authoritative conversation redo after Undo hides the prompt', async () => {
   const redoTarget = { actionId: 'undone', turnId: target.turnId, journalGeneration: 8 }
   const { redo } = await mount(vi.fn().mockResolvedValue({ ...history, undoTarget: undefined, redoTarget }))

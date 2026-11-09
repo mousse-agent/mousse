@@ -34,15 +34,15 @@ describe('evaluateRestore (SPEC §16.3)', () => {
     integrationTarget: { checkoutPath: primary, baseSha: 'a' }
   })
 
-  it('reviews the diff for weak containment, restores automatically for strong, and lets a reviewed restore proceed', () => {
+  it('restores automatically for every known provider, reviews the diff for unknown capabilities, and lets a reviewed restore proceed', () => {
     root = mkdtempSync(join(tmpdir(), 'mousse-restore-'))
     const worktree = join(root, 'worktrees', 't1')
     mkdirSync(worktree, { recursive: true })
     const owned = metadata('t1', worktree, join(root, 'primary'))
-    expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
-    expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [], reviewed: true })).toEqual({ action: 'proceed', mode: 'review_diff' })
+    expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'workspace_only' })
     expect(evaluateRestore({ threadId: 't1', caps: PI_TEST_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'auto' })
     expect(evaluateRestore({ threadId: 't1', caps: null, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
+    expect(evaluateRestore({ threadId: 't1', caps: null, metadata: owned, others: [], reviewed: true })).toEqual({ action: 'proceed', mode: 'review_diff' })
   })
 
   it('refuses workspace_shared when the thread does not own the worktree or another thread overlaps it by realpath', () => {
@@ -150,9 +150,19 @@ describe('undo and revert through the protocol (SPEC §16.3)', () => {
   }
   const runs = async (threadId: string) => (await client.request<{ runs: RunRecord[] }>('runs.list', { threadId })).runs
 
-  it('weak containment returns the diff to review, restores nothing, and restores as an undo run once reviewed', async () => {
-    const { thread, workspace, action } = await threadWithAction('weak')
+  it('weak containment restores the worktree automatically as an undo run, with no review (Claude, Codex, Cursor)', async () => {
+    const { thread, workspace } = await threadWithAction('weak')
     mms.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
+    const undone = await client.request<{ requiresReview?: boolean; action: { id: string }; runId: string }>('actions.undoLatest', { threadId: thread.id })
+    expect(undone.requiresReview).toBeUndefined()
+    expect(f.read(workspace)).toBe('base\n')
+    expect(mms.runEngine.listEvents(thread.id).filter((event) => event.type === 'restore.review_required')).toEqual([])
+    expect(await runs(thread.id)).toMatchObject([{ runId: undone.runId, source: 'undo', status: 'completed', outcome: { undoStrategy: 'checkpoint' } }])
+  }, 30_000)
+
+  it('unknown capabilities fail closed: the diff is reviewed first, and only the reviewed diff restores (M6)', async () => {
+    const { thread, workspace, action } = await threadWithAction('unknown')
+    vi.spyOn(mms.orchestrator, 'capabilitiesForThread').mockReturnValue(null)
     const review = await client.request<{ requiresReview: boolean; diff: string; diffSha: string; actionId: string }>('actions.undoLatest', { threadId: thread.id })
     expect(review).toMatchObject({ requiresReview: true, actionId: action.id })
     expect(review.diffSha).toBe(restoreDiffSha(review.diff))
@@ -174,17 +184,7 @@ describe('undo and revert through the protocol (SPEC §16.3)', () => {
 
     const undone = await client.request<{ action: { id: string }; runId: string }>('actions.undoLatest', { threadId: thread.id, reviewedDiffSha: review.diffSha })
     expect(f.read(workspace)).toBe('base\n')
-    // S2: the undo run records how it restored (no adapter rolls back natively today).
     expect(await runs(thread.id)).toMatchObject([{ runId: undone.runId, source: 'undo', status: 'completed', outcome: { undoStrategy: 'checkpoint' } }])
-  }, 30_000)
-
-  it('unknown capabilities fail closed: the diff is reviewed first (M6)', async () => {
-    const { thread, workspace } = await threadWithAction('unknown')
-    vi.spyOn(mms.orchestrator, 'capabilitiesForThread').mockReturnValue(null)
-    const review = await client.request<{ requiresReview: boolean; diffSha: string }>('actions.undoLatest', { threadId: thread.id })
-    expect(review.requiresReview).toBe(true)
-    expect(f.read(workspace)).toBe('agent code\n')
-    expect(await runs(thread.id)).toEqual([])
   }, 30_000)
 
   it('strong containment restores automatically; undo and revert are runs; a failure ends the run failed', async () => {

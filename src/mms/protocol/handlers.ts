@@ -304,12 +304,20 @@ interface RestoreReview {
 }
 
 /**
+ * A visible message the person sent to start a turn. The answers to an agent's questions are stored as user messages
+ * (`questionAnswers`) but shown as a step of the agent's turn, so Undo never names one as the turn's prompt.
+ */
+function isTurnPrompt(message: ChatMessage): boolean {
+  return message.role === 'user' && !message.hidden && !message.questionAnswers?.length
+}
+
+/**
  * SPEC §16.3 restore gate for a file-restoring action: refuses (`workspace_shared`) unless the
  * thread owns its worktree and no other thread's worktree or live working directory overlaps it
  * (the other threads' workspaces are listed once per evaluation, and only when ownership holds);
- * for a weak-containment provider, or one whose capabilities are unknown, returns the diff to
- * review with its SHA-256 and appends `restore.review_required` — unless `reviewedDiffSha` names
- * exactly the diff a restore would apply now. Null: go ahead.
+ * for a provider whose capabilities are unknown, returns the diff to review with its SHA-256 and
+ * appends `restore.review_required` — unless `reviewedDiffSha` names exactly the diff a restore
+ * would apply now. Null: go ahead.
  */
 function restoreGate(
   ctx: HandlerContext,
@@ -3362,7 +3370,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const activeBranchId = new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const latest = actions.filter((action) => action.conversationBranchId === activeBranchId).at(-1)
       const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
-      const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+      const prompt = messages.filter(isTurnPrompt).at(-1)
       const busy = ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)
       const retained = latest?.retention?.state === 'available' || latest?.retention?.state === 'pinned'
       let contextMatches = true
@@ -3457,7 +3465,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new DomainRpcError('undo_boundary_unavailable', 'This turn has no exact recorded conversation Undo boundary.')
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
-        const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+        const prompt = messages.filter(isTurnPrompt).at(-1)
         if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new DomainRpcError('undo_boundary_unavailable', 'The latest prompt has no eligible Undo boundary.')
       }
       const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
@@ -3471,7 +3479,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       let gate: (() => RestoreReview | null) | undefined
       if (latest?.scope !== 'conversation') {
         if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('undo_boundary_unavailable', 'This prompt has no eligible recorded Undo boundary.')
-        // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
+        // SPEC §16.3: files are restored only in an owned, unshared worktree; unknown capabilities review first.
         gate = () => restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewedDiffSha })
       }
       // SPEC §13.2: a provider that rolls its own session back would undo natively; none does yet.
