@@ -165,6 +165,8 @@ export interface PinnedPopoverOptions {
   padding?: number
   /** `right`: beside the anchor, bottom edges aligned, growing upward (a rail item's menu). */
   side?: 'above' | 'right'
+  /** Above or below the anchor: `end` lines the layer's right edge up with the anchor's (a row's "…" at its end). */
+  align?: 'start' | 'end'
 }
 
 /**
@@ -182,7 +184,8 @@ export function usePinnedPopover({
   minHeight = 220,
   gap = 6,
   padding = 8,
-  side = 'above'
+  side = 'above',
+  align = 'start'
 }: PinnedPopoverOptions): CSSProperties {
   const hidden: CSSProperties = { position: 'fixed', top: 0, left: 0, zIndex: FLOATING_LAYER_Z_INDEX, visibility: 'hidden' }
   const [style, setStyle] = useState<CSSProperties>(hidden)
@@ -220,7 +223,8 @@ export function usePinnedPopover({
       const above = roomAbove >= Math.min(minHeight, maxHeight) || roomAbove >= roomBelow
       const room = Math.max(0, Math.floor(Math.min(maxHeight, above ? roomAbove : roomBelow)))
       const width = content.offsetWidth
-      const left = Math.round(Math.max(padding, Math.min(rect.left, viewportWidth - width - padding)))
+      const start = align === 'end' ? rect.right - width : rect.left
+      const left = Math.round(Math.max(padding, Math.min(start, viewportWidth - width - padding)))
       const originX = Math.round(Math.max(0, Math.min(width, rect.left + Math.min(rect.width, 40) / 2 - left)))
       const next: CSSProperties & Record<'--floating-max-height', string> = {
         position: 'fixed',
@@ -249,7 +253,7 @@ export function usePinnedPopover({
       window.removeEventListener('scroll', update, true)
       observer?.disconnect()
     }
-  }, [open, anchorRef, contentRef, maxHeight, minHeight, gap, padding, side])
+  }, [open, anchorRef, contentRef, maxHeight, minHeight, gap, padding, side, align])
 
   return style
 }
