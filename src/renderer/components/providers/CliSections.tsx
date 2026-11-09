@@ -33,6 +33,8 @@ export interface InstanceActions {
   update: () => Promise<void>
   /** Starts the sign-in; its prompts open the sign-in dialog. */
   signIn: () => Promise<void>
+  /** The user copied the sign-in command to run elsewhere: the page checks again by itself for a while. */
+  signInElsewhere?: () => void
   signOut: () => Promise<void>
   recheck: () => Promise<void>
   /** Runs this version anyway, though it has a known problem (this program only). */
@@ -116,7 +118,7 @@ export function SetupRow({
           below = (
             <>
               <span className="prov-command-hint">{inApp ? 'Or run this in a terminal, then check again.' : 'Run this in a terminal, then check again.'}</span>
-              <CommandBox command={step.command} label="Copy sign-in command" />
+              <CommandBox command={step.command} label="Copy sign-in command" onCopy={actions.signInElsewhere} />
             </>
           )
           if (inApp) control = button('signin', step.label, actions.signIn)

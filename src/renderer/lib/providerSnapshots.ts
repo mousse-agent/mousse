@@ -267,7 +267,149 @@ function ensureListening(): void {
   listening = true
   window.mousse.providers.onSnapshots(applySnapshotsEvent)
   window.mousse.providers.onOperation(applyOperationEvent)
-  window.mousse.providers.onServiceRestarted?.(() => failRunningOperations('The connection to the Mousse service was lost. Start the sign-in again.'))
+  window.mousse.providers.onServiceRestarted?.(() => {
+    failRunningOperations('The connection to the Mousse service was lost. Start the sign-in again.')
+    // Changes pushed while the window was not connected never arrived: read every scope on screen again.
+    void reloadLoadedScopes()
+  })
+}
+
+/** Reads every scope that has snapshots again (a missed change, a reconnect, a pending sign-in). */
+function reloadLoadedScopes(): Promise<void> {
+  const loads: Array<Promise<void>> = []
+  for (const [key, state] of Object.entries(useProviderSnapshotsStore.getState().scopes)) {
+    const scope = scopesByKey.get(key)
+    if (scope && state.snapshots && !state.loading) loads.push(loadProviderSnapshots(scope))
+  }
+  return Promise.all(loads).then(() => undefined)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sign-in changes
+
+/** Who an instance is signed in as, as far as a page showing it cares. */
+function signInSignature(snapshot: InstanceSnapshot): string {
+  return JSON.stringify([snapshot.auth.state, snapshot.auth.account?.id ?? null, snapshot.auth.account?.label ?? null])
+}
+
+/**
+ * Calls `changed` when an instance signs in, signs out or changes account, as snapshots events
+ * report it (an instance added or removed counts too). Bursts are gathered into one call. Pages that
+ * show sign-in state without reading the snapshot store (the usage page) read again from here.
+ */
+export function onProviderSignInChanged(changed: () => void, delayMs = LISTING_RELOAD_DELAY_MS): () => void {
+  const last = new Map<string, string>()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const unsubscribe = window.mousse.providers.onSnapshots((event) => {
+    const key = scopeKey(event.scope)
+    const signature = JSON.stringify(event.snapshots.map((snapshot) => [snapshot.instanceId, signInSignature(snapshot)]))
+    const previous = last.get(key)
+    last.set(key, signature)
+    // The first event of a scope is the baseline: nothing is known to have changed yet.
+    if (previous === undefined || previous === signature) return
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = undefined
+      changed()
+    }, delayMs)
+  })
+  return () => {
+    if (timer) clearTimeout(timer)
+    unsubscribe()
+  }
+}
+
+/** How often a pending sign-in is checked again. */
+export const PENDING_SIGN_IN_POLL_MS = 2_000
+/** How long after a sign-in starts the page keeps checking by itself. */
+export const PENDING_SIGN_IN_WINDOW_MS = 2 * 60_000
+/**
+ * Every this many polls the instance is checked in full (`recheck`): a sign-in finished outside
+ * Mousse (a terminal, another app) is only learned that way. The other polls read what the service
+ * already knows, which is cheap.
+ */
+export const PENDING_SIGN_IN_RECHECK_EVERY = 3
+
+interface PendingSignIn {
+  timer?: ReturnType<typeof setTimeout>
+  stopped: boolean
+}
+
+const pendingSignIns = new Map<string, PendingSignIn>()
+
+function snapshotsOf(instanceId: string): InstanceSnapshot[] {
+  return Object.values(useProviderSnapshotsStore.getState().scopes).flatMap((state) => (state.snapshots ?? []).filter((entry) => entry.instanceId === instanceId))
+}
+
+function signInOperations(instanceId: string): ProviderOperationEvent[] {
+  return Object.values(useProviderSnapshotsStore.getState().operations).filter((event) => event.instanceId === instanceId && event.kind === 'sign_in')
+}
+
+/**
+ * The user started signing `instanceId` in (in Mousse, or by copying its terminal command). The
+ * service reports a sign-in it runs when it ends, and a sign-in elsewhere only on its next check; so
+ * until the instance reads signed in, the page reads its status again every
+ * `PENDING_SIGN_IN_POLL_MS`, for at most `PENDING_SIGN_IN_WINDOW_MS`. It stops as soon as the
+ * instance is signed in (as someone new, or after a sign-in Mousse ran completed), when that
+ * sign-in fails or is cancelled, or when the returned function (or `stopPendingSignIns`) is called.
+ */
+export function watchPendingSignIn(instanceId: string): () => void {
+  // Starting again (Try again) replaces the earlier watch, and its two-minute window.
+  const previous = pendingSignIns.get(instanceId)
+  if (previous) {
+    previous.stopped = true
+    if (previous.timer) clearTimeout(previous.timer)
+  }
+  const pending: PendingSignIn = { stopped: false }
+  pendingSignIns.set(instanceId, pending)
+  const binding = currentProfileBinding()
+  const startedAt = Date.now()
+  const before = new Set(snapshotsOf(instanceId).map(signInSignature))
+  const wasSignedIn = snapshotsOf(instanceId).some((entry) => entry.auth.state === 'signed_in')
+  // Operations of this instance already finished are not this sign-in's outcome.
+  const earlier = new Set(signInOperations(instanceId).map((event) => `${event.operationId}:${event.phase}`))
+  const stop = () => {
+    pending.stopped = true
+    if (pending.timer) clearTimeout(pending.timer)
+    if (pendingSignIns.get(instanceId) === pending) pendingSignIns.delete(instanceId)
+  }
+  const ended = () => signInOperations(instanceId).filter((event) => finished(event) && !earlier.has(`${event.operationId}:${event.phase}`))
+  const abandoned = () => ended().some((event) => event.phase !== 'completed')
+  // Asked only after a reading, so a completed sign-in still gets one: its account may be new.
+  const done = (): boolean => {
+    const signedIn = snapshotsOf(instanceId).filter((entry) => entry.auth.state === 'signed_in')
+    if (!signedIn.length) return false
+    return !wasSignedIn || ended().length > 0 || signedIn.some((entry) => !before.has(signInSignature(entry)))
+  }
+  let polls = 0
+  const tick = async () => {
+    pending.timer = undefined
+    if (pending.stopped) return
+    if (!isCurrentProfileBinding(binding) || Date.now() - startedAt >= PENDING_SIGN_IN_WINDOW_MS || abandoned()) return stop()
+    polls += 1
+    const running = signInOperations(instanceId).some((event) => event.phase === 'progress' || event.phase === 'prompt')
+    try {
+      // While Mousse runs the sign-in it reports the end itself; a full check is for the rest.
+      if (!running && polls % PENDING_SIGN_IN_RECHECK_EVERY === 0) applySnapshot(await window.mousse.providers.instances.recheck(instanceId), binding)
+      else await reloadLoadedScopes()
+    } catch {
+      // The next poll tries again; the manual refresh stays at hand.
+    }
+    if (pending.stopped) return
+    if (done()) return stop()
+    pending.timer = setTimeout(() => void tick(), PENDING_SIGN_IN_POLL_MS)
+  }
+  pending.timer = setTimeout(() => void tick(), PENDING_SIGN_IN_POLL_MS)
+  return stop
+}
+
+/** The page showing sign-ins closed: nothing is checked by itself any more. */
+export function stopPendingSignIns(): void {
+  for (const pending of [...pendingSignIns.values()]) {
+    pending.stopped = true
+    if (pending.timer) clearTimeout(pending.timer)
+  }
+  pendingSignIns.clear()
 }
 
 function ensureProfile(profileId: string): void {

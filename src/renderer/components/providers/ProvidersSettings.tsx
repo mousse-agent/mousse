@@ -14,9 +14,11 @@ import {
   projectScope,
   removeSnapshot,
   sortInstances,
+  stopPendingSignIns,
   useProviderSnapshots,
   useProviderSnapshotsStore,
-  useRunningOperation
+  useRunningOperation,
+  watchPendingSignIn
 } from '../../lib/providerSnapshots'
 import { useLocalProjects } from '../../hooks/useLocalProjects'
 import { takePendingProvider } from '../../lib/settingsNavigation'
@@ -115,6 +117,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     (instanceId: string) => setRevealModels((current) => ({ instanceId, count: (current?.count ?? 0) + 1 })),
     []
   )
+  // A sign-in started here is checked again by itself until it reads signed in; leaving the page stops that.
+  useEffect(() => stopPendingSignIns, [])
   const [pageError, setPageError] = useState<string | null>(null)
   /** Something a finished action wants the user to know (files kept after a remove). */
   const [pageNotice, setPageNotice] = useState<string | null>(null)
@@ -191,6 +195,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       let failure: Error | null = null
       const attempt = async () => {
         const started = await instances.signIn(instanceId, method)
+        watchPendingSignIn(instanceId)
         failure = null
         // Closing ends the wait: a sign-in that completed resolves, any other rejects.
         const onEnd = () => {
@@ -210,6 +215,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   /** An agent's own sign-in: its prompts open the sign-in dialog, which can start it again. */
   const startAgentSignIn = async (instanceId: string, name: string) => {
     const started = await window.mousse.providers.instances.signIn(instanceId)
+    watchPendingSignIn(instanceId)
     setSignIn({ operationId: started.operationId, name, retry: () => startAgentSignIn(instanceId, name) })
   }
 
@@ -241,6 +247,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         await instances.update(id)
       },
       signIn: () => startAgentSignIn(id, snapshot.displayName),
+      // The sign-in command was copied to run in a terminal: Mousse learns of it only by checking.
+      signInElsewhere: () => void watchPendingSignIn(id),
       signOut: async () => applySnapshot(await instances.signOut(id)),
       recheck: async () => applySnapshot(await instances.recheck(id)),
       allowKnownProblem: async (version) => applySnapshot(await instances.allowKnownProblem(id, version)),
