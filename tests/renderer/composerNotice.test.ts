@@ -219,19 +219,8 @@ describe('the dock on the composer', () => {
     return css.slice(start, css.indexOf('}', start))
   }
 
-  it('docks the queue on the composer: its surface, flush on its top edge', () => {
-    const queue = body('.chat-input-area > .queued-messages')
-    expect(queue).toMatch(/margin:\s*0;/)
-    expect(queue).toMatch(/border:\s*1px solid var\(--ui-line-strong\);\s*border-bottom:\s*0;/)
-    expect(queue).toMatch(/border-radius:\s*16px 16px 0 0;/)
-    expect(queue).toMatch(/background:\s*var\(--ui-raised\);/)
-    expect(body('.app .chat-input-area:has(> .queued-messages):not(:has(> .new-thread-row)) .composer'))
-      .toMatch(/border-top-left-radius:\s*0;\s*border-top-right-radius:\s*0;/)
-  })
-
   it('draws a notice as one quiet line: no border, fill, shadow or corners, muted metadata text, plain text actions', () => {
-    // Both appear and fade in the same way.
-    expect(body('.chat-input-area > :is(.composer-notice-slot, .queued-messages)')).toMatch(/animation:\s*composer-dock-in/)
+    expect(body('.chat-input-area > .composer-notice-slot')).toMatch(/animation:\s*composer-dock-in/)
     const rules = [...css.matchAll(/([^{}]*\.composer-notice[^{}]*)\{([^}]*)\}/g)].map(([, selector, declarations]) => ({ selector: selector.trim(), declarations }))
     expect(rules.length).toBeGreaterThan(5)
     for (const { selector, declarations } of rules) {

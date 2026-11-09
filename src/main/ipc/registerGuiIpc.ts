@@ -1303,6 +1303,11 @@ export function registerGuiIpc(
     })
     return res.removed
   })
+  // Replaces a queued message's text; it keeps its place in the queue.
+  registerHandler('queue:edit', async (_e, threadId: string, itemId: string, content: string) => {
+    const res = await guiMms.request<{ item: unknown }>('queue.edit', { threadId, itemId, content })
+    return res.item
+  })
   registerHandler('queue:reorder', async (_e, threadId: string, orderedIds: string[]) => {
     const res = await guiMms.request<{ items: unknown[] }>('queue.reorder', {
       threadId,

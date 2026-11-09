@@ -345,6 +345,9 @@ const api = {
       ipcRenderer.invoke('queue:enqueue', threadId, request),
     remove: (threadId: string, itemId: string): Promise<QueuedMessage | null> =>
       ipcRenderer.invoke('queue:remove', threadId, itemId),
+    /** Replaces a queued message's text in place; resolves the saved item. */
+    edit: (threadId: string, itemId: string, content: string): Promise<QueuedMessage> =>
+      ipcRenderer.invoke('queue:edit', threadId, itemId, content),
     reorder: (threadId: string, orderedIds: string[]): Promise<QueuedMessage[]> =>
       ipcRenderer.invoke('queue:reorder', threadId, orderedIds),
     promoteToSteer: (threadId: string, itemId: string): Promise<boolean> =>
