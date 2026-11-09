@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../../src/renderer/components/QueuedMessages'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
-import { useThreadQueue, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import type { QueuedMessage } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -19,12 +19,15 @@ let push: ((event: { threadId: string; items: QueuedMessage[] }) => void) | null
 /** What the daemon lists. */
 let listed: QueuedMessage[]
 let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reorder: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn>; promoteToSteer: ReturnType<typeof vi.fn> }
+/** What the queue handed to the composer. */
+let toComposer: ReturnType<typeof vi.fn>
 
-/** The queue as the chat renders it: in the conversation, with its errors in the composer's notice slot. */
+/** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
 function Chat({ hold = null }: { hold?: QueueHold | null }) {
-  const thread = useThreadQueue({ threadId: 't1', hold })
+  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer })
   return createElement(Fragment, null,
     createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
+    createElement(ComposerNoticeSource, { notice: thread.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, onDismiss: thread.dismissDraftMoved } : null }),
     createElement(ComposerNoticeSlot),
     createElement(QueuedMessages, { queue: thread }))
 }
@@ -35,6 +38,7 @@ beforeEach(() => {
   root = createRoot(host)
   push = null
   listed = []
+  toComposer = vi.fn()
   api = {
     list: vi.fn(async () => listed),
     edit: vi.fn(async (_thread: string, itemId: string, content: string) => ({ item: queued(itemId, content) })),
@@ -195,6 +199,56 @@ describe('queued messages in the conversation', () => {
       await type(area, 'one, revised again')
       await click(button('a', 'Save'))
       expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'one, revised again', 'one, revised')
+    })
+  })
+
+  describe('when the message starts while it is edited', () => {
+    const editA = async (text: string) => {
+      await show([queued('a', 'one'), queued('b', 'two')])
+      await click(button('a', 'Edit'))
+      await type(row('a').querySelector('textarea')!, text)
+    }
+
+    it('moves the unsaved edit to the composer when the message leaves the queue', async () => {
+      await editA('one, but better')
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      expect(host.querySelector('textarea')).toBeNull()
+      expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
+    })
+
+    it('moves it too when the message is still listed but already sending', async () => {
+      await editA('one, but better')
+      await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { state: 'steering' }), queued('b', 'two')] }) })
+      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      expect(host.querySelector('textarea')).toBeNull()
+    })
+
+    it('moves nothing when the edit had no changes', async () => {
+      await editA('one')
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      expect(toComposer).not.toHaveBeenCalled()
+      expect(host.querySelector('.composer-notice')).toBeNull()
+    })
+
+    it('shows only the composer note when the save was refused because the message started', async () => {
+      const answer = deferred<{ item: QueuedMessage }>()
+      api.edit.mockReturnValueOnce(answer.promise)
+      await editA('one, but better')
+      await click(button('a', 'Save'))
+      await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
+      await act(async () => { answer.reject(new Error("Error invoking remote method 'queue:edit': Error: Queue item a already started and can no longer be edited.")) })
+      expect(toComposer).toHaveBeenCalledWith('one, but better')
+      const notices = [...host.querySelectorAll('.composer-notice')].map((entry) => entry.textContent)
+      expect(notices).toHaveLength(1)
+      expect(notices[0]).toContain(QUEUE_DRAFT_MOVED_NOTICE)
+    })
+
+    it('puts the text in an empty composer, or on a new line after what it has', () => {
+      expect(withDraftAppended('', 'edit')).toBe('edit')
+      expect(withDraftAppended('  ', 'edit')).toBe('edit')
+      expect(withDraftAppended('typed', 'edit')).toBe('typed\nedit')
+      expect(withDraftAppended('typed\n', 'edit')).toBe('typed\nedit')
     })
   })
 

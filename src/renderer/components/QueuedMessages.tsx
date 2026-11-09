@@ -206,16 +206,22 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     return () => window.removeEventListener('pointerup', disarm)
   }, [armedId, dragId])
 
-  // The item being edited left the queue (it was sent or removed elsewhere): nothing to edit. Its text changed
-  // elsewhere while the draft has no changes of its own: the draft follows it.
+  // The item being edited left the queue or started (it was sent, or removed elsewhere): nothing to edit, and a
+  // draft with changes of its own goes to the composer, so it is not lost. Its text changed elsewhere while the
+  // draft has no changes of its own: the draft follows it.
   useEffect(() => {
     if (!editing) return
     const item = items.find((entry) => entry.id === editing.id)
-    if (!item) { setEditing(null); return }
+    if (!item || !canEditQueued(item)) {
+      const draft = editing.draft.trim()
+      if (draft && draft !== splitQueuedContent(editing.base).text) queue.moveDraftToComposer(draft)
+      setEditing(null)
+      return
+    }
     if (item.content !== editing.base && editing.draft === splitQueuedContent(editing.base).text) {
       setEditing({ ...editing, base: item.content, draft: splitQueuedContent(item.content).text })
     }
-  }, [items, editing])
+  }, [items, editing, queue])
 
   if (items.length === 0) return null
   const firstHeldId = shown.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending')?.id

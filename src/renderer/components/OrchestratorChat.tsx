@@ -27,7 +27,7 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
-import { useThreadQueue } from '../hooks/useThreadQueue'
+import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended } from '../hooks/useThreadQueue'
 import { contextTokens } from '../lib/promptCache'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -341,12 +341,20 @@ export function OrchestratorChat() {
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
   const historyTokens = contextTokens(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
+  // An unsaved edit of a queued message that started meanwhile: the composer takes the text, after what it has.
+  const onQueueDraftToComposer = useCallback((text: string) => {
+    setInput((current) => withDraftAppended(current, text))
+  }, [setInput])
   const queue = useThreadQueue({
     threadId: activeThreadId,
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
-    hold: queueHold
+    hold: queueHold,
+    onDraftToComposer: onQueueDraftToComposer
   })
+  // The notice about the moved edit goes once the composer is empty again (sent or cleared).
+  const { draftMoved: queueDraftMoved, dismissDraftMoved } = queue
+  useEffect(() => { if (queueDraftMoved && !input.trim()) dismissDraftMoved() }, [queueDraftMoved, input, dismissDraftMoved])
 
   const turnActivityRequestRef = useRef(0)
   const [renderQuestions, setRenderQuestions] = useState(false)
@@ -1477,6 +1485,7 @@ export function OrchestratorChat() {
         </div>
 
         <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
+        <ComposerNoticeSource notice={queue.draftMoved ? { tone: 'info', title: QUEUE_DRAFT_MOVED_NOTICE, shortTitle: 'Your edit is in the composer', onDismiss: queue.dismissDraftMoved } : null} />
         {/* The dock on the composer's top edge: the top notice, one at a time. */}
         <ComposerNoticeSlot />
 

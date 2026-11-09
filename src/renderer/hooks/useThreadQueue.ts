@@ -6,6 +6,15 @@ import { readableError } from '../lib/errorText'
 export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
 export const QUEUE_LOAD_RETRY_CAP_MS = 5000
 
+/** The composer's notice when an unsaved edit of a queued message went to the composer. */
+export const QUEUE_DRAFT_MOVED_NOTICE = 'Your edit is in the composer: the message had already started.'
+
+/** The composer's text with `text` added: alone when the composer is empty, else on a new line after what it has. */
+export function withDraftAppended(current: string, text: string): string {
+  if (!current.trim()) return text
+  return current.endsWith('\n') ? `${current}${text}` : `${current}\n${text}`
+}
+
 export interface UseThreadQueueOptions {
   threadId: string | null
   /** Messages just sent while a reply runs, shown until the daemon lists them. */
@@ -13,6 +22,8 @@ export interface UseThreadQueueOptions {
   onOptimisticItemReconciled?: (id: string) => void
   /** A compaction holds the queue until it ends; null when nothing does. */
   hold?: QueueHold | null
+  /** Puts text in the composer: an unsaved edit whose message left the queue. */
+  onDraftToComposer?: (text: string) => void
 }
 
 /** What holds the queue: a running compaction, and the size of the history it would replace. */
@@ -30,6 +41,11 @@ export interface ThreadQueue {
   /** The last failed change, for the composer's notice line; it stays until dismissed or a change succeeds. */
   error: string | null
   clearError: () => void
+  /** An unsaved edit went to the composer (its message had started), for the composer's notice line. */
+  draftMoved: boolean
+  dismissDraftMoved: () => void
+  /** Hands an unsaved edit to the composer: its message left the queue (it started) before the edit was saved. */
+  moveDraftToComposer: (text: string) => void
   /** While a compaction runs, the queue waits for it; Send now then skips the compaction. */
   hold: QueueHold | null
   /** Sends the item into the running reply now; while a compaction holds the queue, stops it and sends the item first. */
@@ -66,9 +82,12 @@ export function reorderByIds(items: QueuedMessage[], orderedIds: string[]): Queu
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer }: UseThreadQueueOptions): ThreadQueue {
   const [items, setItems] = useState<QueuedMessage[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [draftMoved, setDraftMoved] = useState(false)
+  const toComposer = useRef(onDraftToComposer)
+  toComposer.current = onDraftToComposer
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({})
   const itemsRef = useRef(items)
   itemsRef.current = items
@@ -121,6 +140,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     setItems([])
     setError(null)
+    setDraftMoved(false)
     setBusyIds({})
     if (!threadId) return
     // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list.
@@ -235,6 +255,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       return 'saved'
     } catch (err) {
       if (!live()) return 'failed'
+      // The message left the queue meanwhile (it started): its draft goes to the composer, which says so.
+      if (!itemsRef.current.some((entry) => entry.id === itemId)) return 'failed'
       setError(readableError(err, 'Could not edit the queued message.'))
       void loadQueue(threadId)
       return 'failed'
@@ -244,6 +266,13 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   }, [threadId, loadQueue, markBusy, changeScope])
 
   const clearError = useCallback(() => setError(null), [])
+  const dismissDraftMoved = useCallback(() => setDraftMoved(false), [])
+  const moveDraftToComposer = useCallback((text: string) => {
+    toComposer.current?.(text)
+    // The notice says what happened; an error about the same message (its edit refused) adds nothing.
+    setError(null)
+    setDraftMoved(true)
+  }, [])
 
   const shown = useMemo(() => [
     ...items,
@@ -251,7 +280,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   ].filter((item) => !item.internal), [items, optimisticItems, threadId])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds, error, clearError, hold, steer, remove, reorder, edit }),
-    [threadId, shown, busyIds, error, clearError, hold, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, moveDraftToComposer, hold, steer, remove, reorder, edit }),
+    [threadId, shown, busyIds, error, clearError, draftMoved, dismissDraftMoved, moveDraftToComposer, hold, steer, remove, reorder, edit]
   )
 }
