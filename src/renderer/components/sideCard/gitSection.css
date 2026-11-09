@@ -940,23 +940,188 @@
   }
 }
 
-/* The glance: the branch, then how many files changed (opens Changes). */
+/* The glance, one row each: the branch, the one next step, then how many files changed (opens Changes). */
 .side-card-git-glance {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.side-card-git-branch-tag {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-branch-tag[data-tone='warn'] {
+  color: var(--warning);
+}
+
+/* The next step: the card's one tinted control, a row tall, with the other ways behind ▾. */
+.side-card-git-next {
+  display: flex;
+  align-items: stretch;
+  height: 26px;
+  border-radius: var(--ui-row-radius);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-hover, var(--accent));
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.side-card-git-next[data-tone='warn'] {
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+  color: var(--warning);
+}
+
+.side-card-git-next[data-tone='busy'] {
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+}
+
+.side-card-git-next-main,
+.side-card-git-next-split,
+.side-card-git-next-side,
+.side-card-git-next-item,
+.side-card-git-commit-open {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-card-git-next-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  text-align: left;
+}
+
+.side-card-git-next-label {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-next-split,
+.side-card-git-next-side {
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: 0 var(--ui-row-radius) var(--ui-row-radius) 0;
+}
+
+.side-card-git-next-split {
+  width: 26px;
+}
+
+.side-card-git-next-side {
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.side-card-git-next-main:hover:not([aria-disabled='true']),
+.side-card-git-next-split:hover:not([aria-disabled='true']),
+.side-card-git-next-side:hover,
+.side-card-git-next-split[aria-expanded='true'],
+.side-card-git-next-main[aria-expanded='true'] {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.side-card-git-next-main[aria-disabled='true'],
+.side-card-git-next-split[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.side-card-git-next-main:focus-visible,
+.side-card-git-next-split:focus-visible,
+.side-card-git-next-side:focus-visible,
+.side-card-git-next-item:focus-visible,
+.side-card-git-commit-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-git-next-spin {
+  flex: none;
+  animation: side-card-git-next-spin 0.9s linear infinite;
+}
+
+@keyframes side-card-git-next-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.side-card-git-next-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+}
+
+.side-card-git-next-item {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--ui-menu-row-radius, 6px);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-card-git-next-item:hover {
+  background: var(--ui-hover);
+}
+
+/* How many files changed (opens Changes), with Commit, which is written there. */
+.side-card-git-changes-row {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
-.side-card-git-glance .side-card-git-branch {
+.side-card-git-changes-row .side-card-git-changes {
   flex: 1 1 auto;
-  width: auto;
+  justify-content: flex-start;
+  min-width: 0;
+  margin-top: 0;
 }
 
-.side-card-git-glance .side-card-git-changes {
+.side-card-git-changes-row .side-card-git-stat [data-zero] {
+  color: var(--ui-faint);
+}
+
+.side-card-git-commit-open {
   flex: none;
-  width: auto;
-  margin-top: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: 6px;
   color: var(--text-secondary);
-  white-space: nowrap;
+  font-size: 12px;
+}
+
+.side-card-git-commit-open:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-card-git-next-spin {
+    animation: none;
+  }
 }

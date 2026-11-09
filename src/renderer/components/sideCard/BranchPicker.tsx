@@ -12,6 +12,7 @@ import {
   branchSearchAria,
   dirtySwitchChoices,
   localBranchNames,
+  type BranchTag,
   type DirtySwitchChoiceId,
   type GitAction,
   type GitActionLock
@@ -44,13 +45,23 @@ interface BranchPickerProps {
   onNotice: (message: string | null) => void
   /** Draws the button another way (the Changes tab's sync chip); it then stays usable while branch actions are locked. */
   trigger?: { className: string; content: ReactNode; title: string }
+  /** A quiet word after the branch name ("up to date", "rebasing"); its title says more. */
+  tag?: BranchTag | null
   /** More at the bottom of the popover, such as Pull, Fetch and Abort. */
   footer?: ReactNode
 }
 
 type BranchWork = 'carry' | 'stash' | 'branch'
 
-export function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, lock, disabledReason, onBegin, onEnd, onActionError, onNotice, trigger, footer }: BranchPickerProps) {
+function branchAriaLabel(label: string, tag: BranchTag | null): string {
+  return tag ? `Branch ${label}, ${tag.text}` : `Branch ${label}`
+}
+
+function BranchTagText({ tag }: { tag: BranchTag }) {
+  return <span className="side-card-git-branch-tag" data-tone={tag.tone} title={tag.title}>{tag.text}</span>
+}
+
+export function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, lock, disabledReason, onBegin, onEnd, onActionError, onNotice, trigger, footer, tag = null }: BranchPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -158,7 +169,7 @@ export function BranchPicker({ path, scope, status, branches, fileCount, busyLab
           type="button"
           className={trigger?.className ?? 'side-card-git-branch'}
           title={trigger?.title ?? label}
-          aria-label={trigger?.title ?? `Branch ${label}`}
+          aria-label={trigger?.title ?? branchAriaLabel(label, tag)}
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
@@ -167,6 +178,7 @@ export function BranchPicker({ path, scope, status, branches, fileCount, busyLab
             <>
               <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
               <span className="side-card-git-branch-name">{label}</span>
+              {tag && <BranchTagText tag={tag} />}
               <ChevronDown className="side-card-git-branch-chevron" size={11} aria-hidden="true" />
             </>
           )}
@@ -189,7 +201,7 @@ export function BranchPicker({ path, scope, status, branches, fileCount, busyLab
         type="button"
         className={trigger?.className ?? 'side-card-git-branch'}
         title={trigger?.title ?? lock.reason ?? busyLabel ?? undefined}
-        aria-label={trigger?.title ?? `Branch ${label}`}
+        aria-label={trigger?.title ?? branchAriaLabel(label, tag)}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-busy={busyLabel !== null}
@@ -200,6 +212,7 @@ export function BranchPicker({ path, scope, status, branches, fileCount, busyLab
           <>
             <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
             <span className="side-card-git-branch-name">{busyLabel ?? label}</span>
+            {tag && !busyLabel && <BranchTagText tag={tag} />}
             <ChevronDown className="side-card-git-branch-chevron" size={11} aria-hidden="true" />
           </>
         )}
