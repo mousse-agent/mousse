@@ -131,10 +131,13 @@ const tooltipIfTruncated = (fullTitle: string) => (event: React.MouseEvent<HTMLE
   else element.removeAttribute('title')
 }
 
-/** A row's title: it ends in an ellipsis where it does not fit and stays still on hover, the full text in its tooltip. */
-function ThreadTitle({ name, fullTitle, onDoubleClick }: { name: string; fullTitle?: string; onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void }) {
+/**
+ * A row's title: it ends in an ellipsis where it does not fit and stays still on hover, the full text in its tooltip.
+ * `provisional`: taken from the first message while the title model works; dimmed until the model's title replaces it.
+ */
+function ThreadTitle({ name, fullTitle, provisional, onDoubleClick }: { name: string; fullTitle?: string; provisional?: boolean; onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void }) {
   return (
-    <span className="threads-sidebar-thread-name" onMouseEnter={tooltipIfTruncated(fullTitle ?? name)} onDoubleClick={onDoubleClick}>
+    <span className={provisional ? 'threads-sidebar-thread-name provisional' : 'threads-sidebar-thread-name'} onMouseEnter={tooltipIfTruncated(fullTitle ?? name)} onDoubleClick={onDoubleClick}>
       {name}
     </span>
   )
@@ -1372,7 +1375,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ) : (
 
-          <ThreadTitle name={thread.name} fullTitle={fullTitle} onDoubleClick={renameFromTitle} />
+          <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
 
         )}
 

@@ -166,6 +166,7 @@ import {
   type PendingUserQuestions,
   type QueuedMessage,
   type Thread,
+  type ThreadTitleSource,
   type TurnPhase,
   type TurnState,
   type TurnStateSnapshot,
@@ -176,6 +177,7 @@ import {
   DEFAULT_CHAT_MODE
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
+import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
@@ -1857,6 +1859,10 @@ export class OrchestratorService extends EventEmitter {
     // Seed unbound session registries (tests / legacy inject shared instances).
     this.boundSession.agents = agents
     this.boundSession.tasks = tasks
+    // A thread named from its first message alone is named once more after its first reply.
+    this.on('turn-completed', (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, true) })
+    for (const event of ['turn-failed', 'turn-interrupted'] as const)
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, false) })
   }
 
   /**
@@ -7965,59 +7971,55 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * A title for Regenerate: the first request, up to two later ones and the opening of the first reply,
+   * on the chosen title model; without one, or when it fails or names nothing, the title from the first
+   * message. Empty only when the thread has no message that names anything.
+   */
   async generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string> {
-    const firstUser = messages.find((message) => message.role === 'user' && message.content.trim())
-    const firstAssistant = messages.find(
-      (message) => message.role === 'assistant' && !message.streaming && message.content.trim()
-    )
-    if (!firstUser) {
+    const context = titleContextOf(messages)
+    if (!context) {
       throw new Error('A user message is required to generate a title.')
     }
-    const heuristic =
-      firstUser.content.trim().split('\n')[0]?.trim().slice(0, 60).slice(0, 80) || 'New Chat'
-    const titleSettings = this.settingsStore.get().title
-    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
-    if (!hasExplicitTitleModel) {
-      return heuristic
-    }
+    // Regenerate always names the thread: a message that names nothing ("hello there") is used as written.
+    const heuristic = heuristicTitle(context.request) || fitTitle(cleanTitleText(context.request).text)
+    if (!this.hasTitleModel()) return heuristic
     try {
-      return await this.generateTitleText(firstUser.content, firstAssistant?.content, threadId)
+      return (await this.generateTitleText(context, threadId)) ?? heuristic
     } catch (error) {
-      // The chat keeps its first-line title. A failed request is logged; a refused title model was
-      // already reported once (`reportTitleModelRefusal`).
-      if ((error as { code?: unknown } | undefined)?.code !== 'unsupported')
-        console.warn('[titles] the title model could not name the chat', { threadId, error: error instanceof Error ? error.message : String(error) })
+      this.warnTitleFailure(threadId, error)
       return heuristic
     }
   }
 
+  private hasTitleModel(): boolean {
+    const titleSettings = this.settingsStore.get().title
+    return Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+  }
+
+  /** A failed request is logged; a refused title model was already reported once (`reportTitleModelRefusal`). */
+  private warnTitleFailure(threadId: string | undefined, error: unknown): void {
+    if ((error as { code?: unknown } | undefined)?.code !== 'unsupported')
+      console.warn('[titles] the title model could not name the chat', { threadId, error: error instanceof Error ? error.message : String(error) })
+  }
+
   /**
    * Names a chat with the chosen title model (Automatic never reaches here: it names the chat from
-   * its first line). The selection is resolved through the gateway like any other: the instance the
-   * picker chose (a legacy record maps to its built-in instance), and exactly that selection runs.
-   * A disabled instance, a hidden model or an instance that cannot run a single request (an agent
-   * runtime, a Bedrock model) is refused by its typed error, never swapped for another provider.
+   * its first message). The model sees a small cleaned summary (`buildTitlePrompt`), never code, logs or
+   * tool output, and its answer is fitted to the sidebar (`normalizeTitle`). Null when it names nothing.
+   * The selection is resolved through the gateway like any other: the instance the picker chose (a legacy
+   * record maps to its built-in instance), and exactly that selection runs. A disabled instance, a hidden
+   * model or an instance that cannot run a single request (an agent runtime, a Bedrock model) is refused
+   * by its typed error, never swapped for another provider.
    */
-  private async generateTitleText(userRequest: string, firstResponse: string | undefined, threadId: string | undefined): Promise<string> {
-    const prompt = [
-      'Write a concise title for this chat (maximum 7 words).',
-      'Return only the title: no quotes, markdown, or ending punctuation.',
-      '',
-      `User request: ${userRequest.slice(0, 4000)}`,
-      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
-    ].join('\n')
-    const text = await this.titleModelText('You name chat threads clearly and specifically.', prompt, {
+  private async generateTitleText(context: TitleContext, threadId: string | undefined): Promise<string | null> {
+    const text = await this.titleModelText(TITLE_SYSTEM_PROMPT, buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
-      sessionKey: threadId ?? `title:${userRequest}`,
-      maxChars: 400
+      sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
+      maxChars: 120
     })
-    return text
-      .trim()
-      .replace(/^["'`]+|["'`]+$/g, '')
-      .replace(/[.!?:;]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .slice(0, 80)
+    return normalizeTitle(text)
   }
 
   /**
@@ -8188,54 +8190,98 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Name a newly-created thread before its first turn starts. This is deliberately
-   * awaited by executeTurn: title generation must not race the first response (or
-   * leave the sidebar showing "New Chat" after the turn has already begun).
-   *
-   * Title generation is best-effort. A missing/unconfigured title provider must not
-   * prevent the user's actual message from being sent; the awaited call still makes
-   * successful title generation deterministic and visible before the turn runs.
+   * Title work per thread, chained: the request made at the first send, then the pass after a turn. The
+   * pass waits for the first request, and two passes never run at once.
    */
-  private async generateInitialThreadTitleForThread(
-    threadId: string,
-    userContent: string
-  ): Promise<void> {
-    if (!this.threadStore || threadId === '__unbound__') return
+  private titleWork = new Map<string, Promise<void>>()
 
-    const thread = this.threadStore.getThread(threadId)
-    // Keep retrying while the auto-created label remains. This recovers from a
-    // transient title-provider failure on the next send without renaming user titles.
-    if (!thread || !isDefaultThreadName(thread.name)) return
-
-    const titleSettings = this.settingsStore.get().title
-    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
-    const heuristic = (userContent.trim().split('\n')[0]?.trim().slice(0, 60) || 'New Chat').slice(0, 80)
-    if (!hasExplicitTitleModel) {
-      if (!heuristic || isDefaultThreadName(heuristic)) return
-      const updated = this.threadStore.updateThreadMeta(threadId, { name: heuristic })
-      this.emit('thread-title-updated', { threadId, thread: updated })
-      return
-    }
-    let title: string | null = null
-    try {
-      title = await this.generateTitleText(userContent, undefined, threadId)
-    } catch (error) {
-      this.emit('thread-title-generation-failed', {
-        threadId,
-        error: error instanceof Error ? error.message : String(error)
-      })
-    }
-    const finalTitle = (title?.trim() ? title.trim() : heuristic).slice(0, 80)
-    if (!finalTitle || isDefaultThreadName(finalTitle)) return
-    const updated = this.threadStore.updateThreadMeta(threadId, { name: finalTitle })
-    this.emit('thread-title-updated', { threadId, thread: updated })
+  private queueTitleWork(threadId: string, work: () => Promise<void>): Promise<void> {
+    const next = (this.titleWork.get(threadId) ?? Promise.resolve()).then(work).catch(() => {})
+    this.titleWork.set(threadId, next)
+    void next.then(() => {
+      if (this.titleWork.get(threadId) === next) this.titleWork.delete(threadId)
+    })
+    return next
   }
 
-  private async generateInitialThreadTitle(
-    session: ThreadSession,
-    userContent: string
-  ): Promise<void> {
-    await this.generateInitialThreadTitleForThread(session.threadId, userContent)
+  /**
+   * Writes a title Mousse chose, only if nobody changed the thread's name or its source since `seen` was
+   * read: a rename made while the title model was working is never overwritten. Returns the updated thread,
+   * or undefined when it was not written.
+   */
+  private writeThreadTitle(threadId: string, seen: Thread, name: string, titleSource: ThreadTitleSource): Thread | undefined {
+    const current = this.threadStore?.getThread(threadId)
+    if (!current || current.name !== seen.name || current.titleSource !== seen.titleSource) return undefined
+    if (current.name === name && current.titleSource === titleSource) return current
+    try {
+      const updated = this.threadStore!.updateThreadMeta(threadId, { name, titleSource }, { touch: false })
+      this.emit('thread-title-updated', { threadId, thread: updated })
+      return updated
+    } catch {
+      // A name the thread may not take (a sibling subagent's title) leaves the thread as it was.
+      return undefined
+    }
+  }
+
+  /**
+   * Names a thread when its first message is sent, without holding up the turn, while it still has the
+   * default name. Without a title model, the title from the message is final. With one, the title from the
+   * message shows at once as `provisional` (dimmed in the sidebar) and the model's title replaces it as
+   * `auto`. A model that fails or names nothing leaves it provisional until the pass after the first reply.
+   */
+  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    const thread = this.threadStore.getThread(threadId)
+    if (!thread || !isDefaultThreadName(thread.name)) return
+    const fromMessage = heuristicTitle(userContent)
+    if (!this.hasTitleModel()) {
+      if (fromMessage) this.writeThreadTitle(threadId, thread, fromMessage, 'final')
+      return
+    }
+    const shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
+    if (!shown) return
+    void this.queueTitleWork(threadId, async () => {
+      let title: string | null = null
+      try {
+        title = await this.generateTitleText({ request: userContent, images }, threadId)
+      } catch (error) {
+        this.warnTitleFailure(threadId, error)
+        this.emit('thread-title-generation-failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+      if (title) this.writeThreadTitle(threadId, shown, title, 'auto')
+    })
+  }
+
+  /**
+   * After a turn of a thread Mousse named from its first message alone (`provisional` or `auto`). After the
+   * first finished reply the thread is named once more from the request and the opening of that reply,
+   * which says what "continue" or a pasted log was about, and the title is final; a model that fails or
+   * names nothing keeps the name, also final. A turn that failed or stopped only stops dimming a
+   * provisional title (it becomes `auto`), so the next finished reply can still name the thread.
+   */
+  private nameThreadAfterTurn(threadId: string, completed: boolean): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    const source = this.threadStore.getThread(threadId)?.titleSource
+    if (source !== 'provisional' && source !== 'auto' && !this.titleWork.has(threadId)) return
+    void this.queueTitleWork(threadId, async () => {
+      const thread = this.threadStore?.getThread(threadId)
+      if (!thread || (thread.titleSource !== 'provisional' && thread.titleSource !== 'auto')) return
+      if (!completed) {
+        if (thread.titleSource === 'provisional') this.writeThreadTitle(threadId, thread, thread.name, 'auto')
+        return
+      }
+      const context = titleContextOf(this.getMessages(threadId))
+      let title: string | null = null
+      if (context?.reply && this.hasTitleModel()) {
+        try {
+          title = await this.generateTitleText({ ...context, later: [] }, threadId)
+        } catch (error) {
+          this.warnTitleFailure(threadId, error)
+        }
+      }
+      // Still the default name: the first message named nothing and neither did the reply. Keep "New Chat".
+      this.writeThreadTitle(threadId, thread, title ?? thread.name, 'final')
+    })
   }
 
   getNativeContext(threadId?: string): NativeLlmContext {
@@ -10189,7 +10235,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (!reuseLastUser && displayUserMessage) {
-      void this.generateInitialThreadTitle(session, userContent).catch(() => {})
+      this.nameThreadOnFirstSend(session.threadId, userContent, images?.length ?? 0)
     }
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the

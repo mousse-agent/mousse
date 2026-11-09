@@ -78,7 +78,7 @@ function titleOrchestrator(profile: Awaited<ReturnType<typeof titleProfile>>, ti
     harness: profile.harness,
     settingsStore: { get: () => settings }
   }) as {
-    generateTitleText: (request: string, first: string | undefined, threadId: string | undefined) => Promise<string>
+    generateTitleText: (context: { request: string; reply?: string }, threadId: string | undefined) => Promise<string | null>
     generateThreadTitle: (messages: Array<{ role: 'user' | 'assistant'; content: string }>) => Promise<string>
   }
   return { orch, oneShot: profile.oneShot }
@@ -95,28 +95,28 @@ describe('chat title model', () => {
   it('a chosen model runs exactly as chosen; a legacy record resolves to its instance', async () => {
     const profile = await titleProfile()
     const chosen = titleOrchestrator(profile, OPENAI_BIG)
-    // The answer is cleaned the way titles always were: no quotes, no ending punctuation.
-    expect(await chosen.orch.generateTitleText('hello', undefined, undefined)).toBe('A title')
+    // The answer is cleaned: no quotes, no ending punctuation.
+    expect(await chosen.orch.generateTitleText({ request: 'Fix the login redirect' }, undefined)).toBe('A title')
     expect(profile.oneShot).toHaveBeenCalledTimes(1)
     expect(profile.oneShot.mock.calls[0]![0]).toMatchObject({ model: 'gpt-big', system: expect.stringContaining('name chat threads') })
-    expect(profile.oneShot.mock.calls[0]![0].prompt).toContain('User request: hello')
+    expect(profile.oneShot.mock.calls[0]![0].prompt).toContain('Request: Fix the login redirect')
     const legacy = titleOrchestrator(profile, { llmProvider: 'openai', model: 'gpt-big' })
-    expect(await legacy.orch.generateTitleText('hello', undefined, undefined)).toBe('A title')
+    expect(await legacy.orch.generateTitleText({ request: 'Fix the login redirect' }, undefined)).toBe('A title')
     expect(profile.oneShot).toHaveBeenCalledTimes(2)
   })
 
   it('an agent runtime, a disabled instance or a hidden model is refused with its code, never run elsewhere', async () => {
     const vendor = titleOrchestrator(await titleProfile(), WORK)
-    await expect(vendor.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(vendor.orch.generateTitleText({ request: 'Fix the login redirect' }, undefined)).rejects.toMatchObject({ code: 'unsupported' })
     expect(vendor.oneShot).not.toHaveBeenCalled()
     const disabled = titleOrchestrator(await titleProfile({ work: false }), WORK)
     // The gateway's own code for it (oneShot reports harness errors).
-    await expect(disabled.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'instance_disabled' })
+    await expect(disabled.orch.generateTitleText({ request: 'Fix the login redirect' }, undefined)).rejects.toMatchObject({ code: 'instance_disabled' })
     expect(disabled.oneShot).not.toHaveBeenCalled()
     const profile = await titleProfile()
     await profile.harness.instances.setModelPrefs('pi:openai', { hidden: ['gpt-big'] })
     const hidden = titleOrchestrator(profile, OPENAI_BIG)
-    await expect(hidden.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'model_hidden' })
+    await expect(hidden.orch.generateTitleText({ request: 'Fix the login redirect' }, undefined)).rejects.toMatchObject({ code: 'model_hidden' })
     expect(hidden.oneShot).not.toHaveBeenCalled()
   })
 

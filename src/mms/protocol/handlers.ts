@@ -1922,7 +1922,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const name = asString(p.name, 'name', 512)
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, { name })
+      // The person's name: Mousse never renames the thread on its own again.
+      const thread = ctx.mms.threads.updateThreadMeta(threadId, { name, titleSource: 'user' })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
@@ -2105,9 +2106,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
+      const before = ctx.mms.threads.getThread(threadId)
       const title = await ctx.mms.orchestrator.generateThreadTitle(messages, threadId)
       if (!title) throw new DomainRpcError('title_unavailable', 'The title model returned an empty title.')
-      const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
+      // A rename made while the title was being written wins over it.
+      const now = ctx.mms.threads.getThread(threadId)
+      const renamedMeanwhile = Boolean(before && now && (now.name !== before.name || (now.titleSource === 'user' && before.titleSource !== 'user')))
+      const thread = renamedMeanwhile ? now! : ctx.mms.threads.updateThreadMeta(threadId, { name: title, titleSource: 'final' })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads) }
