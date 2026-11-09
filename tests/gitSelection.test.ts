@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -189,7 +189,8 @@ describe('project folder selection', () => {
 
   it('shows a mode-only change and a submodule as whole files without hunks', async () => {
     const cwd = repo(), place = projectPlace(), service = new GitService()
-    git(cwd, 'update-index', '--chmod=+x', 'b.txt')
+    // The file on disk too, so Git sees the same mode change where it tracks modes (not only on Windows).
+    chmodSync(join(cwd, 'b.txt'), 0o755); git(cwd, 'update-index', '--chmod=+x', 'b.txt')
     const nested = join(cwd, 'sub')
     mkdirSync(nested); git(nested, 'init', '-q', '-b', 'main'); git(nested, 'config', 'user.name', 'n'); git(nested, 'config', 'user.email', 'n@example.invalid')
     git(nested, 'config', 'commit.gpgsign', 'false')
