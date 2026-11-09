@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
-import { collectFindRanges, createFindPainter } from '../src/renderer/chat/components/agent-elements/find/dom-highlight'
+import { collectFindRanges, createFindPainter, MAX_PAINTED_RANGES } from '../src/renderer/chat/components/agent-elements/find/dom-highlight'
 import { FindInThreadBar } from '../src/renderer/chat/components/agent-elements/find/FindInThreadBar'
 import { buildFindIndex, normalizeForSearch, type FindTurn } from '../src/renderer/chat/components/agent-elements/find/find-index'
 import { bringIntoView, revealMatch, type RevealDeps } from '../src/renderer/chat/components/agent-elements/find/reveal'
@@ -186,6 +186,23 @@ describe('the painter', () => {
     expect(active.ranges[0]!.startContainer.textContent).toBe('first needle')
     painter.dispose()
     expect(highlights.size).toBe(0)
+  })
+
+  it('paints at most MAX_PAINTED_RANGES occurrences, and still finds the active one past the cap', async () => {
+    const root = document.createElement('div')
+    const words = Array.from({ length: MAX_PAINTED_RANGES + 200 }, () => 'a').join(' ')
+    root.innerHTML = `<div data-turn-key="k0"><p data-find-text data-message-id="m0" data-part-index="0">${words}</p></div>`
+    document.body.append(root)
+    const painter = createFindPainter(root)
+    painter.setQuery('a')
+    painter.setActive({ turnKey: 'k0', messageId: 'm0', partIndex: 0, ordinal: MAX_PAINTED_RANGES + 150 })
+    await nextFrame()
+    expect(highlights.get('mousse-find')!.ranges).toHaveLength(MAX_PAINTED_RANGES)
+    const active = highlights.get('mousse-find-active')!.ranges
+    expect(active).toHaveLength(1)
+    // The 1,151st "a" starts at character 2 × 1,150.
+    expect(active[0]!.startOffset).toBe(2 * (MAX_PAINTED_RANGES + 150))
+    painter.dispose()
   })
 
   it('reads a match across inline elements as one range and code lines as separate lines', () => {

@@ -105,7 +105,9 @@ html[data-theme='blacksphere-plus'] {
   --an-foreground-muted: #969696;
   --an-foreground-subtle: #666666;
   --an-border-color: #242424;
-  --an-user-message-bg: #0d0d0d;
+  /* The user's bubble stands a clear step above the pure-black transcript (about #1c1c1c), lighter than
+     tool cards (#0d0d0d) and the composer (#121212), so a prompt reads apart from the replies. */
+  --an-user-message-bg: color-mix(in srgb, var(--text-primary) 12%, var(--surface-base));
   --an-user-message-text: #e6e6e6;
   --an-tool-background: #0d0d0d;
   --an-tool-border-color: #242424;

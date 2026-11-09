@@ -24,7 +24,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
+import { ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -85,7 +85,10 @@ import {
 import { useTurnWindow } from "./virtual/use-turn-window";
 import { TurnIdContext } from "./turn-context";
 import { FindInThreadBar } from "./find/FindInThreadBar";
+import { findBarHost, placeFindBar } from "./find/find-bar-host";
 import { useThreadFind } from "./find/use-thread-find";
+import { FindRailButton } from "./find/FindRailButton";
+import { cappedWords, markdownPreviewText } from "./utils/preview-text";
 import { flashLocated, revealMessage } from "./reveal-message";
 import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
@@ -592,10 +595,6 @@ export type PromptMarkerLayout = {
   subscribe: (listener: () => void) => () => void;
 };
 
-function cappedWords(text: string, limit: number): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
-}
 
 /** Width of the tick column (`.chat-prompt-ticks`) and its gap to the transcript text. */
 const PROMPT_RAIL_WIDTH = 40;
@@ -633,6 +632,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   markProgrammatic,
   scrollAnimRef,
   layout,
+  onFind,
 }: {
   messages: UIMessage[];
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -644,6 +644,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   scrollAnimRef: React.MutableRefObject<number>;
   /** Set while the list is windowed; without it every prompt is read from the DOM. */
   layout?: PromptMarkerLayout;
+  /** Opens find in thread: a search button sits above the ticks. */
+  onFind?: (() => void) | null;
 }) {
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
   const [activeId, setActiveId] = useState<string>();
@@ -703,9 +705,12 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           : target instanceof HTMLElement
             ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
             : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
-        const preview = cappedWords(getTextFromParts(userMsg.parts ?? [], " "), 10);
+        // The tooltip shows plain text: Markdown syntax in the prompt or the reply is dropped.
+        const preview = cappedWords(markdownPreviewText(getTextFromParts(userMsg.parts ?? [], "\n")), 10);
         const responsePreview = cappedWords(
-          turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], " ")).join(" "),
+          markdownPreviewText(
+            turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], "\n\n")).join("\n\n"),
+          ),
           24,
         );
         next.push({
@@ -869,6 +874,9 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         if (!event.currentTarget.contains(event.relatedTarget)) setPreviewId(undefined);
       }}
     >
+      {/* The column the ticks centre in; the find button hangs above it, so the ticks do not move. */}
+      <div className="chat-prompt-column">
+      {onFind && <FindRailButton onOpen={onFind} />}
       <nav className="chat-prompt-ticks" aria-label="Conversation turns">
       {markers.map((marker, index) => (
         <button
@@ -890,6 +898,7 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         </button>
       ))}
       </nav>
+      </div>
       {previewMarker && (
         <div className="chat-prompt-preview" aria-hidden="true">
           <strong>{previewMarker.preview}</strong>
@@ -1834,7 +1843,7 @@ export const MessageList = memo(function MessageList({
                                   count={items.length}
                                   icon={
                                     groupLabel ? (
-                                      <Brain size={18} />
+                                      <ThinkingIcon size={18} active={anyToolPending && isLastTurn && isStreaming} />
                                     ) : (
                                       <Wrench size={18} />
                                     )
@@ -1941,8 +1950,9 @@ export const MessageList = memo(function MessageList({
       markProgrammatic={markProgrammaticScroll}
       scrollAnimRef={promptScrollAnimRef}
       layout={markerLayout}
+      onFind={find.openFind}
     />
-    {find.barProps && <FindInThreadBar {...find.barProps} />}
+    {find.barProps && placeFindBar(<FindInThreadBar {...find.barProps} />, findBarHost(chatContainerRef.current))}
     {showJumpButton && (
       <button
         type="button"
