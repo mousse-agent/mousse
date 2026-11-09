@@ -260,7 +260,7 @@ export async function abortGitInProgress(key: string, kind: 'merge' | 'rebase', 
 /** Carry on with the merge, rebase, cherry-pick or revert that stopped, now its conflicts are resolved. */
 export async function continueGitInProgress(key: string, kind: GitInProgress, scope: GitScope): Promise<GitContinueResult> {
   try {
-    const { result } = await window.mousse.git.continueInProgress(scope, kind)
+    const { result } = await trackGitOperation(key, 'commit', (operationId) => window.mousse.git.continueInProgress(scope, kind, { operationId }), gitOperationOwner(scope))
     return { result }
   } finally {
     await refreshAfterMutation(key, scope)

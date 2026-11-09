@@ -1967,9 +1967,12 @@ export interface GitPullResult {
   result: 'up-to-date' | 'fast-forwarded' | 'merged' | 'rebased' | 'conflicted'
 }
 
-/** What continuing a stopped merge, rebase, cherry-pick or revert came to: finished, or stopped again on the next conflict. */
+/**
+ * What continuing a stopped merge, rebase, cherry-pick or revert came to: finished; stopped again on the next
+ * conflict; or paused with nothing in conflict (an interactive rebase's `edit` or `break`, a failed `exec`).
+ */
 export interface GitContinueResult {
-  result: 'done' | 'conflicted'
+  result: 'done' | 'conflicted' | 'paused'
 }
 
 export interface GitFetchResult {

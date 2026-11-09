@@ -574,8 +574,8 @@ const api = {
       storageInvoke('git:cancelOperation', operationId, threadId, projectId),
     abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult<{ kept?: GitKeptCopy }>> =>
       storageInvoke('git:abortInProgress', scope, kind),
-    continueInProgress: (scope: GitScope, kind: GitInProgress): Promise<GitMutationResult<GitContinueResult>> =>
-      storageInvoke('git:continueInProgress', scope, kind),
+    continueInProgress: (scope: GitScope, kind: GitInProgress, options?: { operationId?: string }): Promise<GitMutationResult<GitContinueResult>> =>
+      storageInvoke('git:continueInProgress', scope, kind, options),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>
       storageInvoke('git:createBranch', scope, name, options),
     renameBranch: (scope: GitScope, name: string, newName: string): Promise<GitMutationResult> =>

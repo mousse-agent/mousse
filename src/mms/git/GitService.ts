@@ -1424,27 +1424,38 @@ export class GitService {
 
   /**
    * Carries on with a merge, rebase, cherry-pick or revert that stopped, once its conflicts are resolved. Only ever
-   * called by an explicit user action. The messages Git prepared are kept as they are (no editor opens) and hooks run
-   * as for any commit. A rebase may stop again on a later commit: that is `conflicted`, left as Git left it.
+   * called by an explicit user action. The messages Git prepared are kept as they are (no editor opens); the hooks and
+   * `exec` steps Git runs are its own. It is followed like a commit: Cancel stops it, and so does a long silence (a
+   * hook or step waiting on a prompt), so it never holds the repository's lease for good. A rebase may stop again:
+   * `conflicted` on a later commit's conflict, `paused` on a step that wants the person (`edit`, `break`, a failed
+   * `exec`), left as Git left it.
    */
-  continueInProgress(cwd: string, userRequested: UserAction, kind: GitInProgress): Promise<GitContinueResult> {
-    return this.asUser(userRequested, () => this.continueInProgressNow(cwd, kind))
+  continueInProgress(cwd: string, userRequested: UserAction, kind: GitInProgress, options: GitOperationRequest = {}): Promise<GitContinueResult> {
+    return this.asUser(userRequested, () => this.continueInProgressNow(cwd, kind, options))
   }
 
-  private async continueInProgressNow(cwd: string, kind: GitInProgress): Promise<GitContinueResult> {
-    return await this.serialized(cwd, async () => {
+  private async continueInProgressNow(cwd: string, kind: GitInProgress, options: GitOperationRequest): Promise<GitContinueResult> {
+    return this.runOperation(cwd, 'commit', options, true, (live) => this.serialized(cwd, async () => {
+      assertNotCancelled(live)
       const top = await this.toplevel(cwd)
       if (await this.inProgress(top) !== kind) throw gitErrors.create('git_continue_none')
+      const unmerged = () => this.read(top, ['diff', '--name-only', '--diff-filter=U'])
       // Git refuses with unmerged paths anyway; saying so first keeps its long message out of the card.
-      if (await this.read(top, ['diff', '--name-only', '--diff-filter=U'])) throw gitErrors.create('git_continue_conflicted')
+      if (await unmerged()) throw gitErrors.create('git_continue_conflicted')
       // Finishing a merge is a commit of what it prepared; the others have their own --continue.
       const args = kind === 'merge' ? ['commit', '--no-edit'] : [kind, '--continue']
-      const run = await this.runGit(top, args, { userAction: true, env: { ...explicitActionGitEnv(), GIT_EDITOR: 'true' } })
+      const run = await this.runLive(top, args, live, {
+        env: { ...explicitActionGitEnv(), GIT_EDITOR: 'true' },
+        silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS,
+        hooks: true
+      })
+      if (run.cancelled) throw cancelledError()
+      if (run.stalled) throw gitErrors.create('git_silence_timeout')
       const still = await this.inProgress(top)
-      if (still && await this.read(top, ['diff', '--name-only', '--diff-filter=U'])) return { result: 'conflicted' }
+      if (still && await unmerged()) return { result: 'conflicted' }
       if (!run.ok) throw failure('git_failed', run)
-      return { result: still ? 'conflicted' : 'done' }
-    })
+      return { result: still ? 'paused' : 'done' }
+    }, live.signal))
   }
 
   /** The checked-out branch, or null for a detached HEAD. */

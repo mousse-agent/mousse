@@ -4358,10 +4358,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (kind !== 'merge' && kind !== 'rebase' && kind !== 'cherry-pick' && kind !== 'revert') throw new DomainRpcError('invalid_params', 'kind must be merge, rebase, cherry-pick or revert')
       // As Abort: in a thread worktree it carries on with what a terminal started there, as a recorded action of the person.
       const thread = recordedThreadTarget(ctx, p, target)
-      const carryOn = () => ctx.mms.gitService.continueInProgress(target.root, gitUserAction(ctx, `Continue the ${kind}`), kind)
-      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => thread
-        ? runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Continued the ${kind}`, reversible: false }] }, carryOn)
-        : carryOn())
+      // Followed like a commit: the window shows its output and can cancel it.
+      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => followedGitAction(ctx, p, target.root, 'commit', (request, signal) => {
+        const carryOn = () => ctx.mms.gitService.continueInProgress(target.root, gitUserAction(ctx, `Continue the ${kind}`), kind, request)
+        return thread
+          ? runUserThreadGitAction(ctx, thread, { signal, externalEffects: [{ kind: 'unknown', description: `Continued the ${kind}`, reversible: false }] }, carryOn)
+          : carryOn()
+      }))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.createBranch': {

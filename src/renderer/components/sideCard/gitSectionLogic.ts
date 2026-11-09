@@ -1024,9 +1024,10 @@ export function branchTag(status: GitStatusSnapshot | null, figures: UpstreamFig
 }
 
 /** What continuing came to, as the section's notice. */
-export function continueNotice(what: GitInProgress, result: 'done' | 'conflicted'): string {
+export function continueNotice(what: GitInProgress, result: 'done' | 'conflicted' | 'paused'): string {
   const name = IN_PROGRESS_NAMES[what]
-  return result === 'done' ? `${name[0]!.toUpperCase()}${name.slice(1)} finished` : `The ${name} stopped on another conflict`
+  if (result === 'done') return `${name[0]!.toUpperCase()}${name.slice(1)} finished`
+  return result === 'conflicted' ? `The ${name} stopped on another conflict` : `The ${name} paused at a step for you; continue when ready`
 }
 
 /** What a failed pull from the side card says: overlapping edits get a fixed line, everything else Git's own. */

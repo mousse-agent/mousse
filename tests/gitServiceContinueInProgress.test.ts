@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -45,6 +45,7 @@ const resolve = (cwd: string, content: string) => {
   git(cwd, 'add', 'a.txt')
 }
 const marker = (cwd: string, name: string) => existsSync(join(cwd, '.git', name))
+const slash = (path: string) => path.replace(/\\/g, '/')
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
@@ -107,4 +108,39 @@ describe('GitService.continueInProgress', () => {
     await expect(new GitService().continueInProgress(cwd, USER, 'rebase')).rejects.toMatchObject({ code: 'git_continue_none' })
     expect(marker(cwd, 'MERGE_HEAD')).toBe(true)
   })
+
+  it('says paused, not conflicted, when an interactive rebase stops at its next edit step', async () => {
+    const cwd = repo()
+    git(cwd, 'checkout', '-q', 'topic')
+    // Mark both topic commits "edit": the rebase stops after each with nothing in conflict.
+    const editor = `${cwd}-sequence.cjs`
+    roots.push(editor)
+    writeFileSync(editor, "const f = process.argv[2]; const fs = require('fs'); fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/^pick /gm, 'edit '))")
+    execFileSync('git', ['rebase', '-i', 'main~1'], { cwd, stdio: 'ignore', env: { ...process.env, GIT_SEQUENCE_EDITOR: `node "${slash(editor)}"`, GIT_EDITOR: 'true' } })
+    expect(marker(cwd, 'rebase-merge')).toBe(true)
+
+    expect(await new GitService().continueInProgress(cwd, USER, 'rebase')).toEqual({ result: 'paused' })
+    expect(await new GitService().continueInProgress(cwd, USER, 'rebase')).toEqual({ result: 'done' })
+    expect(marker(cwd, 'rebase-merge')).toBe(false)
+  })
+
+  it('stops a hook that goes silent, so the repository is free for the next action', async () => {
+    const cwd = repo()
+    tryGit(cwd, 'merge', 'topic')
+    resolve(cwd, 'merged\n')
+    const hooks = `${cwd}-hooks`
+    roots.push(hooks)
+    mkdirSync(hooks, { recursive: true })
+    writeFileSync(join(hooks, 'pre-commit.cjs'), 'setTimeout(() => {}, 60000)')
+    writeFileSync(join(hooks, 'pre-commit'), `#!/bin/sh\nexec node "${slash(join(hooks, 'pre-commit.cjs'))}"\n`, { mode: 0o755 })
+    git(cwd, 'config', 'core.hooksPath', hooks)
+
+    await expect(new GitService({ commitSilenceMs: 3000 }).continueInProgress(cwd, USER, 'merge')).rejects.toMatchObject({ code: 'git_silence_timeout' })
+    expect(marker(cwd, 'MERGE_HEAD')).toBe(true)
+    expect(existsSync(join(cwd, '.git', 'index.lock'))).toBe(false)
+
+    // The lease was let go: the next action runs.
+    git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
+    expect(await new GitService().continueInProgress(cwd, USER, 'merge')).toEqual({ result: 'done' })
+  }, 60_000)
 })
