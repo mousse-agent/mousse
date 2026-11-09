@@ -231,8 +231,8 @@ export function collectBlobs(dir: string, referenced: Set<string>, minAgeMs: num
 }
 
 /**
- * Moves the blobs an import staged (`<stage>/blobs/<aa>/<hash>`) into the thread's `blobs/`, keeping a copy that is
- * already there, then removes the staging folder. Each new file and folder is fsynced into its parent. The caller
+ * Moves the blobs an import staged (`<stage>/blobs/<aa>/<hash>`) into the thread's `blobs/`, keeping an intact copy
+ * that is already there (a damaged one is replaced), then removes the staging folder. Each new file and folder is fsynced into its parent. The caller
  * holds the thread's lock and publishes the database only after this returns.
  */
 export function publishStagedBlobs(dir: string, stage: string): number {
@@ -246,7 +246,12 @@ export function publishStagedBlobs(dir: string, stage: string): number {
         const root = join(dir, BLOBS_DIR)
         const folder = join(root, prefix)
         mkdirSync(folder, { recursive: true })
-        if (!existsSync(target)) {
+        // A copy already there is kept only when it is intact; a damaged one is replaced by the staged bytes.
+        let intact = false
+        try { intact = sha256(readFileSync(target)) === name } catch { /* absent */ }
+        if (intact) {
+          fsyncPath(target)
+        } else {
           renameSync(join(staged, prefix, name), target)
           moved += 1
         }

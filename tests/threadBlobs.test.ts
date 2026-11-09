@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { ThreadDbStore } from '../src/mms/data/threadDb/threadDbStore'
 import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
-import { BLOB_TEXT_THRESHOLD, blobPath, collectBlobs, encodeRow, missingPlaceholder, publishStagedBlobs, writeBlob } from '../src/mms/data/threadDb/threadBlobs'
+import { BLOB_TEXT_THRESHOLD, blobPath, collectBlobs, encodeRow, missingPlaceholder, publishStagedBlobs, readBlob, writeBlob } from '../src/mms/data/threadDb/threadBlobs'
 import { legacyFingerprint } from '../src/mms/data/legacyThreadData'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 import { getActiveMessages } from '../src/mms/orchestrator/nativeContext'
@@ -348,6 +348,28 @@ describe('importing through the store', () => {
       store.closeThreadStorage()
     } finally {
       rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('publishing staged blobs', () => {
+  it('replaces a damaged copy already in blobs/ with the staged one', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-blob-publish-')))
+    try {
+      const data = image()
+      const messages = [message('a', 'x', { images: [{ name: 'a.png', mimeType: 'image/png', data }] })]
+      writeFileSync(join(dir, 'messages.json'), JSON.stringify(messages))
+      const engine = new ThreadDbEngine({ idleCloseMs: 0 })
+      expect(engine.build(dir, { tmpName: 'thread.db.import-x', fingerprint: legacyFingerprint(dir) })).toMatchObject({ ok: true })
+      const staged = blobFiles(join(dir, 'thread.db.import-x.stage'))
+      expect(staged).toHaveLength(1)
+      const hash = staged[0]!.split('/').at(-1)!
+      mkdirSync(join(dir, 'blobs', hash.slice(0, 2)), { recursive: true })
+      writeFileSync(join(dir, 'blobs', hash.slice(0, 2), hash), 'damaged')
+      publishStagedBlobs(dir, join(dir, 'thread.db.import-x.stage'))
+      expect(readBlob(dir, { v: 1, path: [], sha256: hash, bytes: 0, kind: 'base64' })).toBe(data)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
