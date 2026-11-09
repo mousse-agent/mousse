@@ -1,12 +1,14 @@
 /**
  * Reading a thread folder's JSON files: the storage every thread used before `thread.db`, and the source a
- * thread is imported from. Pure file reads, so the thread database worker can use it too.
+ * thread is imported from. Reads are pure file reads, so the thread database worker can use them too;
+ * `settleLegacyGenerations` is the one writer, run by the daemon under the thread's lock.
  */
-import { existsSync, readFileSync, statSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'fs'
 import { join } from 'path'
 import type { Agent, ChatMessage, MousseAgentSessionSnapshot, NativeLlmContext, Task } from '../../shared/types'
 import { parseMousseAgentSessions } from '../agents/legacyAgentSessions'
 import { ThreadGenerationStore } from './ThreadGenerationStore'
+import { ThreadRecoveryService } from './ThreadRecoveryService'
 import type { StoredThreadData } from './threadDb/collections'
 
 export class ThreadDataCorruptionError extends Error {
@@ -115,40 +117,10 @@ export function loadMousseAgentSessions(threadDir: string): MousseAgentSessionSn
   }
 }
 
-/**
- * A thread's data from its JSON files, chosen exactly as the app chooses it: with the transactional store on,
- * the current generation wins; otherwise a `conversation-state.json` at least as new as `messages.json` and
- * `llm-context.json` wins over them. The queue is not part of it (`queue.json` is read on its own).
- */
-/**
- * True when a thread's current generation (the transactional store, an opt-in of earlier builds) is at least as new
- * as its flat files. Those builds wrote the generation first and the flat files after, so flat files that are newer
- * were written by a build that had the store off again.
- */
-function generationIsCurrent(threadDir: string): boolean {
-  try {
-    const manifest = statSync(join(threadDir, 'manifest.json')).mtimeMs
-    const flat = existsSync(join(threadDir, 'messages.json')) ? statSync(join(threadDir, 'messages.json')).mtimeMs : 0
-    return manifest >= flat
-  } catch {
-    return false
-  }
-}
+type Field = 'messages' | 'agents' | 'tasks' | 'llmContext' | 'mousseAgentSessions'
 
-export function readLegacyThreadData(threadDir: string, options: { transactional?: boolean } = {}): StoredThreadData {
-  if (options.transactional ?? generationIsCurrent(threadDir)) {
-    const current = new ThreadGenerationStore(threadDir).loadCurrent()
-    if (current) {
-      const generationDir = join(threadDir, 'generations', current.descriptor.generationId)
-      return {
-        messages: validateArray<ChatMessage>(current.data.messages, 'messages', threadDir),
-        agents: validateArray<Agent>(current.data.agents, 'agents', threadDir),
-        tasks: validateArray<Task>(current.data.tasks, 'tasks', threadDir),
-        llmContext: validateNativeContext(current.data.llmContext, join(generationDir, 'llm-context.json')),
-        mousseAgentSessions: parseSessionCollection(current.data.mousseAgentSessions, join(generationDir, 'mousse-agent-sessions.json'))
-      }
-    }
-  }
+/** A thread's data from its plain files, and the file each field was read from. */
+function readFlatThreadData(threadDir: string): { data: StoredThreadData; sources: Record<Field, string> } {
   const conversationStatePath = join(threadDir, 'conversation-state.json')
   const legacyMessagesPath = join(threadDir, 'messages.json')
   const llmContextPath = join(threadDir, 'llm-context.json')
@@ -168,12 +140,129 @@ export function readLegacyThreadData(threadDir: string, options: { transactional
     conversationContext = validateNativeContext(conversationState.llmContext, conversationStatePath)
   }
   return {
-    messages: conversationMessages ?? validateArray<ChatMessage>(readJsonFile<unknown>(legacyMessagesPath, []), 'messages', threadDir),
-    agents: validateArray<Agent>(readJsonFile<unknown>(join(threadDir, 'agents.json'), []), 'agents', threadDir),
-    tasks: validateArray<Task>(readJsonFile<unknown>(join(threadDir, 'tasks.json'), []), 'tasks', threadDir),
-    llmContext: conversationContext ?? validateNativeContext(readJsonFile<unknown>(llmContextPath, undefined), llmContextPath),
-    mousseAgentSessions: loadMousseAgentSessions(threadDir)
+    data: {
+      messages: conversationMessages ?? validateArray<ChatMessage>(readJsonFile<unknown>(legacyMessagesPath, []), 'messages', threadDir),
+      agents: validateArray<Agent>(readJsonFile<unknown>(join(threadDir, 'agents.json'), []), 'agents', threadDir),
+      tasks: validateArray<Task>(readJsonFile<unknown>(join(threadDir, 'tasks.json'), []), 'tasks', threadDir),
+      llmContext: conversationContext ?? validateNativeContext(readJsonFile<unknown>(llmContextPath, undefined), llmContextPath),
+      mousseAgentSessions: loadMousseAgentSessions(threadDir)
+    },
+    sources: {
+      messages: conversationMessages ? conversationStatePath : legacyMessagesPath,
+      agents: join(threadDir, 'agents.json'),
+      tasks: join(threadDir, 'tasks.json'),
+      llmContext: conversationState !== undefined ? conversationStatePath : llmContextPath,
+      mousseAgentSessions: join(threadDir, 'mousse-agent-sessions.json')
+    }
   }
+}
+
+/**
+ * A thread's data from its JSON files. A thread that once used the transactional store of earlier builds is read
+ * from its current generation until `settleLegacyGenerations` has run; the daemon runs that before any other read
+ * or write, so this choice is only a reader's that does not hold the lock. The queue is not part of it
+ * (`queue.json` is read on its own).
+ */
+export function readLegacyThreadData(threadDir: string): StoredThreadData {
+  if (existsSync(join(threadDir, 'manifest.json'))) {
+    const generation = readCurrentGeneration(threadDir)
+    if (generation) return generation
+  }
+  return readFlatThreadData(threadDir).data
+}
+
+function readCurrentGeneration(threadDir: string): StoredThreadData | undefined {
+  const current = new ThreadGenerationStore(threadDir).loadCurrent()
+  if (!current) return undefined
+  const generationDir = join(threadDir, 'generations', current.descriptor.generationId)
+  return {
+    messages: validateArray<ChatMessage>(current.data.messages, 'messages', threadDir),
+    agents: validateArray<Agent>(current.data.agents, 'agents', threadDir),
+    tasks: validateArray<Task>(current.data.tasks, 'tasks', threadDir),
+    llmContext: validateNativeContext(current.data.llmContext, join(generationDir, 'llm-context.json')),
+    mousseAgentSessions: parseSessionCollection(current.data.mousseAgentSessions, join(generationDir, 'mousse-agent-sessions.json'))
+  }
+}
+
+function comparable(value: unknown): string {
+  return JSON.stringify(value ?? null, (_key, item: unknown) => {
+    if (!isRecord(item)) return item
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(item).sort()) out[key] = item[key]
+    return out
+  }) ?? 'null'
+}
+
+function mtimeOf(path: string): number {
+  try { return statSync(path).mtimeMs } catch { return 0 }
+}
+
+export interface SettleOutcome {
+  /** Which copy the thread now reads: nothing to settle, the generation, or the plain files. */
+  kept: 'none' | 'generation' | 'files'
+  /** True when the two copies differed and their times could not say which was written last. */
+  ambiguous?: boolean
+  /** Where the copy that lost was set aside, when there was one. */
+  backup?: string
+}
+
+/**
+ * Ends a thread's use of the transactional store of earlier builds, once, so every later read and write uses the
+ * plain files alone. The caller holds the thread's lock. A crash's unfinished generation is finished first. Then
+ * the current generation and the plain files are compared field by field:
+ *
+ * - equal: nothing to choose;
+ * - every field that differs is in a file written after the generation was selected: the plain files were written
+ *   by a build with the store off again, and they win;
+ * - otherwise the generation wins (those builds wrote the plain files only as a copy of it, after it, and a copy
+ *   cut short leaves some files older), and is written as the plain files.
+ *
+ * The copy that loses is never lost: plain files that are replaced are copied to `legacy-json/settled-<time>/`
+ * first, and a generation stays in `generations/`. The generation pointer is renamed to
+ * `manifest.json.settled-<time>`. When times cannot tell the copies apart (equal times, a clock change, copied
+ * files), the outcome says so.
+ */
+export function settleLegacyGenerations(threadDir: string, writeFlat: (data: StoredThreadData) => void): SettleOutcome {
+  const manifestPath = join(threadDir, 'manifest.json')
+  if (!existsSync(manifestPath)) return { kept: 'none' }
+  // When the generation was selected: before a crash's unfinished generation is finished here, the pointer's time;
+  // a generation finished now was written when that crash happened, not now.
+  const selectedBefore = mtimeOf(manifestPath)
+  const recovered = new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile().repairedGeneration
+  const selectedAt = recovered ? Math.max(selectedBefore, mtimeOf(join(threadDir, 'generations', recovered, 'generation.json'))) : selectedBefore
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const outcome: SettleOutcome = { kept: 'files' }
+  const generation = readCurrentGeneration(threadDir)
+  if (generation) {
+    const flat = readFlatThreadData(threadDir)
+    const fields: Field[] = ['messages', 'agents', 'tasks', 'llmContext', 'mousseAgentSessions']
+    const differing = fields.filter((field) => {
+      const ours = field === 'mousseAgentSessions' ? (generation[field]?.length ? generation[field] : []) : generation[field]
+      const theirs = field === 'mousseAgentSessions' ? (flat.data[field]?.length ? flat.data[field] : []) : flat.data[field]
+      return comparable(ours) !== comparable(theirs)
+    })
+    if (differing.length) {
+      const times = differing.map((field) => mtimeOf(flat.sources[field]))
+      const filesWin = times.every((time) => time > selectedAt)
+      outcome.ambiguous = times.some((time) => time === selectedAt) || (!filesWin && times.some((time) => time > selectedAt))
+      if (!filesWin) {
+        const backup = join(threadDir, 'legacy-json', `settled-${stamp}`)
+        mkdirSync(backup, { recursive: true })
+        for (const file of LEGACY_DATA_FILES) {
+          if (file !== 'manifest.json' && existsSync(join(threadDir, file))) copyFileSync(join(threadDir, file), join(backup, file))
+        }
+        writeFlat(generation)
+        outcome.kept = 'generation'
+        outcome.backup = backup
+      } else {
+        outcome.backup = join(threadDir, 'generations')
+      }
+    } else {
+      outcome.kept = 'generation'
+    }
+  }
+  renameSync(manifestPath, join(threadDir, `manifest.json.settled-${stamp}`))
+  return outcome
 }
 
 /** The files a thread's data may be read from, in the thread folder (and its current generation). */

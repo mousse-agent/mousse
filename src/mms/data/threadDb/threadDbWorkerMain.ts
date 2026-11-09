@@ -6,7 +6,7 @@ import { parentPort, workerData, type MessagePort } from 'node:worker_threads'
 import { ThreadDbEngine } from './threadDbEngine'
 import { runOp, toWireError } from './threadDbClient'
 
-const data = workerData as { role: 'write'; flag: Int32Array; port: MessagePort } | { role: 'read' | 'index' }
+const data = workerData as { role: 'write'; flag: Int32Array; port: MessagePort } | { role: 'read' | 'index' | 'import' }
 
 if (data.role === 'write') {
   const engine = new ThreadDbEngine({ idleCloseMs: 2_000 })
@@ -22,7 +22,7 @@ if (data.role === 'write') {
     Atomics.notify(data.flag, 0)
   })
 } else {
-  // Reads (and index work, in a worker of its own) open a connection per thread request and close it after, so
+  // Reads (and index work and imports, each in a worker of its own) open a connection per thread request and close it after, so
   // these workers hold no thread database open between requests.
   const engine = new ThreadDbEngine({ idleCloseMs: 0, checkpointOnClose: false })
   process.on('exit', () => engine.closeEverything())

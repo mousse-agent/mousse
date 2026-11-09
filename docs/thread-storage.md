@@ -4,7 +4,7 @@ Each thread keeps its history in one SQLite database, `thread.db`, inside the th
 
 New threads start with a `thread.db`. Threads made before it are imported in the background, one at a time, starting shortly after the daemon starts (see [Moving a thread from JSON](#moving-a-thread-from-json)). The `sqliteThreadStore` feature is on by default. Turning it off stops new imports only: a thread that already has a `thread.db` always uses it.
 
-A thread whose import failed keeps working from its JSON files. A save rewrites them whole, as before, but writes only the plain files: no `conversation-state.json` (an older copy left behind is removed) and no `generations/`. The opt-in transactional store of earlier versions is gone; a thread that used it is imported from its current generation, after unfinished generations are reconciled.
+A thread whose import failed keeps working from its JSON files. A save rewrites them whole, as before, but writes only the plain files: no `conversation-state.json` (an older copy left behind is removed) and no `generations/`. The opt-in transactional store of earlier versions is gone. A thread that used it is settled once, under its lock, before anything else reads or writes it: a generation a crash left unfinished is finished, then the current generation and the plain files are compared field by field. Plain files that differ only where they were written after the generation was selected (a build with the store off again) are kept; otherwise the generation is kept and written as the plain files (a copy of it that was cut short leaves some files older). The copy that loses stays: replaced plain files go to `legacy-json/settled-<time>/`, a generation stays in `generations/`. The pointer is renamed `manifest.json.settled-<time>`, and when equal times leave the choice open, a warning is logged.
 
 ## What a thread database holds
 
@@ -57,10 +57,10 @@ Each save still moves the thread's `updatedAt`. For a thread in `thread.db` that
 
 ## Where the work runs
 
-All database work runs in two worker threads (`src/mms/data/threadDb/`), never on the daemon's event loop:
+All database work runs in worker threads (`src/mms/data/threadDb/`), never on the daemon's event loop:
 
 - **The write worker** runs saves and the few small reads a save needs. The caller waits for its reply synchronously, which is what keeps "saved before the next step" true for queue admission, steering, handoffs and every other place that depends on it. A save writes only the rows that changed, so the wait does not grow with the thread. It keeps one connection per thread and closes it after 2 seconds idle.
-- **The read worker** runs everything whose cost grows with a thread or with the profile: loading a whole thread, importing and checking, and later pages, search and exports. Nothing waits for it synchronously, and a long read never delays a save. It opens a connection per request and closes it afterwards, so it never holds a read open between requests.
+- **The read worker** runs everything whose cost grows with a thread or with the profile: loading a whole thread, checking, pages, search fallback and exports. Nothing waits for it synchronously, and a long read never delays a save. It opens a connection per request and closes it afterwards, so it never holds a read open between requests.
 
 Entry points that are about to load a thread (`thread.snapshot`, `thread.messages`) read it in the read worker first, so the synchronous load that follows finds it in memory.
 
@@ -92,17 +92,17 @@ Opening a thread reads one page, not the whole thread:
 - `thread.messages` pages `before` or `after` a cursor from `earlier` or `later`. A cursor is the message id, with the occurrence among visible messages appended when an id appears more than once (the same in the database and in a loaded transcript), so a transcript with repeated ids still pages through every message; a bare repeated id means its last occurrence. `thread.changesSince` returns the visible messages changed since a snapshot's `seq` (in the same `epoch`) and the ids that have no visible message any more (removed or hidden since; an id written again is not among them), or `reset` when the reader is too far behind. A reader applies `removed` first, then the messages.
 - In the app, older messages load when the "earlier messages" bar scrolls into view. Opening a search result in an older part of a thread loads pages until it is there.
 - Phones still get the whole transcript in one snapshot, and the thread is read in the read worker first.
-- Search index work runs in a worker of its own, so indexing a long thread never delays a page someone is waiting for.
+- Search index work and imports each run in a worker of their own, so indexing or importing a long thread never delays a page someone is waiting for.
 
 ## Moving a thread from JSON
 
 With the feature on, a JSON thread is imported the first time it is read, in the background:
 
-1. Under the thread's lock, unfinished generations are reconciled and the JSON files are fingerprinted: every data file, the root `manifest.json` and the files of the generation it selects, with whether each exists.
-2. The read worker builds `thread.db.import-<pid>-<id>` (and its blobs, in a staging folder beside it) from the files, chosen exactly as the app chooses them, and reads it back to check every row against them.
+1. Under the thread's lock, a thread that used the transactional store is settled (see above) and the JSON files are fingerprinted: every data file, the root `manifest.json` and the files of the generation it selects, with whether each exists.
+2. The import worker builds `thread.db.import-<pid>-<id>` (and its blobs, in a staging folder beside it) from the files, chosen exactly as the app chooses them, and reads it back to check every row against them.
 3. Under the lock again, the fingerprint is checked unchanged, the staged blobs are moved into `blobs/`, and the file is linked into place as `thread.db`, never over an existing one.
 
-A crash at any step leaves either no `thread.db` (an abandoned import file and its staging folder are removed an hour later) or a complete, checked one. An import that fails leaves the thread on JSON, writes the reason to `thread-db-import-error.json` and is tried again later.
+A crash at any step leaves either no `thread.db` (an abandoned import file and its staging folder are removed an hour later) or a complete, checked one. An import that fails leaves the thread on JSON, writes the reason to `thread-db-import-error.json` and is tried again when its back-off ends (two minutes, doubling up to an hour), by the background pass or by the next read.
 
 The JSON files are left exactly as they were, as a frozen backup, and are never written again.
 

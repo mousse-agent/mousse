@@ -8,6 +8,7 @@ import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifec
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 import { readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
 import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
 
 const homes: string[] = []
@@ -93,6 +94,73 @@ describe('threads kept in thread.db', () => {
     expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['gen'])
   })
 
+  it('finishes a generation a crash left unselected before the first read, so a later save keeps it', async () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('base', 'base')])
+    const generations = new ThreadGenerationStore(dir)
+    generations.publish({ messages: [message('base', 'base')], agents: [], tasks: [], queue: [] }, 1)
+    // A save that made its generation durable and crashed before selecting it.
+    const journal = new ThreadJournal(dir)
+    const intent = journal.append({ operationId: 'op', operationType: 'thread-data-save', state: 'planned' })
+    const durable = generations.createGeneration({ messages: [message('base', 'base'), message('durable', 'durable')], agents: [], tasks: [], queue: [] }, intent.sequence)
+    journal.append({ operationId: 'op', operationType: 'thread-data-save', state: 'running', resultGenerationId: durable.generationId, details: { intentSequence: intent.sequence, generationDurable: true } })
+    const { threads } = open(path, false)
+    expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['base', 'durable'])
+    threads.mutateThreadData(id, (current) => ({ messages: [...current.messages, message('after', 'after restart')] }))
+    const sqlite = open(path).threads
+    expect(await sqlite.importThreadStorage(id)).toMatchObject({ status: 'imported' })
+    expect(sqlite.loadThreadData(id).messages.map((m) => m.id)).toEqual(['base', 'durable', 'after'])
+    expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
+  })
+
+  it('keeps the generation when a copy into the plain files was cut short', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    const old = Date.now() / 1000 - 60
+    utimesSync(join(dir, 'llm-context.json'), old, old)
+    const newer = { ...llmContext, messages: [{ role: 'user', content: 'newer context' }] } as unknown as NativeLlmContext
+    new ThreadGenerationStore(dir).publish({ messages: [message('m1', 'one'), message('m2', 'two')], agents: [], tasks: [], llmContext: newer, queue: [] }, 1)
+    // The copy wrote the messages, then stopped before the context.
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('m1', 'one'), message('m2', 'two')]))
+    writeFileSync(join(dir, 'agents.json'), '[]')
+    const { threads } = open(path, false)
+    const data = threads.loadThreadData(id)
+    expect(data.messages.map((m) => m.id)).toEqual(['m1', 'm2'])
+    expect(data.llmContext).toEqual(newer)
+    expect(JSON.parse(readFileSync(join(dir, 'llm-context.json'), 'utf8'))).toEqual(newer)
+    const settled = readdirSync(join(dir, 'legacy-json'))
+    expect(settled).toHaveLength(1)
+    expect(JSON.parse(readFileSync(join(dir, 'legacy-json', settled[0]!, 'llm-context.json'), 'utf8'))).toEqual(llmContext)
+  })
+
+  it('keeps plain files written after the generation by a build with the store off, and the generation stays', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    new ThreadGenerationStore(dir).publish({ messages: [message('m1', 'one')], agents: [], tasks: [], llmContext, queue: [] }, 1)
+    const old = Date.now() / 1000 - 60
+    utimesSync(join(dir, 'manifest.json'), old, old)
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('m1', 'one'), message('later', 'later')]))
+    writeFileSync(join(dir, 'agents.json'), '[]')
+    const { threads } = open(path, false)
+    expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['m1', 'later'])
+    expect(existsSync(join(dir, 'generations'))).toBe(true)
+    expect(readdirSync(dir).some((name) => name.startsWith('manifest.json.settled-'))).toBe(true)
+  })
+
+  it('keeps the generation and sets the plain files aside when their times cannot tell which is newer', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    new ThreadGenerationStore(dir).publish({ messages: [message('m1', 'one'), message('gen', 'gen')], agents: [], tasks: [], llmContext, queue: [] }, 1)
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('m1', 'one'), message('flat', 'flat')]))
+    writeFileSync(join(dir, 'agents.json'), '[]')
+    const same = Date.now() / 1000
+    for (const file of ['manifest.json', 'messages.json', 'agents.json']) utimesSync(join(dir, file), same, same)
+    const { threads } = open(path, false)
+    expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['m1', 'gen'])
+    const settled = readdirSync(join(dir, 'legacy-json'))
+    expect(JSON.parse(readFileSync(join(dir, 'legacy-json', settled[0]!, 'messages.json'), 'utf8')).map((m: ChatMessage) => m.id)).toEqual(['m1', 'flat'])
+  })
+
   it('writes only the plain files for a thread still on JSON', () => {
     const path = home()
     const { id, dir } = jsonThread(path, [message('m1', 'one')])
@@ -116,6 +184,22 @@ describe('threads kept in thread.db', () => {
     threads.stopBackgroundImport()
     expect(threads.threadStorageStatus()).toEqual({ database: 2, json: 0, failed: [] })
     expect(existsSync(join(first.dir, 'thread.db')) && existsSync(join(second.dir, 'thread.db'))).toBe(true)
+  })
+
+  it('tries a failed background import again when its back-off ends', async () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    const { threads } = open(path)
+    writeFileSync(join(dir, 'messages.json'), '{ not json')
+    threads.startBackgroundImport({ delayMs: 0, pauseMs: 10, recheckMs: 50 })
+    for (let i = 0; i < 100 && !existsSync(join(dir, 'thread-db-import-error.json')); i++) await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(threads.threadStorageStatus().failed).toHaveLength(1)
+    // Shorten the back-off, then fix the file without opening the thread.
+    ;(threads as unknown as { importState: Map<string, { retryAt: number }> }).importState.get(id)!.retryAt = Date.now() + 100
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('m1', 'fixed')]))
+    for (let i = 0; i < 100 && !existsSync(join(dir, 'thread.db')); i++) await new Promise((resolve) => setTimeout(resolve, 20))
+    threads.stopBackgroundImport()
+    expect(threads.threadStorageStatus()).toEqual({ database: 1, json: 0, failed: [] })
   })
 
   it('a thread whose import fails keeps working from JSON and says why', async () => {

@@ -58,6 +58,7 @@ import {
   readJsonFile,
   readLegacyThreadData,
   sameFingerprint,
+  settleLegacyGenerations,
   ThreadDataCorruptionError,
   validateArray,
   type FileStamp
@@ -416,15 +417,11 @@ export class ThreadDataStore extends EventEmitter {
         if (ThreadDbStore.usesDb(threadDir)) return { status: 'already' }
         const fingerprint: FileStamp[] = withThreadDataMutationLock(threadDir, () => {
           removeAbandonedImports(threadDir)
-          // A thread that once used the transactional store: finish what a crash left unfinished, so the import
-          // reads the generation that was meant to be current.
-          if (existsSync(join(threadDir, 'manifest.json'))) {
-            new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
-          }
+          this.settleGenerations(threadDir, id)
           return legacyFingerprint(threadDir)
         })
         const tmpName = `${THREAD_DB_FILE}.import-${process.pid}-${uuidv4()}`
-        const built = await this.threadDb().client.call('build', threadDir, { tmpName, fingerprint })
+        const built = await this.threadDb().client.callImport('build', threadDir, { tmpName, fingerprint })
         if (!built.ok) continue
         const published = withThreadDataMutationLock(threadDir, () => {
           const tmp = join(threadDir, tmpName)
@@ -463,29 +460,60 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
+  /**
+   * Ends a thread's use of the transactional store of earlier builds before anything reads or writes its JSON files
+   * (`settleLegacyGenerations`), under the thread's lock. One stat when there is nothing to settle.
+   */
+  private settleGenerations(threadDir: string, id: string): void {
+    if (!existsSync(join(threadDir, 'manifest.json'))) return
+    withThreadDataMutationLock(threadDir, () => {
+      const outcome = settleLegacyGenerations(threadDir, (data) => this.writeJsonFiles(threadDir, { ...data, messageQueue: [] }))
+      if (outcome.kept === 'none') return
+      fsyncDirectorySync(threadDir)
+      if (outcome.ambiguous) {
+        console.warn('thread files and generation differed and their times could not tell which was newer', { threadId: id, kept: outcome.kept, setAside: outcome.backup })
+      }
+    })
+  }
+
   private backgroundImport?: { stopped: boolean }
 
   /**
    * Imports every listed thread that is still on JSON files, one at a time in the background, starting after
-   * `delayMs`. Each import runs in the read worker; a failure leaves the thread on JSON and is retried later.
+   * `delayMs`. Each import runs in a worker of its own. A thread whose import failed is tried again when its back-off
+   * ends, in a later pass; the passes stop when no thread is waiting for one.
    */
-  startBackgroundImport(options: { delayMs?: number; pauseMs?: number } = {}): void {
+  startBackgroundImport(options: { delayMs?: number; pauseMs?: number; recheckMs?: number } = {}): void {
     if (this.backgroundImport || !this.sqliteStoreEnabled()) return
     const run = { stopped: false }
     this.backgroundImport = run
     const pause = (ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.() })
+    const active = () => !run.stopped && this.sqliteStoreEnabled()
     void (async () => {
       await pause(options.delayMs ?? 10_000)
-      for (const thread of this.listAllThreads()) {
-        if (run.stopped || !this.sqliteStoreEnabled()) return
-        let threadDir: string
-        try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
-        if (ThreadDbStore.usesDb(threadDir) || existsSync(join(threadDir, EXPORTED_MARKER))) continue
-        const state = this.importState.get(thread.id)
-        if (state && (state.running || Date.now() < state.retryAt)) continue
-        await this.importThreadStorage(thread.id).catch(() => undefined)
-        await pause(options.pauseMs ?? 50)
+      while (active()) {
+        let nextRetry = Number.POSITIVE_INFINITY
+        for (const thread of this.listAllThreads()) {
+          if (!active()) break
+          let threadDir: string
+          try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
+          if (ThreadDbStore.usesDb(threadDir) || existsSync(join(threadDir, EXPORTED_MARKER))) continue
+          const state = this.importState.get(thread.id)
+          if (state?.running) continue
+          if (state && Date.now() < state.retryAt) {
+            if (state.failures > 0) nextRetry = Math.min(nextRetry, state.retryAt)
+            continue
+          }
+          await this.importThreadStorage(thread.id).catch(() => undefined)
+          const after = this.importState.get(thread.id)
+          if (after && after.failures > 0) nextRetry = Math.min(nextRetry, after.retryAt)
+          await pause(options.pauseMs ?? 50)
+        }
+        if (!Number.isFinite(nextRetry)) break
+        // Woken at least every `recheckMs`, so a back-off cut short is not overslept.
+        await pause(Math.min(Math.max(nextRetry - Date.now(), options.pauseMs ?? 50), options.recheckMs ?? 60_000))
       }
+      if (this.backgroundImport === run) this.backgroundImport = undefined
     })()
   }
 
@@ -1189,6 +1217,7 @@ export class ThreadDataStore extends EventEmitter {
       this.checkForDowngradeWrites(threadDir, id)
       return { ...this.threadDb().load(threadDir), messageQueue: this.readMessageQueueFile(threadDir, id) }
     }
+    this.settleGenerations(threadDir, id)
     const data = readLegacyThreadData(threadDir)
     this.scheduleImport(id)
     return { ...data, mousseAgentSessions: data.mousseAgentSessions, messageQueue: this.readMessageQueueFile(threadDir, id) }
@@ -1338,6 +1367,7 @@ export class ThreadDataStore extends EventEmitter {
       return
     }
     // A thread still on JSON files (its import failed, or the store is off): only the plain files, written whole.
+    this.settleGenerations(threadDir, id)
     this.writeJsonFiles(threadDir, data)
     this.writeTerminalScrollbacks(threadDir, terminalScrollbacks)
     this.touchAfterSave(threadDir, data.messages.length > 0)
