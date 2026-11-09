@@ -1,0 +1,46 @@
+/* The chat's thinking icon (ThinkingIcon in lib/icons.tsx). While the model thinks (`.is-thinking`):
+   - the orbit group (the three arcs and dots) turns around the still centre circle: 2s a turn at Normal
+     speed, scaled by Settings > Animation speed (`--ui-motion-scale`). Transform only.
+   - the icon takes part in the label's shimmer (TextShimmer, agent-ui.css): the same two colours as the
+     text gradient, on the same period (`--an-shimmer-duration`, set on the row by ToolRowBase) and phase
+     (both start when the row starts running). The sweep crosses the icon just before it enters the label.
+   With motion off (that setting or the OS reduced-motion setting), and once the thought is done, the icon
+   is still. */
+
+.thinking-icon .thinking-icon-orbit {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
+
+.thinking-icon.is-thinking {
+  color: var(--an-foreground-subtle, #a3a3a3);
+  animation: thinking-icon-sweep var(--an-shimmer-duration, 1.2s) linear infinite;
+}
+
+.thinking-icon.is-thinking .thinking-icon-orbit {
+  animation: thinking-icon-orbit calc(2s * var(--ui-motion-scale, 1)) linear infinite;
+  will-change: transform;
+}
+
+@keyframes thinking-icon-orbit {
+  to { transform: rotate(360deg); }
+}
+
+/* The label's band (40-60% of a 250%-wide gradient, moving left to right once per period) is left of the
+   text for the first sixth of the period; that is when it passes over the icon. */
+@keyframes thinking-icon-sweep {
+  0%, 15%, 100% { color: var(--an-foreground-subtle, #a3a3a3); }
+  5% { color: var(--an-foreground-muted, #737373); }
+}
+
+[data-motion='off'] .thinking-icon.is-thinking,
+[data-motion='off'] .thinking-icon.is-thinking .thinking-icon-orbit {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-icon.is-thinking,
+  .thinking-icon.is-thinking .thinking-icon-orbit {
+    animation: none !important;
+  }
+}

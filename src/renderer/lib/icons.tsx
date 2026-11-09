@@ -1,5 +1,6 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
+import '../styles/thinking-icon.css'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -25,6 +26,7 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
+import Atom01Icon from '@hugeicons/core-free-icons/Atom01Icon'
 import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
@@ -341,7 +343,49 @@ export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
 export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
+export interface ThinkingIconProps extends IconProps {
+  /** While the model thinks: the orbits turn around the still centre (thinking-icon.css). */
+  active?: boolean
+}
+
+/**
+ * The chat's thinking icon (Hugeicons Atom 01). Its own SVG so the centre circle and the orbits
+ * (arcs and dots) are separate: only the orbit group rotates while `active`.
+ */
+export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
+  { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
+  ref,
+) {
+  const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
+  const color = typeof stroke === 'string' ? stroke : 'currentColor'
+  const [centre, ...orbits] = Atom01Icon as unknown as Array<[string, Record<string, string>]>
+  const draw = ([tag, { key, ...attrs }]: [string, Record<string, string>]) => {
+    const shape = { ...attrs, stroke: color, strokeWidth: width }
+    return tag === 'circle' ? <circle key={key} {...shape} /> : <path key={key} {...shape} />
+  }
+  return (
+    <svg
+      ref={ref}
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden={props['aria-label'] ? undefined : true}
+      data-icon-library="hugeicons"
+      data-thinking={active ? 'active' : 'done'}
+      className={`mousse-icon thinking-icon${active ? ' is-thinking' : ''} ${className}`.trim()}
+      {...props}
+    >
+      {draw(centre!)}
+      <g className="thinking-icon-orbit">{orbits.map(draw)}</g>
+    </svg>
+  )
+})
+ThinkingIcon.displayName = 'ThinkingIcon'
+
 export const IconBrain = Brain
+export const IconThinking = ThinkingIcon
 export const IconArrowBackUp = Undo2
 export const IconArrowDown = ArrowDown
 export const IconCheck = Check

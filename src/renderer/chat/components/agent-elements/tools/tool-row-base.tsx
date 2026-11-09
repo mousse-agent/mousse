@@ -1,8 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
+
+/** Seconds per sweep of a running row's label shimmer. */
+export const SHIMMER_DURATION_S = 1.2;
 
 export type ToolRowBaseProps = {
   icon?: ReactNode;
@@ -53,7 +56,11 @@ export function ToolRowBase({
         canToggle ? "cursor-pointer" : "cursor-default",
       )}
     >
-      <div className="flex items-center gap-2 min-w-0 text-[15px] leading-[22px] text-muted-foreground">
+      <div
+        className="flex items-center gap-2 min-w-0 text-[15px] leading-[22px] text-muted-foreground"
+        // One sweep period for the label's shimmer and an icon that follows it (thinking-icon.css).
+        style={{ "--an-shimmer-duration": `${SHIMMER_DURATION_S}s` } as CSSProperties}
+      >
         {icon && (
           <span className="flex items-center justify-center size-[18px] shrink-0">
             {icon}
@@ -70,7 +77,7 @@ export function ToolRowBase({
           {isAnimating && shimmerLabel ? (
             <TextShimmer
               as="span"
-              duration={1.2}
+              duration={SHIMMER_DURATION_S}
               className="flex items-center m-0"
             >
               {shimmerLabel}
