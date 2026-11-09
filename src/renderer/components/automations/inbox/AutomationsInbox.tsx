@@ -146,7 +146,7 @@ export function AutomationsInbox({ active }: { active: boolean }) {
   })
 
   useEffect(() => {
-    listRef.current?.querySelector(`[data-row-key="${cursor}"]`)?.scrollIntoView({ block: 'nearest' })
+    listRef.current?.querySelector(`[data-row-key="${cursor}"]`)?.scrollIntoView?.({ block: 'nearest' })
   }, [cursor])
 
   const setText = (text: string | undefined) => setInboxFilter({ ...filter, ...(text ? { text } : { text: undefined }) })

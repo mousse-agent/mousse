@@ -582,7 +582,7 @@ export function registerGuiIpc(
     const notification = new Notification({
       ...content,
       title: run.jobName,
-      body: automationRunBody(run.outcome, run.error),
+      body: automationRunBody(run.outcome, run.error, { ...(run.level ? { level: run.level } : {}), ...(run.summary ? { summary: run.summary } : {}) }),
       silent: useWindowsCompletionSound ? true : content.silent
     })
     notification.on('click', () => {
