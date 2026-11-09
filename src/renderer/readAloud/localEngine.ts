@@ -8,17 +8,20 @@ import { NativeTtsSlot, nativeKokoroUnavailable, type TtsWorker } from './native
 import { splitSpeechSegments } from './speechText'
 
 /**
- * Kokoro runs natively (onnxruntime-node in a process of its own, about 1.8x real time); the other
- * models run on one WebAssembly thread per worker (only dictation asks for more), at roughly 0.6x
- * to 0.7x. Two workers voicing consecutive segments in parallel stay ahead of playback.
+ * The models run on one WebAssembly thread per worker (only dictation asks for more), at roughly
+ * 0.6x to 0.7x real time. Two workers voicing consecutive segments in parallel stay ahead of
+ * playback.
  */
 const POOL_SIZE = 2
+/** Kokoro's native engine voices about 3x real time, so one slot stays ahead of playback. */
+const NATIVE_POOL_SIZE = 1
 /** Segments voiced ahead of the one playing; each holds a few seconds of audio. */
 const LOOKAHEAD_SEGMENTS = 8
 /**
- * A loaded worker holds about 500 MB that is only returned when the worker ends, so the pool is
- * shut down after the last playback. The delay is long enough that reading the next paragraph
- * does not pay for loading the model again.
+ * A loaded worker holds about 500 MB that is only returned when the worker ends, and an open
+ * native slot keeps its engine's model loaded, so the pool is shut down after the last playback.
+ * The delay is long enough that reading the next paragraph does not pay for loading the model
+ * again.
  */
 const IDLE_DISPOSE_MS = 5 * 60_000
 
@@ -39,6 +42,9 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null
 function send(target: TtsWorker, message: LocalTtsWorkerRequest): void {
   target.postMessage(message)
 }
+
+/** Kokoro runs natively unless its engine failed to start this session; the others run on WebAssembly. */
+const runsNatively = (model: LocalTtsModel): boolean => model.runtime === 'kokoro' && !nativeKokoroUnavailable()
 
 /** Kokoro gets a native slot unless one failed to start this session; the others get WebAssembly workers. */
 function createWorker(model: LocalTtsModel): TtsWorker {
@@ -75,7 +81,7 @@ function createWebWorker(model: LocalTtsModel): Worker {
 function ensurePool(model: LocalTtsModel, segments: number, lease: object): TtsWorker[] {
   if (pool && pool.model.id !== model.id) disposeLocalEngine('Reading stopped because another voice model started')
   pool ??= { model, workers: [], leases: new Map() }
-  const size = Math.min(model.maxWorkers ?? POOL_SIZE, segments)
+  const size = Math.min(runsNatively(model) ? NATIVE_POOL_SIZE : (model.maxWorkers ?? POOL_SIZE), segments)
   while (pool.workers.length < size) pool.workers.push(createWorker(model))
   const workers = pool.workers.slice(0, size)
   for (const worker of workers) {
@@ -87,17 +93,18 @@ function ensurePool(model: LocalTtsModel, segments: number, lease: object): TtsW
 }
 
 /**
- * Ends `lease` on its workers. A worker still voicing one of its segments is terminated and
- * replaced at once when no other running job holds it, because a running synthesis cannot be
- * interrupted and the next read would wait behind it; the replacement loads the model before the
- * next read needs it. A worker another job holds only gets `cancel`, which drops the result.
+ * Ends `lease` on its workers. A native slot still voicing one of its segments gets `cancel`,
+ * which stops it at once. A WebAssembly worker still voicing one is terminated and replaced at
+ * once when no other running job holds it, because its synthesis cannot be interrupted and the
+ * next read would wait behind it; the replacement loads the model before the next read needs it.
+ * A worker another job holds only gets `cancel`, which drops the result.
  */
 function releaseWorkers(lease: object, workers: readonly TtsWorker[], inFlight: ReadonlyMap<number, { worker: TtsWorker }>): void {
   const current = disposing ? null : pool
   for (const worker of workers) current?.leases.get(worker)?.delete(lease)
   for (const [id, { worker }] of inFlight) {
     const index = current ? current.workers.indexOf(worker) : -1
-    if (current && index >= 0 && !current.leases.get(worker)?.size) {
+    if (current && index >= 0 && !worker.cancelsInPlace && !current.leases.get(worker)?.size) {
       current.leases.delete(worker)
       worker.terminate()
       current.workers[index] = createWorker(current.model)

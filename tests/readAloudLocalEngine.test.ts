@@ -16,7 +16,7 @@ const SAMPLE_RATE = 24_000
 /** One segment, so one worker. */
 const SHORT = 'Hello there, this is the first message.'
 const OTHER_SHORT = 'And this is the next paragraph.'
-/** Two segments, so two workers. */
+/** Two segments, so two WebAssembly workers; Kokoro's native engine uses one slot for any length. */
 const LONG =
   'The quick brown fox jumps over the dog. ' +
   'Meanwhile the river runs past the old stone bridge.'
@@ -101,6 +101,7 @@ class FakeSlot implements FakeEngine {
   readonly id = FakeSlot.next++
   readonly requests: NativeRequest[] = []
   terminated = 0
+  cancelled = 0
 
   constructor(readonly modelId: string) {
     engines.push(this)
@@ -119,6 +120,15 @@ class FakeSlot implements FakeEngine {
       answered = true
     }
     return answered
+  }
+
+  /** Main stops the slot's segment; it answers as cancelled. */
+  cancel(): void {
+    this.cancelled++
+    for (const request of this.requests) {
+      if (!request.answered) request.resolve({ error: 'The segment was cancelled' })
+      request.answered = true
+    }
   }
 
   close(error: Error): void {
@@ -149,6 +159,7 @@ function fakeNative() {
           slots.get(slotId)!.requests.push({ type: 'speak', text, voice, resolve, reject, answered: false })
         })
     ),
+    nativeCancel: vi.fn(async (slotId: number) => slots.get(slotId)!.cancel()),
     nativeClose: vi.fn(async (slotId: number) => {
       const slot = slots.get(slotId)!
       slot.terminated++
@@ -261,9 +272,9 @@ describe('local read aloud keeps the model loaded between reads', () => {
     expect(next.onPlaying).toHaveBeenCalledTimes(1)
   })
 
-  it('drops every slot exactly five minutes after the last read ended, and the next read starts fresh', async () => {
+  it('drops every worker exactly five minutes after the last read ended, and the next read starts fresh', async () => {
     expect(splitSpeechSegments(LONG)).toHaveLength(2)
-    await finishRead(startRead(LONG))
+    await finishRead(startRead(LONG, new AbortController(), 'kitten-tts-micro'))
     expect(engines).toHaveLength(2)
 
     await vi.advanceTimersByTimeAsync(IDLE_MS - 1)
@@ -272,12 +283,21 @@ describe('local read aloud keeps the model loaded between reads', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(engines.map((entry) => entry.terminated)).toEqual([1, 1])
 
-    await finishRead(startRead(SHORT))
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-micro'))
     expect(engines).toHaveLength(3)
   })
 
-  it('keeps the slots for as long as a read is still playing', async () => {
-    const read = startRead(LONG)
+  it('closes the native slot five minutes after the last read ended', async () => {
+    await finishRead(startRead(LONG))
+    expect(engines).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(IDLE_MS - 1)
+    expect(engines[0].terminated).toBe(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(engines[0].terminated).toBe(1)
+  })
+
+  it('keeps the workers for as long as a read is still playing', async () => {
+    const read = startRead(LONG, new AbortController(), 'kitten-tts-micro')
     await vi.advanceTimersByTimeAsync(2 * IDLE_MS)
     expect(engines.map((entry) => entry.terminated)).toEqual([0, 0])
 
@@ -305,7 +325,7 @@ describe('local read aloud keeps the model loaded between reads', () => {
 })
 
 describe('local read aloud when a read is cut short', () => {
-  it('stops the slot voicing the stopped read and starts a loaded replacement at once, which the next read uses', async () => {
+  it('stops the segment of a stopped read in its native slot, which the next read uses at once', async () => {
     const read = startRead(SHORT)
     await flush()
     const [slot] = engines as FakeSlot[]
@@ -315,19 +335,38 @@ describe('local read aloud when a read is cut short', () => {
     await read.done
     await flush()
 
-    expect(slot.terminated).toBe(1)
-    // The replacement is opened, which loads the model, before anyone asks for it.
-    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
-    expect(engines).toHaveLength(2)
+    expect(slot.cancelled).toBe(1)
+    expect(slot.terminated).toBe(0)
+    expect(native.nativeOpen).toHaveBeenCalledTimes(1)
     // The stopped segment started no sound.
     expect(FakeAudioContext.sources).toHaveLength(0)
 
     const next = startRead(OTHER_SHORT)
     await flush()
-    expect(engines).toHaveLength(2)
-    expect(engines[1].speakRequests()).toMatchObject([{ text: OTHER_SHORT }])
+    expect(engines).toHaveLength(1)
+    expect(slot.speakRequests()).toMatchObject([{ text: SHORT }, { text: OTHER_SHORT }])
     await finishRead(next)
     expect(next.onPlaying).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses one native slot for Kokoro, and two WebAssembly workers once its engine could not start', async () => {
+    await finishRead(startRead(LONG))
+    expect(engines).toHaveLength(1)
+    engine.disposeLocalEngine()
+
+    native.nativeOpen.mockRejectedValueOnce(new Error('The native voice engine is not part of this build'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // The slot hands this read to a WebAssembly worker.
+    const read = startRead(LONG)
+    await flush()
+    expect(workers()).toHaveLength(1)
+    await finishRead(read)
+    engine.disposeLocalEngine()
+
+    await finishRead(startRead(LONG))
+    expect(workers()).toHaveLength(3)
+    expect(workers().every((worker) => worker.url.pathname.endsWith('kokoroWorker.ts'))).toBe(true)
+    warn.mockRestore()
   })
 
   it('replaces a stopped WebAssembly worker too, and tells the replacement which model to load', async () => {
@@ -408,8 +447,8 @@ describe('local read aloud when a read is cut short', () => {
     await outcome
     await flush()
 
-    expect(engines.map((entry) => entry.terminated)).toEqual([1, 1])
-    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
+    expect(engines.map((entry) => entry.terminated)).toEqual([1])
+    expect(native.nativeOpen).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -483,16 +522,17 @@ describe('local synthesis for a phone', () => {
     await read.done
     await flush()
 
-    expect(engines).toHaveLength(2)
-    expect(engines.map((entry) => entry.terminated)).toEqual([0, 0])
+    expect(engines).toHaveLength(1)
+    expect(engines.map((entry) => entry.terminated)).toEqual([0])
     while (gates.length > 0) {
       gates.shift()!()
       await answerAll()
     }
     await phone
-    expect(engines.map((entry) => entry.terminated)).toEqual([0, 0])
-    // The stopped segment was voiced on the shared slot, but its audio was dropped.
+    expect(engines.map((entry) => entry.terminated)).toEqual([0])
+    // The stopped segment reached the shared slot, which stopped it; it made no sound.
     expect(engines.flatMap((entry) => entry.speakRequests().map((request) => request.text))).toContain(SHORT)
+    expect(native.nativeCancel).toHaveBeenCalledTimes(1)
     expect(FakeAudioContext.sources).toHaveLength(0)
   })
 })
@@ -567,9 +607,9 @@ describe('local read aloud with more than one model', () => {
 
     await outcome
     await flush()
-    expect(kokoro.map((entry) => entry.terminated)).toEqual([1, 1])
+    expect(kokoro.map((entry) => entry.terminated)).toEqual([1])
     // No replacement is started for the dropped model.
-    expect(native.nativeOpen).toHaveBeenCalledTimes(2)
+    expect(native.nativeOpen).toHaveBeenCalledTimes(1)
     await answerAll()
     await phone
 

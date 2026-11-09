@@ -136,6 +136,20 @@ export class LocalModelManager<M extends LocalModelManifest> {
     return bytes
   }
 
+  /** Where a file of a downloaded model is, for a process that reads it itself. Fetches an optional file first. */
+  async filePath(modelId: string, path: string): Promise<string> {
+    const model = this.requireModel(modelId)
+    const file = model.files.find((entry) => entry.path === path)
+    if (!file) throw new Error(`${model.label} has no file named ${JSON.stringify(path)}`)
+    if (!(await this.isInstalled(model))) {
+      throw new Error(`${model.label} is not downloaded. Download it under Settings, Speech.`)
+    }
+    if (file.optional) await this.fetchOptionalFile(model, file)
+    const finalPath = join(this.modelDir(model), file.path)
+    if ((await fileSize(finalPath)) !== file.size) throw new Error(`${model.label} file ${file.path} is damaged. Download the model again.`)
+    return finalPath
+  }
+
   private requireModel(modelId: string): M {
     const model = this.models.find((entry) => entry.id === modelId)
     if (!model) throw new Error(`Unknown local model: ${String(modelId)}`)

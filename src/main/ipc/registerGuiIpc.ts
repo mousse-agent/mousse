@@ -20,7 +20,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell, utilityProcess } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
@@ -53,7 +53,7 @@ import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
-import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import { LOCAL_TTS_MODELS, type KokoroTtsModel, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { SPEECH_HOST_METHODS } from '../../shared/speechRelay'
 import {
   LOCAL_STT_MODELS,
@@ -62,7 +62,9 @@ import {
   type ProviderTranscriptionResult
 } from '../../shared/dictation'
 import { LocalModelManager, defaultLocalModelsRoot } from '../localModels/LocalModelManager'
-import { NativeTtsSlots, nativeTtsHostScript } from '../readAloud/NativeTtsSlots'
+import { NativeTtsSlots } from '../readAloud/NativeTtsSlots'
+import { kokoroOnnxFile, spawnVoiceEngine, voiceEnginePath } from '../readAloud/voiceEngineProcess'
+import type { KokoroFrontEnd } from '../readAloud/kokoroText'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -2664,16 +2666,31 @@ export function registerGuiIpc(
   registerHandler('readAloud:readLocalModelFile', (_e, modelId: string, path: string) =>
     localTtsModels.readFile(modelId, path)
   )
-  // Kokoro on onnxruntime-node, one utility process per slot (see NativeTtsSlots).
+  // Kokoro on the native voice engine, one process per model (see NativeTtsSlots). The text front
+  // end, with its espeak-ng, loads on the first segment.
+  const kokoroFrontEnds = new Map<string, Promise<KokoroFrontEnd>>()
+  const kokoroFrontEnd = (model: KokoroTtsModel): Promise<KokoroFrontEnd> => {
+    let frontEnd = kokoroFrontEnds.get(model.id)
+    if (!frontEnd) {
+      frontEnd = import('../readAloud/kokoroText').then(
+        ({ KokoroFrontEnd }) => new KokoroFrontEnd(model, (path) => localTtsModels.readFile(model.id, path))
+      )
+      kokoroFrontEnds.set(model.id, frontEnd)
+    }
+    return frontEnd
+  }
   const nativeTts = new NativeTtsSlots({
-    fork: () => utilityProcess.fork(nativeTtsHostScript(), [], { serviceName: 'Mousse voice engine' }),
-    readFile: (modelId, path) => localTtsModels.readFile(modelId, path),
-    isDownloaded: async (modelId) => (await localTtsModels.status(modelId)).state.status === 'downloaded'
+    spawn: () => spawnVoiceEngine(voiceEnginePath(app)),
+    isDownloaded: async (modelId) => (await localTtsModels.status(modelId)).state.status === 'downloaded',
+    modelPath: (model) => localTtsModels.filePath(model.id, kokoroOnnxFile(model)),
+    prepare: async (model, text, voice) => (await kokoroFrontEnd(model)).prepare(text, voice)
   })
+  app.on('will-quit', () => nativeTts.dispose())
   registerHandler('readAloud:nativeOpen', (event, modelId: unknown) => nativeTts.open(event.sender, modelId))
   registerHandler('readAloud:nativeSpeak', (event, slotId: unknown, text: unknown, voice: unknown, speed: unknown) =>
     nativeTts.speak(event.sender, slotId, text, voice, speed)
   )
+  registerHandler('readAloud:nativeCancel', (event, slotId: unknown) => nativeTts.cancel(event.sender, slotId))
   registerHandler('readAloud:nativeClose', (event, slotId: unknown) => nativeTts.close(event.sender, slotId))
   registerHandler('readAloud:synthesizeWithProvider', async (_e, request: ProviderSpeechRequest): Promise<ProviderSpeechResult> => {
     const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
