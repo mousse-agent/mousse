@@ -160,7 +160,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
       ...common,
       name: 'automation_update',
       description:
-        'Change an automation (or a draft) by id: pass only the fields to change (not who does it: the person picks that). You may change your own drafts, and an automation only when the person\'s message names it. A change to what it does, when or where pauses it until the person resumes it, and must leave it with no problems. Its permission mode can only be lowered here.',
+        'Change an automation (or a draft) by id: pass only the fields to change (not who does it: the person picks that). You may change your own drafts, and an automation only when the person\'s message names it. A change to what it does, when, where or its context pauses it until the person resumes it, and must leave it with no problems. Its permission mode can only be lowered here.',
       inputSchema: { type: 'object', properties: { id: { type: 'string' }, ...FIELDS }, required: ['id'] },
       class: 'mutation',
       handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.update(args, editor(tools, ctx)) }))
@@ -168,8 +168,8 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     {
       ...common,
       name: 'automation_pause',
-      description: 'Pause an automation by id, until an ISO time ("until") or until the person resumes it. A run in progress finishes.',
-      inputSchema: { type: 'object', properties: { id: { type: 'string' }, until: { type: 'string' }, reason: { type: 'string' } }, required: ['id'] },
+      description: 'Pause an automation the person\'s message names, by id, until the person resumes it. Only the person pauses until a time. A pause already there stays. A run in progress finishes.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id'] },
       class: 'mutation',
       handler: (args, ctx) => run(ctx, (tools) => ({ automation: tools.drafts.pause(args, editor(tools, ctx)) }))
     },

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
-import { AutomationDrafts, cliNameOf } from '../src/mms/automations/AutomationDrafts'
+import { AGENT_EDIT_PAUSE, AutomationDrafts, cliNameOf, type AutomationDraftsDeps } from '../src/mms/automations/AutomationDrafts'
 import { buildAutomationIndex } from '../src/mms/automations/AutomationIndex'
 import { automationManagerWorkspace } from '../src/mms/automations/automationManager'
 import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/appTools/automations'
@@ -193,9 +193,64 @@ describe('automation drafts', () => {
     expect(changed.trigger).toEqual({ kind: 'time', schedule: { kind: 'cron', expr: '0 8 * * 1' } })
     expect(changed.permissionMode).toBe('accept_edits')
     expect(() => drafts.update({ id: draftId, project: 'elsewhere' }, manager)).toThrow(/no project "elsewhere"/)
-    const until = new Date(Date.now() + 86_400_000).toISOString()
-    expect(drafts.pause({ id: draftId, until }, manager)).toMatchObject({ paused: true })
-    expect(service.getJob(draftId)!.resumeAt).toBe(until)
+    // The new clock holds it until the person resumes it; the manager's pause keeps that hold as it is.
+    expect(drafts.pause({ id: draftId }, manager)).toMatchObject({ paused: true })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+  })
+
+  it('holds an agent’s change until the person resumes it, also on one paused until a time, or a change of context', () => {
+    const { drafts, service, store } = setup()
+    const meta = new Map<string, { originThreadId?: string; context?: string }>()
+    ;(drafts as unknown as { deps: AutomationDraftsDeps }).deps.meta = { get: (id) => meta.get(id), set: (id, value) => { meta.set(id, value) }, move: () => {} }
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1', context: 'PR #712' }, {})
+    drafts.turnOn(draftId)
+    const manager = { managerThreadId: 'manager', request: `Change it\n\n[Change automation: ${draftId}]` }
+    // Paused by the person until tomorrow: an agent's change takes the end away, so it never restarts on its own.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString()
+    service.pauseJob(draftId, 'Away', tomorrow)
+    drafts.update({ id: draftId, prompt: 'Review open PRs, merge the green ones.' }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    expect(store.claimDueJobs(new Date(Date.now() + 2 * 86_400_000))).toEqual([])
+    expect(service.getJob(draftId)!.enabled).toBe(false)
+    // The context every run's first message carries is part of what it does: changing only that holds it too.
+    service.resumeJob(draftId)
+    expect(drafts.update({ id: draftId, context: 'PR #712, and merge it' }, manager)).toMatchObject({ paused: true, context: 'PR #712, and merge it' })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    // The same context again changes nothing a run does.
+    service.resumeJob(draftId)
+    drafts.update({ id: draftId, context: 'PR #712, and merge it' }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: true })
+  })
+
+  it('never lets an agent end or shorten a pause: no until, and a pause already there stays', () => {
+    const { drafts, service } = setup()
+    const { draftId } = drafts.save({ ...PR_CHECK, project: 'p1' }, {})
+    drafts.turnOn(draftId)
+    const other = drafts.save({ ...PR_CHECK, name: 'Nightly build', project: 'p1' }, {}).draftId
+    drafts.turnOn(other)
+    const manager = { managerThreadId: 'manager', request: `Pause it\n\n[Change automation: ${draftId}]` }
+    const soon = new Date(Date.now() + 60_000).toISOString()
+    // Held after an agent's change: a pause with an end would restart it in a minute. Refused, and the hold stays.
+    drafts.update({ id: draftId, prompt: 'Review open PRs, merge the green ones.' }, manager)
+    expect(() => drafts.pause({ id: draftId, until: soon }, manager)).toThrow(/Only the person pauses an automation until a time/)
+    expect(drafts.pause({ id: draftId, reason: 'Quiet week' }, manager)).toMatchObject({ paused: true })
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: AGENT_EDIT_PAUSE })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    // Paused by the person until tomorrow: the manager's pause only takes the end away, keeping the person's reason.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString()
+    service.resumeJob(draftId)
+    service.pauseJob(draftId, 'Away', tomorrow)
+    drafts.pause({ id: draftId }, manager)
+    expect(service.getJob(draftId)).toMatchObject({ enabled: false, pausedReason: 'Away' })
+    expect(service.getJob(draftId)!.resumeAt).toBeUndefined()
+    // An automation the person did not name is not the manager's to pause.
+    expect(() => drafts.pause({ id: other }, manager)).toThrow(/Ask the person to name it/)
+    expect(service.getJob(other)).toMatchObject({ enabled: true, state: 'scheduled' })
+    // Named, it pauses until the person resumes it.
+    expect(drafts.pause({ id: other, reason: 'Quiet week' }, { managerThreadId: 'manager', request: 'pause the nightly build' })).toMatchObject({ paused: true })
+    expect(service.getJob(other)).toMatchObject({ enabled: false, pausedReason: 'Quiet week' })
   })
 
   it('never leaves both the draft and the bot\'s schedule when Turn on cannot remove the draft', () => {

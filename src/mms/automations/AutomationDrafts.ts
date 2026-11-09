@@ -500,8 +500,9 @@ export class AutomationDrafts {
   }
 
   /**
-   * `automation_update`: changes an automation or a draft. An automation keeps running; a change that would leave it
-   * with a problem is refused. Its May can only be lowered here; raising it is for the person, in Edit details.
+   * `automation_update`: changes an automation or a draft. A change to what an automation does, when, where or its
+   * context holds it until the person resumes it; a change that would leave it with a problem is refused. Its May can
+   * only be lowered here; raising it is for the person, in Edit details.
    */
   update(args: Record<string, unknown>, editor: AutomationEditor): AutomationContract {
     const id = text(args.id, 'id', 256)
@@ -525,32 +526,35 @@ export class AutomationDrafts {
     const nextRun = scheduleChanged && job.enabled && job.state !== 'paused' && job.state !== 'running' ? { nextRunAt: computeNextRun(next.schedule) } : {}
     const updated = this.deps.update(job.id, { ...next, ...nextRun, permissionMode, threadId, ...(reuseThread ? { createThread: undefined } : {}) })
     if (!updated) fail(`No automation ${id}.`)
+    const contextBefore = this.metaOf(job.id)?.context || undefined
     this.keepMeta(job.id, fields, {})
-    // What it does, when, or where it runs changed at an agent's hand: it waits for the person to look and resume it.
-    const executable = (['prompt', 'schedule', 'trigger', 'threadId', 'projectId', 'createThread'] as const).some((key) => JSON.stringify(updated[key] ?? null) !== JSON.stringify(job[key] ?? null))
-    const paused = executable && job.enabled && job.state !== 'paused' ? this.deps.pause(job.id, AGENT_EDIT_PAUSE) : null
+    // What it does, when, where it runs, or the context every run's first message carries changed at an agent's hand:
+    // it waits for the person to look and resume it. The hold has no end, also on one that was paused until a time.
+    const contextChanged = Boolean(this.deps.meta) && fields.context !== undefined && (fields.context || undefined) !== contextBefore
+    const executable = contextChanged || (['prompt', 'schedule', 'trigger', 'threadId', 'projectId', 'createThread'] as const).some((key) => JSON.stringify(updated[key] ?? null) !== JSON.stringify(job[key] ?? null))
+    const paused = executable ? this.deps.pause(job.id, AGENT_EDIT_PAUSE) : null
     for (const threadId of new Set([job.trigger?.threadEvent?.threadId, updated.trigger?.threadEvent?.threadId])) if (threadId) this.deps.watch?.(threadId)
     this.deps.changed?.()
     return this.contract(paused ?? updated)
   }
 
-  /** `automation_pause`: pauses an automation, until a time or until the person resumes it. */
+  /**
+   * `automation_pause`: pauses an automation the person named until the person resumes it. An agent never sets an end:
+   * an end is a restart no one approved, and could end a hold an agent's change put on it. A pause that is already
+   * there stays, with its reason; one with an end loses only its end.
+   */
   pause(args: Record<string, unknown>, editor: AutomationEditor): AutomationContract {
     const id = text(args.id, 'id', 256)
     const job = this.deps.get(id)
     if (!job || job.bot) fail(`No automation ${id}.`)
     if (job.draft) fail('A draft does not run; there is nothing to pause.')
-    // Pausing only lowers what runs: the manager may pause any of the person's automations; a bot none of them.
     if ('botId' in editor) fail('A bot pauses only its own schedules, with its schedule tools.')
-    let until: string | undefined
-    if (args.until !== undefined) {
-      const at = Date.parse(text(args.until, 'until', 64))
-      if (!Number.isFinite(at)) fail('until must be a date and time')
-      if (at <= this.now().getTime()) fail('until must be in the future')
-      until = new Date(at).toISOString()
-    }
-    const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 200) : undefined
-    const paused = this.deps.pause(job.id, reason, until)
+    if (args.until !== undefined) fail('Only the person pauses an automation until a time. Pause it with no until; the person resumes it.')
+    const refusal = this.editRefusal(job, editor)
+    if (refusal) fail(refusal)
+    if (!job.enabled && !job.resumeAt) return this.contract(job)
+    const reason = !job.enabled ? job.pausedReason : typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 200) : undefined
+    const paused = this.deps.pause(job.id, reason)
     if (!paused) fail(`No automation ${id}.`)
     this.deps.changed?.()
     return this.contract(paused)
