@@ -29,6 +29,7 @@ import {
   type GitAction,
   type GitActionRowModel
 } from '../sideCard/gitSectionLogic'
+import { useToastObstruction } from '../ui/Toast'
 import { MenuButton, type MenuItem } from './MenuButton'
 import { changesErrorCode, changesErrorText, type CommitSelectionField } from './changesApi'
 import { plural, type FooterState } from './changesModel'
@@ -71,6 +72,8 @@ const NOTICE_MS = 15_000
  */
 export function ChangesFooter({ state, path, scope, commits, model, running, begin, end, onReviewUncommitted, onResolveConflicts, onRetry, onIncludeAll, commitSelection, onSelectionStale }: ChangesFooterProps) {
   const footerRef = useRef<HTMLDivElement>(null)
+  // Toasts (such as "Reverted · Undo") sit above the footer, not over the message field and Commit.
+  useToastObstruction(footerRef)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const [message, setMessage] = useState('')
   const [phase, setPhase] = useState<{ flow: CommitFlow; phase: CommitPhase } | null>(null)

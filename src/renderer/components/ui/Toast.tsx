@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type RefObject } from 'react'
 import { create } from 'zustand'
 import { Check, Copy, X } from '../../lib/icons'
 import { FloatingPortal } from '../../lib/floatingLayer'
@@ -20,6 +20,68 @@ const EXIT_MS = 220
 /** Height of the "Clear all" row above the open stack, and its gap to the top toast. */
 const HEAD_HEIGHT = 20
 const HEAD_GAP = 6
+/** The stack's distance from the window's bottom and right edges, and its width at most (toast.css). */
+const EDGE = 12
+const TOASTER_WIDTH = 328
+/** Space between the stack and bottom UI it stays above. */
+const OBSTRUCTION_GAP = 8
+
+/** Bottom UI the stack stays above while it is on screen, such as the Changes tab's footer. */
+const useToastObstructions = create<{ elements: HTMLElement[] }>(() => ({ elements: [] }))
+
+/**
+ * Keeps toasts above `ref`'s element while it is mounted: a pane's footer with actions the stack would cover.
+ * Only an element under the stack's column counts, so a footer elsewhere leaves the stack where it is.
+ */
+export function useToastObstruction(ref: RefObject<HTMLElement | null>): void {
+  const registered = useRef<HTMLElement | null>(null)
+  // Every render, since the element can come and go without the component unmounting.
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (element === registered.current) return
+    const previous = registered.current
+    registered.current = element
+    useToastObstructions.setState(({ elements }) => ({
+      elements: [...elements.filter((item) => item !== previous), ...(element ? [element] : [])]
+    }))
+  })
+  useLayoutEffect(() => () => {
+    const element = registered.current
+    registered.current = null
+    if (element) useToastObstructions.setState(({ elements }) => ({ elements: elements.filter((item) => item !== element) }))
+  }, [])
+}
+
+/** How far up the stack sits so it clears every registered obstruction under its column; undefined at its usual place. */
+function useToastBottom(): number | undefined {
+  const elements = useToastObstructions((state) => state.elements)
+  const [bottom, setBottom] = useState<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    const read = () => {
+      const width = Math.min(TOASTER_WIDTH, window.innerWidth - 2 * EDGE)
+      const right = window.innerWidth - EDGE
+      const left = right - width
+      let lift = 0
+      for (const element of elements) {
+        if (!element.isConnected) continue
+        const rect = element.getBoundingClientRect()
+        if (rect.width <= 0 || rect.height <= 0 || rect.right <= left || rect.left >= right) continue
+        lift = Math.max(lift, window.innerHeight - rect.top + OBSTRUCTION_GAP)
+      }
+      setBottom(lift > EDGE ? Math.round(lift) : undefined)
+    }
+    read()
+    if (elements.length === 0) return
+    window.addEventListener('resize', read)
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(read)
+    for (const element of elements) observer?.observe(element)
+    return () => {
+      window.removeEventListener('resize', read)
+      observer?.disconnect()
+    }
+  }, [elements])
+  return bottom
+}
 
 /**
  * What a toast is about, shown by a faint wash of the status colour over the toast: finished
@@ -210,11 +272,13 @@ export function ToastView({
   // A clicked-open toast keeps holding after the pointer and focus leave.
   const pinnedRef = useRef(false)
   const setHeld = (held: boolean) => onHoldChange?.(held || pinnedRef.current)
+  const bottom = useToastBottom()
   return (
     <FloatingPortal>
       <section
         className="ui-toaster"
         aria-label="Notifications"
+        style={bottom === undefined ? undefined : { bottom }}
         onPointerEnter={() => setHeld(true)}
         onPointerLeave={() => setHeld(false)}
         onFocus={() => setHeld(true)}
@@ -349,6 +413,7 @@ export function ToastHost() {
   }, [toasts.length])
   const now = useNow(toasts.length > 0)
   const paused = expanded || !windowFocused
+  const bottom = useToastBottom()
 
   // Each toast's measured height, so the open stack can lay them out as a list.
   const observers = useRef(new Map<number, ResizeObserver>())
@@ -419,7 +484,7 @@ export function ToastHost() {
       <section
         className={`ui-toaster${expanded ? ' is-expanded' : ''}`}
         aria-label="Notifications"
-        style={{ height: Math.max(stackHeight, 0) }}
+        style={{ height: Math.max(stackHeight, 0), ...(bottom === undefined ? {} : { bottom }) }}
         onPointerEnter={() => setHovered(true)}
         onPointerLeave={() => setHovered(false)}
         onFocus={() => setFocusWithin(true)}
