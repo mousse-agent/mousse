@@ -1,0 +1,4 @@
+# The prebuilt ONNX Runtime the `ort` crate downloads is kept in the crate's own target folder, not in the user's
+# cache folder: a build stays in the checkout, and CI caches it with the rest of the build.
+[env]
+ORT_CACHE_DIR = { value = "target/ort", relative = true }
