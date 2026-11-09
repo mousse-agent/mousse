@@ -289,6 +289,7 @@ import {
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
 import { isProcessAlive } from '../queue/processLiveness'
+import { clearQueueHold, isQueueHoldLive, readQueueHold, setQueueHold } from '../queue/queueHold'
 import {
   completeClaimDurable,
   mutateDurableQueue,
@@ -7061,7 +7062,11 @@ export class OrchestratorService extends EventEmitter {
   private closeStaleActivity(session: ThreadSession): void {
     // A `/compact` this daemon runs keeps its row open until it ends.
     if (session.isTurnRunning() || this.compactions.has(session.threadId)) return
-    const stale = new Set(session.messages.filter(isOpenActivityRow).map((message) => message.id))
+    let open = session.messages.filter(isOpenActivityRow)
+    // A compaction another live process runs (its saved queue hold) keeps its row open too.
+    if (open.some((message) => message.kind === 'context_compaction') && session.threadId !== '__unbound__' && this.peerCompactionHold(session.threadId))
+      open = open.filter((message) => message.kind !== 'context_compaction')
+    const stale = new Set(open.map((message) => message.id))
     if (!stale.size) return
     const store = this.threadStore
     if (!store || session.threadId === '__unbound__') {
@@ -7345,6 +7350,8 @@ export class OrchestratorService extends EventEmitter {
       threadId,
       session.executionLease?.owner.token
     )
+    // A compaction has no turn to steer: Send now skips it and the message goes first, with the full history.
+    if (!localActive && !externalActive && this.compactions.has(threadId)) return this.sendNowSkippingCompaction(session, itemId, opts?.expectedRevision)
     if (!localActive && !externalActive) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
@@ -7387,6 +7394,28 @@ export class OrchestratorService extends EventEmitter {
     }
 
     return this.deliverPromotedItem(session, item!, steerRunId)
+  }
+
+  /**
+   * Send now on a message the queue holds while a compaction runs: the message moves to the front of the queue and
+   * the compaction stops, with nothing cut ("Compaction stopped · full history kept"). Its hold lifts as it ends, and
+   * the queue drains as usual from the front, so this message is the first to go, with the full history.
+   */
+  private sendNowSkippingCompaction(session: ThreadSession, itemId: string, expectedRevision?: string): boolean {
+    const threadId = session.threadId
+    const toFront = (items: QueuedMessage[]): QueuedMessage[] => {
+      assertQueueRevision(items, expectedRevision)
+      const pending = listPendingQueue(items).filter((entry) => !entry.internal)
+      const item = pending.find((entry) => entry.id === itemId)
+      if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
+      if (pending[0]?.id === itemId) return items
+      return reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
+    }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, toFront) : toFront(session.queue)
+    this.emitQueueUpdated(threadId, session.queue)
+    // A Stop already on its way ends it the same way.
+    this.stopCompaction(threadId)
+    return true
   }
 
   /**
@@ -8971,6 +9000,18 @@ export class OrchestratorService extends EventEmitter {
       const item = this.enqueueExternalSteer(threadId, text, opts)
       if (item) return { steered: false, queued: true, item }
     }
+    // A compaction has no turn to join either, and a steer never stops it: the text waits in the queue as a message
+    // sent now does, held until the compaction ends (Send now on it is what skips the compaction).
+    if (text.trim() && this.compactionHoldsQueue(threadId)) {
+      this.assertQueueOpen(threadId)
+      const item = this.enqueueForThread(threadId, { content: text.trim() }, {
+        source: opts?.source,
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+        ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {})
+      })
+      this.drainQueueAfterCompaction(threadId)
+      return { steered: false, queued: true, item }
+    }
     // A paused run has no turn to join. The text is kept as a held message, as a steer that names the paused run is
     // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays, as a message sent now does.
     const paused = this.runEngine?.store.getPausedRun(threadId)
@@ -9155,7 +9196,7 @@ export class OrchestratorService extends EventEmitter {
     const queueBehindPause =
       !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake' && !opts?.agent && !opts?.delegation && !opts?.bindDelivery && !opts?.refuseWhilePaused
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
-    if (opts?.forceQueue || session.isTurnRunning() || (queueBehindPause && this.hasPausedRun(threadId))) this.assertQueueOpen(threadId)
+    if (opts?.forceQueue || session.isTurnRunning() || (queueBehindPause && this.hasPausedRun(threadId)) || this.compactionHoldsQueue(threadId)) this.assertQueueOpen(threadId)
     // Only a new message is checked: a replay of an accepted request returns its run as it was.
     const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
       ? () => {
@@ -9283,7 +9324,10 @@ export class OrchestratorService extends EventEmitter {
         return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
       })()
 
-    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause) {
+    // A compaction of the thread is running: the message waits in the queue, which is held until the compaction ends.
+    const heldByCompaction = !session.isTurnRunning() && this.compactionHoldsQueue(threadId)
+
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause || heldByCompaction) {
       if (expectedBranch) {
         const busy = new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
         if (run) this.cancelOrphanedAdmission(run.runId, busy.message)
@@ -9301,6 +9345,8 @@ export class OrchestratorService extends EventEmitter {
         if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
         else this.scheduleQueueDrain(session)
       }
+      // The same for a compaction that ended in between: its drain may have run before the item was saved.
+      if (heldByCompaction) this.drainQueueAfterCompaction(threadId)
       return {
         message: '',
         actions: [],
@@ -11076,14 +11122,17 @@ export class OrchestratorService extends EventEmitter {
             isAccepted: (item) => acceptedIds.has(item.id)
           }).items
           const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]))
-          // The queue is held while the thread is paused; only the continue message of the pause goes.
-          const result = this.pausedHoldsQueue(threadId, demoted) ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
+          // The queue is held while the thread is paused (only the continue message of the pause goes), and while a
+          // compaction runs. Read here, under the queue lock the hold is saved under.
+          const held = this.pausedHoldsQueue(threadId, demoted) || this.compactionHoldsQueue(threadId)
+          const result = held ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
           claimed = result.claimed
           return result.items
         })
       } else {
         const demoted = demoteSteerItems(session.queue)
-        const result = this.pausedHoldsQueue(session.threadId, demoted) ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
+        const held = this.pausedHoldsQueue(session.threadId, demoted) || this.compactionHoldsQueue(session.threadId)
+        const result = held ? { items: demoted, claimed: null } : claimNextNormal(demoted, claimOwner)
         session.queue = result.items
         claimed = result.claimed
       }
@@ -11245,6 +11294,50 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Whether a compaction holds the thread's queue: one runs here (`/compact`, Compact now), its run has not
+   * ended yet (the local action ends a moment after the compaction), or another live process saved a hold for
+   * one it runs. Nothing queued starts meanwhile, so nothing is sent with the history the compaction replaces.
+   */
+  private compactionHoldsQueue(threadId: string): boolean {
+    if (this.compactions.has(threadId)) return true
+    try {
+      if (this.runEngine?.getActiveRun(threadId)?.source === 'compact') return true
+    } catch (error) {
+      console.warn('the active run of a thread could not be read; the saved hold decides', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return this.peerCompactionHold(threadId)
+  }
+
+  /** A hold another live process saved on the thread's queue. A hold its process left behind is removed and holds nothing. */
+  private peerCompactionHold(threadId: string): boolean {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) return false
+    const hold = readQueueHold(threadDir)
+    if (!hold) return false
+    if (isQueueHoldLive(hold, () => this.compactions.has(threadId))) return true
+    try {
+      clearQueueHold(threadDir, hold.id)
+    } catch (error) {
+      logDebug('OrchestratorService', 'a stale queue hold could not be removed', error, { threadId })
+    }
+    return false
+  }
+
+  /**
+   * The queue goes on once a compaction ended (completed, stopped, failed): what waited is sent with the compacted
+   * context, or with the full history. Its run ends a moment after the compaction, so `threads.compact` calls this
+   * again then; a drain that finds the queue still held leaves it.
+   */
+  drainQueueAfterCompaction(threadId: string): void {
+    if (this.lifecycle.stopping) return
+    if (this.threadStore && !this.threadStore.getThread(threadId)) return
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted || this.compactionHoldsQueue(threadId)) return
+    if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+  }
+
+  /**
    * Startup / headless recovery: reclaim abandoned claims then drain pending normal work
    * without requiring the GUI. Bounded and non-blocking — does not steal live ownership.
    */
@@ -11302,7 +11395,9 @@ export class OrchestratorService extends EventEmitter {
         const hasPendingNormal = listPendingQueue(session.queue).some(
           (item) => item.intent === 'normal' && item.state === 'pending'
         )
-        if (!hasPendingNormal || this.pausedHoldsQueue(thread.id, session.queue)) continue
+        // A compaction another live process runs holds the queue; one a restart cut short holds nothing (its row was
+        // settled as interrupted when the session loaded, and its saved hold is removed here).
+        if (!hasPendingNormal || this.pausedHoldsQueue(thread.id, session.queue) || this.compactionHoldsQueue(thread.id)) continue
         this.startupDrainScheduled.add(thread.id)
         this.startupDrainPending.push(thread.id)
       } catch (err) {
@@ -11949,6 +12044,16 @@ export class OrchestratorService extends EventEmitter {
       this.emitMessageUpdated(note)
       this.persist(true)
     })
+    // The queue waits while the compaction runs (see `compactionHoldsQueue`); the hold is saved, so another process
+    // that drains this thread's queue waits too.
+    const threadDir = this.resolveThreadDir(threadId)
+    try {
+      if (threadDir) setQueueHold(threadDir, { kind: 'compaction', id: note.id })
+    } catch (error) {
+      this.compactions.delete(threadId)
+      clearTimeout(timeout)
+      throw error
+    }
     this.sessionAls.run(session, () => {
       session.messages.push(note)
       this.emitMessageAdded(note)
@@ -11996,11 +12101,27 @@ export class OrchestratorService extends EventEmitter {
           : 'Context compacted')
       return outcome
     } catch (error) {
-      finish('Context not compacted')
+      // The row says why; the queue then goes on with the full history.
+      const reason = error instanceof Error ? error.message : String(error)
+      finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted')
       throw error
     } finally {
       clearTimeout(timeout)
       this.compactions.delete(threadId)
+      try {
+        if (threadDir) clearQueueHold(threadDir, note.id)
+      } catch (error) {
+        // Left behind, the hold names this process, which no longer runs the compaction: it holds nothing.
+        logDebug('OrchestratorService', 'the queue hold of a compaction could not be removed', error, { threadId })
+      }
+      // After the callers' own steps (the run of `threads.compact` ends once this returns).
+      setImmediate(() => {
+        try {
+          this.drainQueueAfterCompaction(threadId)
+        } catch (error) {
+          logDebug('OrchestratorService', 'the queue could not go on after a compaction', error, { threadId })
+        }
+      })
     }
   }
 
