@@ -38,7 +38,8 @@ Image data (`images[].data` in messages, image parts of the model context) and a
 A row that refers to blobs lists them in its `blob_paths` column: for each, the exact path in the row's JSON, the hash, the size and how it is stored. The payload holds an empty string there. That list is the only thing that marks a value as a blob, so an ordinary value can never be read as one.
 
 - A save writes and fsyncs its blobs before the transaction that commits the rows referring to them.
-- Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as empty image data or `[attachment unavailable]`, the thread still opens, and the row keeps its reference: a later save of that row writes the reference back, not the placeholder.
+- Reading a row puts its blobs back and checks each one's hash. A missing or damaged blob shows as `[attachment unavailable: blob <hash>]` and the thread still opens. The placeholder names its blob, so a later save that still holds it, wherever the value moved to, writes the reference back instead of the placeholder.
+- Text that UTF-8 cannot hold exactly (a lone surrogate) stays in its row. New blob folders are fsynced into their parents before rows that refer to them commit, and collection never removes a folder that is not empty.
 - When a save removes or rewrites a row that had blobs, blobs no row refers to any more are deleted, once they are an hour old. Saves and collection both run under the thread's lock, and the hour keeps a blob another process has just written for a save it has not committed yet.
 
 ## Saving only what changed
