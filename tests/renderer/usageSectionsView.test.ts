@@ -50,11 +50,11 @@ describe('the three sections', () => {
   it('a subscription card, Other usage and Needs attention collapsed to their header rows, and the header chip counts', () => {
     render()
     expect(all('.usage-provider').map((card) => card.querySelector('.settings-group-title')?.textContent)).toEqual(['Claude subscription'])
-    expect(q('[data-testid="usage-section-usage-other"] .usage-section-head')?.textContent).toContain('Other usage· 1')
-    expect(q('[data-testid="usage-section-usage-attention"] .usage-section-head')?.textContent).toContain('Needs attention· 3')
+    expect(q('[data-testid="usage-section-usage-other"] .usage-section-head')?.textContent).toContain('Other usage· 2')
+    expect(q('[data-testid="usage-section-usage-attention"] .usage-section-head')?.textContent).toContain('Needs attention· 2')
     expect(all('[data-testid="usage-other-row"]')).toHaveLength(0)
     expect(all('[data-testid="usage-attention-row"]')).toHaveLength(0)
-    expect(q('[data-testid="usage-attention-chip"]')?.textContent).toBe('3')
+    expect(q('[data-testid="usage-attention-chip"]')?.textContent).toBe('2')
     expect(q('[data-testid="usage-section-usage-attention"]')?.className).toContain('is-dimmed')
   })
 
@@ -65,23 +65,32 @@ describe('the three sections', () => {
     expect(localStorage.getItem('mousse.usage.section.other')).toBe('open')
     act(() => root!.unmount())
     render()
-    expect(all('[data-testid="usage-other-row"]')).toHaveLength(1)
+    expect(all('[data-testid="usage-other-row"]')).toHaveLength(2)
   })
 
   it('Other usage starts open when there are no subscriptions at all', () => {
     render({ usage: { providers: providers.slice(1), fetchedAt: '2026-11-09T12:00:00Z' } })
-    expect(all('[data-testid="usage-other-row"]')).toHaveLength(1)
+    expect(all('[data-testid="usage-other-row"]')).toHaveLength(2)
   })
 
-  it('the header chip opens Needs attention and brings it into view; rows are ordered, no subscription last', () => {
+  it('the header chip opens Needs attention and brings it into view, things to fix only', () => {
     render()
     act(() => q('[data-testid="usage-attention-chip"]')!.click())
     expect(all('[data-testid="usage-attention-row"]').map((row) => row.textContent)).toEqual([
       'ChatGPT subscriptionSigned outReconnect',
-      'Grok (xAI)Session expiredReconnect',
-      'OpenCode GoNo subscription'
+      'Grok (xAI)Session expiredReconnect'
     ])
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
+  })
+
+  it('no subscription is a muted Other usage row, with no Reconnect; its "…" menu stays', () => {
+    localStorage.setItem('mousse.usage.section.other', 'open')
+    render({ rowActions: { onHide: vi.fn(), onDisable: vi.fn() } })
+    const row = all('[data-testid="usage-other-row"]').find((entry) => entry.textContent?.startsWith('OpenCode Go'))!
+    expect(row.textContent).toBe('OpenCode GoNo subscription')
+    expect(row.querySelector('.settings-muted')?.textContent).toBe('No subscription')
+    expect(row.querySelector('[data-testid="usage-reconnect"]')).toBeNull()
+    expect(row.querySelector('[data-testid="usage-row-menu"]')).not.toBeNull()
   })
 
   it('Reconnect opens that provider\'s settings entry', () => {
