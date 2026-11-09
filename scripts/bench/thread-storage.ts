@@ -88,7 +88,7 @@ function median(values: number[]): number {
 }
 
 type MaybePaged = ThreadDataStore & {
-  getMessages?: (id: string, page: { limit: number }) => Promise<{ messages: ChatMessage[] }>
+  readMessagePage?: (id: string, page: { limit: number; maxBytes: number; images?: boolean }) => Promise<{ messages: ChatMessage[] } | undefined>
   closeThreadStorage?: () => void
 }
 
@@ -136,9 +136,14 @@ async function main(): Promise<void> {
     const heapBefore = process.memoryUsage().heapUsed
     const reopened = new ThreadDataStore(new ProjectManager(home), home) as MaybePaged
     let openPage = 'n/a'
-    if (reopened.getMessages) {
-      const [, ms] = await timeAsync(() => reopened.getMessages!(written.threadId, { limit: 100 }))
+    let heapAfterPage = 'n/a'
+    if (reopened.readMessagePage && process.env.MOUSSE_SQLITE_THREAD_STORE === '1') {
+      // What opening a thread costs now: its newest 200 messages, read in the read worker.
+      const [, ms] = await timeAsync(() => reopened.readMessagePage!(written.threadId, { limit: 200, maxBytes: 16 * 1024 * 1024, images: true }))
       openPage = `${ms.toFixed(1)} ms`
+      gc?.()
+      gc?.()
+      heapAfterPage = mb(process.memoryUsage().heapUsed - heapBefore)
     }
     const [loaded, openAll] = await timeAsync(async () => {
       const warm = (reopened as { loadThreadDataAsync?: (id: string) => Promise<ReturnType<ThreadDataStore['loadThreadData']>> }).loadThreadDataAsync
@@ -157,6 +162,7 @@ async function main(): Promise<void> {
       toolResultSaveMedianMs: +median(written.toolSaves).toFixed(2),
       toolResultSaveP99Ms: +percentile(written.toolSaves, 0.99).toFixed(2),
       openNewestPage: openPage,
+      heapHeldAfterNewestPage: heapAfterPage,
       openWholeThreadMs: +openAll.toFixed(1),
       heapHeldAfterOpen: mb(heapAfter - heapBefore),
       sizeOnDisk: mb(written.bytes)

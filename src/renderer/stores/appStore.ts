@@ -29,6 +29,7 @@ import { workspacePendingKey } from '../lib/newThread'
 import { DEFAULT_THREADS_SIDEBAR_WIDTH } from '../lib/resizerKeys'
 import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
+import { parseCursor } from '../../shared/pageCursor'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'
@@ -589,6 +590,12 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         ? sortMessagesDeterministic(snapshot.messages)
         : reconcileMessageSnapshot(s.messages, snapshot.messages)
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      // A replacement is the whole transcript: nothing earlier is left to load.
+      if (snapshot.replace && s.activeThreadId && s.earlierByThread[s.activeThreadId]) {
+        const earlierByThread = { ...s.earlierByThread }
+        delete earlierByThread[s.activeThreadId]
+        return { messages, earlierByThread }
+      }
       return { messages }
     }),
   addMessage: (message) =>
@@ -599,6 +606,12 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     }),
   updateMessage: (message) =>
     set((s) => {
+      // A change to a message in a part of the thread this window has not loaded stays there; it arrives with
+      // that page, instead of appearing out of place among the loaded ones.
+      if (s.activeThreadId && s.earlierByThread[s.activeThreadId] && !s.messages.some((existing) => existing.id === message.id)) {
+        const first = s.messages[0]
+        if (first && sortMessagesDeterministic([message, first])[0] === message) return s
+      }
       const messages = upsertMessage(s.messages, message)
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
@@ -649,9 +662,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const had = s.earlierByThread[view.threadId]
       // Older messages this window already loaded stay: a view that stops at the same boundary again
       // (a reconnect) does not bring the "load earlier" prompt back for them.
-      const loadedBeyond = Boolean(
-        had && view.earlier && s.messages.length > 0 && s.messages[0].id !== view.earlier.before && s.messages.some((message) => message.id === view.earlier!.before)
-      )
+      // This window keeps one message per id (`reconcileMessageSnapshot`), so the boundary is found by the cursor's id.
+      const boundary = view.earlier ? parseCursor(view.earlier.before).id : undefined
+      const loadedBeyond = Boolean(had && boundary !== undefined && s.messages.findIndex((message) => message.id === boundary) > 0)
       const next = loadedBeyond ? had : view.earlier
       let earlierByThread = s.earlierByThread
       if (had?.before !== next?.before || had?.count !== next?.count) {

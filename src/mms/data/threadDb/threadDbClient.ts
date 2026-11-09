@@ -63,15 +63,56 @@ const SYNC_TIMEOUT_MS = 120_000
 
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
+/** A worker answering requests by id. It keeps the process alive only while a request is in flight. */
+class AsyncWorker {
+  private readonly worker: Worker
+  private readonly pending = new Map<number, Pending>()
+  private nextId = 1
+
+  constructor(script: string, role: 'read' | 'index') {
+    this.worker = new Worker(script, { workerData: { role }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+    this.worker.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
+      const entry = this.pending.get(message.id)
+      if (!entry) return
+      this.pending.delete(message.id)
+      if (!this.pending.size) this.worker.unref()
+      if (message.ok) entry.resolve(message.value)
+      else entry.reject(fromWireError(message.error!))
+    })
+    const failAll = (error: Error): void => {
+      for (const entry of this.pending.values()) entry.reject(error)
+      this.pending.clear()
+      this.worker.unref()
+    }
+    this.worker.on('error', failAll)
+    this.worker.on('exit', (code) => failAll(new Error(`Thread database ${role} worker stopped (${code})`)))
+    // After the listeners: adding a message listener refs a worker again.
+    this.worker.unref()
+  }
+
+  call(op: string, args: unknown[]): Promise<unknown> {
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      if (!this.pending.size) this.worker.ref()
+      this.pending.set(id, { resolve, reject })
+      this.worker.postMessage({ id, op, args })
+    })
+  }
+
+  terminate(): Promise<number> {
+    return this.worker.terminate()
+  }
+}
+
 export class ThreadDbClient {
   private readonly inlineWrite?: ThreadDbEngine
   private readonly inlineRead?: ThreadDbEngine
   private writer?: Worker
-  private reader?: Worker
+  private reader?: AsyncWorker
+  private indexer?: AsyncWorker
+  private script?: string
   private syncPort?: MessagePort
   private syncFlag?: Int32Array
-  private nextId = 1
-  private readonly pending = new Map<number, Pending>()
   private closed = false
   readonly mode: 'worker' | 'inline'
 
@@ -87,24 +128,8 @@ export class ThreadDbClient {
     this.mode = 'worker'
     this.writerScript = script
     this.startWriter()
-    this.reader = new Worker(script, { workerData: { role: 'read' }, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
-    this.reader.on('message', (message: { id: number; ok: boolean; value?: unknown; error?: WireError }) => {
-      const entry = this.pending.get(message.id)
-      if (!entry) return
-      this.pending.delete(message.id)
-      if (!this.pending.size) this.reader?.unref()
-      if (message.ok) entry.resolve(message.value)
-      else entry.reject(fromWireError(message.error!))
-    })
-    const failAll = (error: Error): void => {
-      for (const entry of this.pending.values()) entry.reject(error)
-      this.pending.clear()
-      this.reader?.unref()
-    }
-    this.reader.on('error', failAll)
-    this.reader.on('exit', (code) => failAll(new Error(`Thread database reader stopped (${code})`)))
-    // After the listeners: adding a message listener refs a worker again. Neither worker keeps the process alive.
-    this.reader.unref()
+    this.reader = new AsyncWorker(script, 'read')
+    this.script = script
   }
 
   private writerScript?: string
@@ -160,13 +185,18 @@ export class ThreadDbClient {
         try { resolve(runOp(this.inlineRead!, op, args) as Result<K>) } catch (error) { reject(error as Error) } finally { this.inlineRead!.closeAll() }
       }))
     }
-    const id = this.nextId++
-    return new Promise((resolve, reject) => {
-      // A read in flight keeps the process alive until it is answered; an idle reader does not.
-      if (!this.pending.size) this.reader!.ref()
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject })
-      this.reader!.postMessage({ id, op, args })
-    })
+    return this.reader!.call(op, args) as Promise<Result<K>>
+  }
+
+  /**
+   * Search index work, in a worker of its own (started on first use): indexing a long thread can take seconds, and
+   * must never hold up a page a person is waiting for. In-process mode runs it on the read engine.
+   */
+  callIndex<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
+    if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
+    if (this.inlineRead) return this.call(op, ...args)
+    this.indexer ??= new AsyncWorker(this.script!, 'index')
+    return this.indexer.call(op, args) as Promise<Result<K>>
   }
 
   /** Closes the write worker's connection to a thread's database (checkpointing it) before its folder moves. */
@@ -191,7 +221,7 @@ export class ThreadDbClient {
     }
     this.closed = true
     this.inlineRead?.closeEverything()
-    await Promise.all([this.writer?.terminate(), this.reader?.terminate()])
+    await Promise.all([this.writer?.terminate(), this.reader?.terminate(), this.indexer?.terminate()])
   }
 }
 

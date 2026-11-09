@@ -149,6 +149,8 @@ export function reclaimAbandonedClaimsDurable(
   let result: ReclaimAbandonedResult = { items: [], released: [], completed: [] }
   mutateDurableQueue(store, threadId, (items) => {
     let isAccepted = options?.isAccepted
+    // Only a claimed item asks whether it was accepted; with none, the transcript is not read.
+    if (!isAccepted && !items.some((item) => item.state === 'claimed')) isAccepted = () => false
     if (!isAccepted) {
       // Fail closed: loadThreadData errors abort the mutator before saveMessageQueue.
       const data = store.loadThreadData(threadId)

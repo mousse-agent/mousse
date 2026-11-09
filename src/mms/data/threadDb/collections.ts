@@ -98,11 +98,13 @@ export function compose(collections: Map<string, unknown[]>, state: Map<string, 
 }
 
 /** The fields a transcript row is indexed by. */
-export function rowFields(collection: string, value: unknown): { msgId: string | null; role: string | null; kind: string | null; ts: string | null } {
-  if (collection !== TRANSCRIPT && !/^s:.+:m$/.test(collection)) return { msgId: null, role: null, kind: null, ts: null }
+export function rowFields(collection: string, value: unknown): { msgId: string | null; role: string | null; kind: string | null; ts: string | null; hidden: 0 | 1 } {
+  if (collection !== TRANSCRIPT && !/^s:.+:m$/.test(collection)) return { msgId: null, role: null, kind: null, ts: null, hidden: 0 }
   const record = isRecord(value) ? value : {}
   const ts = record.timestamp
   return {
+    // Hidden messages (internal queue inputs) stay in the transcript but are never shown or paged.
+    hidden: record.hidden === true ? 1 : 0,
     msgId: typeof record.id === 'string' ? record.id : null,
     role: typeof record.role === 'string' ? record.role : null,
     kind: typeof record.kind === 'string' ? record.kind : null,

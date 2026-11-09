@@ -178,3 +178,37 @@ describe('images that were fetched stay', () => {
     expect(again).toEqual(['1'])
   })
 })
+
+describe('a long thread opened at its newest page', () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeThreadId: 't', messages: [message('50'), message('51')], earlierByThread: { t: { before: '50', count: 49 } } })
+  })
+
+  it('leaves a change to an older, unloaded message where it is', () => {
+    useAppStore.getState().updateMessage(message('10', { content: 'edited' }))
+    expect(useAppStore.getState().messages.map((m) => m.id)).toEqual(['50', '51'])
+    useAppStore.getState().updateMessage(message('52'))
+    expect(useAppStore.getState().messages.map((m) => m.id)).toEqual(['50', '51', '52'])
+  })
+
+  it('forgets the earlier prompt when the whole transcript replaces it', () => {
+    const all = Array.from({ length: 51 }, (_, at) => message(String(at + 1)))
+    useAppStore.getState().applyThreadMessages({ threadId: 't', messages: all, replace: true } as never, useAppStore.getState().profileId)
+    expect(useAppStore.getState().earlierByThread.t).toBeUndefined()
+    expect(useAppStore.getState().messages).toHaveLength(51)
+  })
+})
+
+describe('a reconnect to a long thread whose ids repeat', () => {
+  it('keeps the boundary this window already paged past', () => {
+    const withId = (id: string, content: string) => ({ ...message(id), content })
+    useAppStore.setState({
+      activeThreadId: 't',
+      // The whole transcript is [a, d, x, d, y]; this window loaded back to x and keeps one message per id.
+      messages: [withId('x', 'x'), withId('d', 'second'), withId('y', 'y')],
+      earlierByThread: { t: { before: 'x', count: 2 } }
+    })
+    useAppStore.getState().applyThreadView({ threadId: 't', messages: [withId('d', 'second'), withId('y', 'y')], earlier: { before: 'd\u001f1', count: 3 } } as never)
+    expect(useAppStore.getState().earlierByThread.t).toEqual({ before: 'x', count: 2 })
+  })
+})

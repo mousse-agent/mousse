@@ -3,6 +3,7 @@ import { scrollToMessage } from '../stores/chatNavigationStore'
 import { useAppStore, type PaletteMode } from '../stores/appStore'
 import type { PaletteItem } from './paletteItems'
 import { runCommand } from './commandRegistry'
+import { loadEarlierUntil } from '../components/EarlierMessagesBar'
 
 interface FocusTarget {
   focus(): void
@@ -52,7 +53,10 @@ export function togglePalette(): void {
 export async function openMessage(threadId: string, messageId: string): Promise<void> {
   await selectThread(threadId)
   // A navigation guard can keep the current thread open; its transcript has no such message.
-  if (useAppStore.getState().activeThreadId === threadId) scrollToMessage(messageId)
+  if (useAppStore.getState().activeThreadId !== threadId) return
+  // A long thread opens at its newest messages; an older hit is in a page that is loaded first.
+  await loadEarlierUntil(threadId, messageId).catch(() => false)
+  scrollToMessage(messageId)
 }
 
 /**

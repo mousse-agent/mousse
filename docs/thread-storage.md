@@ -81,6 +81,17 @@ The worker is built as one self-contained file beside each bundle (`out/cli/thre
 - **Query length.** Queries of three characters or more use the full-text index. Shorter ones scan the index table, never the thread files.
 - **No scan bound.** Threads in `thread.db` are always all searched. `maxMessageThreads` still bounds the scan of threads that are still on JSON.
 
+## Opening a thread and paging
+
+Opening a thread reads one page, not the whole thread:
+
+- `thread.snapshot` takes `newest`: only the newest messages, with `earlier` naming the first one and how many are older. The app asks for the newest 200. Without `newest`, the snapshot is the whole visible transcript, as before.
+- A thread in `thread.db` whose session is not loaded is answered by the read worker: an index range over `items(coll, ord, rid)` that skips hidden messages, and is never a read of the whole thread. A page is measured by the JSON it returns (UTF-8, long text from blobs included), and always holds at least one message. A page that shows work still marked running loads the session instead, since loading it settles work a previous daemon left running. Otherwise the session (the whole thread in memory) loads only when something needs it, such as a turn, a queue drain or a claim to reclaim at startup (a thread with nothing queued is not loaded when the daemon starts), and the thread is read in the read worker just before.
+- `thread.messages` pages `before` or `after` a cursor from `earlier` or `later`. A cursor is the message id, with the occurrence among visible messages appended when an id appears more than once (the same in the database and in a loaded transcript), so a transcript with repeated ids still pages through every message; a bare repeated id means its last occurrence. `thread.changesSince` returns the visible messages changed since a snapshot's `seq` (in the same `epoch`) and the ids that have no visible message any more (removed or hidden since; an id written again is not among them), or `reset` when the reader is too far behind. A reader applies `removed` first, then the messages.
+- In the app, older messages load when the "earlier messages" bar scrolls into view. Opening a search result in an older part of a thread loads pages until it is there.
+- Phones still get the whole transcript in one snapshot, and the thread is read in the read worker first.
+- Search index work runs in a worker of its own, so indexing a long thread never delays a page someone is waiting for.
+
 ## Moving a thread from JSON
 
 With the feature on, a JSON thread is imported the first time it is read, in the background:

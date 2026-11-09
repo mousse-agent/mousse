@@ -12,11 +12,12 @@ import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
+import { formatCursor, parseCursor } from '../../../shared/pageCursor'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
 import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
-export const THREAD_DB_FORMAT = 1
+export const THREAD_DB_FORMAT = 2
 /** Rows are spaced this far apart, so a message inserted between two others rarely moves anything. */
 export const ORD_STEP = 1024
 
@@ -49,6 +50,18 @@ export type BuildResult =
 
 export interface ThreadDbSummary { seq: number; messages: number }
 
+export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
+export interface MessagePage {
+  info: DbInfo
+  /** Message payloads (JSON), oldest first. */
+  messages: string[]
+  earlier?: { before: string; count: number }
+  later?: { after: string; count: number }
+  missing?: true
+}
+export interface MessageChanges { info: DbInfo; reset: boolean; messages: Array<{ ord: number; payload: string }>; removed: string[] }
+
+
 const SCHEMA = `
 CREATE TABLE info(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE items(
@@ -59,6 +72,7 @@ CREATE TABLE items(
   role TEXT,
   kind TEXT,
   ts TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
   rev INTEGER NOT NULL DEFAULT 1,
   changed_seq INTEGER NOT NULL,
   payload TEXT NOT NULL,
@@ -68,7 +82,7 @@ CREATE INDEX items_order ON items(coll, ord, rid);
 CREATE INDEX items_changed ON items(changed_seq);
 CREATE INDEX items_msg ON items(coll, msg_id);
 CREATE TABLE state(key TEXT PRIMARY KEY, rev INTEGER NOT NULL DEFAULT 1, changed_seq INTEGER NOT NULL, payload TEXT NOT NULL);
-CREATE TABLE removed(rid INTEGER NOT NULL, coll TEXT NOT NULL, changed_seq INTEGER NOT NULL);
+CREATE TABLE removed(rid INTEGER NOT NULL, coll TEXT NOT NULL, changed_seq INTEGER NOT NULL, msg_id TEXT);
 CREATE INDEX removed_changed ON removed(changed_seq);
 `
 
@@ -106,14 +120,14 @@ function createSchema(db: DatabaseSync): void {
 
 function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: Record<string, string>): number {
   const { collections, state } = decompose(data)
-  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
+  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, hidden, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)')
   let rows = 0
   for (const [coll, items] of collections) {
     items.forEach((item, index) => {
       const fields = rowFields(coll, item)
       const encoded = encodeRow(skeletonOf(item) ?? null)
       for (const blob of encoded.blobs) writeBlob(dir, blob)
-      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
+      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
       rows += 1
     })
   }
@@ -142,6 +156,16 @@ function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null
     const hydrated = hydratePayload(dir, row.payload, row.blob_paths, options)
     return { ...base, payload: hydrated.payload, hasBlobs: true, ...(hydrated.missing.length ? { missing: hydrated.missing } : {}) }
   })
+}
+
+/** The cursor of a transcript row: its message id, and its occurrence when the id repeats. */
+function rowCursor(db: DatabaseSync, row: { rid: number; ord: number; payload: string; msg_id: string | null }): string {
+  const id = row.msg_id ?? String((JSON.parse(row.payload) as { id?: unknown }).id)
+  // Occurrences among visible messages only, as a loaded transcript counts them.
+  const total = Number((db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ?").get(id) as { n: number }).n)
+  if (total <= 1) return id
+  const earlier = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? AND (ord < ? OR (ord = ? AND rid < ?))").get(id, row.ord, row.ord, row.rid) as { n: number }
+  return formatCursor(id, Number(earlier.n), true)
 }
 
 function loadFrom(db: DatabaseSync, dir: string): DbLoad {
@@ -195,7 +219,21 @@ export class ThreadDbEngine {
       const db = new DatabaseSync(path)
       try {
         db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
-        const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+        let version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+        if (version === 1) {
+          // Format 2: a hidden flag for paging, and the message id of removed rows for changesSince.
+          db.exec('BEGIN IMMEDIATE')
+          try {
+            // Another connection may have migrated while this one waited for the write lock.
+            version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+            if (version === 1) db.exec("ALTER TABLE items ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0; UPDATE items SET hidden = 1 WHERE coll = 'm' AND json_extract(payload, '$.hidden') = 1; ALTER TABLE removed ADD COLUMN msg_id TEXT; PRAGMA user_version=2;")
+            db.exec('COMMIT')
+          } catch (error) {
+            if (db.isTransaction) db.exec('ROLLBACK')
+            throw error
+          }
+          version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+        }
         if (version !== THREAD_DB_FORMAT) throw new ThreadDbError('format', `Unsupported thread database format ${version} at ${path}`)
       } catch (error) {
         db.close()
@@ -300,12 +338,14 @@ export class ThreadDbEngine {
       }
       const seq = info.seq + 1
       const remove = this.statement(connection, 'DELETE FROM items WHERE rid = ? AND coll = ?')
-      const tombstone = this.statement(connection, 'INSERT INTO removed(rid, coll, changed_seq) VALUES (?, ?, ?)')
+      const tombstone = this.statement(connection, 'INSERT INTO removed(rid, coll, changed_seq, msg_id) VALUES (?, ?, ?, ?)')
+      const removedId = this.statement(connection, 'SELECT msg_id FROM items WHERE rid = ?')
       for (const entry of request.deletes) {
+        const msgId = (removedId.get(entry.rid) as { msg_id: string | null } | undefined)?.msg_id ?? null
         remove.run(entry.rid, entry.coll)
-        tombstone.run(entry.rid, entry.coll, seq)
+        tombstone.run(entry.rid, entry.coll, seq, msgId)
       }
-      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, payload = ?, blob_paths = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
+      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, hidden = ?, payload = ?, blob_paths = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
       const move = this.statement(connection, 'UPDATE items SET ord = ?, changed_seq = ? WHERE rid = ?')
       for (const entry of request.updates) {
         if (entry.payload === undefined) {
@@ -313,13 +353,13 @@ export class ThreadDbEngine {
           continue
         }
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, entry.payload, entry.blobPaths ?? null, seq, entry.rid)
+        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, entry.payload, entry.blobPaths ?? null, seq, entry.rid)
       }
-      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, hidden, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       const rids: number[] = []
       for (const entry of request.inserts) {
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, seq, entry.payload, entry.blobPaths ?? null)
+        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, fields.hidden, seq, entry.payload, entry.blobPaths ?? null)
         rids[entry.tmp] = Number(result.lastInsertRowid)
       }
       const upsertState = this.statement(connection, 'INSERT INTO state(key, changed_seq, payload) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, changed_seq = excluded.changed_seq, rev = rev + 1')
@@ -352,6 +392,95 @@ export class ThreadDbEngine {
       if (db.isTransaction) db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  /**
+   * A page of the visible transcript, read in one transaction: the newest messages, or those just before or after
+   * the cursor `before`/`after`, up to `limit` and `maxBytes` of the JSON returned (UTF-8, blobs put back; always at
+   * least one message). A cursor is a message id, with the occurrence appended (`parseCursor`) when the id repeats;
+   * a bare repeated id means its last occurrence. `earlier`/`later` say how many visible messages are left on each
+   * side. Image data is left out unless `images`; it is fetched one image at a time. `missing` when the cursor
+   * message is not in the thread.
+   */
+  page(dir: string, request: MessagePageRequest): MessagePage {
+    const { db } = this.open(dir)
+    db.exec('BEGIN')
+    try {
+      const info = readInfo(db)
+      const cursorText = request.before ?? request.after
+      let cursor: { ord: number; rid: number } | undefined
+      if (cursorText !== undefined) {
+        const { id, occurrence } = parseCursor(cursorText)
+        // Among visible messages, as a loaded transcript pages; a bare id of a hidden message still finds it.
+        cursor = (occurrence === undefined
+          ? db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY hidden ASC, ord DESC, rid DESC LIMIT 1").get(id)
+          : db.prepare("SELECT ord, rid FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? ORDER BY ord ASC, rid ASC LIMIT 1 OFFSET ?").get(id, occurrence)) as { ord: number; rid: number } | undefined
+        if (!cursor) return { info, messages: [], missing: true }
+      }
+      const forward = request.after !== undefined
+      const where = cursor ? (forward ? 'AND (ord > ? OR (ord = ? AND rid > ?))' : 'AND (ord < ? OR (ord = ? AND rid < ?))') : ''
+      const order = forward ? 'ORDER BY ord ASC, rid ASC' : 'ORDER BY ord DESC, rid DESC'
+      const args = cursor ? [cursor.ord, cursor.ord, cursor.rid] : []
+      const statement = db.prepare(`SELECT rid, coll, ord, msg_id, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
+      const kept: Array<DbRow & { msg_id: string | null }> = []
+      let bytes = 0
+      // Measured as returned: blobs put back, in UTF-8.
+      for (const raw of statement.iterate(...args, request.limit) as Iterable<DbRow & { msg_id: string | null; blob_paths: string | null }>) {
+        const row = hydrateRows(dir, [raw], { images: request.images === true })[0]!
+        const size = Buffer.byteLength(row.payload)
+        if (kept.length && bytes + size > request.maxBytes) break
+        bytes += size
+        kept.push({ ...row, msg_id: raw.msg_id })
+      }
+      if (!forward) kept.reverse()
+      const out: MessagePage = { info, messages: kept.map((row) => row.payload) }
+      if (kept.length) {
+        const first = kept[0]!
+        const last = kept[kept.length - 1]!
+        const before = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord < ? OR (ord = ? AND rid < ?))").get(first.ord, first.ord, first.rid) as { n: number }
+        const after = db.prepare("SELECT count(*) AS n FROM items WHERE coll = 'm' AND hidden = 0 AND (ord > ? OR (ord = ? AND rid > ?))").get(last.ord, last.ord, last.rid) as { n: number }
+        if (Number(before.n) > 0) out.earlier = { before: rowCursor(db, first), count: Number(before.n) }
+        if (Number(after.n) > 0) out.later = { after: rowCursor(db, last), count: Number(after.n) }
+      }
+      return out
+    } finally {
+      if (db.isTransaction) db.exec('COMMIT')
+    }
+  }
+
+  /**
+   * The visible transcript messages that changed since `since`, the ids that have no visible message any more
+   * (removed or hidden since), and the new sequence. A reader applies `removed` first, then `messages`.
+   */
+  messageChanges(dir: string, since: number, epoch?: number): MessageChanges {
+    const changes = this.changes(dir, since, epoch)
+    if (changes.reset) return { info: changes.info, reset: true, messages: [], removed: [] }
+    const connection = this.open(dir)
+    const transcript = changes.rows.filter((row) => row.coll === 'm')
+    const messages: Array<{ ord: number; payload: string }> = []
+    const gone = new Set<string>()
+    for (const row of transcript) {
+      const value = JSON.parse(row.payload) as { id?: unknown; hidden?: unknown }
+      if (value.hidden === true) {
+        if (typeof value.id === 'string') gone.add(value.id)
+      } else {
+        messages.push({ ord: row.ord, payload: row.payload })
+      }
+    }
+    const removedIds = this.statement(connection, "SELECT DISTINCT msg_id FROM removed WHERE coll = 'm' AND changed_seq > ? AND msg_id IS NOT NULL").all(since) as Array<{ msg_id: string }>
+    for (const row of removedIds) gone.add(row.msg_id)
+    // Net of what is there now: an id removed and written again, or hidden in one row and shown in another, stays.
+    const visible = this.statement(connection, "SELECT 1 FROM items WHERE coll = 'm' AND hidden = 0 AND msg_id = ? LIMIT 1")
+    const removed = [...gone].filter((id) => !visible.get(id))
+    return { info: changes.info, reset: false, messages, removed }
+  }
+
+  /** One transcript message, whole (images included), by id; its last occurrence when an id repeats. */
+  messageById(dir: string, id: string): string | undefined {
+    const connection = this.open(dir)
+    const row = this.statement(connection, "SELECT rid, coll, ord, payload, blob_paths FROM items WHERE coll = 'm' AND msg_id = ? ORDER BY ord DESC, rid DESC LIMIT 1").get(id) as (DbRow & { blob_paths: string | null }) | undefined
+    if (!row) return undefined
+    return hydrateRows(dir, [row], { images: true })[0]!.payload
   }
 
   /** A value kept in `info`, such as the source fingerprint of an import. */
