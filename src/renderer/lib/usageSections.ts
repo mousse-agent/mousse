@@ -3,8 +3,8 @@ import { formatUsd, orderUsageWindows, remainingPercent } from './subscriptionUs
 
 /**
  * Where a provider goes on the Usage page: its card among the subscriptions (plan limits that are
- * working), a slim row in Other usage (credit balances, API keys, no usage data), or a dimmed row
- * in Needs attention (signed out, a sign-in or key that has to be redone, no subscription, no answer).
+ * working), a slim row in Other usage (credit balances, API keys, no usage data, no subscription), or a
+ * dimmed row in Needs attention (signed out, a sign-in or key that has to be redone, no answer).
  */
 export type UsageSection = 'subscription' | 'other' | 'attention'
 
@@ -17,7 +17,10 @@ export function usageUnsupported(provider: Pick<ProviderUsage, 'status' | 'windo
 }
 
 export function usageSection(provider: ProviderUsage): UsageSection {
-  if (provider.signedOut || provider.problem === 'no_subscription' || provider.status === 'error') return 'attention'
+  if (provider.signedOut) return 'attention'
+  // No subscription is a fact about the account, not something to fix: a muted row among Other usage.
+  if (provider.problem === 'no_subscription') return 'other'
+  if (provider.status === 'error') return 'attention'
   if (provider.credit || usageUnsupported(provider) || provider.authType === 'api_key') return 'other'
   return 'subscription'
 }
@@ -29,11 +32,11 @@ export function slotSection(slot: Pick<UsageSlot, 'authType' | 'signedOut'>): Us
 }
 
 export interface AttentionReason {
-  /** A few words: "Signed out", "Session expired", "No subscription". */
+  /** A few words: "Signed out", "Session expired", "Not reachable". */
   text: string
   /** Whether Reconnect (the provider's settings) can fix it. */
   reconnect: boolean
-  /** Order in the list: things to fix first, no subscription last. */
+  /** Order in the list: things to fix first. */
   rank: number
 }
 
@@ -43,7 +46,6 @@ export function attentionReason(provider: ProviderUsage): AttentionReason {
     case 'session_expired': return { text: 'Session expired', reconnect: true, rank: 0 }
     case 'key_expired': return { text: 'Key expired', reconnect: true, rank: 0 }
     case 'key_rejected': return { text: 'Key rejected', reconnect: true, rank: 0 }
-    case 'no_subscription': return { text: 'No subscription', reconnect: false, rank: 2 }
     default: break
   }
   const message = provider.message ?? ''
@@ -59,8 +61,12 @@ export function usageInstanceId(providerId: string): string {
   return `pi:${providerId}`
 }
 
-/** An Other usage row's figure: "$12.40 left · $37.60 used", "58% left · Weekly limit", or "No usage data". */
-export function otherUsageFigure(provider: ProviderUsage): { text: string; remaining?: number } {
+/**
+ * An Other usage row's figure: "$12.40 left · $37.60 used", "58% left · Weekly limit", or, `muted`,
+ * "No subscription" or "No usage data".
+ */
+export function otherUsageFigure(provider: ProviderUsage): { text: string; remaining?: number; muted?: boolean } {
+  if (provider.problem === 'no_subscription') return { text: 'No subscription', muted: true }
   if (provider.credit) {
     const { balanceUsd, usedUsd, limitUsd } = provider.credit
     const remaining = limitUsd && limitUsd > 0 ? Math.max(0, Math.min(100, Math.round((balanceUsd / limitUsd) * 100))) : undefined
@@ -72,10 +78,10 @@ export function otherUsageFigure(provider: ProviderUsage): { text: string; remai
     const tightest = windows.reduce((low, entry) => (entry.left! < low.left! ? entry : low))
     return { text: `${tightest.left}% left · ${tightest.window.label}`, remaining: tightest.left! }
   }
-  return { text: 'No usage data' }
+  return { text: 'No usage data', muted: true }
 }
 
-/** Needs attention, things to fix first and "No subscription" last; the same rank keeps the page's order. */
+/** Needs attention, things to fix first; the same rank keeps the page's order. */
 export function orderAttention<T extends { provider: ProviderUsage }>(rows: readonly T[]): T[] {
   return rows.map((row, index) => ({ row, index, rank: attentionReason(row.provider).rank }))
     .sort((a, b) => a.rank - b.rank || a.index - b.index)

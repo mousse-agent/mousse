@@ -50,12 +50,11 @@ export function UsageCardSkeleton() {
 /** One provider in Other usage: its name, and its key figure on the right; a mini bar only against a limit. */
 export function OtherUsageRow({ provider, computerName, menu }: { provider: ProviderUsage; computerName?: string; menu?: ReactNode }) {
   const figure = otherUsageFigure(provider)
-  const none = figure.text === 'No usage data'
   return <div className="usage-slim-row" data-testid="usage-other-row">
     <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       {figure.remaining !== undefined && <span className="usage-slim-bar"><UsageBar remaining={figure.remaining} label={provider.label} size="cell" /></span>}
-      <span className={none ? 'settings-muted' : undefined}>{figure.text}</span>
+      <span className={figure.muted ? 'settings-muted' : undefined} title={figure.muted ? provider.message : undefined}>{figure.text}</span>
       {menu}
     </span>
   </div>
@@ -64,7 +63,7 @@ export function OtherUsageRow({ provider, computerName, menu }: { provider: Prov
 /** One provider in Needs attention: its name, why in a few words, and Reconnect where signing in again fixes it. */
 export function AttentionRow({ provider, computerName, onReconnect, menu }: { provider: ProviderUsage; computerName?: string; onReconnect?: (instanceId: string) => void; menu?: ReactNode }) {
   const reason = attentionReason(provider)
-  return <div className={`usage-slim-row usage-attention-row${reason.rank === 2 ? ' is-faint' : ''}`} data-testid="usage-attention-row" tabIndex={-1}>
+  return <div className="usage-slim-row usage-attention-row" data-testid="usage-attention-row" tabIndex={-1}>
     <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       <span className="settings-muted" title={provider.message}>{reason.text}</span>

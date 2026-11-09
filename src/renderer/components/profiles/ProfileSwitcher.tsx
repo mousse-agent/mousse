@@ -9,6 +9,7 @@ import { FloatingPortal, useFloatingPosition, usePinnedPopover } from '../../lib
 import { useAppStore } from '../../stores/appStore'
 import { devicesLine, mousseIdName, mousseIdSignedIn, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
 import { openSettingsSection } from '../../lib/settingsNavigation'
+import { sidebarProfileShown } from '../../lib/railPages'
 import { MousseIdAvatar } from '../MousseIdAvatar'
 import { ProfileEditDialog, type ProfileEditMode, type ProfileEditValues } from './ProfileEditDialog'
 import { ProfileRowMenu } from './ProfileRowMenu'
@@ -100,10 +101,10 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
   }, [open])
 
   // The rail avatar steps aside for the sidebar's own footer; its menu goes with it.
-  const sidebarOpen = useAppStore((state) => state.threadsSidebarOpen)
+  const sidebarShown = useAppStore(sidebarProfileShown)
   useEffect(() => {
-    if (rail && sidebarOpen) setOpen(false)
-  }, [rail, sidebarOpen])
+    if (rail && sidebarShown) setOpen(false)
+  }, [rail, sidebarShown])
 
   // Keyboard focus returns to the trigger once the edit dialog is gone.
   const dialogOpen = !!dialog

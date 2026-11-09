@@ -683,10 +683,6 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   opacity: 0.6;
 }
 
-.usage-attention-row.is-faint {
-  opacity: 0.75;
-}
-
 /* The header chip that leads to Needs attention: muted, a background, no border. */
 .usage-attention-chip {
   display: inline-flex;

@@ -137,8 +137,8 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
   const readings: ComputerUsage[] = usage ? [{ id: THIS_COMPUTER, name: computers?.selfName ?? '', providers: usage.providers }, ...(computers ? remote ?? [] : [])] : []
   const rows = usage ? usageRows(readings, picked) : []
   const pickedOther = picked !== ALL_COMPUTERS && picked !== THIS_COMPUTER
-  // Three sections: working plans as cards; credit balances, API keys and no-data rows in Other usage;
-  // signed out, failing and no-subscription rows in Needs attention. A provider still on its way waits
+  // Three sections: working plans as cards; credit balances, API keys, no-data and no-subscription rows in
+  // Other usage; signed out and failing rows in Needs attention. A provider still on its way waits
   // where its slot suggests.
   const placed = rows.map((row) => ({ ...row, loading: !!loadingIds?.has(row.provider.id) }))
     .map((row) => ({ ...row, section: row.loading ? slotSection(row.provider) : usageSection(row.provider) }))

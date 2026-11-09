@@ -74,6 +74,21 @@ describe('the profile avatar on the rail', () => {
     expect(slot().getAttribute('aria-hidden')).toBe('true')
   })
 
+  it('shows on Automations and Usage with the sidebar set to expanded, which those pages hide, and its menu stays open', async () => {
+    useAppStore.setState({ threadsSidebarOpen: true, usageOpen: true })
+    await render()
+    expect(slot().dataset.shown).toBe('true')
+    expect(slot().hasAttribute('inert')).toBe(false)
+    await act(async () => avatar()!.click())
+    expect(document.querySelector('.profile-menu-rail')).not.toBeNull()
+    // Back to the workspace: the expanded sidebar's footer takes over and the rail menu closes.
+    await act(async () => useAppStore.setState({ usageOpen: false }))
+    expect(slot().dataset.shown).toBe('false')
+    expect(document.querySelector('.profile-menu')).toBeNull()
+    await act(async () => useAppStore.setState({ scheduledOpen: true }))
+    expect(slot().dataset.shown).toBe('true')
+  })
+
   it('opens the profile menu, checks the current profile, and closes on Escape, the avatar or a pick', async () => {
     await render()
     await act(async () => avatar()!.click())

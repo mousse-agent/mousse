@@ -15,11 +15,17 @@ describe('which section a provider goes to', () => {
     expect(usageSection(usage({ id: 'openrouter', status: 'unavailable', message: 'Usage information is not available for this provider.' }))).toBe('other')
   })
 
-  it('signed out, failing and no-subscription providers need attention', () => {
+  it('signed out and failing providers need attention', () => {
     expect(usageSection(usage({ signedOut: true, status: 'unavailable' }))).toBe('attention')
     expect(usageSection(usage({ status: 'error', problem: 'session_expired' }))).toBe('attention')
-    expect(usageSection(usage({ status: 'unavailable', problem: 'no_subscription' }))).toBe('attention')
     expect(usageSection(usage({ authType: 'api_key', status: 'error', problem: 'key_expired' }))).toBe('attention')
+  })
+
+  it('no subscription is listed among Other usage, not as something to fix', () => {
+    expect(usageSection(usage({ status: 'unavailable', problem: 'no_subscription' }))).toBe('other')
+    expect(usageSection(usage({ authType: 'api_key', status: 'error', problem: 'no_subscription' }))).toBe('other')
+    // Signed out still needs attention, whatever else is said.
+    expect(usageSection(usage({ signedOut: true, problem: 'no_subscription' }))).toBe('attention')
   })
 
   it('a provider on its way waits where its slot suggests', () => {
@@ -33,15 +39,14 @@ describe('why a provider needs attention', () => {
     expect(attentionReason(usage({ status: 'error', problem: 'session_expired', message: 'Grok (xAI) session expired. Reconnect it in Settings.' }))).toMatchObject({ text: 'Session expired', reconnect: true })
     expect(attentionReason(usage({ status: 'error', problem: 'key_expired' }))).toMatchObject({ text: 'Key expired', reconnect: true })
     expect(attentionReason(usage({ status: 'error', problem: 'key_rejected' }))).toMatchObject({ text: 'Key rejected', reconnect: true })
-    expect(attentionReason(usage({ status: 'unavailable', problem: 'no_subscription' }))).toEqual({ text: 'No subscription', reconnect: false, rank: 2 })
     expect(attentionReason(usage({ status: 'error', message: 'Not reachable', problem: 'unavailable' }))).toMatchObject({ text: 'Not reachable', reconnect: false })
     expect(attentionReason(usage({ status: 'error', message: 'Could not refresh Provider login. Reconnect it in Settings.' }))).toMatchObject({ text: 'Login refresh failed', reconnect: true })
     expect(attentionReason(usage({ status: 'error', message: 'Something odd' }))).toMatchObject({ text: 'Usage unavailable', reconnect: false })
   })
 
-  it('things to fix first, no subscription last', () => {
-    const rows = [usage({ id: 'a', problem: 'no_subscription' }), usage({ id: 'b', status: 'error', message: 'Not reachable' }), usage({ id: 'c', signedOut: true })].map((provider) => ({ provider }))
-    expect(orderAttention(rows).map((row) => row.provider.id)).toEqual(['c', 'b', 'a'])
+  it('things to fix first', () => {
+    const rows = [usage({ id: 'a', status: 'error', message: 'Something odd' }), usage({ id: 'b', status: 'error', message: 'Not reachable' }), usage({ id: 'c', signedOut: true })].map((provider) => ({ provider }))
+    expect(orderAttention(rows).map((row) => row.provider.id)).toEqual(['c', 'a', 'b'])
   })
 
   it('Reconnect opens the right entry in Settings → Providers', () => {
@@ -51,11 +56,12 @@ describe('why a provider needs attention', () => {
 })
 
 describe("an other usage row's figure", () => {
-  it('a balance and its spend; the tightest window; or no usage data', () => {
+  it('a balance and its spend; the tightest window; or, muted, no subscription or no usage data', () => {
     expect(otherUsageFigure(usage({ credit: { balanceUsd: 12.4, usedUsd: 37.6 } }))).toEqual({ text: '$12.40 left · $37.60 used' })
     expect(otherUsageFigure(usage({ credit: { balanceUsd: 25, limitUsd: 100 } }))).toEqual({ text: '$25.00 left', remaining: 25 })
     expect(otherUsageFigure(usage({ windows: [weekly, { id: 'five_hour', label: '5-hour limit', remainingPercent: 30 }] }))).toEqual({ text: '30% left · 5-hour limit', remaining: 30 })
-    expect(otherUsageFigure(usage({ status: 'unavailable' }))).toEqual({ text: 'No usage data' })
+    expect(otherUsageFigure(usage({ status: 'unavailable' }))).toEqual({ text: 'No usage data', muted: true })
+    expect(otherUsageFigure(usage({ status: 'unavailable', problem: 'no_subscription' }))).toEqual({ text: 'No subscription', muted: true })
   })
 })
 

@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
 
-const { ToastHost, showToast, dismissToast, dismissToastByKey, MAX_TOASTS, toastAge } = await import('../../src/renderer/components/ui/Toast')
+const { ToastHost, showToast, dismissToast, dismissToastByKey, MAX_TOASTS, toastAge, useToastObstruction } = await import('../../src/renderer/components/ui/Toast')
+const { useRef } = await import('react')
 const { threadToastInput } = await import('../../src/renderer/lib/threadToasts')
 
 let host: HTMLDivElement
@@ -171,6 +172,48 @@ describe('a toast whose text is cut off', () => {
     await act(async () => { copy.click() })
     expect(writeText).toHaveBeenCalledWith(LONG)
     expect(card().querySelector('.ui-toast-copied')?.textContent).toBe('Copied')
+  })
+})
+
+describe('the toast stack above a pane footer', () => {
+  // jsdom's window is 1024 × 768; the stack's column is its right 328px, 12px in.
+  function Footer({ rect }: { rect: { left: number; right: number; top: number; bottom: number } }) {
+    const ref = useRef<HTMLDivElement>(null)
+    useToastObstruction(ref)
+    return createElement('div', {
+      className: 'pane-footer',
+      ref: (element: HTMLDivElement | null) => {
+        ref.current = element
+        if (element) element.getBoundingClientRect = () => ({ ...rect, width: rect.right - rect.left, height: rect.bottom - rect.top, x: rect.left, y: rect.top, toJSON() {} }) as DOMRect
+      }
+    })
+  }
+  let footerRoot: Root
+  let footerHost: HTMLDivElement
+  beforeEach(() => {
+    footerHost = document.createElement('div')
+    document.body.appendChild(footerHost)
+    footerRoot = createRoot(footerHost)
+  })
+  afterEach(() => {
+    act(() => footerRoot.unmount())
+    footerHost.remove()
+  })
+  const section = () => document.querySelector<HTMLElement>('.ui-toaster')!
+
+  it('sits above a registered footer under it, and goes back down when the footer goes', () => {
+    act(() => footerRoot.render(createElement(Footer, { rect: { left: 584, right: 1024, top: 713, bottom: 768 } })))
+    act(() => { showToast({ message: 'Reverted', action: { label: 'Undo', run: () => {} } }) })
+    // 768 - 713 = 55px of footer, plus an 8px gap.
+    expect(section().style.bottom).toBe('63px')
+    act(() => footerRoot.render(createElement('div')))
+    expect(section().style.bottom).toBe('')
+  })
+
+  it('stays where it is for a footer outside its column, such as the composer side', () => {
+    act(() => footerRoot.render(createElement(Footer, { rect: { left: 300, right: 600, top: 680, bottom: 768 } })))
+    act(() => { showToast({ message: 'Archived' }) })
+    expect(section().style.bottom).toBe('')
   })
 })
 

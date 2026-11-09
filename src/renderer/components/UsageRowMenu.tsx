@@ -18,8 +18,9 @@ export function UsageRowMenu({ provider, hidden, actions }: { provider: Provider
   const [open, setOpen] = useState(false)
   const anchorRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  // The "…" sits at the row's end: the menu lines up with it there, over the row's own figure only.
-  const style = usePinnedPopover({ open, anchorRef, contentRef: menuRef, maxHeight: 160, minHeight: 120, align: 'end' })
+  // The "…" sits at the row's end: the menu opens below it, right edges lined up, so it never covers the
+  // row above; it opens upward only where the page has no room below.
+  const style = usePinnedPopover({ open, anchorRef, contentRef: menuRef, maxHeight: 160, minHeight: 120, side: 'below', align: 'end' })
   useEffect(() => {
     if (!open) return
     menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus()

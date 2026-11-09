@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { Gauge, House, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
-import { activeRailPage, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
+import { activeRailPage, sidebarProfileShown, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -24,7 +24,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   // The sidebar's footer shows the profile; while the sidebar is closed (a hover peek included) the rail does.
-  const profileShown = useAppStore((s) => !s.threadsSidebarOpen)
+  const profileShown = useAppStore((s) => !sidebarProfileShown(s))
   const profileReady = useAppStore((s) => s.profileReady)
   // In the Chats tab, Search finds agent chats.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
