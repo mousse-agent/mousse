@@ -24,7 +24,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -2070,22 +2070,21 @@ export const MessageList = memo(function MessageList({
       onFind={find.openFind}
     />
     {find.barProps && placeFindBar(<FindInThreadBar {...find.barProps} />, findBarHost(chatContainerRef.current))}
-    {showJumpButton && (
+    {/* Mounted while the thread has messages, so it fades both ways; hidden (and inert) while the view
+        follows the end of the thread. */}
+    {normalizedMessages.length > 0 && (
       <button
         type="button"
         onClick={handleJumpToLatest}
-        aria-label="Go to latest"
-        title="Go to latest"
         data-find-ignore
-        className={cn(
-          "chat-jump absolute left-1/2 z-10 -translate-x-1/2",
-          "inline-flex items-center justify-center",
-          "transition-[opacity,transform] duration-150 ease-out",
-          "hover:brightness-110 active:scale-[0.97]",
-        )}
+        data-hidden={showJumpButton ? undefined : "true"}
+        inert={!showJumpButton}
+        aria-hidden={!showJumpButton || undefined}
+        className="chat-jump absolute left-1/2 z-10 -translate-x-1/2"
       >
         {isStreaming && <span aria-hidden="true" className="chat-jump-live" />}
-        <IconArrowDown className="size-4" aria-hidden="true" />
+        <IconChevronDown className="chat-jump-icon" aria-hidden="true" />
+        <span>Go to latest</span>
       </button>
     )}
     </div>

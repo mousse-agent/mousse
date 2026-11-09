@@ -1176,18 +1176,53 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 /*
  * Floats over the bottom of the transcript, centred a few px above the composer's top edge; it takes no
  * height, so the transcript runs on beneath it. It only shows while the reader is scrolled up, so it
- * never covers the last line at the end. Hidden while a composer menu or the notice slot is open: they
- * use that space.
+ * never covers the last line at the end (`data-hidden`: faded out, inert). A quiet pill: chevron and
+ * label in the muted text colour on a subtle fill, no border; hover deepens the fill and brings the text
+ * to full colour. Hidden while a composer menu or the notice slot is open: they use that space.
  */
 .chat-jump {
   bottom: calc(var(--chat-composer-stack, 32px) + 8px);
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--ui-line-strong);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 11px 0 8px;
+  border: 0;
   border-radius: 999px;
-  background: var(--ui-raised);
+  background: color-mix(in srgb, var(--text-primary) 9%, var(--surface-base));
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    opacity var(--ui-dur) ease,
+    transform var(--ui-dur) ease,
+    background-color var(--ui-dur) ease,
+    color var(--ui-dur) ease;
+}
+
+.chat-jump .chat-jump-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-jump:hover {
+  background: color-mix(in srgb, var(--text-primary) 15%, var(--surface-base));
   color: var(--text-primary);
-  box-shadow: var(--ui-raised-shadow);
+}
+
+.chat-jump:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  color: var(--text-primary);
+}
+
+.chat-jump[data-hidden] {
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
 }
 
 .chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump {
@@ -1229,8 +1264,8 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
 
 .chat-jump-live {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: -1px;
+  right: 2px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
