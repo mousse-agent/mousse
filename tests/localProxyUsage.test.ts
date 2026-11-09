@@ -14,7 +14,13 @@ import {
   proxyApiCallBody,
   proxyClaudeWindows,
   readLocalProxyClaudeUsage,
+  readLocalProxyClaudeAccount,
+  previewLocalProxyClaudeAccounts,
+  observedClaudeLimits,
   resetLocalProxyDetection,
+  ACCOUNT_READ_REUSE_MS,
+  OBSERVED_FRESH_MS,
+  RATE_LIMIT_WAIT_MS,
   type ProxyFetch
 } from '../src/mms/providers/localProxyUsage'
 
@@ -375,5 +381,186 @@ describe('checking a proxy key before it is saved', () => {
     now = 61_000
     await readLocalProxyClaudeUsage({ baseUrl, managementKey: 'mgmt', fetch, now: () => now })
     expect(calls.filter((call) => call.url === `${baseUrl}/`)).toHaveLength(2)
+  })
+})
+
+describe('fewer requests: the limits the proxy already lists', () => {
+  const baseUrl = 'http://127.0.0.1:8317'
+  const NOW = Date.parse('2026-11-09T12:00:00Z')
+  const seconds = (iso: string) => String(Date.parse(iso) / 1000)
+  // `quota` on a listing entry, as CLIProxyAPI writes it from the last reply the sign-in served.
+  const quota = (observedAt: string, five = '0.37', seven = '0.125') => ({
+    observed_at: observedAt,
+    signals: {
+      'Anthropic-Ratelimit-Unified-Status': 'allowed',
+      'Anthropic-Ratelimit-Unified-5h-Utilization': five,
+      'Anthropic-Ratelimit-Unified-5h-Reset': seconds('2026-11-09T14:00:00Z'),
+      'Anthropic-Ratelimit-Unified-7d-Utilization': seven,
+      'Anthropic-Ratelimit-Unified-7d-Reset': seconds('2026-11-12T09:00:00Z')
+    }
+  })
+  const RECENT = '2026-11-09T11:55:00Z'
+  const WINDOWS = [
+    { id: 'five_hour', label: '5-hour limit', remainingPercent: 63, resetsAt: '2026-11-09T14:00:00.000Z' },
+    { id: 'seven_day', label: 'Weekly limit', remainingPercent: 87.5, resetsAt: '2026-11-12T09:00:00.000Z' }
+  ]
+
+  /** A proxy whose listing is `files` and whose `api-call` answers `usage(authIndex)`; counts every request. */
+  function fakeProxy(files: unknown[], usage: (authIndex: string) => unknown = () => apiCall(200, CLAUDE_USAGE)) {
+    const asked: string[] = []
+    let listed = 0
+    let hold: Promise<void> | undefined
+    const fetch: ProxyFetch = vi.fn(async (url, init) => {
+      if (url === `${baseUrl}/`) return { status: 200, text: async () => JSON.stringify(ROOT) }
+      if (url === `${baseUrl}/v8/management/credentials`) {
+        listed++
+        return { status: 200, text: async () => JSON.stringify({ files }) }
+      }
+      if (url === `${baseUrl}/v8/management/requests/api-call`) {
+        const index = (JSON.parse(init.body!) as { auth_index: string }).auth_index
+        asked.push(index)
+        if (hold) await hold
+        return { status: 200, text: async () => JSON.stringify(usage(index)) }
+      }
+      return { status: 404, text: async () => '{}' }
+    })
+    return { fetch, asked, listings: () => listed, holdReads: (until: Promise<void>) => { hold = until } }
+  }
+  const read = (fetch: ProxyFetch, at: number, extra: object = {}) => readLocalProxyClaudeUsage({ baseUrl, managementKey: 'mgmt', fetch, now: () => at, ...extra })
+
+  it('one listing answers for every sign-in that has recent limits: no usage request at all', async () => {
+    const proxyFake = fakeProxy([
+      { id: 'one.json', provider: 'claude', email: 'one@example.com', auth_index: 'i1', quota: quota(RECENT) },
+      { id: 'two.json', provider: 'claude', email: 'two@example.com', auth_index: 'i2', quota: quota(RECENT, '0.9', '0.5') }
+    ])
+    const usage = await read(proxyFake.fetch, NOW)
+    expect(proxyFake.asked).toEqual([])
+    expect(proxyFake.listings()).toBe(1)
+    expect(usage?.status).toBe('available')
+    expect(usage?.accounts).toEqual([
+      { id: 'one.json', label: 'one@example.com', windows: WINDOWS },
+      { id: 'two.json', label: 'two@example.com', windows: [
+        { ...WINDOWS[0], remainingPercent: 10 },
+        { ...WINDOWS[1], remainingPercent: 50 }
+      ] }
+    ])
+    // Root, then the listing: nothing else went out.
+    expect(proxyFake.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('the Usage page filling sign-ins one by one also needs only the listing', async () => {
+    const proxyFake = fakeProxy([
+      { id: 'one.json', provider: 'claude', auth_index: 'i1', quota: quota(RECENT) },
+      { id: 'two.json', provider: 'claude', auth_index: 'i2', quota: quota(RECENT) },
+      { id: 'three.json', provider: 'claude', auth_index: 'i3', quota: quota(RECENT) }
+    ])
+    const options = { baseUrl, managementKey: 'mgmt', fetch: proxyFake.fetch, now: () => NOW }
+    const preview = await previewLocalProxyClaudeAccounts(options)
+    const groups = await Promise.all(preview!.accounts!.map((account) => readLocalProxyClaudeAccount(options, account.id)))
+    expect(groups.map((group) => group?.windows)).toEqual([WINDOWS, WINDOWS, WINDOWS])
+    expect(proxyFake.asked).toEqual([])
+    expect(proxyFake.listings()).toBe(1)
+  })
+
+  it('only a sign-in without recent limits is asked, and its answer is reused for a few minutes', async () => {
+    const stale = new Date(NOW - OBSERVED_FRESH_MS - 60_000).toISOString()
+    const proxyFake = fakeProxy([
+      { id: 'fresh.json', provider: 'claude', auth_index: 'i1', quota: quota(RECENT) },
+      { id: 'stale.json', provider: 'claude', auth_index: 'i2', quota: quota(stale) },
+      { id: 'none.json', provider: 'claude', auth_index: 'i3' },
+      { id: 'empty.json', provider: 'claude', auth_index: 'i4', quota: { signals: {} } }
+    ])
+    const first = await read(proxyFake.fetch, NOW)
+    expect(proxyFake.asked.sort()).toEqual(['i2', 'i3', 'i4'])
+    expect(first?.accounts?.map((account) => account.windows.length)).toEqual([2, 2, 2, 2])
+    // The listing is read again on a later refresh; the sign-ins' own reads are not.
+    await read(proxyFake.fetch, NOW + 60_000)
+    await read(proxyFake.fetch, NOW + ACCOUNT_READ_REUSE_MS - 1_000)
+    expect(proxyFake.asked).toHaveLength(3)
+    expect(proxyFake.listings()).toBe(3)
+    await read(proxyFake.fetch, NOW + ACCOUNT_READ_REUSE_MS)
+    expect(proxyFake.asked).toHaveLength(6)
+  })
+
+  it('reads at the same time share one request per sign-in', async () => {
+    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1' }, { id: 'two.json', provider: 'claude', auth_index: 'i2' }])
+    let release!: () => void
+    proxyFake.holdReads(new Promise<void>((settle) => { release = settle }))
+    const options = { baseUrl, managementKey: 'mgmt', fetch: proxyFake.fetch, now: () => NOW }
+    const reads = Promise.all([read(proxyFake.fetch, NOW), readLocalProxyClaudeAccount(options, 'one.json'), readLocalProxyClaudeAccount(options, 'one.json'), read(proxyFake.fetch, NOW)])
+    await vi.waitFor(() => expect(proxyFake.asked.length).toBeGreaterThanOrEqual(2))
+    release()
+    const [whole, one, again, wholeAgain] = await reads
+    expect(proxyFake.asked.sort()).toEqual(['i1', 'i2'])
+    expect(one?.windows).toHaveLength(2)
+    expect(again).toEqual(one)
+    expect(wholeAgain).toEqual(whole)
+  })
+
+  it('after a 429 the sign-in is not asked again until Retry-After has passed, and shows the last limits known', async () => {
+    let limited = true
+    const stale = new Date(NOW - OBSERVED_FRESH_MS - 60_000).toISOString()
+    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1', quota: quota(stale) }], () => (limited
+      ? { status_code: 429, header: { 'Retry-After': ['600'] }, body: '{"error":"rate_limited"}' }
+      : apiCall(200, CLAUDE_USAGE)))
+    const first = await read(proxyFake.fetch, NOW)
+    expect(proxyFake.asked).toHaveLength(1)
+    // The listing's older limits stand in rather than "Rate limited".
+    expect(first?.windows).toEqual(WINDOWS)
+    limited = false
+    await read(proxyFake.fetch, NOW + 60_000)
+    await read(proxyFake.fetch, NOW + 599_000)
+    expect(proxyFake.asked).toHaveLength(1)
+    const after = await read(proxyFake.fetch, NOW + 600_000)
+    expect(proxyFake.asked).toHaveLength(2)
+    expect(after?.windows.map((window) => window.resetsAt)).toEqual(['2026-11-08T17:00:00Z', '2026-11-12T09:00:00Z'])
+  })
+
+  it('a 429 without Retry-After waits a couple of minutes; with nothing known it says Rate limited', async () => {
+    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1' }, { id: 'two.json', provider: 'claude', auth_index: 'i2', quota: quota(RECENT) }], () => apiCall(429, { error: 'rate_limited' }))
+    const first = await read(proxyFake.fetch, NOW)
+    expect(first?.accounts?.[0]).toMatchObject({ id: 'one.json', windows: [], problem: 'Rate limited' })
+    await read(proxyFake.fetch, NOW + RATE_LIMIT_WAIT_MS - 1_000)
+    expect(proxyFake.asked).toEqual(['i1'])
+    await read(proxyFake.fetch, NOW + RATE_LIMIT_WAIT_MS)
+    expect(proxyFake.asked).toEqual(['i1', 'i1'])
+  })
+
+  it('an expired sign-in says so, even when older limits are listed for it', async () => {
+    const stale = new Date(NOW - OBSERVED_FRESH_MS - 60_000).toISOString()
+    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1', quota: quota(stale) }, { id: 'two.json', provider: 'claude', auth_index: 'i2', quota: quota(RECENT) }], () => apiCall(401, { error: 'expired' }))
+    const usage = await read(proxyFake.fetch, NOW)
+    expect(usage?.accounts?.[0]).toMatchObject({ id: 'one.json', windows: [], problem: 'Sign-in expired' })
+  })
+
+  it('another management key does not reuse what the last one read', async () => {
+    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1' }])
+    await read(proxyFake.fetch, NOW)
+    await read(proxyFake.fetch, NOW + 1_000, { managementKey: 'other' })
+    expect(proxyFake.asked).toEqual(['i1', 'i1'])
+  })
+
+  it('turns limit headers into windows: a window past its reset is unused, odd values are left out', () => {
+    const observed = (signals: Record<string, string>) => ({ at: NOW, signals })
+    expect(observedClaudeLimits(observed({ '5h-utilization': '0.37', '5h-reset': seconds('2026-11-09T14:00:00Z'), '7d-utilization': '1.02' }), NOW)).toEqual({
+      five_hour: { utilization: 37, resets_at: '2026-11-09T14:00:00.000Z' },
+      seven_day: { utilization: 100 }
+    })
+    // The 5-hour window reset after the reply that reported it.
+    expect(observedClaudeLimits(observed({ '5h-utilization': '0.95', '5h-reset': seconds('2026-11-09T11:00:00Z') }), NOW)).toEqual({ five_hour: { utilization: 0 } })
+    expect(observedClaudeLimits(observed({ '5h-reset': '2026-11-09T14:00:00Z', '5h-utilization': '0.5' }), NOW)).toEqual({ five_hour: { utilization: 50, resets_at: '2026-11-09T14:00:00.000Z' } })
+    for (const bad of ['', '-0.1', 'abc', '37', 'NaN', '0x1']) expect(observedClaudeLimits(observed({ '5h-utilization': bad }), NOW)).toBeUndefined()
+    expect(observedClaudeLimits(observed({ status: 'allowed' }), NOW)).toBeUndefined()
+  })
+
+  it('reads the listing quota in any header case, and ignores other providers\' signals and a missing time', () => {
+    const [withLimits, codexStyle, undated] = claudeProxyAccounts({ files: [
+      { id: 'a', provider: 'claude', auth_index: 'a', quota: { observed_at: '2026-11-09T11:55:00.123456789Z', signals: { 'anthropic-ratelimit-unified-5h-utilization': '0.2', 'X-Other': '1' } } },
+      { id: 'b', provider: 'claude', auth_index: 'b', quota: { observed_at: RECENT, signals: { 'X-Codex-Primary-Used-Percent': '90' } } },
+      { id: 'c', provider: 'claude', auth_index: 'c', quota: { signals: { 'Anthropic-Ratelimit-Unified-5h-Utilization': '0.2' } } }
+    ] })
+    expect(withLimits!.observed).toEqual({ at: Date.parse('2026-11-09T11:55:00.123Z'), signals: { '5h-utilization': '0.2' } })
+    expect(codexStyle!.observed).toBeUndefined()
+    expect(undated!.observed).toBeUndefined()
   })
 })
