@@ -404,6 +404,9 @@ export function ToastHost() {
   const [focusWithin, setFocusWithin] = useState(false)
   const [heights, setHeights] = useState<Record<number, number>>({})
   const [ghosts, setGhosts] = useState<Ghost[]>([])
+  // Ghost removals still pending when the stack unmounts are dropped with it.
+  const ghostTimers = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => () => { for (const timer of ghostTimers.current) clearTimeout(timer) }, [])
   const expanded = (hovered || focusWithin) && toasts.length > 0
   // An empty stack unmounts without a pointer leave or a blur: the next toast starts closed and counting down.
   useEffect(() => {
@@ -463,7 +466,11 @@ export function ToastHost() {
     if (left.length > 0) {
       setGhosts((current) => [...current, ...left.map((entry) => ({ entry, style: previous.current.styles.get(entry.id) ?? {} }))])
       const ids = new Set(left.map((entry) => entry.id))
-      setTimeout(() => setGhosts((current) => current.filter((ghost) => !ids.has(ghost.entry.id))), EXIT_MS + 40)
+      const timer = setTimeout(() => {
+        ghostTimers.current.delete(timer)
+        setGhosts((current) => current.filter((ghost) => !ids.has(ghost.entry.id)))
+      }, EXIT_MS + 40)
+      ghostTimers.current.add(timer)
       setHeights((current) => {
         const next = { ...current }
         for (const id of ids) delete next[id]
