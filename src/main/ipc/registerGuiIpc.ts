@@ -12,6 +12,7 @@ import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS } from '../../shared/bots/personal/methods'
+import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
@@ -52,7 +53,7 @@ import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
-import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import { LOCAL_TTS_MODELS, type KokoroTtsModel, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { SPEECH_HOST_METHODS } from '../../shared/speechRelay'
 import {
   LOCAL_STT_MODELS,
@@ -61,6 +62,9 @@ import {
   type ProviderTranscriptionResult
 } from '../../shared/dictation'
 import { LocalModelManager, defaultLocalModelsRoot } from '../localModels/LocalModelManager'
+import { NativeTtsSlots } from '../readAloud/NativeTtsSlots'
+import { kokoroOnnxFile, spawnVoiceEngine, voiceEnginePath } from '../readAloud/voiceEngineProcess'
+import type { KokoroFrontEnd } from '../readAloud/kokoroText'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -77,6 +81,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
+import { stageBotAttachment } from './botAttachments'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -116,6 +121,9 @@ import type {
   GitCheckoutOptions,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitIncludeRequest,
+  GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
   GitDeleteBranchOptions,
@@ -200,6 +208,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
+  ...BOTS_BROWSER_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -1296,6 +1305,11 @@ export function registerGuiIpc(
     })
     return res.removed
   })
+  // Replaces a queued message's text; it keeps its place in the queue.
+  registerHandler('queue:edit', async (_e, threadId: string, itemId: string, content: string) => {
+    const res = await guiMms.request<{ item: unknown }>('queue.edit', { threadId, itemId, content })
+    return res.item
+  })
   registerHandler('queue:reorder', async (_e, threadId: string, orderedIds: string[]) => {
     const res = await guiMms.request<{ items: unknown[] }>('queue.reorder', {
       threadId,
@@ -1717,6 +1731,10 @@ export function registerGuiIpc(
 
   registerHandler('threads:compact', async (_e, threadId: string, focus?: string) => {
     await guiMms.request('threads.compact', { threadId, ...(focus ? { focus } : {}) })
+  })
+
+  registerHandler('threads:stopCompaction', async (_e, threadId: string) => {
+    await guiMms.request('threads.stopCompaction', { threadId })
   })
 
   registerHandler('threads:regenerateTitle', async (_e, threadId: string) => {
@@ -2347,9 +2365,17 @@ export function registerGuiIpc(
     )
   }
   gitMutation('git:checkout', 'git.checkout', (branch: string, options?: GitCheckoutOptions) => ({ branch, dirty: options?.dirty, operationId: options?.operationId }))
-  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
+  gitMutation('git:commit', 'git.commit', (message: string, options?: GitCommitOptions) => ({ message, amend: options?.amend, expectedBranch: options?.expectedBranch, operationId: options?.operationId, selection: options?.selection }))
   // A proposal, not a mutation, but it names its folder like one and its error codes (no title model) reach the renderer.
-  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string }) => ({ expectedBranch: options?.expectedBranch }))
+  gitMutation('git:suggestCommitMessage', 'git.suggestCommitMessage', (options?: { expectedBranch?: string; selection?: GitCommitSelection }) => ({ expectedBranch: options?.expectedBranch, selection: options?.selection }))
+  // What the next commit takes: read as hunks, include or leave out, and undo the last commit of a project folder.
+  gitMutation('git:changes', 'git.changes', (options?: { paths?: string[] }) => ({ paths: options?.paths }))
+  gitMutation('git:include', 'git.include', (input: GitIncludeRequest | { all: true; include: boolean }) => ({ ...input }))
+  gitMutation('git:undoLastCommit', 'git.undoLastCommit', (expectedHead: string) => ({ expectedHead }))
+  // Revert hunks or files with a kept copy, put one back, and list those that can be.
+  gitMutation('git:revert', 'git.revert', (input: GitRevertRequest) => ({ ...input }))
+  gitMutation('git:restoreReverted', 'git.restoreReverted', (revertId: string) => ({ revertId }))
+  gitMutation('git:revertedList', 'git.revertedList')
   gitMutation('git:push', 'git.push', (options?: GitPushOptions) => ({ expectedBranch: options?.expectedBranch, operationId: options?.operationId }))
   gitMutation('git:init', 'git.init')
   gitMutation('git:stage', 'git.stage', (input: { paths?: string[]; all?: boolean }) => ({ paths: input?.paths, all: input?.all }))
@@ -2622,6 +2648,12 @@ export function registerGuiIpc(
   registerHandler('providers:getUsage', async () =>
     guiMms.request('providers.getUsage')
   )
+  registerHandler('providers:setUsageProxyKey', async (_e, providerId: string, key: string) =>
+    guiMms.request('providers.setUsageProxyKey', { providerId, key })
+  )
+  registerHandler('providers:clearUsageProxyKey', async (_e, providerId: string) => {
+    await guiMms.request('providers.clearUsageProxyKey', { providerId })
+  })
   registerHandler('providers:getSubscriptionUsage', async (_e, providerId: string) => {
     const res = await guiMms.request<{ usage?: string }>('providers.getSubscriptionUsage', {
       providerId
@@ -2646,6 +2678,32 @@ export function registerGuiIpc(
   registerHandler('readAloud:readLocalModelFile', (_e, modelId: string, path: string) =>
     localTtsModels.readFile(modelId, path)
   )
+  // Kokoro on the native voice engine, one process per model (see NativeTtsSlots). The text front
+  // end, with its espeak-ng, loads on the first segment.
+  const kokoroFrontEnds = new Map<string, Promise<KokoroFrontEnd>>()
+  const kokoroFrontEnd = (model: KokoroTtsModel): Promise<KokoroFrontEnd> => {
+    let frontEnd = kokoroFrontEnds.get(model.id)
+    if (!frontEnd) {
+      frontEnd = import('../readAloud/kokoroText').then(
+        ({ KokoroFrontEnd }) => new KokoroFrontEnd(model, (path) => localTtsModels.readFile(model.id, path))
+      )
+      kokoroFrontEnds.set(model.id, frontEnd)
+    }
+    return frontEnd
+  }
+  const nativeTts = new NativeTtsSlots({
+    spawn: () => spawnVoiceEngine(voiceEnginePath(app)),
+    isDownloaded: async (modelId) => (await localTtsModels.status(modelId)).state.status === 'downloaded',
+    modelPath: (model) => localTtsModels.filePath(model.id, kokoroOnnxFile(model)),
+    prepare: async (model, text, voice) => (await kokoroFrontEnd(model)).prepare(text, voice)
+  })
+  app.on('will-quit', () => nativeTts.dispose())
+  registerHandler('readAloud:nativeOpen', (event, modelId: unknown) => nativeTts.open(event.sender, modelId))
+  registerHandler('readAloud:nativeSpeak', (event, slotId: unknown, text: unknown, voice: unknown, speed: unknown) =>
+    nativeTts.speak(event.sender, slotId, text, voice, speed)
+  )
+  registerHandler('readAloud:nativeCancel', (event, slotId: unknown) => nativeTts.cancel(event.sender, slotId))
+  registerHandler('readAloud:nativeClose', (event, slotId: unknown) => nativeTts.close(event.sender, slotId))
   registerHandler('readAloud:synthesizeWithProvider', async (_e, request: ProviderSpeechRequest): Promise<ProviderSpeechResult> => {
     const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
       providerId: request?.providerId,
@@ -2776,13 +2834,10 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  registerHandler('dialog:pickFiles', async (event, request: unknown) => {
-    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
-    const title = (request as { title?: unknown } | null)?.title
-    const options: Electron.OpenDialogOptions = { ...(typeof title === 'string' ? { title } : {}), properties: ['openFile', 'multiSelections'] }
-    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    return result.canceled ? [] : result.filePaths
-  })
+  // A file pasted into a bot's composer has no path: it waits in the temporary folder until the service copies it.
+  registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
+    stageBotAttachment(app.getPath('temp'), name, bytes)
+  )
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

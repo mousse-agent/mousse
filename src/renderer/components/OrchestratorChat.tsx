@@ -27,7 +27,7 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
-import { QueuedMessages } from './QueuedMessages'
+import { useThreadQueue } from '../hooks/useThreadQueue'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
   ComposerQuestionModal,
@@ -36,9 +36,8 @@ import {
   questionComposerSend,
   type QuestionCardHandle
 } from './ComposerQuestionModal'
-import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile, isImageMimeType } from '../utils/imageAttachments'
+import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
 import { parseUserMessageContent } from '../utils/messageAttachments'
-import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
 import { SubagentParentBar } from './SubagentParentBar'
@@ -329,6 +328,14 @@ export function OrchestratorChat() {
   useEffect(() => { setSendError(null); setSendChanges(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
   const [lastSteer, setLastSteer] = useState<{ text: string; at: number } | null>(null)
+  const onOptimisticQueueItemReconciled = useCallback((id: string) => {
+    setOptimisticQueueItems((current) => current.filter((item) => item.id !== id))
+  }, [])
+  const queue = useThreadQueue({
+    threadId: activeThreadId,
+    optimisticItems: optimisticQueueItems,
+    onOptimisticItemReconciled: onOptimisticQueueItemReconciled
+  })
 
   const turnActivityRequestRef = useRef(0)
   const [renderQuestions, setRenderQuestions] = useState(false)
@@ -546,7 +553,8 @@ export function OrchestratorChat() {
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const compaction = normalizeContextSettings(settings.context)
     setContextCompactionSetting((current) =>
-      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens &&
+        current.idleCompaction === compaction.idleCompaction
         ? current
         : compaction
     )
@@ -966,7 +974,7 @@ export function OrchestratorChat() {
   const resendBusy = turnActive || loading
   const turnActions = useMemo<TurnActions | null>(() => {
     if (!activeThreadId) return null
-    return createTurnActions({
+    const actions = createTurnActions({
       // Read at use: depending on the transcript would rebuild this on every streamed token.
       prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
       send: (content, images) => {
@@ -980,7 +988,24 @@ export function OrchestratorChat() {
         })
       }
     })
+    return { ...actions, stopCompaction: () => void window.mousse.threads.stopCompaction(activeThreadId).catch(() => undefined) }
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
+
+  // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
+  // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
+  const [compactingThread, setCompactingThread] = useState<string | null>(null)
+  const compactionRunning = useMemo(
+    () => messages.some((message) => message.kind === 'context_compaction' && message.streaming === true && message.compaction?.manual === true),
+    [messages]
+  )
+  const handleCompactNow = useCallback(() => {
+    const threadId = activeThreadId
+    if (!threadId) return
+    setCompactingThread(threadId)
+    void window.mousse.threads.compact(threadId)
+      .catch((error: unknown) => setSendError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
+  }, [activeThreadId])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1353,6 +1378,7 @@ export function OrchestratorChat() {
         quickActionApproval={quickActionApproval}
         permissionRequests={permissionRequests.controls}
         turnActions={turnActions}
+        queue={queue}
         composer={(
       <div
         ref={inputAreaRef}
@@ -1415,44 +1441,9 @@ export function OrchestratorChat() {
           </div>
         </div>
 
-        {/* The dock on the composer's top edge: the top notice, or the queue; one at a time. */}
+        <ComposerNoticeSource notice={queue.error ? { tone: 'error', title: queue.error, onDismiss: queue.clearError } : null} />
+        {/* The dock on the composer's top edge: the top notice, one at a time. */}
         <ComposerNoticeSlot />
-        <QueuedMessages
-          threadId={activeThreadId}
-          optimisticItems={optimisticQueueItems}
-          onOptimisticItemReconciled={(id) => {
-            setOptimisticQueueItems((current) => current.filter((item) => item.id !== id))
-          }}
-          onEditItem={(item) => {
-            void (async () => {
-              if (!activeThreadId || item.id.startsWith('optimistic:')) return
-              const cleanText = stripComposerTransportMarkers(item.content)
-              setInput(cleanText)
-              if (item.images?.length) {
-                try {
-                  const restored = await Promise.all(
-                    item.images.map(async (image) => {
-                      const file = await imagePayloadToFile(image)
-                      return {
-                        id: crypto.randomUUID(),
-                        file,
-                        previewUrl: imagePayloadToDataUrl(image)
-                      } satisfies AttachedFile
-                    })
-                  )
-                  setAttachedFiles((current) => [...current, ...restored])
-                } catch {
-                  setSendError('Could not restore queued images into the composer')
-                }
-              }
-              try {
-                await window.mousse.queue.remove(activeThreadId, item.id)
-              } catch (err) {
-                setSendError(err instanceof Error ? err.message : 'Could not remove queued message')
-              }
-            })()
-          }}
-        />
 
         {newThreadSettings && (
           <ComposerProjectPicker
@@ -1481,18 +1472,22 @@ export function OrchestratorChat() {
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
               enabledSkills={enabledSkills}
-              providers={providers}
-              selectedProviderId={selectedProviderId}
-              selectedInstanceId={selectedInstanceId}
-              selectedModelId={selectedModelId}
-              modelMenuOpen={modelMenuOpen}
-              onModelMenuOpenChange={setModelMenuOpen}
-              onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
-              onOpenSettings={() => setSettingsOpen(true)}
-              contextUsage={contextUsage}
-              contextCompactionSetting={contextCompactionSetting}
-              contextOpen={contextOpen}
-              onContextOpenChange={setContextOpen}
+              run={{
+                providers,
+                selectedProviderId,
+                selectedInstanceId,
+                selectedModelId,
+                modelMenuOpen,
+                onModelMenuOpenChange: setModelMenuOpen,
+                onModelSelect: (providerId, modelId) => void handleModelSelect(providerId, modelId),
+                onOpenSettings: () => setSettingsOpen(true),
+                contextUsage,
+                contextCompactionSetting,
+                contextOpen,
+                onContextOpenChange: setContextOpen,
+                ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
+                compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId)
+              }}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}
               placeholder={!workspaceReady ? ''

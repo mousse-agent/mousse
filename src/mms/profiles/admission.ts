@@ -19,7 +19,7 @@ const INSTALLATION_METHODS = new Set([
 // providers, so each profile sees only its own. Speech and usage refuse a provider removed from the
 // bound profile (`providerAccess`), so they run on it too.
 const PROFILE_PROVIDER_METHODS = new Set([
-  'providers.getUsage', 'providers.getSubscriptionUsage',
+  'providers.getUsage', 'providers.getSubscriptionUsage', 'providers.setUsageProxyKey', 'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech', 'providers.transcribeAudio',
   'providers.snapshots', 'providers.catalog.addOptions',
   'providers.instances.add', 'providers.instances.setSecret', 'providers.instances.remove',

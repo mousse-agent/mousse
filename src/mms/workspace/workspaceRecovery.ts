@@ -3,12 +3,33 @@ import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { leftMergeRefusalAsync } from '../actions/leftMerge'
 import { waitForFolderAccess } from '../files/folderAccess'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
-import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
+import { ThreadWorkspaceManager, type InFlightTest } from './ThreadWorkspaceManager'
 import { settlesItself } from '../../shared/resourceLifecycle'
+import { isExecutionLeaseHeld } from '../queue/ThreadExecutionLease'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
 const PUBLISH_TYPES = ['publish', 'change-publish']
+/** The checkpoint a turn records at its end, and the states it passes through while it does. */
+const CHECKPOINT_TYPES = ['action-checkpoint', 'change-checkpoint']
+const CHECKPOINT_IN_FLIGHT_STATES = ['prepared', 'git_applied']
+
+/**
+ * For status reads only: true for a checkpoint record (`prepared`, `git_applied`) that a live writer is still finishing.
+ * Every checkpoint is written under the thread's execution lease (`withGitMutationLocks`) and completes before the lease
+ * is released, so while a live holder has the lease (this daemon, or another live process such as the CLI) the
+ * checkpoint is in progress, not left over. After a crash or restart the lease's owner is dead or another process
+ * instance, the lease reads as free, and the record is reported again. `recovery_required` is never skipped. The lease
+ * is read (one small file) only for a record that could be skipped, and again on each read, never cached.
+ */
+export function liveCheckpointTest(threadDirectory: string): InFlightTest {
+  return (entry) => CHECKPOINT_TYPES.includes(entry.operationType) && CHECKPOINT_IN_FLIGHT_STATES.includes(entry.state) && isExecutionLeaseHeld(threadDirectory)
+}
+
+export interface RecoveryReadOptions {
+  /** Pending records a live writer is still finishing (`liveCheckpointTest`); they pause nothing. Recovery never passes it. */
+  inFlight?: InFlightTest
+}
 
 /**
  * An operation's error as the person reads it. A failed Git command's message starts with the whole command line
@@ -63,9 +84,10 @@ export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord
  * What a thread's worktree or its Publish is waiting on, or undefined when nothing is. `verified` is
  * `ThreadWorkspaceManager.verify()` of the stored metadata: `recovery_required` while a Mousse operation other than
  * Publish waits, or when Git cannot read the worktree. The branch and HEAD are the agent's to move and are never a
- * reason.
+ * reason. With `inFlight`, `verified` must come from `verify(…, { inFlight })` too, so a skipped record does not come
+ * back as "Git cannot read the worktree".
  */
-export async function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): Promise<WorkspaceRecovery | undefined> {
+export async function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata, options: RecoveryReadOptions = {}): Promise<WorkspaceRecovery | undefined> {
   const journal = new ThreadJournal(threadDirectory, { readOnly: true })
   const records = journal.list()
   const latest = [...journal.latestByOperation().values()]
@@ -78,7 +100,8 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
   // Turns, Undo and Publish are refused until this is recovered.
   // An unsettled expiry of kept files, or keep of a copy, touches no file; the next retention sweep settles it, so it
   // pauses nothing.
-  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType))
+  // A turn's own end-of-turn checkpoint, still being written under its live lease, is not a leftover.
+  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType) && !options.inFlight?.(entry))
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
   if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
@@ -107,10 +130,10 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
  * that records into a hidden store (a folder without Git, or a standalone thread) is read through `loadOrSnapshotAsync()`,
  * so a pending operation there shows the banner too; it is never verified with Git, since its folder has none.
  */
-export async function threadRecovery(threadDirectory: string, projectPath: string | undefined): Promise<WorkspaceRecovery | undefined> {
+export async function threadRecovery(threadDirectory: string, projectPath: string | undefined, options: RecoveryReadOptions = {}): Promise<WorkspaceRecovery | undefined> {
   const manager = new ThreadWorkspaceManager(threadDirectory)
   const stored = manager.load()
-  if (stored) return projectPath ? describeRecovery(threadDirectory, await manager.verify(stored)) : undefined
+  if (stored) return projectPath ? describeRecovery(threadDirectory, await manager.verify(stored, options), options) : undefined
   const snapshot = await manager.loadOrSnapshotAsync()
-  return snapshot ? describeRecovery(threadDirectory, snapshot) : undefined
+  return snapshot ? describeRecovery(threadDirectory, snapshot, options) : undefined
 }

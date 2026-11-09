@@ -31,6 +31,7 @@ import type { InstanceEnv } from '../env'
 import { killTree } from '../spawn'
 import { COMMAND_DEADLINE_MS, INTERRUPT_DEADLINE_MS, READY_DEADLINE_MS } from '../supervise'
 import { PiBridge, type PiBridgeRegistration } from './bridge'
+import { longerTtl, writtenCacheTtl } from '../promptCache'
 import { DescendantTracker, OwnedGroups } from './descendants'
 import { WriterEpisode, type PiToolClass } from './episode'
 import { authorizeDefinitionCall, recordAuthorizedCall, withoutTransportFields } from '../../agentDefinitions/definitionGate'
@@ -364,6 +365,8 @@ class PiTurn {
   readonly ledgerRows = new Map<string, string>()
   readonly steers: Array<{ text: string; token?: string }> = []
   usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  /** When the turn's last request was answered, and the longest cache lifetime its requests wrote (`cacheWrite1h`). */
+  promptCache: { at?: number; ttlMs?: number } = {}
   /** The current assistant message's text blocks by `contentIndex`. */
   text = new Map<number, string>()
   /** The turn's reply as one cumulative stream, broken at each tool call and closed with the joined text when the turn ends. */
@@ -1483,7 +1486,7 @@ export class PiRpcEngine implements ProviderAdapter {
         // The gauge waits for the next turn.
       }
     }
-    sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}) })
+    sink.providerMetrics({ totalResponseTimeMs: Date.now() - turn.startedAt, totalTokensUsed: turn.usage.input + turn.usage.output, ...(context ? { context } : {}), ...(turn.promptCache.at ? { promptCache: { ...turn.promptCache } } : {}) })
     // Every step's text, as the legacy loop's reply joins them (a steered turn answers more than once).
     // A stopped turn keeps its partial reply; a finished one is every step's text, joined.
     const text = stopped ? turn.replyText() : turn.texts.join('\n\n')
@@ -1938,7 +1941,7 @@ export class PiRpcEngine implements ProviderAdapter {
       case 'message_update':
         return this.streamUpdate(turn, event.assistantMessageEvent as { type: string; contentIndex: number; delta?: string; content?: string } | undefined)
       case 'message_end': {
-        const message = event.message as { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } }; stopReason?: string; errorMessage?: string }
+        const message = event.message as { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cacheWrite1h?: number; cost?: { total?: number } }; stopReason?: string; errorMessage?: string }
         if (message?.role !== 'assistant') return
         // Every attempt's usage, failed ones included: they can be billable.
         const usage = message.usage ?? {}
@@ -1948,6 +1951,11 @@ export class PiRpcEngine implements ProviderAdapter {
         if (reported.input || reported.output || reported.cacheRead || reported.cacheWrite) {
           sink.usage({ ...reported, ...(typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? { costUsd: cost } : {}) })
           turn.usage = { input: turn.usage.input + reported.input, output: turn.usage.output + reported.output, cacheRead: turn.usage.cacheRead + reported.cacheRead, cacheWrite: turn.usage.cacheWrite + reported.cacheWrite }
+          // A lifetime only where pi reports the one-hour share (its Anthropic transport): the rest of a write
+          // is then the default five minutes. Other providers say nothing of a lifetime.
+          const oneHour = usage.cacheWrite1h
+          const ttlMs = typeof oneHour === 'number' ? writtenCacheTtl({ oneHour, fiveMinute: reported.cacheWrite - oneHour }) : undefined
+          turn.promptCache = { at: Date.now(), ttlMs: longerTtl(turn.promptCache.ttlMs, ttlMs) }
         }
         if (message.stopReason === 'error') {
           turn.pendingError = message.errorMessage || 'The provider request failed'

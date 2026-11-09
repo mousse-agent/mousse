@@ -1,7 +1,7 @@
 import type { ProviderUsage } from '../../shared/providerAuth'
 
 /** A provider's usage as lines of text: what it reported, never an estimate. */
-export function usageText(label: string, usage: Pick<ProviderUsage, 'status' | 'windows' | 'message'>): string {
+export function usageText(label: string, usage: Pick<ProviderUsage, 'status' | 'windows' | 'message'> & Partial<Pick<ProviderUsage, 'source' | 'readAt'>>): string {
   if (usage.status !== 'available' || usage.windows.length === 0) return usage.message ?? `Subscription usage is not available for ${label}.`
   const lines = usage.windows.map((window) => {
     const usedPercent = Math.max(0, Math.min(100, 100 - window.remainingPercent))

@@ -24,7 +24,7 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
 
 const PERMISSION = Type.Union([
   Type.Object({ tool: Type.String({ description: 'A tool name, for example read, edit, web_fetch, or shell to run commands.' }) }),
-  Type.Object({ path: Type.String({ description: 'An absolute folder path.' }), access: Type.Union([Type.Literal('read'), Type.Literal('write')]) }),
+  Type.Object({ path: Type.String({ description: 'Any absolute folder path: this asks to use files anywhere on this computer, read and write, once.' }), access: Type.Union([Type.Literal('read'), Type.Literal('write')]) }),
   Type.Object({ skill: Type.String({ description: 'A skill id.' }) }),
   Type.Object({ mcp: Type.Object({ serverId: Type.String(), tool: Type.String() }) }),
   Type.Object({

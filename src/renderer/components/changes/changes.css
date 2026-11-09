@@ -1,0 +1,898 @@
+/* The Changes tab: a one-line header, one accordion of file cards, a one-line footer. Selection is a filled
+   background only (never an edge bar); every control is 28px or less; it must fit a 440px side pane. */
+
+.changes-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  outline: none;
+  font-size: 12.5px;
+}
+
+/* ---- Header */
+
+.changes-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.changes-scope {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.changes-scope .ui-select {
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  font-weight: 500;
+}
+
+.changes-scope .ui-select:hover:not(:disabled),
+.changes-scope .ui-select.open {
+  background: var(--ui-hover);
+}
+
+.changes-scope-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.changes-scope-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-live-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: changes-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes changes-pulse {
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .changes-live-dot { animation: none; }
+}
+
+.changes-counts {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.changes-counts:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.changes-faint {
+  color: var(--ui-faint);
+}
+
+.changes-totals {
+  margin-left: 4px;
+}
+
+.changes-header-gap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.changes-sync-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.changes-sync-chip:hover,
+.changes-sync-chip[aria-expanded='true'] {
+  background: var(--ui-pressed);
+  color: var(--text-primary);
+}
+
+.changes-sync-chip.is-warning { color: var(--warning); }
+.changes-sync-chip.is-danger { color: var(--danger); }
+
+.changes-chip-core {
+  font-variant-numeric: tabular-nums;
+}
+
+.changes-chip-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.changes-icon-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.changes-icon-btn:hover,
+.changes-icon-btn.open {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.changes-newer {
+  display: block;
+  flex: none;
+  align-self: center;
+  margin: 6px auto 0;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.changes-newer:hover {
+  background: var(--ui-pressed);
+  color: var(--text-primary);
+}
+
+.changes-message {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  margin: 6px 10px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.changes-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.changes-link:hover {
+  text-decoration: underline;
+}
+
+.changes-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Sync actions at the bottom of the branch picker */
+
+.changes-sync {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.changes-sync-label {
+  margin: 0 6px 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.changes-sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 6px;
+}
+
+.changes-sync-line {
+  margin: 6px 6px 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.changes-sync-line[data-tone='error'] {
+  color: var(--danger);
+}
+
+/* ---- Body: the accordion */
+
+.changes-body {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+  padding: 4px 0 12px;
+}
+
+.changes-empty {
+  margin: 0;
+  padding: 16px 12px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.changes-card[data-open] {
+  margin: 2px 0 6px;
+}
+
+.changes-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 30px;
+  margin: 0 6px;
+  padding: 0 8px 0 6px;
+  border-radius: var(--ui-row-radius);
+  color: color-mix(in srgb, var(--text-primary) 85%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.changes-row:hover {
+  background: var(--ui-hover);
+}
+
+.changes-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The open card's header stays on top while its diff scrolls. */
+.changes-card[data-open] > .changes-row {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  background: var(--ui-selected-fill, var(--ui-selected));
+  color: var(--text-primary);
+  box-shadow: var(--ui-specular);
+}
+
+.changes-chevron {
+  flex: none;
+  color: var(--ui-faint);
+}
+
+.changes-row-check {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.changes-path {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: plaintext;
+}
+
+.changes-word {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.changes-word[data-word='new'] { color: var(--success); }
+.changes-word[data-word='deleted'] { color: var(--danger); }
+.changes-word[data-word='conflict'] { color: var(--warning); }
+
+.changes-row-end {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.changes-stat {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.changes-comments {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.changes-viewed {
+  color: var(--ui-faint);
+}
+
+.changes-changed-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.changes-viewed-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--ui-faint);
+  cursor: pointer;
+}
+
+.changes-viewed-btn:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.changes-viewed-btn[data-viewed] {
+  color: var(--success);
+}
+
+/* The row's "…" takes no room until the row is hovered or focused; then it narrows the path, never the counts. */
+.changes-row-menu {
+  display: inline-flex;
+  flex: none;
+  overflow: hidden;
+  width: 0;
+  margin-left: -6px;
+}
+
+.changes-row:hover .changes-row-menu,
+.changes-row:focus-within .changes-row-menu,
+.changes-row-menu:has(.open) {
+  overflow: visible;
+  width: 22px;
+  margin-left: 0;
+}
+
+.changes-row-more {
+  width: 22px;
+  height: 22px;
+}
+
+.changes-card-body {
+  margin: 4px 6px 0;
+}
+
+.changes-card-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px;
+  color: var(--text-secondary);
+}
+
+.changes-diff {
+  overflow: hidden;
+  border-radius: var(--ui-row-radius);
+}
+
+.changes-reveal {
+  display: block;
+  height: 0;
+}
+
+/* Annotations drawn inside the diff: a hunk's bar, a comment, the comment form. */
+.changes-hunk-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--an-background-secondary, var(--ui-hover));
+  font-family: var(--font-sans, inherit);
+  font-size: 12px;
+}
+
+.changes-bar-btn,
+.changes-include {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.changes-bar-btn:hover,
+.changes-include:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.changes-include input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* A hunk's own Include box while choosing: quieter than the hovered hunk's bar. */
+.changes-hunk-bar[data-quiet] {
+  background: transparent;
+  padding-block: 1px;
+}
+
+.changes-include[data-off],
+.changes-row-check:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.changes-include[data-off]:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.changes-include[data-included='no'] {
+  color: var(--ui-faint);
+}
+
+.changes-bar-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.changes-bar-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+/* A file being reverted: dimmed in place until Git answers, so no row moves under the pointer. */
+.changes-card[data-pending] > .changes-row {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.changes-comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--an-background-secondary, var(--ui-hover));
+  color: var(--text-primary);
+  font-family: var(--font-sans, inherit);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
+.changes-comment svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.changes-comment-form {
+  padding: 8px 10px;
+  background: var(--an-background-secondary, var(--ui-hover));
+  font-family: var(--font-sans, inherit);
+}
+
+.changes-comment-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  resize: vertical;
+}
+
+.changes-comment-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.changes-comment-error {
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.changes-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* ---- Footer: one line, one next step */
+
+.changes-footer {
+  flex: none;
+  padding: 8px 10px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.changes-footer-message {
+  overflow: hidden;
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-footer-message[data-tone='error'] {
+  color: var(--danger);
+}
+
+.changes-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.changes-footer-row:empty {
+  display: none;
+}
+
+.changes-footer-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+
+.changes-primary,
+.changes-secondary,
+.changes-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--ui-control-radius, var(--ui-row-radius));
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--ui-specular);
+}
+
+.changes-primary:hover:not(:disabled),
+.changes-secondary:hover:not(:disabled),
+.changes-chip:hover {
+  background: var(--ui-pressed);
+}
+
+.changes-primary:disabled,
+.changes-secondary:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.changes-secondary {
+  font-weight: 400;
+  box-shadow: none;
+}
+
+.changes-checks[data-checks='passing'] { color: var(--success); }
+.changes-checks[data-checks='failing'] { color: var(--danger); }
+
+.changes-checks-pending {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.changes-commit {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.changes-commit-field {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+.changes-commit-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  max-height: 120px;
+  padding: 5px 30px 5px 10px;
+  border: 0;
+  border-radius: var(--ui-control-radius, var(--ui-row-radius));
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  resize: none;
+  field-sizing: content;
+}
+
+.changes-commit-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* The placeholder names the branch on one line; a long name ends in an ellipsis (the full one is the tooltip).
+   On the default branch it is tinted. */
+.changes-commit-placeholder {
+  position: absolute;
+  top: 50%;
+  right: 30px;
+  left: 10px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.changes-commit[data-tinted] .changes-commit-placeholder {
+  color: var(--warning);
+}
+
+.changes-suggest {
+  position: absolute;
+  right: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.changes-suggest:hover:not(:disabled) {
+  background: var(--ui-pressed);
+  color: var(--accent);
+}
+
+.changes-suggest:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.changes-split {
+  display: inline-flex;
+  flex: none;
+}
+
+.changes-split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.changes-split-more {
+  width: 26px;
+  padding: 0;
+  border-left: 1px solid var(--ui-line);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* ---- Dialogs */
+
+.changes-jump .modal {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.changes-jump-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+}
+
+.changes-jump-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.changes-jump-filters {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.changes-jump-filter {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.changes-jump-filter:hover {
+  background: var(--ui-hover);
+}
+
+.changes-jump-filter[aria-pressed='true'] {
+  background: var(--ui-selected-fill, var(--ui-selected));
+  color: var(--text-primary);
+}
+
+.changes-jump-list {
+  overflow-y: auto;
+  max-height: 50vh;
+}
+
+.changes-jump-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.changes-jump-row[data-active] {
+  background: var(--ui-hover);
+}
+
+.changes-jump-path {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-jump-empty {
+  margin: 0;
+  padding: 8px;
+  color: var(--text-secondary);
+}
+
+.changes-help-list {
+  margin: 0;
+}
+
+.changes-help-row {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.changes-help-row dt {
+  flex: none;
+  width: 96px;
+}
+
+.changes-help-row dd {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.changes-restore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.changes-restore-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+
+.changes-restore-what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.changes-restore-what .changes-faint {
+  font-size: 11px;
+}

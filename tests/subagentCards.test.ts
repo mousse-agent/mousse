@@ -15,8 +15,7 @@ import {
   subagentToolOfRecord,
   type SubagentToolName
 } from '../src/shared/subagentTools'
-import { previewText } from '../src/renderer/components/QueuedMessages'
-import type { ChatMessage, QueuedMessage } from '../src/shared/types'
+import type { ChatMessage } from '../src/shared/types'
 import type { SubagentSummary, SubagentTaskSummary } from '../src/shared/subagents'
 
 const at = (seconds: number) => new Date(Date.UTC(2026, 9, 25, 12, 0, seconds)).toISOString()
@@ -569,13 +568,6 @@ describe('subagent notices', () => {
   it('ignores a malformed payload', () => {
     expect(readSubagentNotice({ metadata: { subagentNotice: [{ nope: true }, 3] } } as unknown as UIMessage)).toBeNull()
     expect(readSubagentNotice({ metadata: undefined } as unknown as UIMessage)).toBeNull()
-  })
-
-  it('shows a queued steer by what it reports, never by the text the model reads', () => {
-    const queued = (patch: Partial<QueuedMessage>): QueuedMessage =>
-      ({ id: 'q', threadId: 'p', content: 'Subagent "API reviewer" (thread a) finished task d1.\nSECRET RESULT', order: 0, intent: 'steer', state: 'queued', ...patch }) as QueuedMessage
-    expect(previewText(queued({ subagentNotice: [items[0]!] }))).toBe('API reviewer finished')
-    expect(previewText(queued({ content: 'also check the docs', subagentNotice: undefined }))).toBe('also check the docs')
   })
 
   it('names the outcome of each task and summarizes a notice in a line', () => {

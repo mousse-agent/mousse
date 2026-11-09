@@ -26,6 +26,36 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const isRecord = (value: unknown): value is Json => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const on = (value: string | undefined) => Boolean(value && /^(1|true|yes|on)$/i.test(value))
 
+/** The user's and the managed settings Claude Code reads, and the environment they give it. */
+function readClaudeSettings(env: NodeJS.ProcessEnv, options: AccountSubjectOptions) {
+  const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))
+  const home = options.home ?? homedir()
+  const json = (path: string): Json | undefined => {
+    try {
+      const value: unknown = JSON.parse(readText(path))
+      return isRecord(value) ? value : undefined
+    } catch {
+      return undefined
+    }
+  }
+  const configDir = env.CLAUDE_CONFIG_DIR?.trim()
+  const settings = [json(join(configDir || join(home, '.claude'), 'settings.json')), ...managedSettingsPaths(options.platform ?? process.platform).map(json)]
+    .filter((value): value is Json => Boolean(value))
+  // Claude Code applies the `env` of its settings over its own environment.
+  const effective: Record<string, string | undefined> = { ...env }
+  for (const entry of settings)
+    if (isRecord(entry.env)) for (const [name, value] of Object.entries(entry.env)) if (typeof value === 'string') effective[name] = value
+  return { json, readText, home, configDir, settings, effective }
+}
+
+/**
+ * A variable as Claude Code sees it: its environment with the `env` of the user's and the managed
+ * settings applied over it (project settings are not read). Undefined when unset or blank.
+ */
+export function claudeEffectiveVariable(env: NodeJS.ProcessEnv, name: string, options: AccountSubjectOptions = {}): string | undefined {
+  return readClaudeSettings(env, options).effective[name]?.trim() || undefined
+}
+
 /**
  * A stable id of the account Claude Code runs as, read from the files and variables it reads,
  * without starting it (never shown or stored; the gateway hashes it). Undefined when Mousse cannot
@@ -45,23 +75,7 @@ const on = (value: string | undefined) => Boolean(value && /^(1|true|yes|on)$/i.
  * Project settings are not read: they depend on the folder of each turn.
  */
 export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}): string | undefined {
-  const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))
-  const home = options.home ?? homedir()
-  const json = (path: string): Json | undefined => {
-    try {
-      const value: unknown = JSON.parse(readText(path))
-      return isRecord(value) ? value : undefined
-    } catch {
-      return undefined
-    }
-  }
-  const configDir = env.CLAUDE_CONFIG_DIR?.trim()
-  const settings = [json(join(configDir || join(home, '.claude'), 'settings.json')), ...managedSettingsPaths(options.platform ?? process.platform).map(json)]
-    .filter((value): value is Json => Boolean(value))
-  // Claude Code applies the `env` of its settings over its own environment.
-  const effective: Record<string, string | undefined> = { ...env }
-  for (const entry of settings)
-    if (isRecord(entry.env)) for (const [name, value] of Object.entries(entry.env)) if (typeof value === 'string') effective[name] = value
+  const { json, readText, home, configDir, settings, effective } = readClaudeSettings(env, options)
   const value = (name: string) => effective[name]?.trim() || undefined
   const setting = (name: string) => settings.some((entry) => typeof entry[name] === 'string' && (entry[name] as string).trim())
 

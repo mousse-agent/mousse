@@ -6,8 +6,11 @@ import { useBotsStore } from '../../stores/botsStore'
 import { useChatsStore } from '../../stores/chatsStore'
 import { BotLookPicker } from './face/BotLookPicker'
 
-/** A small dialog in the Chats style (`chat-dialog`): focus inside, Escape and the backdrop close it. */
-export function BotDialogFrame({ title, onClose, busy = false, width, children }: { title: string; onClose(): void; busy?: boolean; width?: number; children: ReactNode }) {
+/**
+ * A small dialog in the Chats style (`chat-dialog`): focus inside, Escape and the backdrop close it.
+ * With `keepOnBackdrop` (something was put in) a click beside it does nothing; Close and Escape still close.
+ */
+export function BotDialogFrame({ title, onClose, busy = false, keepOnBackdrop = false, width, children }: { title: string; onClose(): void; busy?: boolean; keepOnBackdrop?: boolean; width?: number; children: ReactNode }) {
   const titleId = useId()
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -16,7 +19,7 @@ export function BotDialogFrame({ title, onClose, busy = false, width, children }
     first?.focus()
     return () => prior?.focus()
   }, [])
-  return <div className="chat-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose() }}>
+  return <div className="chat-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy && !keepOnBackdrop) onClose() }}>
     <div ref={dialog} className="chat-dialog bot-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} style={width ? { width: `min(${width}px, calc(100vw - 40px))` } : undefined} onKeyDown={(event) => {
       if (event.key === 'Escape' && !busy) onClose()
       if (event.key === 'Tab') {

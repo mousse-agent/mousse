@@ -1,4 +1,6 @@
-.scheduled-page {
+/* Rail pages beside the rail: Automations, and Usage (App.tsx). */
+.scheduled-page,
+.usage-rail-page {
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -12,6 +14,18 @@
   -webkit-backdrop-filter: var(--glass-blur);
   overflow: hidden;
   -webkit-app-region: no-drag;
+}
+
+/* No glass on Automations: the specular top light, glint and sheen are the main thread composer's (polish.css,
+   ambient-glow.css). Menus that open from here sit in a portal, so they keep the shared menu material. */
+.scheduled-page {
+  --ui-specular: 0 0 transparent;
+  --ui-glint: transparent;
+  --ui-sheen: none;
+}
+
+.app .scheduled-page .threads-sidebar-tab.active::before {
+  content: none;
 }
 
 .scheduled-page button,
@@ -56,7 +70,7 @@
   --settings-section-gap: var(--space-32);
   --settings-action-hue: var(--accent);
   --settings-surface: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
-  --settings-surface-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  --settings-surface-edge: inset 0 0 0 1px var(--ui-line);
   --scheduled-field: color-mix(in srgb, var(--text-primary) 5%, transparent);
   flex: 1;
   display: flex;
@@ -191,13 +205,6 @@ html[data-theme='high-contrast'] .scheduled-panel {
   padding-left: 2px;
 }
 
-.scheduled-quick-hint {
-  margin: 0;
-  padding-left: 2px;
-  font-size: var(--settings-fs-small);
-  color: var(--text-secondary);
-}
-
 .scheduled-when-gap {
   flex: 1;
 }
@@ -209,14 +216,7 @@ html[data-theme='high-contrast'] .scheduled-panel {
   margin-left: 2px;
 }
 
-/* Schedule chips: one-row choices, the chosen one a pressed fill. */
-.scheduled-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-8);
-}
-
-.scheduled-chip,
+/* The custom builder's segments: one-row choices, the chosen one a pressed fill. */
 .scheduled-segment {
   display: inline-flex;
   align-items: center;
@@ -233,18 +233,15 @@ html[data-theme='high-contrast'] .scheduled-panel {
   cursor: pointer;
 }
 
-.scheduled-chip:hover,
 .scheduled-segment:hover {
   color: var(--text-primary);
 }
 
-.scheduled-chip[aria-pressed='true'],
 .scheduled-segment.active {
   background: var(--ui-pressed);
   color: var(--text-primary);
 }
 
-.scheduled-chip:focus-visible,
 .scheduled-segment:focus-visible,
 .scheduled-row-title:focus-visible,
 .scheduled-line-link:focus-visible,
@@ -254,17 +251,20 @@ html[data-theme='high-contrast'] .scheduled-panel {
   outline-offset: 2px;
 }
 
-.scheduled-select {
-  width: 220px;
+/* Home: a headline over the quick-add line. */
+.scheduled-home-headline {
+  margin: 0 0 var(--space-12) var(--space-4);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
 }
 
-.scheduled-select.where {
-  width: auto;
-  min-width: 140px;
-}
-
-.scheduled-select.narrow {
-  width: 160px;
+.scheduled-group-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-8);
 }
 
 /* ---- scheduler state, errors, empty ------------------------------------ */

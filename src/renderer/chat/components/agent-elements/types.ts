@@ -139,6 +139,8 @@ export type AgentChatProps = {
 
   /** Show copy toolbar on text turns */
   lastTurnNotice?: React.ReactNode;
+  /** Drawn after the last turn (the thread's queued messages). */
+  afterTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
 
   /**

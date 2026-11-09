@@ -4,16 +4,14 @@ import type { ReviewFileEntry, ReviewScope } from '../src/shared/review'
 import { buildComposerMessageContent } from '../src/renderer/components/ChatComposer'
 import {
   commentCounts,
-  commentDecorations,
   commentScopeLabel,
   commentsForFile,
   scopeFromKey,
-  scopeKey,
-  selectedLineRange
+  scopeKey
 } from '../src/renderer/components/review/reviewComments'
 import { openChatReference } from '../src/renderer/components/ReferencePill'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import { useReviewStore } from '../src/renderer/stores/reviewStore'
+import { useChangesStore } from '../src/renderer/stores/changesStore'
 
 // The composer pulls in the microphone worklet, which needs browser audio APIs; only its message builder is used here.
 vi.mock('../src/renderer/dictation/microphone', () => ({}))
@@ -111,42 +109,20 @@ describe('review comments', () => {
       expect(scopeKey({ kind: 'worktree', staged: true })).toBe('worktree:staged')
       expect(scopeFromKey('turn:')).toBeNull()
       expect(scopeFromKey('worktree')).toBeNull()
-      expect(commentScopeLabel({ kind: 'thread' })).toBe('Whole thread')
+      expect(commentScopeLabel({ kind: 'thread' })).toBe('This thread')
+      expect(commentScopeLabel({ kind: 'worktree' })).toBe('Uncommitted')
       expect(commentScopeLabel({ kind: 'worktree', staged: true })).toBe('Staged changes')
-      expect(commentScopeLabel({ kind: 'turn', turnId: TURN_1 }, [{ turnId: TURN_1, label: 'Fix it · 3:04 PM', undone: false, running: false }])).toBe('Turn: Fix it · 3:04 PM')
+      expect(commentScopeLabel({ kind: 'turn', turnId: TURN_1 }, [{ turnId: TURN_1, label: 'Fix it · 3:04 PM', prompt: 'Fix it', number: 1, endedAt: null, files: 1, undone: false, running: false }])).toBe('Turn: Fix it · 3:04 PM')
       expect(() => comment({ reviewScope: scopeKey({ kind: 'turn', turnId: TURN_1 }) })).not.toThrow()
     })
   })
 
-  it('makes one whole-line decoration per comment, in order, including two on the same line', () => {
-    const first = comment({ line: 3, endLine: undefined, comment: 'one' })
-    const second = comment({ line: 3, endLine: undefined, comment: 'two' })
-    const range = comment({ line: 10, endLine: 12, comment: 'three' })
-    const decorations = commentDecorations([first, second, range])
-    expect(decorations.map((item) => item.range)).toEqual([
-      { startLineNumber: 3, startColumn: 1, endLineNumber: 3, endColumn: 1 },
-      { startLineNumber: 3, startColumn: 1, endLineNumber: 3, endColumn: 1 },
-      { startLineNumber: 10, startColumn: 1, endLineNumber: 12, endColumn: 1 }
-    ])
-    expect(decorations.every((item) => item.options.isWholeLine && item.options.className === 'review-comment-line' && item.options.glyphMarginClassName === 'review-comment-glyph')).toBe(true)
-    expect(decorations.map((item) => (item.options.hoverMessage as { value: string }).value)).toEqual(['one', 'two', 'three'])
-  })
-
-  it('reads the lines a selection covers', () => {
-    const range = (a: number, b: number, c: number, d: number) => selectedLineRange({ startLineNumber: a, startColumn: b, endLineNumber: c, endColumn: d })
-    expect(range(4, 3, 4, 3)).toBeNull()
-    expect(range(4, 3, 4, 9)).toEqual({ line: 4, endLine: 4 })
-    expect(range(4, 3, 7, 5)).toEqual({ line: 4, endLine: 7 })
-    // Ending at the start of a line does not take that line; a reversed selection reads the same.
-    expect(range(4, 1, 7, 1)).toEqual({ line: 4, endLine: 6 })
-    expect(range(7, 5, 4, 3)).toEqual({ line: 4, endLine: 7 })
-  })
 })
 
 describe('review comments in the composer', () => {
   beforeEach(() => {
     useAppStore.setState({ composerReferences: {}, activeThreadId: 't1' })
-    useReviewStore.setState({ byThread: {} })
+    useChangesStore.setState({ byThread: {} })
   })
 
   it('keeps two comments on the same path and line, and removes only the one asked for', () => {
@@ -182,43 +158,45 @@ describe('review comments in the composer', () => {
   })
 
   describe('a clicked comment pill', () => {
-    it('switches to the comment\'s scope before showing its file', () => {
-      useReviewStore.getState().setScope('t1', { kind: 'thread' })
-      useReviewStore.getState().revealComment('t1', { scope: { kind: 'turn', turnId: TURN_2 }, absolutePath: '/repo/src/a.ts', line: 12 })
-      expect(useReviewStore.getState().byThread.t1).toMatchObject({
-        scope: { kind: 'turn', turnId: TURN_2 },
+    beforeEach(() => useChangesStore.setState({ byThread: {} }))
+
+    it("asks for the comment's scope before showing its file", () => {
+      useChangesStore.getState().show('t1', 'thread')
+      useChangesStore.getState().revealComment('t1', { scope: { kind: 'turn', turnId: TURN_2 }, absolutePath: '/repo/src/a.ts', line: 12 })
+      expect(useChangesStore.getState().byThread.t1).toMatchObject({
+        requested: `turn:${TURN_2}`,
         pendingFile: { path: '/repo/src/a.ts', line: 12 }
       })
     })
 
-    it('selects the file the list maps it to and offers the line once', () => {
-      const store = useReviewStore.getState()
+    it('opens the file the list maps it to and offers the line once', () => {
+      const store = useChangesStore.getState()
       store.revealComment('t1', { scope: { kind: 'thread' }, absolutePath: '/repo/src/a.ts', line: 12 })
       store.resolvePendingFile('t1', 'src/a.ts')
-      expect(useReviewStore.getState().byThread.t1.pendingFile).toBeUndefined()
-      expect(useReviewStore.getState().byThread.t1.selectedPath).toBe('src/a.ts')
-      expect(useReviewStore.getState().takeReveal('t1', 'src/a.ts')).toEqual({ path: 'src/a.ts', line: 12 })
-      expect(useReviewStore.getState().takeReveal('t1', 'src/a.ts')).toBeUndefined()
+      expect(useChangesStore.getState().byThread.t1.pendingFile).toBeUndefined()
+      expect(useChangesStore.getState().byThread.t1.openPath).toBe('src/a.ts')
+      expect(useChangesStore.getState().takeReveal('t1', 'src/a.ts')).toEqual({ path: 'src/a.ts', line: 12 })
+      expect(useChangesStore.getState().takeReveal('t1', 'src/a.ts')).toBeUndefined()
     })
 
     it('drops the request when the file is not in that scope', () => {
-      const store = useReviewStore.getState()
-      store.selectFile('t1', 'src/other.ts')
+      const store = useChangesStore.getState()
+      store.setOpenPath('t1', 'src/other.ts')
       store.revealComment('t1', { scope: { kind: 'thread' }, absolutePath: '/repo/src/a.ts', line: 12 })
       store.resolvePendingFile('t1', null)
-      expect(useReviewStore.getState().byThread.t1.pendingFile).toBeUndefined()
-      expect(useReviewStore.getState().byThread.t1.selectedPath).toBe('src/other.ts')
-      expect(useReviewStore.getState().byThread.t1.reveal).toBeUndefined()
+      expect(useChangesStore.getState().byThread.t1.pendingFile).toBeUndefined()
+      expect(useChangesStore.getState().byThread.t1.openPath).toBe('src/other.ts')
+      expect(useChangesStore.getState().byThread.t1.reveal).toBeUndefined()
     })
 
-    it('is routed to the Review surface from a comment pill', () => {
+    it('is routed to the Changes tab from a comment pill, on the uncommitted diff for a working-tree comment', () => {
       useAppStore.setState({ activeThreadId: 't1' })
       openChatReference(comment({ reviewScope: 'worktree:staged' }))
-      expect(useReviewStore.getState().byThread.t1).toMatchObject({
-        scope: { kind: 'worktree', staged: true },
+      expect(useChangesStore.getState().byThread.t1).toMatchObject({
+        requested: 'uncommitted',
         pendingFile: { path: '/repo/src/a.ts', line: 12 }
       })
-      expect(useAppStore.getState().mainView).toBe('review')
+      expect(useAppStore.getState().mainView).toBe('git')
     })
   })
 })

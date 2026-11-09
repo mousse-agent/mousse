@@ -16,7 +16,7 @@ import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
@@ -37,6 +37,9 @@ import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '.
 import { threadBranchNameAsync } from '../../shared/mousseBranches'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
+
+/** True for a pending journal record that a live writer is still finishing (`liveCheckpointTest`), so it waits on nothing yet. */
+export type InFlightTest = (entry: Pick<ThreadJournalRecord, 'operationType' | 'state'>) => boolean
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}, which callers that cannot wait yet still use. */
 function gitSync(cwd: string, args: string[]): string {
@@ -631,10 +634,13 @@ export class ThreadWorkspaceManager {
     }
   }
 
-  /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
-  hasPendingOperation(): boolean {
+  /**
+   * An operation that started and did not finish, so a person or recovery has to settle it before the next one.
+   * `inFlight` (status reads only, never admission) names records a live writer is still finishing; they are skipped.
+   */
+  hasPendingOperation(inFlight?: InFlightTest): boolean {
     // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
-    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType) && !settlesItself(entry.operationType))
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType) && !settlesItself(entry.operationType) && !inFlight?.(entry))
   }
 
   /**
@@ -687,7 +693,8 @@ export class ThreadWorkspaceManager {
     return !isProjectFolderWorkspace(metadata) && gate instanceof ResourceLifecycleStore && new WorktreeRetirementService(gate).rebuildUnfinished(metadata.threadId, metadata.worktreePath)
   }
 
-  async verify(metadata = this.load()): Promise<ThreadWorkspaceMetadata> {
+  /** `inFlight`: for status reads only, as in {@link hasPendingOperation}. */
+  async verify(metadata = this.load(), options: { inFlight?: InFlightTest } = {}): Promise<ThreadWorkspaceMetadata> {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     // An unfinished rebuild is never the worktree, whatever is at its path: the next restore finishes it (`clearHalfBuilt`).
     if (this.rebuildUnfinished(metadata)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
@@ -709,7 +716,7 @@ export class ThreadWorkspaceManager {
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
       await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
-      if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
+      if (this.hasPendingOperation(options.inFlight)) throw new Error('A Mousse operation is waiting for recovery.')
       const headSha = (await tryGit(metadata.worktreePath, ['rev-parse', 'HEAD'])).stdout || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified

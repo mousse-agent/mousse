@@ -209,3 +209,63 @@ describe('Claude native file edit accounting', () => {
     }
   })
 })
+
+describe('Claude prompt cache lifetime', () => {
+  /** An assistant frame as Claude Code streams it (and saves it in its session file), with the API's write breakdown. */
+  const written = (id: string, cacheCreation: { ephemeral_5m_input_tokens: number; ephemeral_1h_input_tokens: number } | null | undefined, created = 0) =>
+    ({
+      type: 'assistant',
+      uuid: id,
+      session_id: 'session',
+      parent_tool_use_id: null,
+      message: {
+        id,
+        model: 'claude-opus-4-7',
+        usage: {
+          input_tokens: 2,
+          output_tokens: 1193,
+          cache_read_input_tokens: 15_787,
+          cache_creation_input_tokens: created,
+          ...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
+          service_tier: 'standard'
+        }
+      }
+    }) as SDKMessage
+
+  it('reads a one-hour write from the breakdown, and when the request was answered', () => {
+    vi.useFakeTimers({ now: new Date('2026-11-09T10:00:00Z') })
+    try {
+      const collector = new ClaudeMetricsCollector()
+      collector.observe(written('a1', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 17_089 }, 17_089))
+      expect(collector.report().promptCache).toEqual({ at: Date.parse('2026-11-09T10:00:00Z'), ttlMs: 60 * 60_000 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads a five-minute write, and keeps the longest lifetime the turn wrote', () => {
+    const collector = new ClaudeMetricsCollector()
+    collector.observe(written('a1', { ephemeral_5m_input_tokens: 900, ephemeral_1h_input_tokens: 0 }, 900))
+    expect(collector.report().promptCache?.ttlMs).toBe(5 * 60_000)
+    collector.observe(written('a2', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 400 }, 400))
+    collector.observe(written('a3', { ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 0 }, 300))
+    expect(collector.report().promptCache?.ttlMs).toBe(60 * 60_000)
+  })
+
+  it('says no lifetime for a turn that only read the cache, or without the breakdown', () => {
+    const readOnly = new ClaudeMetricsCollector()
+    readOnly.observe(written('a1', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 }))
+    expect(readOnly.report().promptCache).toEqual({ at: expect.any(Number) })
+    const noBreakdown = new ClaudeMetricsCollector()
+    noBreakdown.observe(written('a1', undefined, 700))
+    noBreakdown.observe(written('a2', null, 700))
+    expect(noBreakdown.report().promptCache).toEqual({ at: expect.any(Number) })
+  })
+
+  it('ignores a subagent\'s requests and reports nothing before any request', () => {
+    const collector = new ClaudeMetricsCollector()
+    expect(collector.report().promptCache).toBeUndefined()
+    collector.observe({ ...written('sub', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 500 }, 500), parent_tool_use_id: 'task-1' } as SDKMessage)
+    expect(collector.report().promptCache).toBeUndefined()
+  })
+})

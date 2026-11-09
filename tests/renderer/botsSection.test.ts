@@ -18,6 +18,8 @@ vi.mock('../../src/renderer/components/chats/NetworkTaskPicker', () => ({ Networ
 vi.mock('../../src/renderer/components/chats/ChatBrowserAccess', () => ({ ChatBrowserAccess: () => null }))
 vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', () => ({ OpenNetworkChatDialog: () => null }))
 vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ ComposerQuestionModal: () => null }))
+// The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   const { createElement: h } = await import('react')
   return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
@@ -25,6 +27,8 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
+// App mounts New bot apart from the chat pane (older code kept it inside the pane).
+const NewBotDialogHost = ((await import('../../src/renderer/components/bots/NewBotDialog')) as { NewBotDialogHost?: () => null }).NewBotDialogHost ?? (() => null)
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 
@@ -39,13 +43,13 @@ const direct = (id: string, name: string, at: string) => ({
   participants: [{ id: 'p1', kind: 'agent', name, definitionId: 'a1' }]
 }) as unknown as ChatSummary
 
-async function show(bots = fake.bots, chats: ChatSummary[] = []) {
+async function show(bots = fake.bots, chats: ChatSummary[] = [], pane = true) {
   fake.bots = bots
   await act(async () => {
     useChatsStore.getState().activate('p1')
     useChatsStore.setState({ snapshot: { agents: [], chats, devices: [] } })
   })
-  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace))))
+  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), pane && createElement(ChatWorkspace), createElement(NewBotDialogHost))))
 }
 const headings = () => [...host.querySelectorAll('.chats-sidebar-content .chat-section-heading h2')].map((element) => element.textContent)
 const button = (label: string) => [...host.querySelectorAll('button')].find((element) => element.getAttribute('aria-label') === label || element.textContent === label)
@@ -79,6 +83,12 @@ describe('the Bots section', () => {
     expect(host.querySelector('[role="dialog"] h2')?.textContent).toBe('New bot')
   })
 
+  it('opens New bot from + while the pane shows Projects, as it does after a restart', async () => {
+    await show([summary('a', { name: 'Inbox helper' })], [], false)
+    await click(button('New bot'))
+    expect(host.querySelector('[role="dialog"] h2')?.textContent).toBe('New bot')
+  })
+
   it('shows the empty page with a face and a New bot button when there is nothing yet', async () => {
     await show([])
     const empty = host.querySelector('.chat-workspace-empty')!
@@ -102,14 +112,14 @@ describe('the Bots section', () => {
 
   it('merges bot chats into Recent by their last message, with the state in words', async () => {
     await show([
-      summary('a', { name: 'Inbox helper', state: 'needs_you', stateText: 'Wants to read files in ~/Invoices', last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
+      summary('a', { name: 'Inbox helper', state: 'needs_you', stateText: 'Wants to use files on this computer', last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
       summary('b', { name: 'Flight deals', state: 'paused', stateText: 'Paused', last: { text: 'Found one', at: '2026-11-07T10:00:00.000Z', author: 'bot' } })
     ], [direct('c1', 'Reviewer', '2026-11-07T09:00:00.000Z')])
     expect(headings()).toEqual(['Bots', 'Groups', 'Recent'])
     const rows = [...host.querySelectorAll('.chat-recent-section .chat-list-row')]
     expect(rows.map((element) => element.querySelector('.chat-list-name')?.textContent)).toEqual(['Flight deals', 'Reviewer', 'Inbox helper'])
     expect(rows[0]!.querySelector('.chat-list-preview')?.textContent).toBe('Paused')
-    expect(rows[2]!.querySelector('.chat-list-preview')?.textContent).toBe('Wants to read files in ~/Invoices')
+    expect(rows[2]!.querySelector('.chat-list-preview')?.textContent).toBe('Wants to use files on this computer')
     expect(rows[2]!.querySelector('.bot-face')?.getAttribute('width')).toBe('40')
   })
 

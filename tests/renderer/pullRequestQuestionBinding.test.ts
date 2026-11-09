@@ -2,7 +2,7 @@
 /**
  * A Merge or Close question acts only on what it was asked about. Switching threads with it open closes it and nothing
  * runs on the other thread's pull request; a refresh that brings a new head keeps the reviewed head and says the pull
- * request changed until it is looked at again. Also: the review toolbars' whitespace switch.
+ * request changed until it is looked at again. Also: the Changes tab's whitespace option.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -28,7 +28,7 @@ vi.mock('../../src/renderer/stores/pullRequestStore', async (importOriginal) => 
 }))
 
 const { PullRequestPanel } = await import('../../src/renderer/components/PullRequestPanel')
-const { DiffOptionsMenu } = await import('../../src/renderer/components/review/ReviewDiffPane')
+const { MenuButton } = await import('../../src/renderer/components/changes/MenuButton')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -176,13 +176,20 @@ describe('a Merge or Close question in the pull request panel', () => {
   })
 })
 
-describe('the diff options menu', () => {
-  it('opens from the "Diff options" button and toggles Ignore whitespace, staying open', async () => {
+describe("the Changes tab's more menu", () => {
+  it('toggles Ignore whitespace from a check-mark row, staying open, and closes on Escape', async () => {
     useAppStore.setState({ reviewIgnoreWhitespace: false })
-    await act(async () => root.render(createElement(DiffOptionsMenu)))
-    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="Diff options"]')
+    const Menu = () => {
+      const ignore = useAppStore((s) => s.reviewIgnoreWhitespace)
+      return createElement(MenuButton, {
+        label: 'More',
+        items: [{ label: 'Ignore whitespace', checked: ignore, onSelect: () => useAppStore.getState().setReviewIgnoreWhitespace(!ignore) }],
+        children: '…'
+      })
+    }
+    await act(async () => root.render(createElement(Menu)))
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="More"]')
     expect(trigger?.getAttribute('aria-haspopup')).toBe('menu')
-    expect(host.querySelector('[role="switch"]')).toBeNull()
 
     await click(trigger)
     const item = () => document.querySelector('[role="menuitemcheckbox"]')

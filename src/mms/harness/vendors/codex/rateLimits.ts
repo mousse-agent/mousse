@@ -24,6 +24,13 @@ function windowLabel(window: RateLimitWindow, slot: 'primary' | 'secondary'): st
   return slot === 'primary' ? 'Usage limit' : 'Secondary usage limit'
 }
 
+/** The plan a snapshot's limits belong to, named as ChatGPT does ("Plus", "Pro"), when Codex says. */
+export function snapshotPlan(snapshot: RateLimitSnapshot | null | undefined): string | undefined {
+  const plan = snapshot?.planType
+  if (typeof plan !== 'string' || !/^[a-z_]{1,32}$/i.test(plan) || plan === 'unknown') return undefined
+  return plan.split('_').map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ')
+}
+
 /** The usage page's windows for a snapshot: what is left of each limit and when it resets. */
 export function usageWindows(snapshot: RateLimitSnapshot | null | undefined): ProviderUsageWindow[] {
   return (['primary', 'secondary'] as const).flatMap((slot) => {
@@ -65,4 +72,16 @@ export function isUsageLimitInfo(info: CodexErrorInfo | null | undefined): boole
 /** Older servers send no structured kind; their message is all there is. */
 export function isUsageLimitText(message: string | undefined): boolean {
   return /usage limit|rate limit/i.test(message ?? '')
+}
+
+/**
+ * The usage page's windows for a snapshot Codex sent at some earlier time. A window whose reset
+ * has passed since then has started over: it reads as all left, with no reset time.
+ */
+export function reportedUsageWindows(snapshot: RateLimitSnapshot | null | undefined, nowMs: number): ProviderUsageWindow[] {
+  return usageWindows(snapshot).map((window) => {
+    if (!window.resetsAt || Date.parse(window.resetsAt) > nowMs) return window
+    const { resetsAt: _passed, ...rest } = window
+    return { ...rest, remainingPercent: 100 }
+  })
 }

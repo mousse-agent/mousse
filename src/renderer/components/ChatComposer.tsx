@@ -2,16 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ComponentProps, ReactNode } from 'react'
 import { Loader2, Mic, RefreshCw, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
-import type { ProviderWithStatus } from '../lib/providerSnapshots'
 import type {
   BrowserElementAttachment,
-  ChatMode,
-  ContextUsageSnapshot,
   FileSearchResponse,
   SkillChatMode
 } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
-import type { ContextSettings } from '../../shared/settings'
 import {
   applyMentionPick,
   filterComposerCommandSuggestions,
@@ -30,7 +26,7 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter, STEER_BINDING } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING, type ComposerRunProps } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
@@ -44,6 +40,7 @@ import { useCommand } from '../commands/commandRegistry'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
+import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
 import { useComposerNotice } from './ComposerNotice'
 
 export interface AttachedFile {
@@ -69,26 +66,18 @@ export interface ChatComposerProps {
   browserElements?: BrowserElementAttachment[]
   onRemoveBrowserElement?: (id: string) => void
   references?: ChatReference[]
+  /** Without it the composer takes no references: a dragged chat or thread is not dropped here. */
   onAddReference?: (reference: ChatReference) => void | Promise<void>
   onRemoveReference?: (id: string) => void
   onReferenceError?: (message: string) => void
   enabledSkills: SkillDescriptor[]
-  providers: ProviderWithStatus[]
-  selectedProviderId: string
-  /** The selection's instance, when it names one. */
-  selectedInstanceId?: string
-  selectedModelId: string
-  modelMenuOpen: boolean
-  onModelMenuOpenChange: (open: boolean) => void
-  onModelSelect: (providerId: string, modelId: string) => void
-  /** Display the selected model without allowing this composer to mutate it. */
-  modelReadOnly?: boolean
-  onOpenSettings: () => void
-  contextUsage: ContextUsageSnapshot
-  /** The Compact context setting, for the ring's compaction mark. */
-  contextCompactionSetting?: ContextSettings
-  contextOpen: boolean
-  onContextOpenChange: (open: boolean) => void
+  /**
+   * The model picker and context ring (see `ComposerFooter`). A thread's composer has them; a bot's
+   * has none, as a bot picks its own model.
+   */
+  run?: ComposerRunProps
+  /** `/` commands (`/clear`, `/compact`, …) are offered while typing; a bot's composer has none. */
+  slashCommands?: boolean
   loading?: boolean
   /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
   stoppable?: boolean
@@ -162,23 +151,12 @@ export function ChatComposer({
   browserElements = [],
   onRemoveBrowserElement = () => {},
   references = [],
-  onAddReference = () => {},
+  onAddReference,
   onRemoveReference = () => {},
   onReferenceError = () => {},
   enabledSkills,
-  providers,
-  selectedProviderId,
-  selectedInstanceId,
-  selectedModelId,
-  modelMenuOpen,
-  onModelMenuOpenChange,
-  onModelSelect,
-  modelReadOnly = false,
-  onOpenSettings,
-  contextUsage,
-  contextCompactionSetting,
-  contextOpen,
-  onContextOpenChange,
+  run,
+  slashCommands = true,
   loading = false,
   stoppable = loading,
   disabled = false,
@@ -316,7 +294,7 @@ export function ChatComposer({
   const showMentionPicker =
     !disabled && !suggestionsDismissed && mentionQuery !== null && (mentionItems.length > 0 || mentionFooter !== null)
 
-  const suggestions = showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
+  const suggestions = !slashCommands || showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
   const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker
   const pickerItemCount = showMentionPicker
@@ -539,7 +517,7 @@ export function ChatComposer({
     setSuggestionsDismissed(true)
     setSelectedSuggestion(0)
     setPendingReferences((count) => count + 1)
-    void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+    void Promise.resolve().then(() => onAddReference?.(reference)).catch((error) => {
       onReferenceError(error instanceof Error ? error.message : String(error))
     }).finally(() => setPendingReferences((count) => count - 1))
   }
@@ -553,6 +531,17 @@ export function ChatComposer({
     if (options?.steer) onSend(skillMode, options)
     else onSend(skillMode)
   }
+
+  // The Changes tab's "Send N comments" sends what the shown composer holds, its review comments included.
+  const submitRef = useRef(submit)
+  submitRef.current = submit
+  useEffect(() => {
+    const onRequest = () => {
+      if (isShown(composerInputRef.current)) submitRef.current()
+    }
+    window.addEventListener(COMPOSER_SEND_EVENT, onRequest)
+    return () => window.removeEventListener(COMPOSER_SEND_EVENT, onRequest)
+  }, [])
 
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     // The token backdrop paints behind the textarea: keep it scroll-locked.
@@ -670,7 +659,7 @@ export function ChatComposer({
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
-    if (event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) || event.dataTransfer.types.includes('Files')) {
+    if ((onAddReference && event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME)) || event.dataTransfer.types.includes('Files')) {
       event.preventDefault()
       event.dataTransfer.dropEffect = 'copy'
     }
@@ -678,8 +667,8 @@ export function ChatComposer({
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
-    const reference = parseReferenceDragData(event.dataTransfer)
-    if (reference) {
+    const reference = onAddReference ? parseReferenceDragData(event.dataTransfer) : null
+    if (reference && onAddReference) {
       event.preventDefault()
       event.stopPropagation()
       setPendingReferences((count) => count + 1)
@@ -883,19 +872,7 @@ export function ChatComposer({
       />
 
       <ComposerFooter
-        providers={providers}
-        selectedProviderId={selectedProviderId}
-        selectedInstanceId={selectedInstanceId}
-        selectedModelId={selectedModelId}
-        modelMenuOpen={modelMenuOpen}
-        onModelMenuOpenChange={onModelMenuOpenChange}
-        onModelSelect={onModelSelect}
-        modelReadOnly={modelReadOnly}
-        onOpenSettings={onOpenSettings}
-        contextUsage={contextUsage}
-        contextCompactionSetting={contextCompactionSetting}
-        contextOpen={contextOpen}
-        onContextOpenChange={onContextOpenChange}
+        run={run}
         onAttachClick={() => fileInputRef.current?.click()}
         loading={loading}
         stoppable={stoppable}

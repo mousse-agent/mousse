@@ -2,7 +2,8 @@ import { registerChatMethods } from './chats/registerMethods'
 import { registerChatNetworkMethods } from './chats/network/registerMethods'
 import { registerChatResourceMethods } from './chats/resources/registerMethods'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsProfileServices } from './MmsProfileServices'
 import type { MmsOptions } from './MmsOptions'
@@ -27,6 +28,7 @@ import { registerBotMethods } from './bots/space/registerMethods'
 import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
+import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -37,6 +39,7 @@ import { BrowserAutomationError } from './browser/automation/BrowserSessionManag
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
 import { createBrowserSetupService, type BrowserSetupService } from './browser/BrowserSetupService'
 import { createManagedBrowserInstaller } from './browser/install'
+import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
 
@@ -235,6 +238,11 @@ export class MousseMainService extends MmsProfileServices {
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     // The Bot UI's methods (`bots.personal.v2`): the profile's bot engine answers them.
     registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots?.service)
+    // Each bot's own browser, as its owner sees it (`bots.browser.*`).
+    registerBotBrowserMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return services.personalBots ? services.botBrowsers : null
+    })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
@@ -263,8 +271,12 @@ export class MousseMainService extends MmsProfileServices {
       if (services.platform.getManagedBrowserActiveCount() > 0) throw new Error('Managed browser work is still draining')
       this.browserProfiles.delete(services)
     })
+    // A bot's browser installs the managed browser on its first use.
+    services.botBrowsers.setSetup({ status: () => this.browserSetup.status(), install: () => this.browserSetup.install() })
     services.platform.configureBrowser({
       installationBrowserRoot: join(this.getHomeDir(), 'browser'),
+      // The worker that drives managed Chromium ships in this build (`out/browser-worker`).
+      workerModulePath: bundledBrowserWorkerModule(dirname(fileURLToPath(import.meta.url))),
       admitManagedLaunch: async () => {
         const admission = this.browserSetup.admitManagedLaunch()
         try {

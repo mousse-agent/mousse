@@ -1,4 +1,4 @@
-import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../shared/bots/personal/definition'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
@@ -40,7 +40,6 @@ const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const MAX_CHAT_TEXT = 64 * 1024
-const MAX_ATTACHMENTS = 10
 
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const whole = (value: unknown, min: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min
@@ -54,7 +53,7 @@ function look(value: unknown): BotLook {
 }
 
 function attachments(value: unknown): BotChatAttachment[] {
-  if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) throw new DomainRpcError('invalid_params', `Attach at most ${MAX_ATTACHMENTS} files`)
+  if (!Array.isArray(value) || value.length > MAX_BOT_CHAT_ATTACHMENTS) throw new DomainRpcError('invalid_params', `Attach at most ${MAX_BOT_CHAT_ATTACHMENTS} files`)
   return value.map((entry) => {
     const file = entry as { name?: unknown; path?: unknown } | null
     if (!file || typeof file !== 'object' || Object.keys(file).some((key) => key !== 'name' && key !== 'path') || !text(file.name, 256) || !text(file.path, 4096) || !isAbsolutePath(file.path))

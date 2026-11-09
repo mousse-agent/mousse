@@ -3,14 +3,21 @@ import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessages } from '../../src/renderer/components/QueuedMessages'
-import { ComposerNoticeProvider, ComposerNoticeSlot } from '../../src/renderer/components/ComposerNotice'
+import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
+import { useThreadQueue } from '../../src/renderer/hooks/useThreadQueue'
 import { readableError } from '../../src/renderer/lib/errorText'
 import type { QueuedMessage } from '../../src/shared/types'
 
 const OVERLOAD = new Error("Error invoking remote method 'queue:list': Error: Too many pending requests")
-/** The queue as the composer renders it: its errors go to the composer's notice slot. */
-const queue = (threadId: string | null) => createElement(ComposerNoticeProvider, null,
-  createElement(Fragment, null, createElement(ComposerNoticeSlot), createElement(QueuedMessages, { threadId })))
+/** The queue as the chat renders it: in the conversation, with its errors in the composer's notice slot. */
+function Chat({ threadId }: { threadId: string | null }) {
+  const thread = useThreadQueue({ threadId })
+  return createElement(Fragment, null,
+    createElement(ComposerNoticeSource, { notice: thread.error ? { tone: 'error', title: thread.error, onDismiss: thread.clearError } : null }),
+    createElement(ComposerNoticeSlot),
+    createElement(QueuedMessages, { queue: thread }))
+}
+const queue = (threadId: string | null) => createElement(ComposerNoticeProvider, null, createElement(Chat, { threadId }))
 const item = { id: 'q1', content: 'Run the tests next', createdAt: 1 } as unknown as QueuedMessage
 
 describe('loading the queue', () => {

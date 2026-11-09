@@ -28,7 +28,7 @@ function writeStoredContext(home: string, context: Record<string, unknown>): voi
 
 describe('context compaction configuration', () => {
   it('defaults to the model maximum and respects opt-out', () => {
-    expect(normalizeContextSettings()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max' })
+    expect(normalizeContextSettings()).toEqual({ compactionEnabled: true, compactionTokens: 'model-max', idleCompaction: 'suggest' })
     expect(normalizeContextSettings({ compactionEnabled: false }).compactionEnabled).toBe(false)
     expect(normalizeContextSettings({ compactionTokens: 123 as never }).compactionTokens).toBe('model-max')
   })
@@ -95,6 +95,19 @@ describe('context compaction configuration', () => {
               .toBe(compactedBefore(context, activeTokens, knownLimit))
         }
   })
+  it('suggests compacting an idle thread unless that is turned off', () => {
+    expect(normalizeContextSettings({ idleCompaction: 'off' }).idleCompaction).toBe('off')
+    expect(normalizeContextSettings({ idleCompaction: 'suggest' }).idleCompaction).toBe('suggest')
+    // An older file without it, or a value this build does not know (a later "prepare"): the default.
+    for (const value of [undefined, null, 'prepare', 1, true])
+      expect(normalizeContextSettings({ idleCompaction: value as never }).idleCompaction).toBe('suggest')
+  })
+  it('keeps the idle suggestion choice through configuration reload', () => withHome((home) => {
+    const settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().context.idleCompaction).toBe('suggest')
+    settings.set({ context: { ...settings.get().context, idleCompaction: 'off' } })
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().context).toMatchObject({ idleCompaction: 'off', compactionTokens: 'model-max' })
+  }))
   it('caps selected thresholds to model capacity', () => {
     expect(resolveContextCompactionTokens(1024000, 256000)).toBe(256000)
     expect(resolveContextCompactionTokens(128000, 272000)).toBe(128000)
@@ -105,12 +118,12 @@ describe('context compaction configuration', () => {
     expect(settings.get().context.compactionTokens).toBe('model-max')
     settings.set({ context: { compactionEnabled: false, compactionTokens: 512000 } })
     const reloaded = new SettingsStore(MousseConfigStore.load(home))
-    expect(reloaded.get().context).toEqual({ compactionEnabled: false, compactionTokens: 512000 })
+    expect(reloaded.get().context).toEqual({ compactionEnabled: false, compactionTokens: 512000, idleCompaction: 'suggest' })
   }))
   it('moves the old stored 128k default to the model maximum once', () => withHome((home) => {
     writeStoredContext(home, { compactionEnabled: false, compactionTokens: 128000 })
     const settings = new SettingsStore(MousseConfigStore.load(home))
-    expect(settings.get().context).toEqual({ compactionEnabled: false, compactionTokens: 'model-max' })
+    expect(settings.get().context).toEqual({ compactionEnabled: false, compactionTokens: 'model-max', idleCompaction: 'suggest' })
     // 128k chosen after the move stays chosen.
     settings.set({ context: { compactionEnabled: true, compactionTokens: 128000 } })
     expect(new SettingsStore(MousseConfigStore.load(home)).get().context.compactionTokens).toBe(128000)

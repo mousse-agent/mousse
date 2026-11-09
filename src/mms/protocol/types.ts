@@ -236,6 +236,7 @@ export const PROTOCOL_METHODS = [
   'threads.regenerateTitle',
   'threads.clearContext',
   'threads.compact',
+  'threads.stopCompaction',
   'threads.setModel',
   'threads.setWorktreeEnabled',
   'threads.setPermissionMode',
@@ -348,6 +349,8 @@ export const PROTOCOL_METHODS = [
   'settings.getOptions',
   'providers.getUsage',
   'providers.getSubscriptionUsage',
+  'providers.setUsageProxyKey',
+  'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech',
   'providers.transcribeAudio',
   // Harness gateway: instance snapshots and commands. Long operations return an operation id
@@ -436,6 +439,12 @@ export const PROTOCOL_METHODS = [
   'git.deleteBranch',
   'git.init',
   'git.cancelOperation',
+  'git.changes',
+  'git.include',
+  'git.undoLastCommit',
+  'git.revert',
+  'git.restoreReverted',
+  'git.revertedList',
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
@@ -499,6 +508,7 @@ export type ProtocolEventType =
   | 'projects.updated'
   | 'threads.updated'
   | 'pullRequests.updated'
+  | 'git.selectionChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
   | 'thread.message'

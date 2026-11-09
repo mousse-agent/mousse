@@ -165,9 +165,14 @@ export function normalizePermissionSettings(raw?: Partial<PermissionSettings> | 
 /** A whole number of tokens from the minimum to the maximum below, or the model's own window. */
 export type ContextCompactionTokens = number | 'model-max'
 
+/** When a thread's prompt cache has expired: suggest compacting before the next send, or say nothing. */
+export type IdleCompactionSetting = 'suggest' | 'off'
+
 export interface ContextSettings {
   compactionEnabled: boolean
   compactionTokens: ContextCompactionTokens
+  /** The composer's Full/Compact chip and the context popover's Compact now, once the cache has expired. */
+  idleCompaction: IdleCompactionSetting
 }
 
 export const CONTEXT_COMPACTION_MIN_TOKENS = 32_000
@@ -216,7 +221,8 @@ export function normalizeContextSettings(raw?: Partial<ContextSettings> | null):
   const tokens: unknown = raw?.compactionTokens
   return {
     compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
-    compactionTokens: tokens === 'model-max' || isContextCompactionSize(tokens) ? tokens : DEFAULT_CONTEXT_COMPACTION_TOKENS
+    compactionTokens: tokens === 'model-max' || isContextCompactionSize(tokens) ? tokens : DEFAULT_CONTEXT_COMPACTION_TOKENS,
+    idleCompaction: raw?.idleCompaction === 'off' ? 'off' : 'suggest'
   }
 }
 

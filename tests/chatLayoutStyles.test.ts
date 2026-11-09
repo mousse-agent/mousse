@@ -128,7 +128,8 @@ describe('chat layout styles', () => {
     const rule = (selector: string) => rulesFor(css, selector).find((entry) => entry.selector.endsWith(selector))!
     expect(rule('.composer-notice-title:has(+ .composer-notice-detail)').body).toMatch(/flex:\s*none;/)
     expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
-    const slot = rule('.composer-notice-slot').body
+    // The slot's own rule, not a rule that only animates it (`.chat-input-area > .composer-notice-slot`).
+    const slot = rulesFor(css, '.composer-notice-slot').find((entry) => /(^|\n)\s*\.composer-notice-slot$/.test(entry.selector))!.body
     expect(slot).toMatch(/flex-direction:\s*column;/)
     // Two quiet lines, one above the other, with no divider between them.
     expect(css).not.toMatch(/\.composer-notice\s*\+\s*\.composer-notice/)

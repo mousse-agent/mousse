@@ -10,7 +10,8 @@ import type {
   NativeCompactionCheckpoint,
   NativeCompactionDirective,
   NativeLastTurnUsage,
-  NativeLlmContext
+  NativeLlmContext,
+  NativePromptCache
 } from '../../shared/types'
 import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
@@ -82,7 +83,50 @@ export function isNativeLastTurnUsage(value: unknown): value is NativeLastTurnUs
   )
 }
 
+export function isNativePromptCache(value: unknown): value is NativePromptCache {
+  if (!value || typeof value !== 'object') return false
+  const cache = value as Partial<NativePromptCache>
+  return (
+    typeof cache.lastRequestAt === 'number' && Number.isFinite(cache.lastRequestAt) && cache.lastRequestAt > 0 &&
+    Number.isInteger(cache.revision) && (cache.revision ?? -1) >= 0 &&
+    (cache.ttlMs === undefined || (typeof cache.ttlMs === 'number' && Number.isFinite(cache.ttlMs) && cache.ttlMs > 0)) &&
+    (cache.modelKey === undefined || typeof cache.modelKey === 'string')
+  )
+}
+
+/**
+ * The prompt cache the provider holds for this history, or undefined: none was recorded, or the history
+ * changed since (every runtime then starts a fresh session, so nothing of it is cached).
+ */
+export function promptCacheOf(context: NativeLlmContext): NativePromptCache | undefined {
+  const cache = context.promptCache
+  return isNativePromptCache(cache) && cache.revision === (context.revision ?? 0) ? cache : undefined
+}
+
+/**
+ * The record after a turn whose last request was answered at `at`: the lifetime its requests wrote, or,
+ * when they only read the cache (or the provider reports none), the lifetime recorded before. A read
+ * keeps what the earlier write said; the provider refreshes the lifetime on every hit.
+ */
+export function nextPromptCache(
+  context: NativeLlmContext,
+  turn: { at: number; ttlMs?: number; modelKey?: string }
+): NativePromptCache {
+  const previous = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey
+    ? context.promptCache.ttlMs
+    : undefined
+  const ttlMs = turn.ttlMs ?? previous
+  return {
+    lastRequestAt: turn.at,
+    ...(ttlMs ? { ttlMs } : {}),
+    revision: context.revision ?? 0,
+    ...(turn.modelKey ? { modelKey: turn.modelKey } : {})
+  }
+}
+
 export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext {
+  // A fork's copies of its source's conversation are shown only: the model gets that history through the transfer.
+  messages = messages.filter((message) => !message.inherited)
   // A newly created task has no legacy context to estimate. Preserve exact provenance.
   if (messages.length === 0) return createNativeContext()
   const transcript: Message[] = []

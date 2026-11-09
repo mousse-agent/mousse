@@ -19,9 +19,11 @@ export interface BotManifest {
   /** Skill ids. */
   skills: string[]
   /**
-   * The folders the bot may touch, and how; null without file access. `access` holds for every
-   * root unless `rootAccess` names that root: an answer to a wall adds or upgrades one folder
-   * without changing what the others allow.
+   * File access (bot-architecture.md §3.7): non-null lets the bot read and change files anywhere on
+   * this computer but Mousse's own data; null keeps it to its files folder. One permission, asked
+   * once: Allow writes `{ roots: [<top of the file system>], access: 'write' }`. A workspace an
+   * older build wrote for some folders is kept as it is (its digest stays approved) and grants the
+   * same; its roots and access no longer narrow anything.
    */
   workspace: BotWorkspace | null
   budget: BotBudget

@@ -17,6 +17,9 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
 })
 
+// The chat's composer pulls in the microphone's audio worklets, which jsdom does not have; these tests never record.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
+
 const { BotAskCard, askAnswerLine } = await import('../../src/renderer/components/bots/BotAskCard')
 const { BotChatView } = await import('../../src/renderer/components/bots/BotChatView')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
@@ -26,7 +29,7 @@ let host: HTMLElement
 let fake: FakeBots
 let pickFolder: ReturnType<typeof vi.fn>
 const botsInitial = useBotsStore.getInitialState()
-const ask = (over: Partial<Ask> = {}): Ask => ({ askId: 'k1', title: 'change files in ~/Notes', note: 'Only this folder.', status: 'open', ...over })
+const ask = (over: Partial<Ask> = {}): Ask => ({ askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open', ...over })
 const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((element) => element.textContent === label)
 const click = async (element: Element | undefined) => { await act(async () => { (element as HTMLElement).click() }); await act(async () => {}) }
 
@@ -50,9 +53,9 @@ afterEach(() => {
 describe('an open ask', () => {
   it('names the bot and what it wants, with the note and two answers', () => {
     act(() => root.render(createElement(BotAskCard, { botName: 'Notes tidier', ask: ask(), onAnswer: () => undefined })))
-    expect(host.querySelector('.bot-ask-title')?.textContent).toBe('Notes tidier wants to change files in ~/Notes')
-    expect(host.querySelector('.bot-ask-title strong')?.textContent).toBe('change files in ~/Notes')
-    expect(host.querySelector('.bot-ask-note')?.textContent).toBe('Only this folder.')
+    expect(host.querySelector('.bot-ask-title')?.textContent).toBe('Notes tidier wants to use files on this computer')
+    expect(host.querySelector('.bot-ask-title strong')?.textContent).toBe('use files on this computer')
+    expect(host.querySelector('.bot-ask-note')?.textContent).toBe("Read and change any file or folder, except Mousse's own data.")
     expect([...host.querySelectorAll('.bot-ask-actions button')].map((element) => element.textContent)).toEqual(['Not now', 'Allow'])
   })
 
@@ -74,19 +77,19 @@ describe('an answered ask', () => {
   it('becomes one line', () => {
     act(() => root.render(createElement(BotAskCard, { botName: 'Bot', ask: ask({ status: 'allowed' }), onAnswer: () => undefined })))
     expect(host.querySelector('.bot-ask')).toBeNull()
-    expect(host.querySelector('.bot-ask-answer')?.textContent).toBe('Allowed: change files in ~/Notes')
+    expect(host.querySelector('.bot-ask-answer')?.textContent).toBe('Allowed: use files on this computer')
     expect(host.querySelector('.bot-ask-answer svg')).not.toBeNull()
   })
 
   it('says a run’s permission applies from the next run, and words Not now and withdrawn', () => {
-    expect(askAnswerLine(ask({ status: 'allowed' }), true)).toBe('Allowed: change files in ~/Notes. It uses it from the next run.')
-    expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: change files in ~/Notes')
-    expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: change files in ~/Notes')
+    expect(askAnswerLine(ask({ status: 'allowed' }), true)).toBe('Allowed: use files on this computer. It uses it from the next run.')
+    expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
+    expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
   })
 })
 
 describe('in the chat', () => {
-  const bot = summary('b1', { name: 'Notes tidier', state: 'needs_you', stateText: 'Wants to change files in ~/Notes' })
+  const bot = summary('b1', { name: 'Notes tidier', state: 'needs_you', stateText: 'Wants to use files on this computer' })
   async function show(card: Ask) {
     fake.bots = [bot]
     fake.chats.b1 = [message(1, { text: 'Can I?', ask: card })]
@@ -98,7 +101,7 @@ describe('in the chat', () => {
     await show(ask())
     await click(button('Allow'))
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'allow'])
-    expect(host.querySelector('.bot-ask-answer')?.textContent).toBe('Allowed: change files in ~/Notes')
+    expect(host.querySelector('.bot-ask-answer')?.textContent).toBe('Allowed: use files on this computer')
   })
 
   it('exports the memory to the folder picked, then closes the ask', async () => {

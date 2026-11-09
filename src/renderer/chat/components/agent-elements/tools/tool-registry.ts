@@ -7,7 +7,7 @@ import {
   IconTerminal2 as Terminal,
   IconCircleX as XCircle,
   IconFileCode as FileCode2,
-  Brain,
+  ThinkingIcon,
   IconSparkles as Sparkles,
   IconGlobe as Globe,
   IconFilePlus as FilePlus,
@@ -409,7 +409,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Thinking": {
-    icon: Brain,
+    icon: ThinkingIcon,
     title: () => "Thinking",
     variant: "collapsible",
   },

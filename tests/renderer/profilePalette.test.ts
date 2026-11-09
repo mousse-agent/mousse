@@ -35,10 +35,10 @@ describe('profile palette', () => {
     expect(empty).not.toContain('background:')
   })
 
-  it('uses a profile colour as stored and falls back to the gradient without one', () => {
-    expect(profileColor({ color: '#604880' })).toBe('#604880')
-    expect(profileColor({})).toBeUndefined()
-    expect(profileColor({ color: '' })).toBeUndefined()
+  it('uses a profile colour as stored and falls back to a palette colour from its id', () => {
+    expect(profileColor({ id: 'prf_a', color: '#604880' })).toBe('#604880')
+    expect(profileColor({ id: 'prf_a' })).toBe(paletteColorFor('prf_a'))
+    expect(profileColor({ id: 'prf_a', color: '' })).toBe(paletteColorFor('prf_a'))
   })
 
   it('suggests the first colour no profile uses, ignoring case', () => {

@@ -143,6 +143,27 @@ describe('Pi RPC engine lifecycle (stub Pi)', () => {
     expect(isRetriesExhausted(await run(engine, turn(exhausted, { threadId: 't2' })).catch((error: unknown) => error))).toBe(true)
   }, 30_000)
 
+  it('reports the prompt cache lifetime where Pi says how much it wrote for an hour, and none where it does not', async () => {
+    const { engine, project } = setup()
+    const answer = (usage: Record<string, number>) => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop', usage } })
+    const metricsOf = async (cwd: string, threadId: string) => {
+      const t = turn(cwd, { threadId })
+      const reports: Array<Parameters<TurnSink['providerMetrics']>[0]> = []
+      t.sink.providerMetrics = (metrics) => void reports.push(metrics)
+      await run(engine, t)
+      return reports.at(-1)
+    }
+    // Pi's Anthropic transport reports the one-hour share of a write; the rest is the default five minutes.
+    const hour = await metricsOf(project('hour', { events: [answer({ input: 5, output: 3, cacheRead: 0, cacheWrite: 900, cacheWrite1h: 600 })] }), 't-hour')
+    expect(hour?.promptCache).toEqual({ at: expect.any(Number), ttlMs: 60 * 60_000 })
+    const fiveMinutes = await metricsOf(project('five', { events: [answer({ input: 5, output: 3, cacheRead: 0, cacheWrite: 900, cacheWrite1h: 0 })] }), 't-five')
+    expect(fiveMinutes?.promptCache).toEqual({ at: expect.any(Number), ttlMs: 5 * 60_000 })
+    // Another provider says nothing of a lifetime: the turn only says when it was answered.
+    const unknown = await metricsOf(project('unknown', { events: [answer({ input: 5, output: 3, cacheRead: 40, cacheWrite: 900 })] }), 't-unknown')
+    expect(unknown?.promptCache?.at).toEqual(expect.any(Number))
+    expect(unknown?.promptCache?.ttlMs).toBeUndefined()
+  }, 30_000)
+
   it('hands out the registered turn token as the attempt token Mousse calls are stamped with', async () => {
     const { engine, project } = setup()
     const cwd = project('p', { onPrompt: 'turn' })

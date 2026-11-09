@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
@@ -50,6 +52,10 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   // writable root, granted with the bot itself.
   const workspace = permissions.workspace ? workspaceWithFiles(permissions.workspace) : null
   const readOnlyRoots = workspace ? workspace.roots.filter((root) => !workspace.writeRoots.includes(root)) : []
+  // File access (§3.7): every folder, read and write, but Mousse's own data. Its files folder and
+  // scratch, inside that data, stay the bot's.
+  const computer = permissions.workspace?.computer
+  const ownInClosed = workspace ? [workspace.scratch, ...(permissions.workspace?.files !== undefined ? [permissions.workspace.files] : [])] : []
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
@@ -57,7 +63,11 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
-    workspace: workspace ? { roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch, ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}) } : null,
+    workspace: workspace ? {
+      roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch,
+      ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}),
+      ...(computer ? { computer: { closed: computer.closed } } : {})
+    } : null,
     waiting: input.waiting,
     counters: input.counters,
     time: input.time,
@@ -89,16 +99,19 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       case 'app':
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
-        return checkBuiltin(call.tool, call.nativeName, call.args)
+        return checkBuiltin(call.tool, call.nativeName, call.args, call.own)
     }
   }
 
-  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>): { ok: true } | { ok: false; wall: WallReason } {
+  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, own?: true): { ok: true } | { ok: false; wall: WallReason } {
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
     // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
     // can reach is the runtime's sandbox, where it has one, not a path check here.
     if (tool === 'shell') return { ok: true }
     if (NETWORK_TOOLS.has(tool)) return { ok: true }
+    // The runtime's own storage for this bot (Claude Code's saved tool output), which its gate
+    // recognised: the runtime reading back what it wrote is never a question for the owner.
+    if (own) return { ok: true }
     const writes = WRITE_TOOLS.has(tool)
     const access = writes ? 'write' : 'read'
     // Without file access the bot has no folder at all, not even its scratch folder.
@@ -107,6 +120,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     const paths = PATH_ARGUMENTS.map((key) => args[key]).filter((value): value is string => typeof value === 'string')
     // A file tool with no path argument works in its working directory: the scratch folder.
     if (!paths.length) return { ok: true }
+    if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed)
     for (const raw of paths) {
       // A path the runtime itself expands is read only after this check: never inside a root.
       if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
@@ -137,6 +151,44 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     }
     return { ok: true }
   }
+
+  /**
+   * File access: any path, read or write, but one inside Mousse's own data that is not the bot's
+   * (its files folder or scratch), on the path as named and on the real path its links lead to.
+   * Neither refusal asks the owner anything: the bot already has all there is to ask for.
+   */
+  function checkEverywhere(nativeName: string, paths: readonly string[], scratch: string, closed: string): { ok: true } | { ok: false; wall: WallReason } {
+    for (const raw of paths) {
+      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path_form', tool: nativeName, path: raw } }
+      const named = resolve(scratch, raw)
+      for (const path of new Set([named, realPathOf(named)]))
+        if (insideFolder(closed, path) && !ownInClosed.some((folder) => insideFolder(folder, path)))
+          return { ok: false, wall: { kind: 'closed', tool: nativeName, path: raw } }
+    }
+    return { ok: true }
+  }
+}
+
+/** `path` with every link in the part that exists followed; the rest (not created yet) as named. */
+function realPathOf(path: string): string {
+  let current = path
+  const rest: string[] = []
+  while (true) {
+    try {
+      return join(realpathSync.native(current), ...rest.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return path
+      rest.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/** Whether `path` is `folder` or inside it (both real, absolute paths). */
+function insideFolder(folder: string, path: string): boolean {
+  const child = relative(folder, path)
+  return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
 }
 
 /**

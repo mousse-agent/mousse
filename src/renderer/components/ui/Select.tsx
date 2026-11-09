@@ -9,9 +9,10 @@ import {
   type KeyboardEvent,
   type ReactNode
 } from 'react'
-import { Check, ChevronDown } from '../../lib/icons'
+import { Check, ChevronDown, Search } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import '../../styles/select.css'
+import '../../styles/composer-workspace.css'
 
 export interface SelectOption<T extends string = string> {
   value: T
@@ -38,11 +39,18 @@ export interface SelectProps<T extends string = string> {
   ariaDescribedBy?: string
   ariaInvalid?: boolean
   size?: 'default' | 'small'
+  /**
+   * `field` (default): the bordered settings control. `menu`: the app's main dropdown, as under the new-thread
+   * composer: a borderless chip that opens the shared workspace menu, the chosen row checked on the right.
+   */
+  variant?: 'field' | 'menu'
   className?: string
   /** Custom trigger content for the selected option. */
   renderValue?: (option: SelectOption<T> | undefined) => ReactNode
   'data-testid'?: string
   title?: string
+  /** With more options than this, typing in the open list filters it instead of jumping. */
+  filterAfter?: number
 }
 
 const TYPEAHEAD_RESET_MS = 600
@@ -69,9 +77,11 @@ export function Select<T extends string = string>({
   ariaDescribedBy,
   ariaInvalid,
   size = 'default',
+  variant = 'field',
   className,
   renderValue,
   title,
+  filterAfter,
   'data-testid': testId
 }: SelectProps<T>) {
   const [open, setOpen] = useState(false)
@@ -80,6 +90,16 @@ export function Select<T extends string = string>({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const typeahead = useRef({ text: '', at: 0 })
+  const filterable = filterAfter !== undefined && options.length > filterAfter
+  const [query, setQuery] = useState('')
+  const matches = useCallback(
+    (option: SelectOption<T>, text: string) => !text || optionText(option).toLowerCase().includes(text.toLowerCase()),
+    []
+  )
+  const shown = useMemo(
+    () => options.map((option, index) => ({ option, index })).filter(({ option }) => !filterable || matches(option, query)),
+    [filterable, matches, options, query]
+  )
   const baseId = useId()
   const listId = `${baseId}-list`
   const optionId = (index: number) => `${baseId}-opt-${index}`
@@ -90,26 +110,29 @@ export function Select<T extends string = string>({
   )
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined
 
+  /** The first enabled shown option from `from` (an option index) in the direction of `step`. */
   const enabledIndex = useCallback(
-    (from: number, step: 1 | -1): number => {
+    (from: number, step: 1 | -1, text = query): number => {
       for (let index = from; index >= 0 && index < options.length; index += step) {
-        if (!options[index].disabled) return index
+        if (!options[index].disabled && (!filterable || matches(options[index], text))) return index
       }
       return -1
     },
-    [options]
+    [filterable, matches, options, query]
   )
 
   const openList = useCallback(() => {
     if (disabled || options.length === 0) return
     setMinWidth(triggerRef.current?.offsetWidth ?? 0)
-    setActive(selectedIndex >= 0 && !options[selectedIndex].disabled ? selectedIndex : enabledIndex(0, 1))
+    setQuery('')
+    setActive(selectedIndex >= 0 && !options[selectedIndex].disabled ? selectedIndex : enabledIndex(0, 1, ''))
     setOpen(true)
   }, [disabled, enabledIndex, options, selectedIndex])
 
   const close = useCallback(() => {
     setOpen(false)
     setActive(-1)
+    setQuery('')
   }, [])
 
   const commit = useCallback(
@@ -223,6 +246,14 @@ export function Select<T extends string = string>({
         event.preventDefault()
         setActive(enabledIndex(options.length - 1, -1))
         return
+      case 'Backspace':
+        if (filterable && query) {
+          event.preventDefault()
+          const next = query.slice(0, -1)
+          setQuery(next)
+          setActive(enabledIndex(0, 1, next))
+        }
+        return
       case 'Enter':
         event.preventDefault()
         if (active >= 0) commit(active)
@@ -230,6 +261,12 @@ export function Select<T extends string = string>({
         return
       case ' ':
         event.preventDefault()
+        if (filterable && query) {
+          const next = query + ' '
+          setQuery(next)
+          setActive(enabledIndex(0, 1, next))
+          return
+        }
         // A space inside a type-ahead run is part of the text.
         if (typeahead.current.text && Date.now() - typeahead.current.at < TYPEAHEAD_RESET_MS) {
           const index = matchTypeahead(' ')
@@ -247,6 +284,13 @@ export function Select<T extends string = string>({
         return
       default:
         if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          if (filterable) {
+            event.preventDefault()
+            const next = query + key
+            setQuery(next)
+            setActive(enabledIndex(0, 1, next))
+            return
+          }
           const index = matchTypeahead(key)
           if (index >= 0) setActive(index)
         }
@@ -259,7 +303,8 @@ export function Select<T extends string = string>({
       ? selected.label
       : placeholder
 
-  const classes = ['ui-select']
+  const menu = variant === 'menu'
+  const classes = menu ? ['new-thread-chip', 'ui-select-chip'] : ['ui-select']
   if (size === 'small') classes.push('small')
   if (open) classes.push('open')
   if (className) classes.push(className)
@@ -298,7 +343,7 @@ export function Select<T extends string = string>({
             ref={listRef}
             id={listId}
             role="listbox"
-            className="ui-select-list"
+            className={menu ? 'composer-workspace-menu ui-select-menu scrollbar-ultra-thin' : 'ui-select-list'}
             aria-label={ariaLabel}
             aria-labelledby={ariaLabel ? undefined : ariaLabelledBy ?? id}
             tabIndex={-1}
@@ -306,7 +351,14 @@ export function Select<T extends string = string>({
             // Keep focus on the trigger so the keyboard keeps working.
             onMouseDown={(event) => event.preventDefault()}
           >
-            {options.map((option, index) => {
+            {filterable && (
+              <div className="ui-select-filter" role="presentation" data-empty={query ? undefined : true}>
+                <Search size={13} strokeWidth={2} aria-hidden="true" />
+                <span>{query || 'Type to filter'}</span>
+              </div>
+            )}
+            {filterable && shown.length === 0 && <div className="ui-select-empty" role="presentation">No matches</div>}
+            {shown.map(({ option, index }) => {
               const header = option.group !== undefined && option.group !== lastGroup ? option.group : undefined
               const separated = option.group === undefined && lastGroup !== undefined
               lastGroup = option.group
@@ -326,19 +378,22 @@ export function Select<T extends string = string>({
                     data-value={option.value}
                     aria-selected={isSelected}
                     aria-disabled={option.disabled || undefined}
-                    className={`ui-select-option${index === active ? ' active' : ''}${isSelected ? ' selected' : ''}${option.disabled ? ' disabled' : ''}`}
+                    className={`ui-select-option${menu ? ' composer-workspace-menu-item' : ''}${index === active ? ' active' : ''}${isSelected ? ' selected' : ''}${option.disabled ? ' disabled' : ''}`}
                     onMouseMove={() => {
                       if (!option.disabled && index !== active) setActive(index)
                     }}
                     onClick={() => commit(index)}
                   >
-                    <span className="ui-select-check" aria-hidden="true">
-                      {isSelected && <Check size={14} strokeWidth={2} />}
-                    </span>
+                    {menu ? null : (
+                      <span className="ui-select-check" aria-hidden="true">
+                        {isSelected && <Check size={14} strokeWidth={2} />}
+                      </span>
+                    )}
                     <span className="ui-select-option-text">
                       <span className="ui-select-option-label">{option.label}</span>
                       {option.description && <span className="ui-select-option-desc">{option.description}</span>}
                     </span>
+                    {menu && isSelected ? <Check size={14} className="composer-workspace-menu-check" aria-hidden="true" /> : null}
                   </div>
                 </div>
               )

@@ -282,6 +282,20 @@ export class ProviderAuthService {
     return this.credentials.has(providerId)
   }
 
+  /**
+   * What re-reading a million prompt tokens with a cold cache costs on this model, in USD: the cache
+   * write price where the catalogue has one (the expired prefix is written again), else the input price.
+   * Undefined unless the profile pays this provider by a saved API key (a subscription bills against
+   * limits, not dollars) and the catalogue prices the model.
+   */
+  uncachedInputPrice(providerId: string, modelId: string): number | undefined {
+    const credential = this.credentials.get(providerId)
+    if (credential?.type !== 'api_key' || !credential.key || isClaudeSubscriptionToken(credential.key)) return undefined
+    const cost = this.models.getModel(providerId, modelId)?.cost
+    const price = cost && cost.cacheWrite > 0 ? cost.cacheWrite : cost?.input
+    return typeof price === 'number' && Number.isFinite(price) && price > 0 ? price : undefined
+  }
+
   /** The API key saved for `providerId` (never an environment fallback), for a move that copies it. */
   storedApiKey(providerId: string): string | undefined {
     const credential = this.credentials.get(providerId)
@@ -579,7 +593,8 @@ export class ProviderAuthService {
         }
       })
     )
-    return { providers, fetchedAt: new Date().toISOString() }
+    // A sign-in's `source` says where its credential is kept ("stored"), not where the numbers came from.
+    return { providers: providers.map(({ source: _credential, ...usage }) => usage), fetchedAt: new Date().toISOString() }
   }
 
   /**

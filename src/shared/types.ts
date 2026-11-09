@@ -4,7 +4,7 @@ import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pullRequest' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -717,6 +717,12 @@ export interface ChatMessage {
   /** Selection actually admitted for this user turn, independent of composer edits. */
   /** The model the message's turn ran (older messages carry the level packed into `model`). */
   modelSelection?: MessageModelSelection
+  /**
+   * Set on a copy of the source thread's conversation that a fork shows above its own (SPEC §16.2): the thread it
+   * came from and that message's turn there. Presentation only: the model gets the history through the fork's
+   * transfer, and Undo, edit and fork never act on a copy.
+   */
+  inherited?: { threadId: string; turnId?: string }
   contextHandoff?: {
     from: MessageModelSelection
     to: MessageModelSelection
@@ -729,6 +735,12 @@ export interface ChatMessage {
     /** Set when the handoff came from a thread transfer (SPEC §16.2). */
     transfer?: 'fork' | 'merge_back'
   }
+  /**
+   * A `context_compaction` row: `manual` when a person started it (`/compact`, Compact now), so it can be
+   * stopped while it runs; `kept` when it ended with the full history still in place (stopped, timed out,
+   * or cut short by a daemon restart).
+   */
+  compaction?: { manual?: true; kept?: 'stopped' | 'interrupted' }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
@@ -949,6 +961,24 @@ export interface ContextUsageSnapshot {
    * size does not apply. Absent: Mousse compacts it at that size.
    */
   compactedByRuntime?: boolean
+  /**
+   * The provider's prompt cache for this context: when the last request was answered and how long the
+   * provider said what it wrote lives. Absent when no request has been answered on this history (a
+   * new thread, or the history changed since, which starts a fresh session).
+   */
+  promptCache?: ContextPromptCache
+}
+
+export interface ContextPromptCache {
+  /** Epoch ms of the last provider request of the thread's last turn. */
+  lastRequestAt: number
+  /** Longest lifetime the provider reported for what it cached; absent when it reports none (show idle time). */
+  ttlMs?: number
+  /**
+   * What one token re-read uncached costs, in USD per million, when the model has a price and the thread
+   * bills by API key. Absent for subscriptions (Claude Code, Codex) and models without a price.
+   */
+  uncachedUsdPerMTok?: number
 }
 
 export interface PtyCreateRequest {
@@ -1359,6 +1389,23 @@ export interface NativeLlmContext {
   }
   /** Restored on session load so context usage stays measured after persist/reload. */
   lastTurnUsage?: NativeLastTurnUsage
+  /** The provider's prompt cache after the last turn; it holds only while `revision` is unchanged. */
+  promptCache?: NativePromptCache
+}
+
+/**
+ * When the provider last read or wrote its prompt cache for this thread, and for how long. Any change
+ * of the history (`NativeLlmContext.revision`) starts a fresh runtime session, so the record then no
+ * longer applies (`promptCacheOf`).
+ */
+export interface NativePromptCache {
+  lastRequestAt: number
+  /** Longest lifetime the provider reported writing; a turn that only read the cache keeps the previous one. */
+  ttlMs?: number
+  /** `NativeLlmContext.revision` after the turn that made the request. */
+  revision: number
+  /** `provider:model` the turn ran: another model has its own cache. */
+  modelKey?: string
 }
 
 export interface FileEntry {
@@ -1526,6 +1573,127 @@ export interface GitCommitOptions {
   expectedBranch?: string
   /** Names the action so its live output reaches the caller and Cancel can find it. */
   operationId?: string
+  /**
+   * What the commit takes. `all`: every change (`add -A`, leaving out `.mousse/`). `chosen`: exactly the selection
+   * (`git.changes`), refused with `stale` when `token` is not the current selection's. Unset: the older rule above.
+   */
+  selection?: GitCommitSelection
+}
+
+/** What a commit takes when the client says so (`GitCommitOptions.selection`). */
+export type GitCommitSelection = { mode: 'all' } | { mode: 'chosen'; token: string }
+
+/** One line of a hunk: context, removed from HEAD, or added in the working tree. Numbers are 1-based. */
+export interface GitChangeLine {
+  kind: ' ' | '-' | '+'
+  text: string
+  oldNo?: number
+  newNo?: number
+}
+
+/** Whether a hunk or file goes into the next commit. */
+export type GitIncluded = 'yes' | 'no' | 'partial'
+
+/** One hunk of HEAD → working tree, in Git's clean form, with 3 lines of context. */
+export interface GitChangeHunk {
+  /** A hash of `oldStart` and the hunk's lines; unique within the file. */
+  id: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: GitChangeLine[]
+  included: GitIncluded
+}
+
+/** One changed file of `git.changes`. A rename is one entry covering both paths. */
+export interface GitChangedFile {
+  path: string
+  oldPath?: string
+  change: 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict'
+  kind: 'file' | 'symlink' | 'submodule'
+  binary: boolean
+  /** Set when the mode changed; such a change has no hunks of its own. */
+  mode?: { old: string; new: string }
+  /** Only the whole file can be included or left out (binary, link, submodule, mode, rename, too large, conflict, diverged, or bytes that may not round-trip). */
+  wholeFileOnly: boolean
+  /** The selection holds content that is neither HEAD nor HEAD plus some of these hunks, or was chosen against an older HEAD. */
+  indexDiverged: boolean
+  /** Listed without hunks: a side is over the size or line limit, or the answer already carries as many hunk lines as one answer holds. */
+  tooLarge: boolean
+  /** Changes whenever this path's HEAD entry, selection entries, working-tree content or the selection state change. */
+  version: string
+  hunks: GitChangeHunk[]
+  included: GitIncluded
+}
+
+/** The selection a commit with `selection: { mode: 'chosen' }` takes. `untouched`: nothing chosen yet, so everything is included. */
+export interface GitSelectionState {
+  state: 'untouched' | 'chosen'
+  token: string
+}
+
+/** `git.changes`' answer. */
+export interface GitChangesResult {
+  files: GitChangedFile[]
+  selection: GitSelectionState
+  /** More files changed than are listed. */
+  truncated: boolean
+}
+
+/** `git.include` for one path: which hunks or lines (by index into `hunk.lines`) of it; neither means the whole file. */
+export interface GitIncludeRequest {
+  path: string
+  version: string
+  include: boolean
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.include`'s answer for one path. */
+export interface GitIncludeResult {
+  path: string
+  version: string
+  included: GitIncluded
+  selection: GitSelectionState
+}
+
+/** `git.revert`: which hunks or lines (by index into `hunk.lines`) of a file go back to HEAD; neither means the whole file (both paths of a rename). */
+export interface GitRevertRequest {
+  path: string
+  version: string
+  hunks?: string[]
+  lines?: Array<{ hunk: string; indexes: number[] }>
+}
+
+/** `git.revert`'s answer: what to restore it by, until when its copy is kept (ms since the epoch), and the file's version now. */
+export interface GitRevertResult {
+  revertId: string
+  keptUntil: number
+  path: string
+  /** The file's version after the revert; empty when it no longer differs from HEAD. */
+  version: string
+  /** Paths of a whole-file revert left as they were, and why, in a sentence. */
+  left?: string
+}
+
+/**
+ * `git.restoreReverted`'s answer. `changed`: the files are no longer what the revert left; nothing was written, and the
+ * blob ids (the file now, and as kept) let the tab show the difference. `expired`: the kept copy is gone.
+ */
+export type GitRestoreRevertedResult =
+  | { restored: true }
+  | { restored: false; reason: 'changed' | 'expired'; currentBlob?: string; keptBlob?: string }
+
+/** One revert `git.restoreReverted` can still put back. Times are ms since the epoch. */
+export interface GitRevertedItem {
+  revertId: string
+  path: string
+  oldPath?: string
+  at: number
+  keptUntil: number
+  /** What was reverted, in a few words: `2 hunks of src/a.ts`. */
+  summary: string
 }
 
 /** A proposed commit message; the user edits it before committing. */

@@ -253,6 +253,28 @@ describe('what a computer refused, in words', () => {
       small.mockRestore()
     })
   }, 60_000)
+
+  it('refuses a chosen commit to a computer that would commit everything instead', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const older = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        const answer = await real.rpc(method, params, options)
+        if (method !== 'net.info') return answer
+        const info = answer as { routed: Record<string, number> }
+        // A computer from before the selection: version 1 of both rows.
+        return { ...info, routed: { ...info.routed, 'git.commit': 1, 'git.suggestCommitMessage': 1 } }
+      }
+    }))
+    await withClient(older, async () => {
+      const selection = { mode: 'chosen', token: 'token-1' }
+      for (const [method, params] of [['git.commit', { threadId: id, message: 'Chosen', selection }], ['git.suggestCommitMessage', { threadId: id, selection }]] as const) {
+        expect(await t.refused(t.dispatch(method, params)), method).toMatchObject({ code: 'computer_outdated', details: { method } })
+      }
+      // Without the field the call still reaches the owner (which refuses it here: the thread has no folder).
+      expect(await t.refused(t.dispatch('git.commit', { threadId: id, message: 'Everything' }))).toMatchObject({ code: 'thread_has_no_folder' })
+    })
+  }, 60_000)
 })
 
 describe('the Auto permission mode', () => {

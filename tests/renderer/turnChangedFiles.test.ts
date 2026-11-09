@@ -10,7 +10,7 @@ import { TurnEditSummary } from '../../src/renderer/chat/components/agent-elemen
 import { AppearanceSettings } from '../../src/renderer/components/settings/AppearanceSettings'
 import { setTurnChangedFiles } from '../../src/renderer/lib/turnChangedFilesSetting'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { useReviewStore } from '../../src/renderer/stores/reviewStore'
+import { useChangesStore } from '../../src/renderer/stores/changesStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { THEME_OPTIONS } from '../../src/shared/settings'
@@ -32,7 +32,7 @@ const draw = () => act(() => root.render(createElement(TurnEditSummary, { messag
 const click = (target: Element | null) => act(() => { (target as HTMLElement).click() })
 const toggle = () => host.querySelector<HTMLButtonElement>('.turn-edits-toggle')!
 const fileList = () => host.querySelector('.turn-edits-files')
-/** openTurnInReview awaits the worktree check before it opens Review. */
+/** openTurnInChanges awaits the worktree check before it opens the Changes tab. */
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 
 beforeEach(() => {
@@ -44,7 +44,7 @@ beforeEach(() => {
     workspace: { getStatus: async () => ({ metadata: { lifecycle: 'ready' }, execution: { lifecycle: 'ready', workspacePath: '/wt/t1', primaryPath: '/repo' } }) }
   }
   useAppStore.setState({ activeThreadId: 't1', mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false })
-  useReviewStore.setState({ byThread: {} })
+  useChangesStore.setState({ byThread: {} })
 })
 
 afterEach(() => {
@@ -89,20 +89,20 @@ describe('changed files after a turn', () => {
     expect(host.querySelector('.turn-edits-line')).not.toBeNull()
   })
 
-  it('Review opens Review on this turn', async () => {
+  it('Review opens the Changes tab on this turn', async () => {
     draw()
     click([...host.querySelectorAll('button')].find((button) => button.textContent === 'Review')!)
     await settle()
-    expect(useReviewStore.getState().byThread.t1.scope).toEqual({ kind: 'turn', turnId })
-    expect(useAppStore.getState().mainView).toBe('review')
+    expect(useChangesStore.getState().byThread.t1.requested).toBe(`turn:${turnId}`)
+    expect(useAppStore.getState().mainView).toBe('git')
   })
 
-  it('a listed file opens Review on this turn at that file', async () => {
+  it('a listed file opens the Changes tab on this turn at that file', async () => {
     draw()
     click(toggle())
     click(host.querySelector('[aria-label="Review src/cart/useCart.ts"]'))
     await settle()
-    expect(useReviewStore.getState().byThread.t1).toMatchObject({ scope: { kind: 'turn', turnId }, pendingFile: { path: 'src/cart/useCart.ts' } })
+    expect(useChangesStore.getState().byThread.t1).toMatchObject({ requested: `turn:${turnId}`, pendingFile: { path: 'src/cart/useCart.ts' } })
   })
 })
 

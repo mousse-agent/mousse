@@ -52,3 +52,75 @@
     transition: none;
   }
 }
+
+/* Find in thread from the rail (FindRailButton): a small search button just above the ticks (2px), centred
+   on their resting marks (2px in, 12px wide). It shows only while the pointer is over the rail (the ticks
+   or the button itself) or it has keyboard focus, fading over 120ms at the Animation speed. The column
+   keeps the button's height free at its top only when it would otherwise fill the rail, so the ticks
+   never move as it shows or hides. It comes and goes with the rail (hidden on short threads). */
+.an-message-list-wrap .chat-prompt-column {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+}
+
+.an-message-list-wrap .chat-prompt-column:has(> .chat-prompt-find) {
+  max-height: calc(100% - 20px);
+}
+
+.an-message-list-wrap .chat-prompt-column > .chat-prompt-ticks {
+  min-height: 0;
+}
+
+.an-message-list-wrap .chat-prompt-find {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: -1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  transition:
+    opacity calc(120ms * var(--ui-motion-scale, 1)) ease,
+    background-color var(--ui-dur) ease,
+    color var(--ui-dur) ease;
+}
+
+/* A larger hit area above and to the sides; nothing toward the ticks, and no visual gap. */
+.an-message-list-wrap .chat-prompt-find::before {
+  content: "";
+  position: absolute;
+  inset: -5px -5px 0;
+}
+
+.an-message-list-wrap .chat-prompt-rail:hover .chat-prompt-find {
+  opacity: 0.7;
+}
+
+.an-message-list-wrap .chat-prompt-rail .chat-prompt-find:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.an-message-list-wrap .chat-prompt-rail .chat-prompt-find:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .an-message-list-wrap .chat-prompt-find {
+    transition: none;
+  }
+}

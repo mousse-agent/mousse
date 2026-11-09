@@ -8,7 +8,7 @@ import { selectionFromListing } from '../../src/shared/providerInstances'
 import type { LlmProviderOption } from '../../src/shared/settings'
 import type { Project, ScheduledJob, ScheduledJobPatch, ScheduledWebhookDelivery, SchedulerStatus, Thread } from '../../src/shared/types'
 import { ScheduledPanel } from '../../src/renderer/components/ScheduledPanel'
-import { MODE_NOTE, MODE_SHORT, WORKFLOW_PERMISSION_NOTE } from '../../src/renderer/components/scheduled/JobEditor'
+import { MODE_NOTE, WORKFLOW_PERMISSION_NOTE } from '../../src/renderer/components/scheduled/JobEditor'
 import {
   createInputOf,
   cronFormOf,
@@ -204,6 +204,13 @@ const pick = async (trigger: HTMLElement, optionText: string) => {
   await click(must(option, `option ${optionText}`))
 }
 const choose = (label: string, optionText: string) => pick(control<HTMLButtonElement>(label), optionText)
+/** The When dropdown: the open editor's, else the quick-add line's. */
+const whenTrigger = () => must(document.querySelector<HTMLElement>('[data-testid="editor-when"]') ?? document.querySelector<HTMLElement>('[data-testid="quick-when"]'), 'When')
+const pickWhen = (optionText: string) => pick(whenTrigger(), optionText)
+/** What the When dropdown shows. */
+const whenShown = () => whenTrigger().querySelector('.ui-select-value')?.textContent
+/** What Add will make: the Add button's tooltip. */
+const quickPreview = () => document.querySelector('[data-testid="quick-preview"]')?.getAttribute('title')
 /** Edit, Webhook, Delete and the rest live in the row's "…" menu. */
 const menuItems = async (jobName: string) => {
   await click(button(`More actions for ${jobName}`))
@@ -256,7 +263,7 @@ const type = async (text: string) => {
 /** Opens the full editor for a new task from the quick-add line's Custom…. */
 async function openNew(prompt = ''): Promise<void> {
   await type(prompt)
-  await click(button('Custom…'))
+  await pickWhen('Custom…')
 }
 
 const PROJECT_JOB = () => job({ projectId: 'p1' })
@@ -269,7 +276,7 @@ describe('Scheduled page: editing a task saves only what changed', () => {
     ['cron schedule', job, async () => { await openBuilder(); await click(button('Cron')); await setValue(control('Cron expression'), '0 8 1 * *') }, { schedule: { kind: 'cron', expr: '0 8 1 * *' } }],
     ['one-time schedule', job, async () => { await openBuilder(); await click(button('Once')); await setValue(control('Run at'), '2030-01-02T03:04') }, { schedule: { kind: 'once', runAt: new Date('2030-01-02T03:04').toISOString() } }],
     ['manual schedule', job, async () => { await openBuilder(); await click(button('Manual')) }, { schedule: { kind: 'manual' } }],
-    ['a preset chip', job, () => click(button(WEEKDAYS)), { schedule: { kind: 'cron', expr: '0 9 * * 1-5' } }],
+    ['a preset', job, () => pickWhen(WEEKDAYS), { schedule: { kind: 'cron', expr: '0 9 * * 1-5' } }],
     ['model', job, () => choose('Model', 'Claude Sonnet'), { selection: sonnet }],
     ['clearing the model', () => job({ selection: sonnet }), () => choose('Model', 'Default model'), { selection: null }],
     ['mode', job, () => choose('Mode', 'Plan (no changes)'), { mode: 'plan' }],
@@ -429,8 +436,9 @@ describe('Scheduled page: validation', () => {
     await mount([PROJECT_JOB()])
     await openEdit()
     expect(document.querySelector('[data-testid="workspace-warning"]')?.textContent).toContain('no checkpoints or undo')
+    // The default mode explains itself in the Mode label's tooltip, not in a line.
     const modeNote = must(document.querySelector<HTMLElement>('[data-testid="mode-note"]'), 'mode note')
-    expect(modeNote.textContent).toBe(MODE_SHORT)
+    expect(modeNote.textContent).toBe('Mode')
     expect(modeNote.title).toBe(MODE_NOTE)
     await choose('Mode', 'Plan (no changes)')
     expect(document.querySelector('[data-testid="workspace-warning"]')).toBeNull()
@@ -453,27 +461,31 @@ describe('Scheduled page: quick add', () => {
   const created = (h: Harness) => h.api.scheduled.create.mock.calls[0][0] as Record<string, unknown>
   const addButton = () => must(buttons().find((item) => item.textContent?.startsWith('Add') && item.classList.contains('scheduled-add')), 'Add')
 
-  it('shows one line until focused, then the schedule chips, a project and Add', async () => {
+  it('shows one line until focused, then When and Where dropdowns and Add', async () => {
     await mount([])
-    expect(quickInput().placeholder).toBe('What should the agent do?')
-    expect(button('Hourly')).toBeUndefined()
+    expect(quickInput().placeholder).toBe('Hand off a chore…')
+    expect(document.querySelector('[data-testid="quick-when"]')).toBeNull()
     await act(async () => quickInput().focus())
-    expect(button('Hourly')).toBeDefined()
-    expect(button(DAILY)).toBeDefined()
-    expect(button(WEEKDAYS)).toBeDefined()
-    expect(button('Custom…')).toBeDefined()
+    expect(whenShown()).toBe('Every 30 min')
+    // The app's main dropdown: the workspace menu, not the bordered settings list.
+    await click(whenTrigger())
+    expect([...document.querySelectorAll('[role="option"] .ui-select-option-label')].map((option) => option.textContent)).toEqual(['Every 30 min', 'Hourly', DAILY, WEEKDAYS, 'Custom…'])
+    expect(document.querySelector('[role="listbox"]')?.classList.contains('composer-workspace-menu')).toBe(true)
+    await click(whenTrigger())
     expect(byAria('Project').textContent).toBe('No project')
     expect(addButton().disabled).toBe(true)
-    expect(document.body.textContent).toContain('Nothing scheduled yet.')
+    // No hint line under the row; the empty page is one short line.
+    expect(document.querySelector('.scheduled-quick-hint')).toBeNull()
+    expect(document.querySelector('.scheduled-empty')?.textContent).toBe('Nothing on the clock.')
   })
 
   it('Enter adds the task with a preset, named after its first sentence, in a new worktree for a Git project', async () => {
     const h = await mount([])
     await type('Summarize open PRs. Post the list to #eng.')
-    await click(button(WEEKDAYS))
-    expect(button(WEEKDAYS)?.getAttribute('aria-pressed')).toBe('true')
+    await pickWhen(WEEKDAYS)
+    expect(whenShown()).toBe(WEEKDAYS)
     await pick(byAria('Project'), 'Mousse')
-    const preview = document.querySelector('[data-testid="quick-preview"]')?.textContent
+    const preview = quickPreview()
     expect(preview).toMatch(new RegExp(`^Monday to Friday at ${clockText(9, 0)} · First run .+ · Runs in a new worktree, on your default model$`))
     await key(quickInput(), 'Enter')
     expect(h.api.scheduled.create).toHaveBeenCalledWith({
@@ -491,31 +503,31 @@ describe('Scheduled page: quick add', () => {
   it('a project that is not a Git repository runs in its checkout', async () => {
     const h = await mount([])
     await type('Tidy the notes folder')
-    await click(button(DAILY))
+    await pickWhen(DAILY)
     await pick(byAria('Project'), 'Other')
-    expect(document.querySelector('[data-testid="quick-preview"]')?.textContent).toContain('Runs in the project checkout')
+    expect(quickPreview()).toContain('Runs in the project checkout')
     await click(addButton())
     expect(created(h)).toMatchObject({ projectId: 'p2', schedule: { kind: 'cron', expr: '0 9 * * *' }, createThread: true })
     expect(created(h)).not.toHaveProperty('workspace')
     expect(h.api.git.status).toHaveBeenCalledWith({ projectId: 'p2', workspaceThreadId: null })
   })
 
-  it('with no chip chosen it keeps the editor\'s default of every 30 minutes, and says so', async () => {
+  it('with nothing chosen it keeps the editor\'s default of every 30 minutes, and says so in Add\'s tooltip', async () => {
     const h = await mount([])
     await type('Check CI')
-    expect(document.querySelector('[data-testid="quick-preview"]')?.textContent).toMatch(/^Every 30 minutes · First run .+ · Runs in a new thread, on your default model$/)
+    expect(quickPreview()).toMatch(/^Every 30 minutes · First run .+ · Runs in a new thread, on your default model$/)
     await key(quickInput(), 'Enter')
     expect(created(h)).toEqual({ name: 'Check CI', prompt: 'Check CI', schedule: { kind: 'interval', minutes: 30 }, createThread: true })
   })
 
-  it('a chip pressed again is unchosen', async () => {
+  it('the default can be chosen again after a preset', async () => {
     await mount([])
     await type('Check CI')
-    await click(button('Hourly'))
-    expect(document.querySelector('[data-testid="quick-preview"]')?.textContent).toMatch(/^Every hour · /)
-    await click(button('Hourly'))
-    expect(button('Hourly')?.getAttribute('aria-pressed')).toBe('false')
-    expect(document.querySelector('[data-testid="quick-preview"]')?.textContent).toMatch(/^Every 30 minutes · /)
+    await pickWhen('Hourly')
+    expect(quickPreview()).toMatch(/^Every hour · /)
+    await pickWhen('Every 30 min')
+    expect(whenShown()).toBe('Every 30 min')
+    expect(quickPreview()).toMatch(/^Every 30 minutes · /)
   })
 
   it('does nothing with an empty line, and shows a refusal in words', async () => {
@@ -534,11 +546,11 @@ describe('Scheduled page: quick add', () => {
     const h = await mount([])
     await type('Check CI in the repo')
     await pick(byAria('Project'), 'Mousse')
-    await click(button('Custom…'))
+    await pickWhen('Custom…')
     const form = must(document.querySelector('form[aria-label="New scheduled task"]'), 'new task form')
     expect(control<HTMLTextAreaElement>('Prompt').value).toBe('Check CI in the repo')
     expect(document.activeElement).toBe(control('Prompt'))
-    expect(form.querySelector('button[aria-pressed="true"]')?.textContent).toBe('Custom…')
+    expect(form.querySelector('[data-testid="editor-when"]')?.textContent).toBe('Custom')
     expect(control<HTMLInputElement>('Minutes between runs').value).toBe('30')
     expect(control('Runs in').textContent).toBe('New worktree per run (recommended)')
     expect(control<HTMLInputElement>('Name').placeholder).toBe('Check CI in the repo')
@@ -609,13 +621,13 @@ describe('Scheduled page: quick add', () => {
   })
 })
 
-describe('Scheduled page: schedule chips and the custom builder', () => {
+describe('Scheduled page: the When dropdown and the custom builder', () => {
   const summary = () => document.querySelector('[data-testid="schedule-summary"]')?.textContent
-  const pressed = () => document.querySelector('form button[aria-pressed="true"]')?.textContent
-  const createWith = async (chip: string) => {
+  const pressed = whenShown
+  const createWith = async (preset: string) => {
     const h = await mount([])
     await openNew('Check CI')
-    await click(button(chip))
+    await pickWhen(preset)
     await click(button('Add'))
     return (h.api.scheduled.create.mock.calls[0][0] as { schedule: unknown }).schedule
   }
@@ -623,11 +635,11 @@ describe('Scheduled page: schedule chips and the custom builder', () => {
   it('choosing Hourly is explicit and closes the builder; Custom… afterwards opens on what Hourly set', async () => {
     await mount([])
     await openNew('Check CI')
-    await click(button('Hourly'))
+    await pickWhen('Hourly')
     expect(pressed()).toBe('Hourly')
     expect(summary()).toBe('Every hour')
     expect(document.querySelector('[role="radiogroup"]')).toBeNull()
-    await click(button('Custom…'))
+    await pickWhen('Custom…')
     expect(control<HTMLInputElement>('Minutes between runs').value).toBe('60')
   })
 
@@ -635,19 +647,19 @@ describe('Scheduled page: schedule chips and the custom builder', () => {
     ['Hourly', { kind: 'interval', minutes: 60 }],
     [DAILY, { kind: 'cron', expr: '0 9 * * *' }],
     [WEEKDAYS, { kind: 'cron', expr: '0 9 * * 1-5' }]
-  ])('%s saves as the scheduler\'s own schedule', async (chip, schedule) => {
-    expect(await createWith(chip)).toEqual(schedule)
+  ])('%s saves as the scheduler\'s own schedule', async (preset, schedule) => {
+    expect(await createWith(preset)).toEqual(schedule)
   })
 
   it('states the clock a daily preset reads, and predicts no time before saving', async () => {
     await mount([])
     await openNew('Check CI')
-    await click(button(WEEKDAYS))
+    await pickWhen(WEEKDAYS)
     expect(summary()).toBe(`Monday to Friday at ${clockText(9, 0)}, this computer's time`)
     expect(document.querySelector('form')?.textContent).not.toMatch(/Next /)
   })
 
-  it('a saved preset task opens on its chip with the cron in Details and its next run', async () => {
+  it('a saved preset task opens on its preset with the cron in Details and its next run', async () => {
     const item = job({ schedule: { kind: 'cron', expr: '0 9 * * 1-5' } })
     const h = await mount([item])
     await openEdit(item)
@@ -662,12 +674,12 @@ describe('Scheduled page: schedule chips and the custom builder', () => {
     const item = job({ schedule: { kind: 'cron', expr: '0 9 * * *' } })
     const h = await mount([item])
     await openEdit(item)
-    await click(button('Custom…'))
+    await pickWhen('Custom…')
     // A daily expression opens on the Daily form.
     expect(document.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toBe('Daily')
     expect(control<HTMLInputElement>('Time').value).toBe('09:00')
     await setValue(control('Time'), '07:30')
-    expect(pressed()).toBe('Custom…')
+    expect(pressed()).toBe('Custom')
     await click(button('Weekly'))
     await choose('Day', 'Wednesday')
     await save()
@@ -677,7 +689,7 @@ describe('Scheduled page: schedule chips and the custom builder', () => {
   it('a task on any other schedule opens on Custom… with the builder folded; Change opens it', async () => {
     await mount([job()])
     await openEdit()
-    expect(pressed()).toBe('Custom…')
+    expect(pressed()).toBe('Custom')
     expect(document.querySelector('[role="radiogroup"]')).toBeNull()
     expect(summary()).toMatch(/^Every 30 minutes/)
     await click(button('Change'))
@@ -737,10 +749,9 @@ describe('Scheduled page: groups', () => {
     expect(heads()).not.toContain('Done')
   })
 
-  it('a page of finished tasks says nothing is left to run', async () => {
+  it('a page of finished tasks says it is all clear', async () => {
     await mount([job({ state: 'completed', nextRunAt: null, lastStatus: 'ok', lastRunAt: NOW })])
-    expect(document.body.textContent).toContain('Nothing left to run.')
-    expect(document.body.textContent).not.toContain('Nothing scheduled yet.')
+    expect(document.querySelector('.scheduled-empty')?.textContent).toBe('All clear.')
   })
 
   it('Show done is off when nothing is done', async () => {
@@ -833,7 +844,9 @@ describe('Scheduled page: the row', () => {
     expect(control('Model').textContent).toBe('Claude Sonnet')
     expect(control('Mode').textContent).toBe('Agent')
     expect(control('Runs in').textContent).toBe('New worktree per run (recommended)')
-    expect(document.body.textContent).toContain('A new worktree and a new thread for each run')
+    // What the workspace means is the Runs in label's tooltip.
+    expect(must([...document.querySelectorAll('label')].find((item) => item.textContent === 'Runs in'), 'Runs in').title).toBe('A new worktree and a new thread for each run')
+    expect(document.body.textContent).not.toContain('A new worktree and a new thread for each run')
     expect(control('Thread').textContent).toBe('A new thread for each run')
     const webhookRow = must([...document.querySelectorAll('.scheduled-detail-row')].find((row) => row.textContent?.startsWith('Webhook')), 'webhook row')
     expect(webhookRow.textContent).toBe('WebhookOnManage')
@@ -1636,11 +1649,13 @@ describe('Scheduled page: permissions respect the task\'s ceiling', () => {
       { text: 'Auto', disabled: true },
       { text: 'Full access', disabled: true }
     ])
-    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toBe('Never more than Auto-accept edits')
+    // The limit is the Permissions label's tooltip, not a line under it.
+    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toBe('Permissions')
+    expect(document.querySelector<HTMLElement>('[data-testid="permission-note"]')?.title).toMatch(/^Never more than Auto-accept edits\. /)
     await choose('Where', 'Other')
     await choose('Thread', 'Other project thread')
     expect((await optionsOf('Permissions')).map((option) => option.disabled)).toEqual([false, false, true, true, true])
-    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('Ask before acting')
+    expect(document.querySelector<HTMLElement>('[data-testid="permission-note"]')?.title).toContain('Ask before acting')
   })
 
   it('creates a task with the chosen permission mode', async () => {
@@ -1668,7 +1683,7 @@ describe('Scheduled page: permissions respect the task\'s ceiling', () => {
     h.api.scheduled.update.mockRejectedValueOnce(new Error('A job cannot run above the mode its creator holds'))
     await openEdit(item)
     const note = must(document.querySelector<HTMLElement>('[data-testid="permission-note"]'), 'note')
-    expect(note.textContent).toContain("this task's limit is Auto-accept edits")
+    expect(note.title).toContain("this task's limit is Auto-accept edits")
     expect(note.title).toContain('A run follows its thread, never above that limit')
     expect(control('Permissions').textContent).toBe('Ask before acting')
     await choose('Permissions', 'Auto-accept edits')
@@ -1721,7 +1736,7 @@ describe('Scheduled page: permissions respect the task\'s ceiling', () => {
     expect(hasLabel('Permissions')).toBe(true)
     await setValue(control('Prompt'), '/deploy staging')
     expect(hasLabel('Permissions')).toBe(false)
-    expect(document.querySelector('[data-testid="workflow-permission-note"]')?.textContent).toBe(WORKFLOW_PERMISSION_NOTE)
+    expect(document.querySelector<HTMLElement>('[data-testid="workflow-permission-note"]')?.title).toBe(WORKFLOW_PERMISSION_NOTE)
     await save()
     expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { prompt: '/deploy staging', permissionMode: null })
   })

@@ -105,12 +105,12 @@ describe('the "+" panel menu', () => {
     expect(addButton().getAttribute('aria-haspopup')).toBe('menu')
     expect(menu()!.getAttribute('role')).toBe('menu')
     expect(menu()!.getAttribute('aria-label')).toBe('Add panel')
-    expect(rows()).toHaveLength(6)
+    expect(rows()).toHaveLength(5)
     expect(document.activeElement).toBe(rows()[0])
     press('ArrowDown')
     expect(document.activeElement).toBe(rows()[1])
     press('End')
-    expect(document.activeElement).toBe(rows()[5])
+    expect(document.activeElement).toBe(rows()[4])
     press('Escape')
     expect(menu()).toBeNull()
     expect(document.activeElement).toBe(addButton())
@@ -118,14 +118,14 @@ describe('the "+" panel menu', () => {
 
   it('marks open panels "Open", reads "New terminal", and shows no shortcut hints', () => {
     render()
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['Browser', 'New terminal', 'Files', 'Diff', 'Review', 'Pull request'])
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual(['Open', null, null, 'Open', null, null])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['Browser', 'New terminal', 'Files', 'Changes', 'Pull request'])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual(['Open', null, null, 'Open', null])
     expect(menu()!.querySelector('kbd')).toBeNull()
   })
 
   it('focuses the tab of an open panel instead of adding one', async () => {
     render()
-    await act(async () => { row('Diff').click() })
+    await act(async () => { row('Changes').click() })
     const state = useAppStore.getState()
     expect(state.mainView).toBe('git')
     expect(state.openedSurfaceKinds).toEqual(['browser', 'git', 'terminal'])
@@ -140,12 +140,12 @@ describe('the "+" panel menu', () => {
     render()
     act(() => row('New terminal').click())
     expect(useAppStore.getState().projectTerminalTabs).toHaveLength(2)
-    expect([...host.querySelectorAll('.main-view-tab-label')].map(text)).toEqual(['Browser', 'Diff', 'Terminal', 'Terminal 2'])
+    expect([...host.querySelectorAll('.main-view-tab-label')].map(text)).toEqual(['Browser', 'Changes', 'Terminal', 'Terminal 2'])
   })
 
   it('closes a tab on middle-click', () => {
     render()
-    const diff = [...host.querySelectorAll('.main-view-tab')].find((tab) => text(tab.querySelector('.main-view-tab-label')) === 'Diff')!
+    const diff = [...host.querySelectorAll('.main-view-tab')].find((tab) => text(tab.querySelector('.main-view-tab-label')) === 'Changes')!
     act(() => { diff.dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true })) })
     expect(useAppStore.getState().openedSurfaceKinds).toEqual(['browser', 'terminal'])
   })
@@ -157,7 +157,7 @@ describe('the empty app panel', () => {
     expect(text(host.querySelector('.surface-picker > .surface-picker-title'))).toBe('Add a panel')
     expect(host.querySelector('.surface-picker-title + .surface-menu-list')).not.toBeNull()
     expect(host.querySelector('[role="menuitem"]')).toBeNull()
-    expect(host.querySelectorAll('.surface-menu-row')).toHaveLength(6)
+    expect(host.querySelectorAll('.surface-menu-row')).toHaveLength(5)
     expect(text(host.querySelectorAll('.surface-menu-row')[1]?.querySelector('.surface-menu-row-label'))).toBe('Terminal')
     expect(host.querySelectorAll('kbd').length).toBeGreaterThan(0)
   })

@@ -1,5 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
@@ -8,7 +8,7 @@ import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
-import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
+import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
@@ -34,6 +34,15 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitCommitSelection,
+  GitChangesResult,
+  GitIncludeRequest,
+  GitIncludeResult,
+  GitSelectionState,
+  GitRestoreRevertedResult,
+  GitRevertedItem,
+  GitRevertRequest,
+  GitRevertResult,
   GitCommitSuggestion,
   GitDeleteBranchOptions,
   GitDiffStats,
@@ -103,7 +112,7 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent } from '../shared/providerAuth'
+import type { CliInstallEvent, UsageProxyKeyResult } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { MoveResult } from '../shared/harness/move'
 import type {
@@ -121,7 +130,7 @@ import type {
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
-import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
 import type {
   GitHubApi,
@@ -336,6 +345,9 @@ const api = {
       ipcRenderer.invoke('queue:enqueue', threadId, request),
     remove: (threadId: string, itemId: string): Promise<QueuedMessage | null> =>
       ipcRenderer.invoke('queue:remove', threadId, itemId),
+    /** Replaces a queued message's text in place; resolves the saved item. */
+    edit: (threadId: string, itemId: string, content: string): Promise<QueuedMessage> =>
+      ipcRenderer.invoke('queue:edit', threadId, itemId, content),
     reorder: (threadId: string, orderedIds: string[]): Promise<QueuedMessage[]> =>
       ipcRenderer.invoke('queue:reorder', threadId, orderedIds),
     promoteToSteer: (threadId: string, itemId: string): Promise<boolean> =>
@@ -499,8 +511,32 @@ const api = {
       storageInvoke('git:checkout', scope, branch, options),
     commit: (scope: GitScope, message: string, options?: GitCommitOptions): Promise<GitMutationResult> =>
       storageInvoke('git:commit', scope, message, options),
-    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string }): Promise<GitCommitSuggestion> =>
+    suggestCommitMessage: (scope: GitScope, options?: { expectedBranch?: string; selection?: GitCommitSelection }): Promise<GitCommitSuggestion> =>
       storageInvoke('git:suggestCommitMessage', scope, options),
+    /** HEAD → working tree as hunks, and what of it the next commit takes. */
+    changes: (scope: GitScope, options?: { paths?: string[] }): Promise<GitChangesResult> =>
+      storageInvoke('git:changes', scope, options),
+    /** Includes or leaves out a file, some of its hunks or lines, or everything. */
+    include: (scope: GitScope, input: GitIncludeRequest | { all: true; include: boolean }): Promise<GitIncludeResult | { selection: GitSelectionState }> =>
+      storageInvoke('git:include', scope, input),
+    /** Undoes the last local commit of a project folder; its changes stay in the files and the index. */
+    undoLastCommit: (scope: GitScope, expectedHead: string): Promise<GitMutationResult> =>
+      storageInvoke('git:undoLastCommit', scope, expectedHead),
+    /** Makes hunks, lines or a whole file match HEAD again, keeping a copy first; `revertId` puts it back. */
+    revert: (scope: GitScope, input: GitRevertRequest): Promise<GitRevertResult> =>
+      storageInvoke('git:revert', scope, input),
+    /** Puts a revert back while its files are still as it left them. */
+    restoreReverted: (scope: GitScope, revertId: string): Promise<GitRestoreRevertedResult> =>
+      storageInvoke('git:restoreReverted', scope, revertId),
+    /** The reverts of the folder whose copies are still kept, newest first. */
+    revertedList: (scope: GitScope): Promise<GitRevertedItem[]> =>
+      storageInvoke('git:revertedList', scope),
+    /** Another view changed what the next commit takes in a thread's or project's folder. */
+    onSelectionChanged: (cb: (event: { threadId?: string; projectId?: string }) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { threadId?: string; projectId?: string }): void => cb(payload)
+      ipcRenderer.on('git:selectionChanged', handler)
+      return () => ipcRenderer.removeListener('git:selectionChanged', handler)
+    },
     push: (scope: GitScope, options?: GitPushOptions): Promise<GitMutationResult> =>
       storageInvoke('git:push', scope, options),
     init: (scope: GitScope): Promise<GitMutationResult> =>
@@ -607,6 +643,11 @@ const api = {
       const handler = (_event: Electron.IpcRendererEvent, state: InAppBrowserState) => listener(state)
       ipcRenderer.on('browser:automation-state', handler)
       return () => { ipcRenderer.removeListener('browser:automation-state', handler) }
+    },
+    onCursor: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, cursor: InAppBrowserCursor) => listener(cursor)
+      ipcRenderer.on('browser:agent-cursor', handler)
+      return () => { ipcRenderer.removeListener('browser:agent-cursor', handler) }
     }
   } satisfies InAppBrowserApi,
   browser: {
@@ -693,7 +734,10 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, event: BotsPersonalV2EventData['bots.activity']) => cb(event)
       ipcRenderer.on('bots:activity', handler)
       return () => ipcRenderer.removeListener('bots:activity', handler)
-    }
+    },
+    /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
+    attachmentPath: async (file: File): Promise<string> =>
+      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer()))
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
@@ -815,6 +859,8 @@ const api = {
     clearContext: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:clearContext', threadId),
     /** `/compact`: summarizes the thread's context now; `focus` says what the summary keeps. */
     compact: (threadId: string, focus?: string): Promise<void> => ipcRenderer.invoke('threads:compact', threadId, focus),
+    /** Stops the thread's running `/compact`; the full history stays. */
+    stopCompaction: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:stopCompaction', threadId),
     /** `/fork`: a new thread from the thread's latest finished turn, selected. */
     /** Forks after the thread's latest finished turn, or after the turn `atRunId` names (a message's `turnId`). */
     fork: (threadId: string, options?: { atRunId?: string }): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId, options),
@@ -936,6 +982,11 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
+    /** Saves a proxy's management key for usage (checked first); the key never comes back. */
+    setUsageProxyKey: (providerId: string, key: string): Promise<UsageProxyKeyResult> =>
+      ipcRenderer.invoke('providers:setUsageProxyKey', providerId, key),
+    clearUsageProxyKey: (providerId: string): Promise<void> =>
+      ipcRenderer.invoke('providers:clearUsageProxyKey', providerId),
     onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
       ipcRenderer.on('providers:install:event', handler)
@@ -1042,6 +1093,21 @@ const api = {
     /** Bytes of one file of a downloaded local model. */
     readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
+    /** Opens a native engine slot for a downloaded Kokoro model; resolves with its id once the model has loaded. */
+    nativeOpen: (modelId: LocalTtsModelId): Promise<number> => ipcRenderer.invoke('readAloud:nativeOpen', modelId),
+    /** Voices one segment on a slot; rejects when the slot stopped. */
+    nativeSpeak: (slotId: number, text: string, voice: string, speed: number): Promise<NativeSpeechResult> =>
+      ipcRenderer.invoke('readAloud:nativeSpeak', slotId, text, voice, speed),
+    /** Stops the slot's segments at once, also mid-segment; they resolve with an error. The slot stays open. */
+    nativeCancel: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeCancel', slotId),
+    /** Closes a slot; its segments stop at once. */
+    nativeClose: (slotId: number): Promise<void> => ipcRenderer.invoke('readAloud:nativeClose', slotId),
+    /** The engine of a slot ended without the slot being closed. */
+    onNativeSlotExit: (cb: (slotId: number) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { slotId: number }) => cb(event.slotId)
+      ipcRenderer.on('readAloud:nativeSlotExit', handler)
+      return () => ipcRenderer.removeListener('readAloud:nativeSlotExit', handler)
+    },
     /** Speech audio for at most PROVIDER_TTS_MAX_CHARS characters, made with a provider's TTS model. */
     synthesizeWithProvider: (request: ProviderSpeechRequest): Promise<ProviderSpeechResult> =>
       ipcRenderer.invoke('readAloud:synthesizeWithProvider', request),
@@ -1193,10 +1259,7 @@ const api = {
       ipcRenderer.invoke('dialog:pickExecutable', options ?? {}),
     /** Native folder picker; resolves to the chosen absolute path, or null when cancelled. */
     pickFolder: (options?: { title?: string; buttonLabel?: string }): Promise<string | null> =>
-      ipcRenderer.invoke('dialog:pickFolder', options ?? {}),
-    /** Native multi-file picker; resolves to the chosen absolute paths, empty when cancelled. */
-    pickFiles: (options?: { title?: string }): Promise<string[]> =>
-      ipcRenderer.invoke('dialog:pickFiles', options ?? {})
+      ipcRenderer.invoke('dialog:pickFolder', options ?? {})
   },
   window: {
     resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),

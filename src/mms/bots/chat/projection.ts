@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
 import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAskCard, BotAskStatus, BotChatMessage, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
-import { foldersOf, workspaceOf, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
-import { askFingerprint, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
+import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
@@ -79,16 +78,10 @@ export class BotChatProjection {
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
-    /** The owner's home folder, for `~/…` in card titles (default: `os.homedir()`). */
-    home?: string
   }) {}
 
   private get store(): BotStore {
     return this.options.store
-  }
-
-  get home(): string {
-    return this.options.home ?? homedir()
   }
 
   /**
@@ -178,7 +171,7 @@ export class BotChatProjection {
   }
 
   card(escalation: BotEscalationRow): BotAskCard {
-    const text = escalation.title !== null ? { title: escalation.title, note: escalation.note ?? '' } : askText(escalation.permission, { home: this.home })
+    const text = escalation.title !== null ? { title: escalation.title, note: escalation.note ?? '' } : askText(escalation.permission)
     return {
       askId: escalation.id,
       title: text.title,
@@ -246,7 +239,7 @@ export class BotChatProjection {
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
     return grantedPermissions(manifest).map((permission) => {
       const id = permissionId(permission)
-      const text = askText(permission, { home: this.home, budget: starterManifest().budget })
+      const text = askText(permission, { budget: starterManifest().budget })
       return { id, title: text.title, note: text.note, grantedAt: this.store.allowedAsk(botId, id)?.answeredAt ?? approvedAt }
     })
   }
@@ -257,16 +250,20 @@ export function permissionId(permission: BotPermissionRequest): string {
   return askFingerprint('budget' in permission ? { budget: { key: permission.budget.key } } : permission)
 }
 
-/** The fingerprint of an ask: at most one is open per bot and fingerprint (a limit's without its amount). */
+/**
+ * The fingerprint of an ask: at most one is open per bot and fingerprint (a limit's without its
+ * amount, a folder's as the one file ask).
+ */
 export function askFingerprintOf(request: BotAskRequest): string {
-  return 'budget' in request ? permissionId(request) : askFingerprint(request)
+  return 'budget' in request ? permissionId(request) : askFingerprint(filesAskOf(request))
 }
 
 /** What `manifest` grants beyond the starter grant, one request per permission. */
 export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[] {
   const starter = starterManifest()
   const items: BotPermissionRequest[] = []
-  for (const [path, access] of foldersOf(manifest.workspace)) items.push({ path, access })
+  // File access is one permission, however many folders an older grant names (`filesAsk`).
+  if (manifest.workspace) items.push(filesAsk())
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
   // The bot's own tools are never permissions: About never lists them.
   for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
@@ -281,16 +278,14 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
 }
 
 /**
- * `manifest` without `permission` (About → Remove): a folder leaves, a tool, skill or MCP tool is
- * taken away, a limit returns to the starter one. Narrowing never needs consent.
+ * `manifest` without `permission` (About → Remove): file access goes as a whole, a tool, skill or
+ * MCP tool is taken away, a limit returns to the starter one. Narrowing never needs consent.
  */
 export function withoutPermission(manifest: BotManifest, permission: BotPermissionRequest): BotManifest {
   const starter = starterManifest()
   const next: BotManifest = { ...manifest, tools: [...manifest.tools], appTools: [...manifest.appTools], mcp: manifest.mcp.map((pair) => ({ ...pair })), skills: [...manifest.skills], budget: { ...manifest.budget } }
-  if ('path' in permission) {
-    const folders = foldersOf(manifest.workspace).filter(([root]) => root !== permission.path)
-    next.workspace = workspaceOf(folders)
-  } else if ('tool' in permission) {
+  if ('path' in permission) next.workspace = null
+  else if ('tool' in permission) {
     next.tools = next.tools.filter((tool) => tool !== permission.tool)
     next.appTools = next.appTools.filter((tool) => tool !== permission.tool)
   } else if ('skill' in permission) next.skills = next.skills.filter((skill) => skill !== permission.skill)

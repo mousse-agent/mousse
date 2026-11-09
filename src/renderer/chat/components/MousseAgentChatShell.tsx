@@ -16,6 +16,8 @@ import {
 } from './agent-elements/tools/quick-action-approval'
 import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import { TurnActionsContext, type TurnActions } from './agent-elements/turn-actions'
+import { QueuedMessages } from '../../components/QueuedMessages'
+import type { ThreadQueue } from '../../hooks/useThreadQueue'
 import './agent-elements/agent-ui.css'
 
 /**
@@ -26,7 +28,7 @@ import './agent-elements/agent-ui.css'
  * - render: 21st.dev Agent Elements (MessageList + ToolRenderer dispatch inside AgentChat)
  *
  * The composer stays Mousse-owned (ChatComposer: model/mode/skills/voice/browser
- * pills/context ring/queue/questions). It is injected via slots.InputBar so
+ * pills/context ring/questions). It is injected via slots.InputBar so
  * AgentChat owns the MessageList + turn grouping + tool-card dispatch while
  * Mousse keeps every composer feature with zero rewrites.
  */
@@ -77,7 +79,7 @@ interface MousseAgentChatShellProps {
   onStop: () => void
   error?: Error
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>
-  /** Mousse composer block (ChatComposer + QueuedMessages/modals/pills). */
+  /** Mousse composer block (ChatComposer + notices/modals/pills). */
   composer: ReactNode
   /** Inline quick-action approval bridged to the matching card. Null = generic question UI. */
   quickActionApproval?: QuickActionApproval | null
@@ -85,6 +87,8 @@ interface MousseAgentChatShellProps {
   permissionRequests?: Readonly<Record<string, PermissionRequestControls>>
   /** Retry after an error and Continue after a stopped run, on the last turn. */
   turnActions?: TurnActions | null
+  /** The thread's queued messages, drawn after the last turn. */
+  queue?: ThreadQueue
 }
 
 export function MousseAgentChatShell({
@@ -100,6 +104,7 @@ export function MousseAgentChatShell({
   quickActionApproval,
   permissionRequests,
   turnActions,
+  queue,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
@@ -109,6 +114,7 @@ export function MousseAgentChatShell({
   )
   const subagentCards = useSubagentCardModels(threadId, messages)
   const threadProvider = useThreadProviderId(threadId)
+  const queued = useMemo(() => (queue ? <QueuedMessages queue={queue} /> : null), [queue])
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
@@ -130,6 +136,7 @@ export function MousseAgentChatShell({
             <WorkspaceRecoveryBanner threadId={threadId} />
             {interrupted ? <RunInterruptedNotice onContinue={turnActions && !busy ? turnActions.continueRun : undefined} /> : undefined}
           </>}
+          afterTurns={queued}
           showCopyToolbar
           enableImagePreview
           enableFind

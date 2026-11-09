@@ -3,7 +3,7 @@ import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
-import { IconBrain } from "../../../../lib/icons";
+import { ThinkingIcon } from "../../../../lib/icons";
 import { latestThoughtHeading, thoughtHeading } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
@@ -35,7 +35,7 @@ export function ThinkingCollapsed({
 
   return (
     <ToolRowBase
-      icon={<IconBrain size={18} />}
+      icon={<ThinkingIcon size={18} active={isAnimating} />}
       shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
       // While it streams, the newest line of the thought follows the label.
@@ -64,7 +64,7 @@ export function ThinkingCollapsed({
 export function LiveThinkingRow() {
   return (
     <ToolRowBase
-      icon={<IconBrain size={18} />}
+      icon={<ThinkingIcon size={18} active />}
       shimmerLabel="Thinking"
       completeLabel="Thinking"
       isAnimating

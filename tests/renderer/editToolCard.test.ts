@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const calls = vi.hoisted(() => ({ review: [] as unknown[][], files: [] as unknown[] }))
 
-vi.mock('../../src/renderer/components/review/openReview', () => ({
-  openTurnInReview: async (...args: unknown[]) => { calls.review.push(args) }
+vi.mock('../../src/renderer/components/changes/openChanges', () => ({
+  openTurnInChanges: async (...args: unknown[]) => { calls.review.push(args) }
 }))
 vi.mock('../../src/renderer/utils/chatLinks', () => ({
   openFileInPanel: (detail: unknown) => { calls.files.push(detail) }
@@ -101,7 +101,7 @@ describe('edit row', () => {
     expect(toggle().classList).not.toContain('flex-1')
     expect(toggle().nextElementSibling).toBe(actions)
     const [review, open] = [...actions.querySelectorAll('button')]
-    expect(review!.getAttribute('title')).toBe('Open in Review')
+    expect(review!.getAttribute('title')).toBe('Open in Changes')
     expect(open!.getAttribute('title')).toBe('Open file')
     for (const button of [review!, open!]) expect(button.classList).toContain('size-7')
     // Not the eye the Read row uses, and not a folder.
@@ -126,10 +126,10 @@ describe('edit row', () => {
     expect(host.querySelector('.an-edit-surface')).toBeNull()
   })
 
-  it('"Open in Review" opens Review on this turn at this file', async () => {
+  it('"Open in Changes" opens the Changes tab on this turn at this file', async () => {
     draw(edit)
-    const review = host.querySelector('button[aria-label="Open app.ts in Review"]')!
-    expect(review.getAttribute('title')).toBe('Open in Review')
+    const review = host.querySelector('button[aria-label="Open app.ts in Changes"]')!
+    expect(review.getAttribute('title')).toBe('Open in Changes')
     click(review)
     expect(calls.review).toEqual([['t1', 'turn-1', '/repo/src/app.ts']])
     expect(calls.files).toEqual([])
@@ -216,14 +216,14 @@ describe('edit row', () => {
     })
     expect(line()).toBe('Edited3 files+12−4')
     // The summary names no single file, so it has no file actions.
-    expect(host.querySelector('button[title="Open in Review"]')).toBeNull()
+    expect(host.querySelector('button[title="Open in Changes"]')).toBeNull()
     click(toggle())
     const rows = [...host.querySelectorAll('.an-edit-files .an-edit-row-toggle')].map((row) => row.textContent)
     expect(rows).toEqual(['Editeda.ts+5−1', 'Editedb.ts+4−3', 'Createdc.ts+3'])
     // The count is not a file name, and hovering the summary line does not reveal the file rows' actions.
     expect(host.querySelector('.an-edit-row-count')!.textContent).toBe('3 files')
     expect(host.querySelector('.an-edit-files')!.closest('[class*="group/edit-line"]')).toBeNull()
-    click(host.querySelector('button[aria-label="Open b.ts in Review"]'))
+    click(host.querySelector('button[aria-label="Open b.ts in Changes"]'))
     expect(calls.review).toEqual([['t1', 'turn-1', 'src/b.ts']])
   })
 })

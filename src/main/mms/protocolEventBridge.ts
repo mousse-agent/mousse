@@ -165,6 +165,11 @@ export function bridgeProtocolEvent(
       broadcast('pullRequests:updated', event.data)
       return true
     }
+    // Another view changed what the next commit takes: the Changes tab reads it again.
+    case 'git.selectionChanged': {
+      broadcast('git:selectionChanged', event.data)
+      return true
+    }
     case 'scheduled.status': {
       broadcast(
         'scheduled:status',

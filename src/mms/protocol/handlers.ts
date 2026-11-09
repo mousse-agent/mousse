@@ -42,7 +42,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -104,7 +104,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
+import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -143,6 +143,7 @@ import { access, realpath as realpathNative } from 'node:fs/promises'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import { clearMarker, type SelectionPlace } from '../git/gitSelection'
 import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import { listFilesPlaces } from '../files/drives'
 import { browsedRootRefusal, browsedSaveRefusal, normalizedBrowsedRoot } from '../files/browsedRoot'
@@ -303,12 +304,20 @@ interface RestoreReview {
 }
 
 /**
+ * A visible message the person sent to start a turn. The answers to an agent's questions are stored as user messages
+ * (`questionAnswers`) but shown as a step of the agent's turn, so Undo never names one as the turn's prompt.
+ */
+function isTurnPrompt(message: ChatMessage): boolean {
+  return message.role === 'user' && !message.hidden && !message.questionAnswers?.length
+}
+
+/**
  * SPEC §16.3 restore gate for a file-restoring action: refuses (`workspace_shared`) unless the
  * thread owns its worktree and no other thread's worktree or live working directory overlaps it
  * (the other threads' workspaces are listed once per evaluation, and only when ownership holds);
- * for a weak-containment provider, or one whose capabilities are unknown, returns the diff to
- * review with its SHA-256 and appends `restore.review_required` — unless `reviewedDiffSha` names
- * exactly the diff a restore would apply now. Null: go ahead.
+ * for a provider whose capabilities are unknown, returns the diff to review with its SHA-256 and
+ * appends `restore.review_required` — unless `reviewedDiffSha` names exactly the diff a restore
+ * would apply now. Null: go ahead.
  */
 function restoreGate(
   ctx: HandlerContext,
@@ -876,7 +885,8 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
 const gitThreadRules = createErrorProvider({
   task_branch_authoritative: { category: 'denied', retryable: false, message: 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.' },
   thread_worktree_checkpointed: { category: 'denied', retryable: false, message: "Staging is not available in a thread's worktree; a commit there includes every change." },
-  git_amend_in_thread: { category: 'denied', retryable: false, message: "Amend is not available in a thread's worktree." }
+  git_amend_in_thread: { category: 'denied', retryable: false, message: "Amend is not available in a thread's worktree." },
+  git_undo_in_thread: { category: 'denied', retryable: false, message: "Use Undo in the chat to take back a commit in a thread's worktree." }
 })
 
 const GIT_PATHS_MAX = 5_000
@@ -1064,6 +1074,160 @@ function projectKeptFilesOwnerFor(ctx: HandlerContext, p: Record<string, unknown
   return owner
 }
 
+/** A thread's selection (`git.include`) in its worktree, next to its other records. */
+const THREAD_SELECTION_FILE = 'git-selection.json'
+/** The "everything left out" marker of a project folder, in the project's kept-files owner folder, never in `.git`. */
+const PROJECT_SELECTION_MARKER = 'git-selection-marker.json'
+
+/**
+ * Where the selection of the folder a request names lives: a thread's own worktree keeps an overlay in the thread's
+ * folder; any other folder (a project's, or a thread working in it) uses the real index and the project's marker.
+ * `write` is set for a change: the marker's folder is then noted for the sweep, a copy of a staged version the change
+ * replaces can be kept, and the change refuses while a turn works in the folder.
+ */
+function selectionPlaceFor(ctx: HandlerContext, p: Record<string, unknown>, root: string, write = false): SelectionPlace {
+  const threadId = asOptionalString(p.threadId, 256)
+  const worktree = threadId ? threadWorktreeDirectory(ctx, threadId) : null
+  const assertIdle = write ? () => assertSelectionIdle(ctx, worktree ? threadId! : null, requestProjectId(ctx, p)) : undefined
+  if (worktree) return { kind: 'thread', overlayFile: join(worktree, THREAD_SELECTION_FILE), ...(assertIdle ? { assertIdle } : {}) }
+  const projectId = requestProjectId(ctx, p)
+  if (!projectId) throw new DomainRpcError('project_not_found', 'The project of this folder is needed for its selection.')
+  const owner = write ? projectKeptFilesOwnerFor(ctx, p, root) : projectKeptFilesOwner(profileHome(ctx), projectId)
+  return { kind: 'project', markerFile: join(owner, PROJECT_SELECTION_MARKER), ...(write ? { keepOwner: owner } : {}), ...(assertIdle ? { assertIdle } : {}) }
+}
+
+/** The thread's folder when it works in a worktree of its own that is ready; null for a thread in its project's folder. */
+function threadWorktreeDirectory(ctx: HandlerContext, threadId: string): string | null {
+  if (threadPlacement(ctx.mms.threads.getThread(threadId)) === 'project-folder') return null
+  const directory = ctx.mms.threads.getThreadDir(threadId)
+  const workspace = new ThreadWorkspaceManager(directory).load()
+  return workspace && !isProjectFolderWorkspace(workspace) ? directory : null
+}
+
+/**
+ * A selection change refuses while a turn works in the folder: the thread's own turn in its worktree, and in a project's
+ * folder any thread working there, its chat history work included.
+ */
+function assertSelectionIdle(ctx: HandlerContext, threadId: string | null, projectId: string | undefined): void {
+  if (threadId) {
+    if (ctx.mms.orchestrator.isTurnActive(threadId)) throw new DomainRpcError('thread_busy', THREAD_BUSY_TEXT)
+    return
+  }
+  if (!projectId) return
+  for (const thread of ctx.mms.threads.listAllThreads()) {
+    if (thread.projectId !== projectId || threadPlacement(thread) !== 'project-folder') continue
+    if (ctx.mms.orchestrator.isTurnActive(thread.id) || ctx.mms.orchestrator.isConversationHistoryBusy(thread.id)) throw new DomainRpcError('thread_busy', THREAD_BUSY_TEXT)
+  }
+}
+
+/** Tells every view of the folder to read its selection again. */
+function announceSelection(ctx: HandlerContext, p: Record<string, unknown>, place: SelectionPlace): void {
+  const threadId = asOptionalString(p.threadId, 256)
+  if (place.kind === 'thread' && threadId) ctx.emitEvent?.('git.selectionChanged', { threadId }, threadId)
+  else {
+    const projectId = requestProjectId(ctx, p)
+    if (projectId) ctx.emitEvent?.('git.selectionChanged', { projectId, ...(threadId ? { threadId } : {}) }, threadId)
+  }
+}
+
+/** `git.commit`'s and `git.suggestCommitMessage`'s `selection`. */
+function asCommitSelection(value: unknown): GitCommitSelection | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!isObject(value)) throw new DomainRpcError('invalid_params', 'selection must be { mode: "all" } or { mode: "chosen", token }')
+  const mode = asString(value.mode, 'selection.mode', 16)
+  if (mode === 'all') return { mode }
+  if (mode === 'chosen') return { mode, token: asString(value.token, 'selection.token', 128) }
+  throw new DomainRpcError('invalid_params', 'selection.mode must be all or chosen')
+}
+
+/** `git.include`'s `hunks` and `lines`. */
+function asIncludeParts(p: Record<string, unknown>): Pick<GitIncludeRequest, 'hunks' | 'lines'> {
+  const hunks = p.hunks === undefined ? undefined : asStringArray(p.hunks, 'hunks', { unique: true, maxItems: 5_000, maxItemLen: 128 })
+  let lines: GitIncludeRequest['lines']
+  if (p.lines !== undefined) {
+    if (!Array.isArray(p.lines) || p.lines.length > 5_000) throw new DomainRpcError('invalid_params', 'lines must be a list of { hunk, indexes }')
+    lines = p.lines.map((item, at) => {
+      if (!isObject(item) || !Array.isArray(item.indexes) || item.indexes.length > 100_000 || !item.indexes.every((index) => Number.isSafeInteger(index) && (index as number) >= 0)) throw new DomainRpcError('invalid_params', `lines[${at}] must be { hunk, indexes }`)
+      return { hunk: asString(item.hunk, `lines[${at}].hunk`, 128), indexes: item.indexes as number[] }
+    })
+  }
+  return { ...(hunks?.length ? { hunks } : {}), ...(lines?.length ? { lines } : {}) }
+}
+
+/** Methods that rewrite a project folder's files or HEAD from the chat: the "everything left out" marker no longer says what the person chose. */
+const CLEARS_PROJECT_SELECTION = new Set(['actions.undoLatest', 'actions.redo', 'actions.revertCode', 'actions.activateBranch'])
+
+/** After chat Undo, Redo, revert or a branch switch of a thread working in its project's folder: the project's marker goes. */
+async function clearProjectSelectionAfter(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+  if (!CLEARS_PROJECT_SELECTION.has(method) || !isObject(params)) return
+  const threadId = asOptionalString(params.threadId, 256)
+  const thread = threadId ? ctx.mms.threads.getThread(threadId) : undefined
+  if (!thread?.projectId || threadPlacement(thread) !== 'project-folder') return
+  try {
+    await clearMarker(join(projectKeptFilesOwner(profileHome(ctx), thread.projectId), PROJECT_SELECTION_MARKER))
+    ctx.emitEvent?.('git.selectionChanged', { projectId: thread.projectId, threadId: thread.id }, thread.id)
+  } catch {
+    /* the marker only remembers "everything left out"; a stale one is cleared by the next index change */
+  }
+}
+
+/**
+ * Runs a switch, pull or abort in a project folder: when it moved HEAD, the project's "everything left out" marker goes
+ * (any HEAD change ends it, so switching away and back does not bring it back) and views read the selection again.
+ */
+async function clearingSelectionWhenHeadMoves<T>(ctx: HandlerContext, p: Record<string, unknown>, target: GitMutationTarget, work: () => Promise<T>): Promise<T> {
+  const marker = threadWorktree(target) ? undefined : selectionMarkerOf(() => selectionPlaceFor(ctx, p, target.root))
+  const { result, moved } = await ctx.mms.gitService.clearingMarkerWhenHeadMoves(target.root, marker, work)
+  const projectId = moved ? requestProjectId(ctx, p) : undefined
+  if (projectId) {
+    const threadId = asOptionalString(p.threadId, 256)
+    ctx.emitEvent?.('git.selectionChanged', { projectId, ...(threadId ? { threadId } : {}) }, threadId)
+  }
+  return result
+}
+
+/** The marker of a project folder's selection, for the index writes that keep it; none in a thread's worktree. */
+function selectionMarkerOf(place: () => SelectionPlace): { markerFile: string } | undefined {
+  let found: SelectionPlace
+  try { found = place() } catch { return undefined }
+  return found.kind === 'project' ? { markerFile: found.markerFile } : undefined
+}
+
+/**
+ * Whose journal records the reverts of the folder a request names, as `git.revert` chooses it (`recordedThreadTarget`):
+ * a thread working in its own worktree, or ready in its project's folder; otherwise the project. Only reads.
+ */
+function revertOwnerFor(ctx: HandlerContext, p: Record<string, unknown>): string | undefined {
+  const threadId = asOptionalString(p.threadId, 256)
+  if (threadId) {
+    const directory = ctx.mms.threads.getThreadDir(threadId)
+    const workspace = new ThreadWorkspaceManager(directory).load()
+    if (workspace && (!isProjectFolderWorkspace(workspace) ? threadPlacement(ctx.mms.threads.getThread(threadId)) !== 'project-folder' : workspace.lifecycle === 'ready')) return directory
+  }
+  const projectId = requestProjectId(ctx, p)
+  try { return projectId ? projectKeptFilesOwner(profileHome(ctx), projectId) : undefined } catch { return undefined }
+}
+
+/**
+ * Every journal the reverts of the folder a request names may be in, `revertOwnerFor`'s first: a thread's own and its
+ * project's. A thread working in its project's folder records its reverts in its own journal only while it is ready
+ * there, and the project records them otherwise, so a revert made in one state is still listed and restored in the
+ * other. Each record names its folder, so a journal's reverts of other folders are never taken. Only reads.
+ */
+function revertJournalsFor(ctx: HandlerContext, p: Record<string, unknown>): string[] {
+  const journals: string[] = []
+  const first = revertOwnerFor(ctx, p)
+  if (first) journals.push(first)
+  const threadId = asOptionalString(p.threadId, 256)
+  if (threadId) {
+    const directory = ctx.mms.threads.getThreadDir(threadId)
+    if (new ThreadWorkspaceManager(directory).load()) journals.push(directory)
+  }
+  const projectId = requestProjectId(ctx, p)
+  try { if (projectId) journals.push(projectKeptFilesOwner(profileHome(ctx), projectId)) } catch { /* no project: the thread's journal only */ }
+  return [...new Set(journals)]
+}
+
 /** Whose Undo window a Discard requested with these parameters keeps its copy for; only reads. */
 function discardOwnerFor(ctx: HandlerContext, p: Record<string, unknown>): string | undefined {
   const threadId = asOptionalString(p.threadId, 256)
@@ -1230,7 +1394,9 @@ export async function dispatchMethod(
   // A button whose handler carries out the user's request without passing it down runs as that request.
   const label = (USER_REQUEST_LABELS as Record<string, string | undefined>)[method]
   const run = label ? () => withUserRequest(gitUserAction(ctx, label), () => dispatchAdmitted(ctx, method, params)) : () => dispatchAdmitted(ctx, method, params)
-  return access ? withGitAccess(method, access, run) : run()
+  const result = await (access ? withGitAccess(method, access, run) : run())
+  await clearProjectSelectionAfter(ctx, method, params)
+  return result
 }
 
 function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
@@ -1670,6 +1836,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const ran = await localActionRun(ctx, threadId, 'compact', () => ctx.mms.orchestrator.compactConversationContext(threadId, focus))
       return { outcome: 'result' in ran ? ran.result : 'unchanged' }
+    }
+    case 'threads.stopCompaction': {
+      // The compaction row's Stop: the running `/compact` ends with the full history kept.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return { stopped: ctx.mms.orchestrator.stopCompaction(threadId) }
     }
     case 'threads.pin': {
       const p = isObject(params) ? params : {}
@@ -2915,6 +3089,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         fetchedAt: new Date().toISOString()
       }
     }
+    // The management key of the local CLI-to-API proxy Claude's usage is read through: saved
+    // encrypted for that proxy's origin after it accepts the key, and never sent back. Only a window
+    // or the CLI on this computer may set or clear it (`providers.*` is never routed either).
+    case 'providers.setUsageProxyKey': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is set on its own computer')
+      const p = isObject(params) ? params : {}
+      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      return ctx.mms.claudeSubscription.setUsageProxyKey(asString(p.key, 'key', 1024))
+    }
+    case 'providers.clearUsageProxyKey': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'A usage proxy key is cleared on its own computer')
+      const p = isObject(params) ? params : {}
+      if (asString(p.providerId, 'providerId', 128) !== 'claude-subscription') throw new Error('Only Claude usage reads through a proxy')
+      ctx.mms.claudeSubscription.clearUsageProxyKey()
+      return { ok: true }
+    }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
@@ -3075,12 +3265,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
-      const metadata = stored && lookup.projectPath ? await manager.verify(stored) : stored
+      // A turn still recording its end-of-turn checkpoint under its live lease is not waiting on recovery.
+      const inFlight = liveCheckpointTest(lookup.threadDirectory)
+      const metadata = stored && lookup.projectPath ? await manager.verify(stored, { inFlight }) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
-      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath)
+      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
@@ -3180,7 +3372,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const activeBranchId = new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const latest = actions.filter((action) => action.conversationBranchId === activeBranchId).at(-1)
       const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
-      const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+      const prompt = messages.filter(isTurnPrompt).at(-1)
       const busy = ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)
       const retained = latest?.retention?.state === 'available' || latest?.retention?.state === 'pinned'
       let contextMatches = true
@@ -3275,7 +3467,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new DomainRpcError('undo_boundary_unavailable', 'This turn has no exact recorded conversation Undo boundary.')
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
-        const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+        const prompt = messages.filter(isTurnPrompt).at(-1)
         if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new DomainRpcError('undo_boundary_unavailable', 'The latest prompt has no eligible Undo boundary.')
       }
       const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
@@ -3289,7 +3481,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       let gate: (() => RestoreReview | null) | undefined
       if (latest?.scope !== 'conversation') {
         if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('undo_boundary_unavailable', 'This prompt has no eligible recorded Undo boundary.')
-        // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
+        // SPEC §16.3: files are restored only in an owned, unshared worktree; unknown capabilities review first.
         gate = () => restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewedDiffSha })
       }
       // SPEC §13.2: a provider that rolls its own session back would undo natively; none does yet.
@@ -3710,7 +3902,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
-      const result = await ctx.mms.gitService.checkout(target.root, gitUserAction(ctx, 'Switch branch'), asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
+      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => ctx.mms.gitService.checkout(target.root, gitUserAction(ctx, 'Switch branch'), asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) }))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
@@ -3719,14 +3911,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const message = asString(p.message, 'message', 4096)
       const amend = asOptionalBoolean(p.amend, 'amend') === true
       const expectedBranch = asOptionalString(p.expectedBranch, 512)
+      // Without it (an older client), the rule from before: everything in a thread's worktree, else the index or everything.
+      const selection = asCommitSelection(p.selection)
       const thread = threadWorktree(target)
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      // Only a chosen commit refuses while a turn works there; the others keep their rules.
+      const chosenPlace = selection?.mode === 'chosen' ? place : { ...place, assertIdle: undefined }
       if (thread) {
         // A thread's commits are recorded one by one with the actions that made them, so an amend is refused before Git runs.
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
-        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded as a failed action.
+        // Committed through the user's hooks as one commit; a rejected commit is recorded as a failed action.
         await followedGitAction(ctx, p, target.root, 'commit', (request, signal) =>
-          runUserThreadGitAction(ctx, thread, { signal }, () => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, 'Commit'), message, { all: true, expectedBranch, ...request })))
-      } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, amend ? 'Amend the last commit' : 'Commit'), message, { amend, expectedBranch, ...request }))
+          runUserThreadGitAction(ctx, thread, { signal }, () => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, 'Commit'), message, { all: true, expectedBranch, ...(selection ? { selection } : {}), place: chosenPlace, ...request })))
+      } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, amend ? 'Amend the last commit' : 'Commit'), message, { amend, expectedBranch, ...(selection ? { selection } : {}), place: chosenPlace, ...request }))
+      announceSelection(ctx, p, place)
       return gitStatusResult(ctx, target.root)
     }
     case 'git.push': {
@@ -3754,7 +3952,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.suggestCommitMessage': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedBranch'])
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedBranch', 'selection'])
+      const selection = asCommitSelection(p.selection)
       // Reads and proposes only: it never provisions a worktree or changes the repository. A worktree that
       // cleanup retired is restored first, because the draft describes what the folder holds.
       await materializeRequestedWorkspace(ctx, p)
@@ -3765,7 +3964,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread's own worktree commits every change (see `git.commit`), so that is what is described there.
       const inWorktree = threadId !== null && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load() !== null
       const projectId = asOptionalString(p.projectId, 256) ?? (threadId ? ctx.mms.threads.getThread(threadId)?.projectId ?? null : null)
-      return await ctx.mms.orchestrator.generateCommitMessage({ root, all: inWorktree, projectId, threadId: inWorktree ? threadId : null, branch: expectedBranch ?? null })
+      // A chosen selection is described as the commit would take it, and only while it is the one the person saw.
+      const describe = selection?.mode === 'chosen' ? () => ctx.mms.gitService.describeSelection(root, selectionPlaceFor(ctx, p, root), selection.token) : undefined
+      return await ctx.mms.orchestrator.generateCommitMessage({ root, all: inWorktree || selection?.mode === 'all', projectId, threadId: inWorktree ? threadId : null, branch: expectedBranch ?? null, ...(describe ? { describe } : {}) })
     }
     case 'git.stage':
     case 'git.unstage': {
@@ -3775,8 +3976,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const all = asOptionalBoolean(p.all, 'all') === true
       const staging = method === 'git.stage'
       const action = gitUserAction(ctx, staging ? 'Stage' : 'Unstage')
-      if (all) await (staging ? ctx.mms.gitService.stageAll(target.root, action) : ctx.mms.gitService.unstageAll(target.root, action))
-      else await (staging ? ctx.mms.gitService.stage(target.root, action, await gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, action, await gitPaths(ctx, target.root, p.paths)))
+      // The project's "everything left out" marker stays only when it held right before this write.
+      const marker = selectionMarkerOf(() => selectionPlaceFor(ctx, p, target.root))
+      if (all) await (staging ? ctx.mms.gitService.stageAll(target.root, action, marker) : ctx.mms.gitService.unstageAll(target.root, action, marker))
+      else await (staging ? ctx.mms.gitService.stage(target.root, action, await gitPaths(ctx, target.root, p.paths), marker) : ctx.mms.gitService.unstage(target.root, action, await gitPaths(ctx, target.root, p.paths), marker))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.discard': {
@@ -3788,7 +3991,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // copy for the project.
       const thread = recordedThreadTarget(ctx, p, target)
       const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
-      const discard = () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths, { owner })
+      const marker = threadWorktree(target) ? undefined : selectionMarkerOf(() => selectionPlaceFor(ctx, p, target.root))
+      const discard = () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths, { owner }, marker)
       let kept: DiscardedCopy | undefined
       if (thread) {
         const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
@@ -3808,7 +4012,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
-      const result = await followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, gitUserAction(ctx, 'Pull'), { strategy: strategy as GitPullStrategy, ...request }))
+      const result = await clearingSelectionWhenHeadMoves(ctx, p, target, () => followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, gitUserAction(ctx, 'Pull'), { strategy: strategy as GitPullStrategy, ...request })))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.abortInProgress': {
@@ -3822,9 +4026,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = recordedThreadTarget(ctx, p, target)
       const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
       const abortKeeping = () => ctx.mms.gitService.abortInProgress(target.root, gitUserAction(ctx, `Abort the ${kind}`), kind, { owner })
-      const kept = thread
-        ? await runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Aborted the ${kind}`, reversible: false }] }, abortKeeping)
-        : await abortKeeping()
+      const kept = await clearingSelectionWhenHeadMoves(ctx, p, target, () => thread
+        ? runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Aborted the ${kind}`, reversible: false }] }, abortKeeping)
+        : abortKeeping())
       return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: abortKeptNotice(kind, kept) } } : {})
     }
     case 'git.createBranch': {
@@ -3844,6 +4048,94 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.deleteBranch(target.root, gitUserAction(ctx, 'Delete branch'), asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
       return gitStatusResult(ctx, target.root)
+    }
+    case 'git.changes': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'paths'])
+      await materializeRequestedWorkspace(ctx, p)
+      const root = projectRootContext(ctx, p)
+      const paths = p.paths === undefined ? undefined : await gitPaths(ctx, root, p.paths)
+      return await ctx.mms.gitService.readChanges(root, selectionPlaceFor(ctx, p, root), paths ? { paths } : {}) satisfies GitChangesResult
+    }
+    case 'git.include': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'path', 'version', 'include', 'hunks', 'lines', 'all'])
+      const target = await gitMutationTarget(ctx, p)
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      const include = asBoolean(p.include, 'include')
+      const action = gitUserAction(ctx, include ? 'Include in the commit' : 'Leave out of the commit')
+      if (asOptionalBoolean(p.all, 'all') === true) {
+        if (p.path !== undefined || p.hunks !== undefined || p.lines !== undefined) throw new DomainRpcError('invalid_params', 'all takes no path, hunks or lines')
+        const result = await ctx.mms.gitService.includeAll(target.root, action, place, include)
+        announceSelection(ctx, p, place)
+        return result
+      }
+      const [path] = await gitPaths(ctx, target.root, [asString(p.path, 'path', 4096)])
+      const result = await ctx.mms.gitService.include(target.root, action, place, { path: path!, version: asString(p.version, 'version', 128), include, ...asIncludeParts(p) })
+      announceSelection(ctx, p, place)
+      return result
+    }
+    case 'git.undoLastCommit': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'expectedHead'])
+      const threadId = asOptionalString(p.threadId, 256)
+      // A thread's commits are its recorded actions: Undo in the chat takes one back.
+      if (threadId && threadPlacement(ctx.mms.threads.getThread(threadId)) !== 'project-folder') throw gitThreadRules.create('git_undo_in_thread')
+      const target = await gitMutationTarget(ctx, p)
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      await ctx.mms.gitService.undoLastCommit(target.root, gitUserAction(ctx, 'Undo last commit'), asString(p.expectedHead, 'expectedHead', 128), place)
+      announceSelection(ctx, p, place)
+      return gitStatusResult(ctx, target.root)
+    }
+    case 'git.revert': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'path', 'version', 'hunks', 'lines'])
+      const target = await gitMutationTarget(ctx, p)
+      const [path] = await gitPaths(ctx, target.root, [asString(p.path, 'path', 4096)])
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      // Before a snapshot is taken for the recorded action: a running turn refuses at once.
+      place.assertIdle?.()
+      // Owned as a Discard's copy is: a thread's revert, in its worktree or its project's folder, is a recorded action of
+      // the person and the thread keeps the copy; the person's own checkout keeps it for the project.
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      const revertFile = () => ctx.mms.gitService.revert(target.root, gitUserAction(ctx, 'Revert'), place, { path: path!, version: asString(p.version, 'version', 128), ...asIncludeParts(p) }, { owner })
+      const result = thread
+        ? await runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Reverted changes in ${path}`, reversible: false }] }, revertFile)
+        : await revertFile()
+      announceSelection(ctx, p, place)
+      return result
+    }
+    case 'git.restoreReverted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'revertId'])
+      const target = await gitMutationTarget(ctx, p)
+      const revertId = asString(p.revertId, 'revertId', 128)
+      const place = selectionPlaceFor(ctx, p, target.root, true)
+      place.assertIdle?.()
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      // A revert recorded while the thread stood otherwise in its project's folder is in the other journal.
+      const also = revertJournalsFor(ctx, p).filter((journal) => journal !== owner)
+      const restoreKept = (check: boolean) => ctx.mms.gitService.restoreReverted(target.root, gitUserAction(ctx, 'Restore reverted changes'), place, revertId, { owner, also }, { check })
+      // A thread's restore writes files as a recorded action; one that has nothing to write (already restored, changed,
+      // expired) records none.
+      let result = await restoreKept(Boolean(thread))
+      if ('pending' in result) {
+        result = await runUserThreadGitAction(ctx, thread!, { externalEffects: [{ kind: 'unknown', description: 'Restored reverted changes', reversible: false }] }, () => restoreKept(false))
+        // Changed in the moment between the check and the action: the answer is still one of the three.
+        if ('pending' in result) result = { restored: false, reason: 'changed' }
+      }
+      if (result.restored) announceSelection(ctx, p, place)
+      return result satisfies GitRestoreRevertedResult
+    }
+    case 'git.revertedList': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId'])
+      await materializeRequestedWorkspace(ctx, p)
+      const root = projectRootContext(ctx, p)
+      const journals = revertJournalsFor(ctx, p)
+      return journals.length ? await ctx.mms.gitService.revertedList(root, journals) : []
     }
     case 'git.cancelOperation': {
       const p = isObject(params) ? params : {}

@@ -1,5 +1,4 @@
-// Pure helpers for line comments on a diff. Type-only Monaco import, so tests can load it.
-import type { editor } from 'monaco-editor'
+// Pure helpers for line comments on a diff, so tests can load them.
 import {
   joinReviewPath,
   normalizeReviewPath,
@@ -27,10 +26,10 @@ export function scopeFromKey(key: string): ReviewScope | null {
   return null
 }
 
-/** The scope name the agent and the pill show: "Whole thread", "Working tree", or the turn's picker label. */
+/** The scope name the agent and the pill show: "This thread", "Uncommitted", or the turn's picker label. */
 export function commentScopeLabel(scope: ReviewScope, choices: readonly TurnChoice[] = []): string {
-  if (scope.kind === 'thread') return 'Whole thread'
-  if (scope.kind === 'worktree') return scope.staged ? 'Staged changes' : 'Working tree'
+  if (scope.kind === 'thread') return 'This thread'
+  if (scope.kind === 'worktree') return scope.staged ? 'Staged changes' : 'Uncommitted'
   const choice = choices.find((item) => item.turnId === scope.turnId)
   return choice ? `Turn: ${choice.label}`.slice(0, 128) : 'Turn'
 }
@@ -76,45 +75,4 @@ export function commentCounts(
     if (count) counts.set(file.path, count)
   }
   return counts
-}
-
-/** One whole-line decoration per comment, in the order given; two comments on a line both get one. */
-export function commentDecorations(comments: readonly ChatReference[]): editor.IModelDeltaDecoration[] {
-  return comments.flatMap((comment) => {
-    const line = comment.line
-    if (!line) return []
-    const endLine = comment.endLine && comment.endLine >= line ? comment.endLine : line
-    return [
-      {
-        range: { startLineNumber: line, startColumn: 1, endLineNumber: endLine, endColumn: 1 },
-        options: {
-          isWholeLine: true,
-          className: 'review-comment-line',
-          glyphMarginClassName: 'review-comment-glyph',
-          hoverMessage: { value: comment.comment ?? '' }
-        }
-      }
-    ]
-  })
-}
-
-/**
- * The lines a selection covers. A selection that ends at the start of a line does not include that
- * line, as in editors; an empty selection is no range.
- */
-export function selectedLineRange(selection: {
-  startLineNumber: number
-  startColumn: number
-  endLineNumber: number
-  endColumn: number
-}): { line: number; endLine: number } | null {
-  // Monaco's `Selection` is ordered (start before end); this also accepts a reversed one.
-  const reversed =
-    selection.startLineNumber > selection.endLineNumber ||
-    (selection.startLineNumber === selection.endLineNumber && selection.startColumn > selection.endColumn)
-  const [startLine, startColumn, endLine, endColumn] = reversed
-    ? [selection.endLineNumber, selection.endColumn, selection.startLineNumber, selection.startColumn]
-    : [selection.startLineNumber, selection.startColumn, selection.endLineNumber, selection.endColumn]
-  if (startLine === endLine && startColumn === endColumn) return null
-  return { line: startLine, endLine: endLine > startLine && endColumn === 1 ? endLine - 1 : endLine }
 }

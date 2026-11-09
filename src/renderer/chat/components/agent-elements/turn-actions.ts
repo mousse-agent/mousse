@@ -11,6 +11,8 @@ export type TurnActions = {
   retry: (promptId: string) => void;
   /** Sends "Continue" to the thread. */
   continueRun: () => void;
+  /** Stops the thread's running compaction; the full history stays. */
+  stopCompaction?: () => void;
   /** Forks the thread after the finished turn with this `turnId` and opens the fork. */
   forkFrom?: (turnId: string) => void;
 };

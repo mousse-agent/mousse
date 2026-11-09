@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle } from '../../lib/icons'
 import { ipcErrorLine } from '../../lib/errorText'
 import { useAppStore } from '../../stores/appStore'
@@ -113,30 +113,50 @@ export function recoveryOf(status: unknown): ShownRecovery | undefined {
 /** Turn phases in which a turn holds the thread, so recovery and Abort wait for it. */
 const RUNNING_PHASES = new Set(['queued', 'thinking', 'streaming', 'tool_running', 'awaiting_input', 'finalizing'])
 
-/** What `threadId` is waiting on, read from the workspace status again when a turn changes phase and while it is shown. */
+/**
+ * A pause shows only when the status is read again this long after and still says so, so a state that settles by
+ * itself (a turn recording its end) never flashes as one.
+ */
+export const PAUSED_CONFIRM_MS = 1_500
+
+/**
+ * What `threadId` is waiting on, read from the workspace status again when a turn changes phase and while it is shown.
+ * A pause is never shown while a turn runs or finishes, and shows only once a second read confirms it; a pause already
+ * on screen is updated by one read. Merge and Publish notices show on the first read.
+ */
 function useWorkspaceRecovery(threadId: string | null | undefined): { recovery: ShownRecovery | undefined; turnRunning: boolean; refresh: () => void } {
   const phase = useAppStore((state) => (threadId ? state.turnStates[threadId]?.phase : undefined))
+  const turnRunning = phase !== undefined && RUNNING_PHASES.has(phase)
   const [read, setRead] = useState<{ threadId: string; recovery: ShownRecovery | undefined } | null>(null)
   const [tick, setTick] = useState(0)
   const refresh = useCallback(() => setTick((value) => value + 1), [])
+  const pausedOnScreen = useRef(false)
   useEffect(() => {
     if (!threadId) return
     let cancelled = false
-    void Promise.resolve(window.mousse.workspace.getStatus(threadId)).then(
-      (status) => { if (!cancelled) setRead({ threadId, recovery: recoveryOf(status) }) },
-      // A failed read says nothing about the worktree: what is shown stays.
-      () => undefined
-    )
-    return () => { cancelled = true }
+    let confirm: ReturnType<typeof setTimeout> | undefined
+    const readStatus = () => Promise.resolve(window.mousse.workspace.getStatus(threadId)).then(recoveryOf)
+    const show = (recovery: ShownRecovery | undefined) => { if (!cancelled) setRead({ threadId, recovery }) }
+    // A failed read says nothing about the worktree: what is shown stays.
+    const ignore = () => undefined
+    void readStatus().then((recovery) => {
+      if (cancelled) return
+      if (recovery?.kind !== 'paused' || pausedOnScreen.current) return show(recovery)
+      // Seen once: what is shown stays until a second read says whether it is still paused.
+      confirm = setTimeout(() => { void readStatus().then(show, ignore) }, PAUSED_CONFIRM_MS)
+    }, ignore)
+    return () => { cancelled = true; if (confirm) clearTimeout(confirm) }
   }, [threadId, phase, tick])
   const shown = read && read.threadId === threadId ? read.recovery : undefined
-  const showing = shown !== undefined
+  const visible = shown?.kind === 'paused' && turnRunning ? undefined : shown
+  useEffect(() => { pausedOnScreen.current = visible?.kind === 'paused' }, [visible])
+  const showing = visible !== undefined
   useEffect(() => {
     if (!showing) return
     const timer = setInterval(refresh, POLL_MS)
     return () => clearInterval(timer)
   }, [showing, refresh])
-  return { recovery: shown, turnRunning: phase !== undefined && RUNNING_PHASES.has(phase), refresh }
+  return { recovery: visible, turnRunning, refresh }
 }
 
 /** The banner for a thread whose worktree or Publish is waiting on something. Renders nothing otherwise. */

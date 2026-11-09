@@ -33,6 +33,7 @@ import {
 } from './scheduled/scheduledLabels'
 import { WebhookDialog, type WebhookApi } from './scheduled/WebhookDialog'
 import { openThread } from '../lib/openThread'
+import { automationsHomeHeadline, SCHEDULE_ALL_CLEAR, SCHEDULE_EMPTY, UP_NEXT_HEADING } from './scheduled/automationsCopy'
 import '../styles/scheduled-panel.css'
 
 /** Which record was newest when Run now was pressed: a different newest one is that run's. */
@@ -73,7 +74,16 @@ interface OpenTask {
 const AGENTS_HELP =
   "Lets agents add, change, pause and run their own scheduled tasks through Mousse's tools, from a turn you started. It also needs the Manage agent access level. Tasks agents add run no wider than that agent, end after the time set here unless you extend them, and are paused when you turn this off (you resume them)."
 
-export function ScheduledPanel() {
+/** Rows Home shows under Up next. */
+const UP_NEXT_ROWS = 3
+
+/**
+ * The Schedule tab (`full`): quick add, every task in groups, and the agents setting. Automations' Home tab
+ * (`home`): a headline, quick add, and the next few tasks to run, with All to open the Schedule tab.
+ */
+export function ScheduledPanel({ variant = 'full', onSeeAll }: { variant?: 'full' | 'home'; onSeeAll?: () => void } = {}) {
+  const home = variant === 'home'
+  const [headline] = useState(() => automationsHomeHeadline())
   const [jobs, setJobs] = useState<ScheduledJob[]>([])
   const [status, setStatus] = useState<SchedulerStatus | null>(null)
   const [catalog, setCatalog] = useState<ScheduledCatalog>(EMPTY_CATALOG)
@@ -153,7 +163,9 @@ export function ScheduledPanel() {
 
   const groups = useMemo(() => groupJobs(jobs, { showDone }), [jobs, showDone])
   const done = useMemo(() => doneCount(jobs), [jobs])
-  const ordered = useMemo(() => groups.flatMap((group) => group.jobs), [groups])
+  const upNext = useMemo(() => groups.filter((group) => group.key !== 'paused' && group.key !== 'done').flatMap((group) => group.jobs).slice(0, UP_NEXT_ROWS), [groups])
+  const shownGroups = home ? (upNext.length > 0 ? [{ key: 'next', label: UP_NEXT_HEADING, jobs: upNext }] : []) : groups
+  const ordered = useMemo(() => shownGroups.flatMap((group) => group.jobs), [shownGroups])
 
   const webhookJob = webhookJobId ? jobs.find((job) => job.id === webhookJobId) : undefined
   // A task deleted while its webhook dialog is open closes the dialog (and with it the secret).
@@ -363,6 +375,7 @@ export function ScheduledPanel() {
     <div className="scheduled-panel">
       <div className="scheduled-scroll">
         <div className="scheduled-column" ref={listRef}>
+          {home ? <h2 className="scheduled-home-headline">{headline}</h2> : null}
           <QuickAdd
             ref={quickInput}
             catalog={catalog}
@@ -371,7 +384,7 @@ export function ScheduledPanel() {
             openCustom={(draft) => { setOpenTask(null); setCreating(draft); void loadCatalog() }}
             editing={creating !== null}
             cleared={quickCleared}
-            menu={pageMenu}
+            menu={home ? undefined : pageMenu}
           />
 
           {schedulerState === 'stopped' || schedulerState === 'unavailable' ? (
@@ -406,20 +419,23 @@ export function ScheduledPanel() {
             </section>
           ) : null}
 
-          {groups.map((group) => (
+          {shownGroups.map((group) => (
             <section key={group.key} className="scheduled-group" aria-labelledby={`${detailsId}-group-${group.key}`} data-group={group.key}>
-              <h2 className="scheduled-group-head" id={`${detailsId}-group-${group.key}`}>{group.label}</h2>
+              <div className="scheduled-group-top">
+                <h2 className="scheduled-group-head" id={`${detailsId}-group-${group.key}`}>{group.label}</h2>
+                {home && onSeeAll ? <button type="button" className="scheduled-line-link" title="Open Schedule" onClick={onSeeAll}>All</button> : null}
+              </div>
               <div className="scheduled-rows">{group.jobs.map(rowOf)}</div>
             </section>
           ))}
 
-          {jobs.length === 0 && !creating ? (
-            <p className="scheduled-empty">Nothing scheduled yet. Type what the agent should do, then pick when.</p>
+          {home ? null : jobs.length === 0 && !creating ? (
+            <p className="scheduled-empty">{SCHEDULE_EMPTY}</p>
           ) : groups.length === 0 && !creating ? (
-            <p className="scheduled-empty">Nothing left to run.</p>
+            <p className="scheduled-empty">{SCHEDULE_ALL_CLEAR}</p>
           ) : null}
 
-          <div className="scheduled-settings">
+          {home ? null : <div className="scheduled-settings">
             <SettingsAdvanced label={`Agents may add tasks · ${agentJobs === true ? 'On' : agentJobs === false ? 'Off' : '…'}`}>
               <div className="scheduled-rows scheduled-settings-rows">
                 <div className="settings-item" title={AGENTS_HELP}>
@@ -438,7 +454,7 @@ export function ScheduledPanel() {
                 <AgentJobLimitFields settings={settings} save={saveSettings} />
               </div>
             </SettingsAdvanced>
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -468,7 +484,7 @@ export function ScheduledPanel() {
             </>
           }
         >
-          <p className="scheduled-note">Its run history is deleted too; the threads it ran in stay.</p>
+          <p className="scheduled-note">Its run history goes too.</p>
           {deleteError ? <p className="scheduled-item-error" role="alert">{deleteError}</p> : null}
         </Modal>
       ) : null}

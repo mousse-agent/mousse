@@ -454,7 +454,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
 
     if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
       if (msg.kind === 'context_cleared') base.metadata = { ...base.metadata as object, contextCleared: true }
-      if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true }
+      if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true,
+        ...(msg.compaction?.manual ? { compactionManual: true } : {}), ...(msg.compaction?.kept ? { compactionKept: msg.compaction.kept } : {}) }
       // A line from Mousse itself (uncommitted changes it could not put back), not part of the agent's answer.
       if (msg.kind === 'warning') base.metadata = { ...base.metadata as object, notice: true }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]

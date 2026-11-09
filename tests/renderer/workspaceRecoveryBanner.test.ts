@@ -2,7 +2,8 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { recoveryOf, WorkspaceRecoveryBanner, WorkspaceRecoveryBannerView, type WorkspaceRecoveryBannerViewProps } from '../../src/renderer/chat/components/WorkspaceRecoveryBanner'
+import { PAUSED_CONFIRM_MS, recoveryOf, WorkspaceRecoveryBanner, WorkspaceRecoveryBannerView, type WorkspaceRecoveryBannerViewProps } from '../../src/renderer/chat/components/WorkspaceRecoveryBanner'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { WorkspaceRecovery } from '../../src/shared/workspace'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -180,10 +181,11 @@ describe('the banner of a thread', () => {
   })
 
   it('shows a refused recovery in the banner and keeps the button', async () => {
+    vi.useFakeTimers()
     mousse.workspace.getStatus.mockResolvedValue({ recovery: paused })
     mousse.operations.recover.mockRejectedValue(new Error("Error invoking remote method 'operations:recover': Undo recovery intent is missing."))
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
-    await settle()
+    await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS) })
     click(buttons()[0])
     await settle()
     await settle()
@@ -194,11 +196,59 @@ describe('the banner of a thread', () => {
 
   it('reads the status again while shown, so a fix made by hand clears it', async () => {
     vi.useFakeTimers()
-    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: paused }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
+    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: paused }).mockResolvedValueOnce({ recovery: paused }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
-    await settle()
+    await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS) })
     expect(host.querySelector('.chat-workspace-recovery')).not.toBeNull()
     await act(async () => { await vi.advanceTimersByTimeAsync(10_500) })
     expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+  })
+
+  it('shows a pause that a second read confirms, and only then', async () => {
+    vi.useFakeTimers()
+    mousse.workspace.getStatus.mockResolvedValue({ recovery: paused })
+    act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+    await settle()
+    expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS) })
+    expect(text()).toContain('This thread is paused until its worktree is recovered.')
+    expect(mousse.workspace.getStatus).toHaveBeenCalledTimes(2)
+  })
+
+  it('never flashes a pause that settles by itself before the second read', async () => {
+    vi.useFakeTimers()
+    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: paused }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
+    act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+    await settle()
+    expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS * 4) })
+    expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+  })
+
+  it('never shows a pause while a turn runs or finishes, and shows a leftover once the turn has ended', async () => {
+    vi.useFakeTimers()
+    const turnStates = useAppStore.getState().turnStates
+    try {
+      mousse.workspace.getStatus.mockResolvedValue({ recovery: paused })
+      for (const phase of ['streaming', 'finalizing']) {
+        act(() => useAppStore.setState({ turnStates: { ...turnStates, t1: { ...turnStates.t1, phase } } as typeof turnStates }))
+        act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+        await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS * 4) })
+        expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+      }
+      // The turn ended and the pause is still there: a leftover, shown after the second read.
+      act(() => useAppStore.setState({ turnStates: { ...turnStates, t1: { ...turnStates.t1, phase: 'idle' } } as typeof turnStates }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(PAUSED_CONFIRM_MS) })
+      expect(text()).toContain('This thread is paused until its worktree is recovered.')
+    } finally {
+      act(() => useAppStore.setState({ turnStates }))
+    }
+  })
+
+  it('shows a Publish that did not finish on the first read', async () => {
+    mousse.workspace.getStatus.mockResolvedValue({ recovery: publish })
+    act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+    await settle()
+    expect(text()).toContain('A Publish did not finish.')
   })
 })

@@ -20,6 +20,8 @@ vi.mock('../../src/renderer/components/chats/NetworkTaskPicker', () => ({ Networ
 vi.mock('../../src/renderer/components/chats/ChatBrowserAccess', () => ({ ChatBrowserAccess: () => null }))
 vi.mock('../../src/renderer/components/chats/OpenNetworkChatDialog', () => ({ OpenNetworkChatDialog: () => null }))
 vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ ComposerQuestionModal: () => null }))
+// The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
   const { createElement: h } = await import('react')
   return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => h('div', { className }, value) }
@@ -27,6 +29,7 @@ vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
 
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
+const { NewBotDialogHost } = await import('../../src/renderer/components/bots/NewBotDialog')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 
@@ -49,7 +52,7 @@ const other = { ...summary('b2', { name: 'Garden', state: 'stuck', stateText: 'N
 const rows: BotChatMessage[] = [
   { ...message(1, { author: 'owner', text: 'Think harder about this.' }), ...leak } as BotChatMessage,
   { ...message(2, { text: 'Okay, I’ll take more time on this.', chips: [{ icon: 'think', text: 'taking more time', ...leak } as never] }), ...leak } as BotChatMessage,
-  { ...message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'read files in ~/Invoices', note: 'Only this folder.', status: 'open', ...leak } as never }), ...leak } as BotChatMessage,
+  { ...message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open', ...leak } as never }), ...leak } as BotChatMessage,
   { ...message(4, { kind: 'error', text: '', error: { text: 'Paused until 14:00 (your Claude usage limit)', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'claude:bots' } } }), ...leak } as BotChatMessage
 ]
 
@@ -70,7 +73,7 @@ beforeEach(async () => {
   fake = fakeBots({
     bots: [bot, other],
     chats: { b1: rows },
-    details: { b1: { summary: bot, permissions: [{ id: 'fp1', title: 'read files in ~/Invoices', note: '', grantedAt: '2026-11-06T10:00:00.000Z', ...leak } as never], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule', ...leak } as never] } }
+    details: { b1: { summary: bot, permissions: [{ id: 'fp1', title: 'use files on this computer', note: '', grantedAt: '2026-11-06T10:00:00.000Z', ...leak } as never], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule', ...leak } as never] } }
   })
   fake.live.b1 = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web', ...leak } as never }
   installPreload(fake)
@@ -79,7 +82,7 @@ beforeEach(async () => {
   document.body.append(host)
   root = createRoot(host)
   await act(async () => useChatsStore.getState().activate('p1'))
-  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace))))
+  await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace), createElement(NewBotDialogHost))))
 })
 
 afterEach(() => {
