@@ -1,7 +1,7 @@
 import { useRef, useState, type MouseEvent } from 'react'
 import { FloatingPortal } from '../../lib/floatingLayer'
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronDown, GitPullRequest, Loader2, Play } from '../../lib/icons'
-import type { GitPullStrategy } from '../../../shared/types'
+import type { GitInProgress, GitPullStrategy } from '../../../shared/types'
 import { PULL_STRATEGY_LABELS, type AbortableKind, type NextStep } from './gitSectionLogic'
 import { useSideCardMenu } from './useSideCardMenu'
 
@@ -12,6 +12,7 @@ export type NextStepChoice =
   | { kind: 'pull'; strategy: GitPullStrategy }
   | { kind: 'push' }
   | { kind: 'abort'; what: AbortableKind }
+  | { kind: 'continue'; what: GitInProgress }
 
 interface NextStepButtonProps {
   step: NextStep
@@ -24,7 +25,7 @@ interface NextStepButtonProps {
 
 const ICONS = {
   resolve: AlertTriangle,
-  finish: Play,
+  continue: Play,
   pull: ArrowDown,
   push: ArrowUp,
   'pull-request': GitPullRequest
@@ -40,18 +41,20 @@ function menuItems(step: NextStep): MenuItem[] {
   if (step.kind === 'pull' && step.strategies.length > 1) {
     return step.strategies.map((strategy) => ({ label: PULL_STRATEGY_LABELS[strategy], choice: { kind: 'pull', strategy } }))
   }
-  if ((step.kind === 'resolve' || step.kind === 'finish') && step.abort) {
-    return [{ label: `Abort ${step.abort}`, choice: { kind: 'abort', what: step.abort } }]
-  }
-  return []
+  const abort: MenuItem[] = (step.kind === 'resolve' || step.kind === 'continue') && step.abort
+    ? [{ label: `Abort ${step.abort}`, choice: { kind: 'abort', what: step.abort } }]
+    : []
+  // Continue carries on at once; the menu also offers the files, to look before carrying on.
+  return step.kind === 'continue' ? [...abort, { label: 'Open Changes', choice: { kind: 'open-changes' } }] : abort
 }
 
 /** What pressing the step itself does. Diverged branches have no default: the press opens the menu. */
 function mainChoice(step: NextStep): NextStepChoice | null {
   switch (step.kind) {
     case 'resolve':
-    case 'finish':
       return { kind: 'open-changes' }
+    case 'continue':
+      return { kind: 'continue', what: step.what }
     case 'pull':
       return step.strategies.length === 1 ? { kind: 'pull', strategy: step.strategies[0] } : null
     case 'push':
@@ -74,7 +77,7 @@ export function NextStepButton({ step, busy, blockedReason, onChoose }: NextStep
   const items = menuItems(step)
   const main = mainChoice(step)
   const Icon = ICONS[step.kind]
-  const tone = step.kind === 'resolve' || step.kind === 'finish' ? 'warn' : 'accent'
+  const tone = step.kind === 'resolve' ? 'warn' : 'accent'
   const blocked = blockedReason !== null
   const open = menuOpen && items.length > 0 && !busy
   const { menuRef, menuId, menuStyle, closeAndFocus, menuKeyDown, triggerKeyDown } = useSideCardMenu({

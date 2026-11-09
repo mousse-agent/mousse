@@ -48,6 +48,7 @@ import type {
   GitCheckoutResult,
   GitCommit,
   GitCommitOptions,
+  GitContinueResult,
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
@@ -90,6 +91,8 @@ const gitErrors = createErrorProvider({
   git_pull_failed: { category: 'unavailable', retryable: false, message: 'Git pull failed. Check the remote and your access.' },
   git_pull_diverged: { category: 'conflict', retryable: false, message: 'This branch and its upstream have both moved. Choose merge or rebase to bring them together.' },
   git_pull_dirty: { category: 'conflict', retryable: false, message: 'Uncommitted changes would be overwritten by the pull. Commit or stash them first.' },
+  git_continue_conflicted: { category: 'conflict', retryable: false, message: 'Resolve the conflicted files first.' },
+  git_continue_none: { category: 'invalid', retryable: false, message: 'Nothing is stopped here to continue.' },
   git_checkout_dirty: { category: 'conflict', retryable: false, message: 'Uncommitted changes would be overwritten by the switch.' },
   git_checkout_untracked_collision: { category: 'conflict', retryable: false, message: 'Untracked files in the way would be overwritten by the switch.' },
   git_checkout_failed: { category: 'invalid', retryable: false, message: 'Git could not switch branches.' },
@@ -200,7 +203,6 @@ const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInPr
   MERGE_HEAD: 'merge',
   REVERT_HEAD: 'revert',
   CHERRY_PICK_HEAD: 'cherry-pick',
-  REBASE_HEAD: 'rebase',
   'rebase-merge': 'rebase',
   'rebase-apply': 'rebase'
 }
@@ -1418,6 +1420,42 @@ export class GitService {
         throw keepRefusal(error)
       }
     })
+  }
+
+  /**
+   * Carries on with a merge, rebase, cherry-pick or revert that stopped, once its conflicts are resolved. Only ever
+   * called by an explicit user action. The messages Git prepared are kept as they are (no editor opens); the hooks and
+   * `exec` steps Git runs are its own. It is followed like a commit: Cancel stops it, and so does a long silence (a
+   * hook or step waiting on a prompt), so it never holds the repository's lease for good. A rebase may stop again:
+   * `conflicted` on a later commit's conflict, `paused` on a step that wants the person (`edit`, `break`, a failed
+   * `exec`), left as Git left it.
+   */
+  continueInProgress(cwd: string, userRequested: UserAction, kind: GitInProgress, options: GitOperationRequest = {}): Promise<GitContinueResult> {
+    return this.asUser(userRequested, () => this.continueInProgressNow(cwd, kind, options))
+  }
+
+  private async continueInProgressNow(cwd: string, kind: GitInProgress, options: GitOperationRequest): Promise<GitContinueResult> {
+    return this.runOperation(cwd, 'commit', options, true, (live) => this.serialized(cwd, async () => {
+      assertNotCancelled(live)
+      const top = await this.toplevel(cwd)
+      if (await this.inProgress(top) !== kind) throw gitErrors.create('git_continue_none')
+      const unmerged = () => this.read(top, ['diff', '--name-only', '--diff-filter=U'])
+      // Git refuses with unmerged paths anyway; saying so first keeps its long message out of the card.
+      if (await unmerged()) throw gitErrors.create('git_continue_conflicted')
+      // Finishing a merge is a commit of what it prepared; the others have their own --continue.
+      const args = kind === 'merge' ? ['commit', '--no-edit'] : [kind, '--continue']
+      const run = await this.runLive(top, args, live, {
+        env: { ...explicitActionGitEnv(), GIT_EDITOR: 'true' },
+        silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS,
+        hooks: true
+      })
+      if (run.cancelled) throw cancelledError()
+      if (run.stalled) throw gitErrors.create('git_silence_timeout')
+      const still = await this.inProgress(top)
+      if (still && await unmerged()) return { result: 'conflicted' }
+      if (!run.ok) throw failure('git_failed', run)
+      return { result: still ? 'paused' : 'done' }
+    }, live.signal))
   }
 
   /** The checked-out branch, or null for a detached HEAD. */

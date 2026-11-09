@@ -11,7 +11,7 @@ import {
 import { openSurface } from '../../lib/surfaces'
 import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
-import { abortGitInProgress, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
+import { abortGitInProgress, continueGitInProgress, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
 import { cancelGitOperation, useGitOperation } from '../../stores/gitOperationStore'
 import { useUpstreamCheck } from '../../stores/upstreamCheckStore'
 import { isActive } from '../git/gitOperationLogic'
@@ -19,7 +19,7 @@ import { pullResultNotice } from '../git/gitSyncLogic'
 import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
 import { gitScopeFor } from '../../lib/activeProject'
-import type { GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
+import type { GitInProgress, GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { BranchPicker } from './BranchPicker'
 import { NextStepButton, type NextStepChoice } from './NextStepButton'
@@ -34,6 +34,7 @@ import {
   branchActionState,
   branchTag,
   canInitRepository,
+  continueNotice,
   changedFileCount,
   diffStatLabel,
   GIT_BUSY_REASON,
@@ -259,7 +260,7 @@ export function GitSectionView({
   // Said once and left for long enough to read, unlike an error it is not a failure.
   const [notice, setNotice] = useTransientError(NOTICE_MS)
   // Which of Pull and Abort holds the section's `sync` action, for the busy label.
-  const [syncing, setSyncing] = useState<'pull' | 'abort' | null>(null)
+  const [syncing, setSyncing] = useState<'pull' | 'abort' | 'continue' | null>(null)
   const operation = useGitOperation(path)
 
   if (collapsedLabel !== null || !path) {
@@ -333,7 +334,7 @@ export function GitSectionView({
   const stepRunning = running === 'push' || running === 'sync'
   const canCancel = stepRunning && operation !== null && isActive(operation) && operation.cancellable && !operation.cancelling
   const busy = !stepRunning ? null : {
-    label: running === 'push' ? 'Pushing…' : syncing === 'abort' ? 'Aborting…' : 'Pulling…',
+    label: running === 'push' ? 'Pushing…' : syncing === 'abort' ? 'Aborting…' : syncing === 'continue' ? 'Continuing…' : 'Pulling…',
     onCancel: canCancel ? () => void cancelGitOperation(path) : null
   }
 
@@ -375,11 +376,25 @@ export function GitSectionView({
       end()
     }
   }
+  const carryOn = async (what: GitInProgress) => {
+    if (!begin('sync')) return
+    setSyncing('continue')
+    setActionError(null)
+    try {
+      setNotice(continueNotice(what, (await continueGitInProgress(path, what, scope)).result))
+    } catch (error) {
+      setActionError(gitErrorMessage(error))
+    } finally {
+      setSyncing(null)
+      end()
+    }
+  }
   const choose = (choice: NextStepChoice) => {
     if (choice.kind === 'open-changes') openSurface('git')
     else if (choice.kind === 'open-pull-request') openSurface('pullRequest')
     else if (choice.kind === 'pull') void pull(choice.strategy)
     else if (choice.kind === 'push') void push()
+    else if (choice.kind === 'continue') void carryOn(choice.what)
     else void abort(choice.what)
   }
 

@@ -129,6 +129,8 @@ import type {
   GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
+  GitContinueResult,
+  GitInProgress,
   GitUpstreamCheck,
   GitDeleteBranchOptions,
   GitFetchOptions,
@@ -2457,6 +2459,7 @@ export function registerGuiIpc(
   gitMutation('git:fetch', 'git.fetch', (options?: GitFetchOptions) => ({ operationId: options?.operationId }))
   gitMutation('git:pull', 'git.pull', (options?: GitPullOptions) => ({ strategy: options?.strategy, operationId: options?.operationId }))
   gitMutation('git:abortInProgress', 'git.abortInProgress', (kind: 'merge' | 'rebase') => ({ kind }))
+  gitMutation('git:continueInProgress', 'git.continueInProgress', (kind: GitInProgress, options?: { operationId?: string }) => ({ kind, operationId: options?.operationId }))
   gitMutation('git:createBranch', 'git.createBranch', (name: string, options?: GitBranchOptions) => ({ name, from: options?.from, checkout: options?.checkout }))
   gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
   gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))

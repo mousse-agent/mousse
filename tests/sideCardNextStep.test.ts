@@ -85,8 +85,8 @@ describe('nextStep', () => {
 
   it('puts conflicts and a stopped rebase ahead of pulling', () => {
     expect(step(status({ changes: [conflicted], inProgress: 'rebase' }), tracked(0, 3))).toMatchObject({ kind: 'resolve', label: 'Resolve 1 conflict', abort: 'rebase' })
-    expect(step(status({ inProgress: 'merge' }), tracked(0, 3))).toMatchObject({ kind: 'finish', label: 'Finish the merge', abort: 'merge' })
-    expect(step(status({ inProgress: 'cherry-pick' }), tracked())).toMatchObject({ kind: 'finish', abort: null })
+    expect(step(status({ inProgress: 'merge' }), tracked(0, 3))).toMatchObject({ kind: 'continue', label: 'Continue merge', what: 'merge', abort: 'merge' })
+    expect(step(status({ inProgress: 'cherry-pick' }), tracked())).toMatchObject({ kind: 'continue', label: 'Continue cherry-pick', what: 'cherry-pick', abort: null })
   })
 
   it('pushes, publishes, then offers a pull request, and has nothing to offer when all is done', () => {

@@ -8,9 +8,11 @@ import type {
   GitCommitSelection,
   GitCommit,
   GitCommitSuggestion,
+  GitContinueResult,
   GitDeleteBranchOptions,
   GitDiffStats,
   GitFetchResult,
+  GitInProgress,
   GitKeptCopy,
   GitPullOptions,
   GitPullResult,
@@ -250,6 +252,16 @@ export async function pullGit(key: string, scope: GitScope, options: GitPullOpti
 export async function abortGitInProgress(key: string, kind: 'merge' | 'rebase', scope: GitScope): Promise<string | undefined> {
   try {
     return (await window.mousse.git.abortInProgress(scope, kind)).kept?.notice
+  } finally {
+    await refreshAfterMutation(key, scope)
+  }
+}
+
+/** Carry on with the merge, rebase, cherry-pick or revert that stopped, now its conflicts are resolved. */
+export async function continueGitInProgress(key: string, kind: GitInProgress, scope: GitScope): Promise<GitContinueResult> {
+  try {
+    const { result } = await trackGitOperation(key, 'commit', (operationId) => window.mousse.git.continueInProgress(scope, kind, { operationId }), gitOperationOwner(scope))
+    return { result }
   } finally {
     await refreshAfterMutation(key, scope)
   }
