@@ -162,13 +162,16 @@ export function runText(run: AutomationRun, now: Date, owner: { name: string; ti
     case 'failed':
       return run.detail ? `failed · ${firstLine(run.detail)}` : 'failed'
     case 'incomplete':
-      return run.detail ? `incomplete · ${firstLine(run.detail).toLowerCase()}` : 'incomplete'
+      return run.detail ? `incomplete · ${lowerFirst(firstLine(run.detail))}` : 'incomplete'
     case 'nothing_new':
       return `nothing new · ${agoText(run.at, now)}`
     case 'done':
       return `done · ${agoText(run.at, now)}`
   }
 }
+
+/** The first letter lowered, so a key's name ("Add key GITHUB_TOKEN") keeps its case. */
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
 
 const firstLine = (text: string) => {
   const line = text.trim().split(/\r?\n/)[0] ?? ''
@@ -190,7 +193,7 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
   const owner = item.computer
   const attention = item.attention
   if (attention && (!item.paused || attention.kind === 'ask')) {
-    const text = attention.kind === 'ask' ? attention.text : attention.kind === 'failed' ? `failed · ${firstLine(attention.text)}` : `incomplete · ${firstLine(attention.text).toLowerCase()}`
+    const text = attention.kind === 'ask' ? attention.text : attention.kind === 'failed' ? `failed · ${firstLine(attention.text)}` : `incomplete · ${lowerFirst(firstLine(attention.text))}`
     parts.push({ key: 'attention', text, tone: attention.kind === 'failed' ? 'bad' : 'warn' })
     return parts
   }
@@ -221,7 +224,7 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
   return parts
 }
 
-export type PrimaryKind = 'allow' | 'retry' | 'run' | 'resume' | 'open'
+export type PrimaryKind = 'allow' | 'retry' | 'run' | 'resume' | 'open' | 'add_key'
 
 /**
  * A row's one primary action. An open ask Needs you can answer in place is Allow (Not now is in "…"); Retry only on a
@@ -234,6 +237,8 @@ export function primaryOf(item: AutomationItem): { kind: PrimaryKind; label: str
   // A paused automation's old failure is not news; an open ask still waits for its answer.
   if (item.paused && item.attention?.kind !== 'ask') return { kind: 'resume', label: 'Resume' }
   if (item.attention?.kind === 'failed') return { kind: 'retry', label: 'Retry' }
+  // A run stopped at a saved key that is not stored: adding it is the one thing to do.
+  if (item.attention?.kind === 'incomplete' && item.attention.addKey) return { kind: 'add_key', label: 'Add key' }
   if (item.attention) return { kind: 'open', label: 'Open' }
   if (item.active && (item.active.state === 'running' || item.active.state === 'queued') && item.active.threadId) return { kind: 'open', label: 'Open' }
   return { kind: 'run', label: 'Run now' }

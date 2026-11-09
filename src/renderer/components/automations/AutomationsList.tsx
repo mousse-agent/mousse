@@ -25,6 +25,7 @@ import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
 import { defaultMay, groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentEntries, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
 import { deliveryText, type RequestApi } from './RequestTrigger'
+import { KeyDialog } from './KeyDialog'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
 import { computerChoicesOf } from './computerChoice'
 
@@ -93,6 +94,9 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const [recentOpen, setRecentOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [moving, setMoving] = useState<string[] | null>(null)
+  // Add key: the automation that needs it (its keys gain the name), and the name a run asked for.
+  const [addingKey, setAddingKey] = useState<{ jobId?: string; name?: string } | null>(null)
+  const [storedKeys, setStoredKeys] = useState<string[]>([])
   const [createRequest, setCreateRequest] = useState(0)
   const [prefill, setPrefill] = useState<CreatePrefill | null>(null)
   const automateRequest = useAutomationCreate((state) => state.request)
@@ -256,6 +260,17 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   }
   const keep = (jobId: string) => act(() => client.keep(jobId))
   const resend = (jobId: string, occurrenceId: string) => act(() => client.resend(jobId, occurrenceId))
+  const openAddKey = (jobId: string | undefined, name?: string) => {
+    setAddingKey({ ...(jobId ? { jobId } : {}), ...(name ? { name } : {}) })
+    void client.listKeys().then(setStoredKeys, () => setStoredKeys([]))
+  }
+  // The value goes to the daemon once; the automation then names the key, and the list reads again.
+  const saveKey = async (jobId: string | undefined, name: string, value: string) => {
+    await client.setKey(name, value)
+    const job = jobId ? allJobs.find((entry) => entry.id === jobId) : undefined
+    if (job && !(job.keys ?? []).includes(name)) await window.mousse.scheduled.update(job.id, { keys: [...(job.keys ?? []), name] })
+    await refresh()
+  }
   const resume = (jobIds: string[]) => act(async () => { for (const id of jobIds) await window.mousse.scheduled.resume(id) })
   // A row paused because its bot is paused resumes the bot (all its schedules), as the bot's own Resume does.
   const resumeItem = (item: AutomationItem) => {
@@ -279,6 +294,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     }
     if (item.link.kind !== 'job') return
     if (kind === 'resume') void resumeItem(item)
+    else if (kind === 'add_key') openAddKey(item.link.jobId, item.attention?.addKey)
     else void runNow(item.link.jobId)
   }
 
@@ -380,6 +396,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
   const dialogs = (
     <>
+      {addingKey ? <KeyDialog {...(addingKey.name ? { name: addingKey.name } : {})} stored={storedKeys} onSave={(name, value) => saveKey(addingKey.jobId, name, value)} onClose={() => setAddingKey(null)} /> : null}
       {moving ? <MovePicker count={moving.length} computers={computers.filter((computer) => computer.node !== '')} onCancel={() => setMoving(null)} onMove={(node) => move(moving, node)} /> : null}
       {pausing ? <PausePicker count={pausing.length} onCancel={() => setPausing(null)} onPause={(until) => pause(pausing, until)} /> : null}
       {deleting ? (
@@ -431,6 +448,10 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             requestApi={requestApi}
             onResend={(occurrenceId) => void resend(detailJob.id, occurrenceId)}
             onKeep={() => void keep(detailJob.id)}
+            {...(detailItem.computer.local ? {
+              onKeys: (keys: string[]) => void act(() => window.mousse.scheduled.update(detailJob.id, { keys: keys.length ? keys : null })),
+              onAddKey: (name?: string) => openAddKey(detailJob.id, name)
+            } : {})}
             {...(detailJob.trigger?.threadEvent && detailItem.computer.local ? { onEvents: (events: ThreadEventKind[]) => void act(() => window.mousse.scheduled.update(detailJob.id, { threadEvent: { events } })) } : {})}
             onOpenThread={goThread}
             onOpenBot={openBot}

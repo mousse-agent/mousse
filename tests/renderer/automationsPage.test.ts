@@ -695,6 +695,46 @@ describe('the Automations page', () => {
     expect($$('[role="menuitem"]').map((entry) => entry.textContent)).toEqual(['Delete'])
   })
 
+  it('asks for a missing saved key from Needs you in a masked field, and the automation names the keys it needs in More', async () => {
+    const stored = job({ id: 'j1', name: 'Bump deps', schedule: { kind: 'manual' }, nextRunAt: null, keys: ['GITHUB_TOKEN'] })
+    const run = { at: new Date(Date.now() - 60_000).toISOString(), state: 'incomplete' as const, detail: 'Add key GITHUB_TOKEN', missingKey: 'GITHUB_TOKEN' }
+    const row = item({ key: 'job:j1', name: 'Bump deps', trigger: 'on_demand', runs: [run], last: run, keys: [{ name: 'GITHUB_TOKEN', stored: false }], attention: { kind: 'incomplete', text: 'Add key GITHUB_TOKEN', addKey: 'GITHUB_TOKEN' } })
+    const mousse = await mount([row], [stored])
+    mousse.platformRequest.request.mockImplementation(async (method: string) => {
+      if (method === 'automations.list') return { items: [row], computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
+      if (method === 'automations.keys.list') return { keys: [{ name: 'NPM_TOKEN' }] }
+      if (method === 'automations.keys.set') return { name: 'GITHUB_TOKEN' }
+      if (method in LIBRARY) return LIBRARY[method]
+      throw new Error(method)
+    })
+    const needs = $('[data-group="needs"] [data-key="job:j1"]')!
+    // The key's name keeps its case on the row.
+    expect(needs.textContent).toContain('incomplete · add key GITHUB_TOKEN')
+    const primary = [...needs.querySelectorAll('button')].find((button) => button.textContent === 'Add key')!
+    await click(primary)
+    expect($('[role="dialog"]')?.textContent).toContain('Add key GITHUB_TOKEN')
+    const value = $<HTMLInputElement>('[data-testid="key-value"]')!
+    expect(value.type).toBe('password')
+    expect($('[data-testid="key-name"]')).toBeNull()
+    await type(value, 'ghp_typed_secret')
+    await click($('[data-testid="key-save"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.keys.set', { name: 'GITHUB_TOKEN', value: 'ghp_typed_secret' })
+    // It already names the key, so the automation is not changed; the secret is nowhere on the page.
+    expect(mousse.scheduled.update).not.toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('ghp_typed_secret')
+
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    await click($('[data-testid="automation-more"]'))
+    expect($$('[data-testid="automation-key"]').map((entry) => [entry.dataset.stored, entry.textContent])).toEqual([['false', expect.stringContaining('GITHUB_TOKEN · missing')]])
+    await click($('[data-testid="automation-key-add"]'))
+    await type($<HTMLInputElement>('[data-testid="key-name"]')!, 'npm token')
+    expect($('[role="dialog"]')?.textContent).toContain('Replaces the stored NPM_TOKEN.')
+    await type($<HTMLInputElement>('[data-testid="key-value"]')!, 'npm_x')
+    await click($('[data-testid="key-save"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.keys.set', { name: 'NPM_TOKEN', value: 'npm_x' })
+    expect(mousse.scheduled.update).toHaveBeenCalledWith('j1', { keys: ['GITHUB_TOKEN', 'NPM_TOKEN'] })
+  })
+
   it('says why an agent-added automation cannot take requests before Keep, and sets one up after it', async () => {
     const stored = job({ id: 'j1', name: 'Rerun test', schedule: { kind: 'manual' }, nextRunAt: null, createdBy: { threadId: 't1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
     const mousse = await mount([item({ key: 'job:j1', name: 'Rerun test', trigger: 'on_demand', addedBy: { threadId: 't1' }, keepable: true })], [stored])

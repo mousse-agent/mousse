@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ChevronLeft, ChevronRight, MessageSquare } from '../../lib/icons'
+import { ChevronLeft, ChevronRight, MessageSquare, X } from '../../lib/icons'
 import { modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, narrowPermissionMode, PERMISSION_MODES, isStricter, type PermissionMode } from '../../../shared/permissionMode'
@@ -165,6 +165,8 @@ export function AutomationDetail({
   onResend,
   onKeep,
   onEvents,
+  onKeys,
+  onAddKey,
   onOpenThread,
   onOpenBot
 }: {
@@ -196,6 +198,9 @@ export function AutomationDetail({
   onKeep: () => void
   /** A thread-event automation: what on its pull request wakes it (saved at once). */
   onEvents?: (events: ThreadEventKind[]) => void
+  /** Saved keys: the names it needs change at once; Add key opens the masked field (with a name, for that key). */
+  onKeys?: (keys: string[]) => void
+  onAddKey?: (name?: string) => void
   onOpenThread: (threadId: string) => void
   /** A bot's automation: opens the bot's chat, where its grant (its May) is shown. */
   onOpenBot?: (botId: string) => void
@@ -648,7 +653,7 @@ export function AutomationDetail({
       <button type="button" className="scheduled-disclosure" aria-expanded={moreOpen} aria-controls={id('more')} onClick={() => setMoreOpen((open) => !open)} data-testid="automation-more">
         <ChevronRight size={13} aria-hidden="true" className="scheduled-disclosure-chevron" />
         More
-        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · limits · request URL + curl · added by'}</span>
+        <span className="automation-more-hint">{bot ? 'name · added by' : 'thread · worktree · mode · keys · request URL + curl · added by'}</span>
       </button>
 
       {moreOpen ? (
@@ -688,6 +693,21 @@ export function AutomationDetail({
           <MoreRow title="Mode" htmlFor={id('mode')} control={
             <Select<JobDraft['mode']> id={id('mode')} className="scheduled-select" value={draft.mode} options={modeChoices(draft)} onChange={(mode) => patch({ mode })} />
           } />
+
+          {remoteNode ? null : (
+            <MoreRow title="Keys" testId="keys-row" description={job.keys?.length ? undefined : 'Saved keys its runs need. Tools read them as ${secret:NAME}.'}>
+              <div className="automation-fields">
+                {(item?.keys ?? (job.keys ?? []).map((name) => ({ name, stored: true }))).map((key) => (
+                  <span key={key.name} className={`automation-field-token${key.stored ? '' : ' missing'}`} data-testid="automation-key" data-stored={key.stored ? 'true' : 'false'} title={key.stored ? 'Stored' : 'Not stored: a run that needs it ends Incomplete'}>
+                    {key.stored ? key.name : `${key.name} · missing`}
+                    {!key.stored && onAddKey ? <button type="button" aria-label={`Add key ${key.name}`} title="Add it" onClick={() => onAddKey(key.name)}>+</button> : null}
+                    {onKeys ? <button type="button" aria-label={`Remove key ${key.name}`} title="Remove" onClick={() => onKeys((job.keys ?? []).filter((name) => name !== key.name))}><X size={11} /></button> : null}
+                  </span>
+                ))}
+                {onAddKey ? <button type="button" className="scheduled-link-btn" data-testid="automation-key-add" onClick={() => onAddKey()}>+ Key</button> : null}
+              </div>
+            </MoreRow>
+          )}
 
           {/* A request URL is served by the computer that runs it, and set up there. */}
           <MoreRow title="Request URL" testId="request-row" description={remoteNode ? `Set up on ${owner.name}` : undefined}>

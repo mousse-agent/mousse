@@ -3,7 +3,8 @@ import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
-import { occurrenceOutcome, tellMeNotifies, type ScheduledRunEnded } from '../../shared/automations'
+import { occurrenceOutcome, tellMeNotifies, type RunEndState, type ScheduledRunEnded } from '../../shared/automations'
+import { missingKeyText } from '../../shared/automationKeys'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
 import { isSilentOutput } from './computeNextRun'
@@ -134,6 +135,8 @@ export class ScheduledJobService extends EventEmitter {
   /** Work that follows every tick in this process, lock or not (the bots' queue, their usage-limit resets). */
   private tickHook: ((now: Date) => Promise<unknown> | unknown) | null = null
   private clock: () => Date = () => new Date()
+  /** The profile's saved keys, by name; without it a job that names keys runs as if they were stored. */
+  private keyStore: { has(name: string): boolean } | null = null
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -163,6 +166,23 @@ export class ScheduledJobService extends EventEmitter {
   /** The clock claims and bot occurrences read (tests set it). */
   setClock(clock: () => Date): void {
     this.clock = clock
+  }
+
+  /** Where saved keys are looked up before a run that names them starts. */
+  setKeyStore(store: { has(name: string): boolean } | null): void {
+    this.keyStore = store
+  }
+
+  /** The first saved key the job names that is not stored, or undefined. A store that cannot be read counts as missing. */
+  private missingKey(job: Pick<ScheduledJob, 'keys'>): string | undefined {
+    if (!job.keys?.length || !this.keyStore) return undefined
+    return job.keys.find((name) => {
+      try {
+        return !this.keyStore!.has(name)
+      } catch {
+        return true
+      }
+    })
   }
 
   /** True while the scheduler is started: only then does anything start a webhook delivery. */
@@ -825,6 +845,12 @@ export class ScheduledJobService extends EventEmitter {
         }
         return
       }
+      // A saved key the job needs is not stored: the run does not start, ends Incomplete and asks for the key (Needs you).
+      const missingKey = this.missingKey(job)
+      if (missingKey) {
+        if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) this.incompleteRun(job, claimToken, missingKey)
+        return
+      }
       // A webhook delivery fills `{{body...}}` placeholders from its stored body; any other run leaves them as written.
       const rendered = this.promptFor(job, claim)
       if (rendered.error !== undefined) {
@@ -985,6 +1011,14 @@ export class ScheduledJobService extends EventEmitter {
     }
   }
 
+  /** Records a run that stopped before its turn at a missing saved key (Incomplete, "Add key <name>"), and announces it. */
+  private incompleteRun(job: ScheduledJob, claimToken: string, key: string): void {
+    const occurrenceKey = job.runClaim?.occurrenceKey ?? job.nextRunAt ?? ''
+    const text = missingKeyText(key)
+    const recorded = this.store.markJobRun(job.id, false, undefined, text, false, claimToken, undefined, { missingKey: key })
+    if (recorded || !this.store.getJob(job.id)) this.announceRunEnd(job, occurrenceKey, { status: 'error', error: text }, 'incomplete')
+  }
+
   /** Records a run that failed before or instead of its turn, and announces it. */
   private failRun(job: ScheduledJob, claimToken: string, error: string): void {
     const occurrenceKey = job.runClaim?.occurrenceKey ?? job.nextRunAt ?? ''
@@ -999,9 +1033,10 @@ export class ScheduledJobService extends EventEmitter {
   private announceRunEnd(
     job: Pick<ScheduledJob, 'id' | 'name' | 'tellMe' | 'threadId'>,
     occurrenceKey: string,
-    result: { status: ScheduledOccurrenceResult['status']; silent?: boolean; error?: string; threadId?: string }
+    result: { status: ScheduledOccurrenceResult['status']; silent?: boolean; error?: string; threadId?: string },
+    endedAs?: RunEndState
   ): void {
-    const outcome = occurrenceOutcome(result.status, result.silent)
+    const outcome = endedAs ?? occurrenceOutcome(result.status, result.silent)
     if (!outcome) return
     if (this.announced.get(job.id) === occurrenceKey) return
     this.announced.set(job.id, occurrenceKey)

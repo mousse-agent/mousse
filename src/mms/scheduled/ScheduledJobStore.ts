@@ -139,7 +139,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders' | 'agent' | 'missingKey'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -508,6 +508,7 @@ export class ScheduledJobStore {
       createdBy: input.createdBy,
       accessCap: input.accessCap,
       expiresAt: input.expiresAt,
+      ...(input.keys?.length ? { keys: [...new Set(input.keys)] } : {}),
       ...(input.threadEvent ? { trigger: { threadEvent: { threadId: input.threadEvent.threadId, number: input.threadEvent.number, events: [...input.threadEvent.events] } } } : {}),
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
       runHistory: [],

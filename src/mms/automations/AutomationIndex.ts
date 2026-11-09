@@ -55,6 +55,8 @@ export interface AutomationIndexSources {
   deliveries?(jobId: string): ScheduledWebhookDelivery[]
   /** Whether a delivery's payload is still stored, so Resend can run it again. */
   payloadKept?(jobId: string, occurrenceId: string): boolean
+  /** Whether a saved key is in the profile's secret store (its value is never read here). */
+  keyStored?(name: string): boolean
   computerName?: string
   timeZone?: string
   now?: () => Date
@@ -243,6 +245,7 @@ function jobItem(job: ScheduledJob, sources: AutomationIndexSources, computer: A
     ...(job.expiresAt ? { expiresAt: job.expiresAt } : {}),
     ...(job.createdBy && job.expiresAt ? { keepable: true as const } : {}),
     ...(request ? { request } : {}),
+    ...(job.keys?.length ? { keys: job.keys.map((name) => ({ name, stored: safely(() => sources.keyStored?.(name)) ?? false })) } : {}),
     ...(wakesOn ? { threadEvent: threadEventPart(job, wakesOn, sources) } : {}),
     ...(attention ? { attention } : {}),
     link: { kind: 'job', jobId: job.id },

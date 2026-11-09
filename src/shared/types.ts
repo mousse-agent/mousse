@@ -73,6 +73,8 @@ export interface ScheduledJobRunRecord {
   /** When the occurrence was claimed and when it ended; a thread-event job reads them to know its own run's effects. */
   startedAt?: string
   endedAt?: string
+  /** The run did not start: a key the job names is not in the profile's secret store ("Add key <name>"). */
+  missingKey?: string
 }
 
 /** Repeats of a job that fell while its computer was off or asleep ("Missed while offline"). */
@@ -303,6 +305,8 @@ export interface ScheduledJob {
   accessCap?: import('./settings').AgentAccessLevel
   /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
   expiresAt?: string
+  /** Saved keys its runs need, by name (the values stay in the profile's secret store). */
+  keys?: string[]
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
   /** Present while state === 'running'; cleared on terminal transition. */
@@ -378,6 +382,8 @@ export interface CreateScheduledJobInput {
   repeat?: { times?: number }
   /** It wakes on this pull request's activity; the protocol sends the thread and events, the daemon adds the number. */
   threadEvent?: ScheduledThreadEventTrigger
+  /** Saved keys its runs need, by name. */
+  keys?: string[]
 }
 
 /** The edits the Scheduled page sends; `null` clears a field so the job goes back to its default. */
@@ -398,6 +404,8 @@ export interface ScheduledJobPatch {
   tellMe?: TellMe
   /** A thread-event job: what on its pull request wakes it. */
   threadEvent?: { events: ThreadEventKind[] }
+  /** Saved keys its runs need, by name; `null` names none. */
+  keys?: string[] | null
 }
 
 /**

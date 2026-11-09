@@ -930,3 +930,9 @@ html[data-theme='high-contrast'] .automations-page {
 .automation-request-line { display: flex; align-items: center; gap: var(--space-8); }
 .automation-request .scheduled-copy-row .settings-icon-btn { flex-shrink: 0; }
 .automation-curl { max-height: 5.5em; overflow: auto; }
+
+/* ---- saved keys ---------------------------------------------------------- */
+
+.automation-field-token.missing { background: color-mix(in srgb, var(--warning) 18%, transparent); }
+.automation-key-form { display: flex; flex-direction: column; gap: var(--space-8); }
+.automation-key-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--settings-fs-small); color: var(--text-secondary); }

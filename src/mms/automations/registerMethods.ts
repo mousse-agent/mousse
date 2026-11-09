@@ -1,5 +1,6 @@
 import { AUTOMATIONS_CAPABILITY, type AutomationIndex, type AutomationMoveResult } from '../../shared/automations'
 import { isId } from '../../shared/net'
+import { isKeyName, MAX_KEY_VALUE_BYTES } from '../../shared/automationKeys'
 import type { ScheduledJob } from '../../shared/types'
 import type { AgentJobAsk } from './AgentJobAsks'
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
@@ -19,6 +20,8 @@ export interface AutomationsDomain {
   move(jobIds: string[], node: string, signal?: AbortSignal): Promise<AutomationMoveResult>
   /** Resend: runs a request automation again with the payload one of its deliveries stored. */
   resend(jobId: string, occurrenceId: string): { occurrenceId: string }
+  /** Saved keys: their names in the profile's secret store (never values), and storing one typed into a masked field. */
+  keys: { list(): string[]; set(name: string, value: string): void }
 }
 
 /**
@@ -98,6 +101,32 @@ export function registerAutomationMethods(
         if (error instanceof DomainRpcError) throw error
         throw new DomainRpcError('resend_refused', error instanceof Error ? error.message : String(error))
       }
+    }
+  })
+  domains.register({
+    method: 'automations.keys.list',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => domainObject(params ?? {}, ['profileId']),
+    async handle(_context, _params, binding) {
+      return { keys: (await bound(binding)).keys.list().map((name) => ({ name })) }
+    }
+  })
+  domains.register({
+    method: 'automations.keys.set',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'name', 'value'])
+      if (!isKeyName(p.name)) throw new DomainRpcError('invalid_params', 'A key name is a word like GITHUB_TOKEN')
+      if (typeof p.value !== 'string' || !p.value || Buffer.byteLength(p.value, 'utf8') > MAX_KEY_VALUE_BYTES) throw new DomainRpcError('invalid_params', 'A key holds 1 byte to 16 KB')
+      return p
+    },
+    async handle(context, params, binding) {
+      // A person types it into a masked field in a window; no agent, CLI call or other computer stores one.
+      if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Add a key from a Mousse window.')
+      ;(await bound(binding)).keys.set(params.name as string, params.value as string)
+      return { name: params.name }
     }
   })
   domains.register({

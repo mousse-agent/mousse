@@ -251,7 +251,8 @@ export class MousseMainService extends MmsProfileServices {
         answerAsk: (askId, answer) => services.answerAgentJobAsk(askId, answer),
         keep: (jobId) => services.scheduled.keepJob(jobId),
         move: (jobIds, node, signal) => services.moveAutomations(jobIds, node, signal),
-        resend: (jobId, occurrenceId) => services.scheduled.resendWebhook(jobId, occurrenceId)
+        resend: (jobId, occurrenceId) => services.scheduled.resendWebhook(jobId, occurrenceId),
+        keys: services.automationKeys
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>

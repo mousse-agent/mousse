@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  createProcessEnvSecretAdapter,
+  resolveEnvValue,
   type IntegrationSecretAdapter
 } from '../integrations/secrets'
+import { isKeyName } from '../../shared/automationKeys'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ensurePrivateDirectory } from '../data/privateAcl'
 
@@ -17,9 +18,7 @@ export function createProfileSecretAdapter(options: {
   environment?: NodeJS.ProcessEnv
 }): IntegrationSecretAdapter {
   const filePath = join(options.profileRoot, 'secrets', 'refs.json')
-  const inherit = options.inheritProcessEnv
-    ? createProcessEnvSecretAdapter(options.environment ?? process.env)
-    : createProcessEnvSecretAdapter({})
+  const environment: NodeJS.ProcessEnv = options.inheritProcessEnv ? options.environment ?? process.env : {}
 
   const readFileSecrets = (): Record<string, string> => {
     if (!existsSync(filePath)) return {}
@@ -36,15 +35,30 @@ export function createProfileSecretAdapter(options: {
     }
   }
 
-  return {
+  const adapter: IntegrationSecretAdapter = {
+    // `${secret:NAME}` in a tool's settings reads the profile's secret store (a saved key), then the inherited overlay.
     resolveEnv(value: string): string {
-      return inherit.resolveEnv(value)
+      return resolveEnvValue(value, environment, adapter)
     },
     resolveSecretRef(ref: string): string | undefined {
       const fromFile = readFileSecrets()[ref]
       if (fromFile !== undefined) return fromFile
-      return inherit.resolveSecretRef?.(ref)
+      return environment[ref]
     }
+  }
+  return adapter
+}
+
+/** The saved keys' names in the profile's secret store (never their values); other entries, such as webhook secrets, are left out. */
+export function listProfileKeyNames(profileRoot: string): string[] {
+  const filePath = join(profileRoot, 'secrets', 'refs.json')
+  if (!existsSync(filePath)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+    return Object.entries(parsed as Record<string, unknown>).filter(([name, value]) => isKeyName(name) && typeof value === 'string' && value.length > 0).map(([name]) => name).sort()
+  } catch {
+    return []
   }
 }
 

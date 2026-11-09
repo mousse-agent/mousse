@@ -2923,6 +2923,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(patch.mode !== undefined ? { mode: patch.mode === null ? undefined : patch.mode } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace === null ? undefined : patch.workspace } : {}),
         ...(patch.tellMe !== undefined ? { tellMe: patch.tellMe } : {}),
+        ...(patch.keys !== undefined ? { keys: patch.keys?.length ? patch.keys : undefined } : {}),
         ...(patch.threadEvent && wakesOn ? { trigger: { ...existing.trigger, threadEvent: { ...wakesOn, events: patch.threadEvent.events } } } : {}),
         ...(patch.repeat === null
           ? { repeat: undefined }

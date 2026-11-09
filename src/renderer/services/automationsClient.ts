@@ -13,6 +13,10 @@ export interface AutomationsClient {
   move(jobIds: string[], node: string): Promise<AutomationMoveResult>
   /** Resend: runs a request automation again with a delivery's stored payload (`automations.request.resend`). */
   resend(jobId: string, occurrenceId: string): Promise<void>
+  /** The saved keys' names in the profile's secret store (`automations.keys.list`); never their values. */
+  listKeys(): Promise<string[]>
+  /** Stores a key typed into a masked field (`automations.keys.set`). */
+  setKey(name: string, value: string): Promise<void>
 }
 
 /** Uses the host's profile-bound bridge. */
@@ -22,7 +26,9 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     answerAsk: async (askId, answer) => { await transport.request('automations.asks.answer', { askId, answer }) },
     keep: async (jobId) => (await transport.request<{ job: ScheduledJob }>('automations.keep', { jobId })).job,
     move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node }),
-    resend: async (jobId, occurrenceId) => { await transport.request('automations.request.resend', { jobId, occurrenceId }) }
+    resend: async (jobId, occurrenceId) => { await transport.request('automations.request.resend', { jobId, occurrenceId }) },
+    listKeys: async () => (await transport.request<{ keys: Array<{ name: string }> }>('automations.keys.list', {})).keys.map((key) => key.name),
+    setKey: async (name, value) => { await transport.request('automations.keys.set', { name, value }) }
   }
 }
 

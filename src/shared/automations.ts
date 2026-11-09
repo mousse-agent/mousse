@@ -1,4 +1,5 @@
 import type { BotLook } from './bots/personal/look'
+import { missingKeyText } from './automationKeys'
 import type { PermissionMode } from './permissionMode'
 import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, ScheduledWebhookDeliveryOutcome, TellMe, ThreadEventKind } from './types'
 
@@ -7,7 +8,7 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
  * without merging them: scheduled jobs, personal bots' schedules and threads that watch their pull request.
  */
 
-export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend'] as const
+export const AUTOMATIONS_METHODS = ['automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set'] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
@@ -58,6 +59,8 @@ export interface AutomationRun {
   request?: { occurrenceId: string; resendable?: true }
   /** Pull request events started it. */
   events?: ThreadEventKind[]
+  /** It ended Incomplete because this saved key is not stored. */
+  missingKey?: string
 }
 
 /** One request to an automation's URL and what became of it (its delivery log). */
@@ -103,6 +106,8 @@ export function jobRecordRun(record: ScheduledJobRunRecord): AutomationRun {
     ...(record.agent?.changed ? { agentChanged: true as const } : {}),
     ...(record.missed ? { missed: record.missed } : {})
   }
+  // It stopped before it started, at a key it needs that is not stored: Incomplete, with the key to add.
+  if (record.missingKey) return { ...base, state: 'incomplete', detail: missingKeyText(record.missingKey), missingKey: record.missingKey }
   const ended = occurrenceOutcome(record.status, record.silent)
   if (ended) return { ...base, state: ended, ...(record.error ? { detail: record.error } : {}) }
   if (record.status === 'queued') return { ...base, state: 'waiting', reason: 'behind' }
@@ -203,6 +208,8 @@ export interface AutomationAttention {
   threadId?: string
   /** An ask Needs you can answer in place (Allow, with Not now in "…"); absent: it is answered where it was asked. */
   answer?: AttentionAnswer
+  /** An Incomplete run stopped at this saved key: Needs you offers Add key. */
+  addKey?: string
 }
 
 export interface AutomationItem {
@@ -243,6 +250,8 @@ export interface AutomationItem {
   notifyOnly?: true
   /** It takes signed requests: where senders post, and the newest requests with what became of each. */
   request?: { url: string; deliveries: AutomationDelivery[] }
+  /** The saved keys its runs need, by name, and whether each is stored now. */
+  keys?: Array<{ name: string; stored: boolean }>
   /**
    * It wakes on a pull request's activity: the thread the PR is linked to, what wakes it, whether the watch reads it now,
    * events waiting for the rate limit, and the newest events with what became of each ("(why?)").
@@ -317,6 +326,6 @@ export function attentionOf(input: { ask?: { text: string; threadId?: string; an
   if (input.ask) return { kind: 'ask', text: input.ask.text, ...(input.ask.threadId ? { threadId: input.ask.threadId } : {}), ...(input.ask.answer ? { answer: input.ask.answer } : {}) }
   const last = input.last
   if (last?.state === 'failed') return { kind: 'failed', text: last.detail ?? 'Failed', ...(last.threadId ? { threadId: last.threadId } : {}) }
-  if (last?.state === 'incomplete') return { kind: 'incomplete', text: last.detail ?? 'Stopped at a missing permission', ...(last.threadId ? { threadId: last.threadId } : {}) }
+  if (last?.state === 'incomplete') return { kind: 'incomplete', text: last.detail ?? 'Stopped at a missing permission', ...(last.threadId ? { threadId: last.threadId } : {}), ...(last.missingKey ? { addKey: last.missingKey } : {}) }
   return undefined
 }

@@ -144,6 +144,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     // Only a chosen value is written: a job without one keeps reading as Only news.
     ...(isTellMe(job.tellMe) ? { tellMe: job.tellMe } : {}),
     trigger: job.trigger,
+    ...(job.keys?.length ? { keys: [...job.keys] } : {}),
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed }
       : undefined,

@@ -84,7 +84,8 @@ import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLe
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
-import { createProfileSecretAdapter, deleteProfileSecret, writeProfileSecret } from './profiles/secrets'
+import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
+import { isKeyName } from '../shared/automationKeys'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -877,6 +878,17 @@ export class MmsProfileServices {
       delete: (ref) => deleteProfileSecret(homeDir, ref)
     })
     this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
+    // Saved keys live in the same secret file, by name; a run that names one that is not there ends Incomplete.
+    this.automationKeys = {
+      list: () => listProfileKeyNames(homeDir),
+      set: (name, value) => {
+        if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
+        writeProfileSecret(homeDir, name, value)
+        this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+      },
+      has: (name) => listProfileKeyNames(homeDir).includes(name)
+    }
+    this.scheduled.setKeyStore(this.automationKeys)
     this.scheduledWebhookServer = new ScheduledWebhookServer({
       resolveSecret: (jobId) => this.webhookSecretCache.resolve(jobId),
       schedulerRunning: () => this.scheduled.isRunning(),
@@ -1335,6 +1347,9 @@ export class MmsProfileServices {
     }
   }
 
+  /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
+  automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
+
   automationIndex(): AutomationIndex {
     const bots = this.personalBots
     return buildAutomationIndex({
@@ -1371,7 +1386,8 @@ export class MmsProfileServices {
       moved: () => this.movedAutomations?.list() ?? [],
       requestUrl: (jobId) => this.scheduledWebhookUrl(jobId),
       deliveries: (jobId) => this.scheduled.listWebhookDeliveries(jobId),
-      payloadKept: (jobId, occurrenceId) => this.scheduled.hasWebhookPayload(jobId, occurrenceId)
+      payloadKept: (jobId, occurrenceId) => this.scheduled.hasWebhookPayload(jobId, occurrenceId),
+      keyStored: (name) => this.automationKeys.has(name)
     })
   }
 
