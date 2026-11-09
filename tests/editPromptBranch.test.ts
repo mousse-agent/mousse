@@ -125,6 +125,25 @@ describe('editing a prompt through the daemon', { timeout: 60_000 }, () => {
     expect(saved.nativeContext.compaction).toBeUndefined()
   })
 
+  it('starts the prompt cache cold on a branch made or switched to after a cached turn', async () => {
+    const { thread, second, call } = await twoTurns()
+    // The provider cached the conversation as it stood after the second turn.
+    const cached = () => {
+      const session = mms.orchestrator.getOrCreateSession(thread.id)
+      session.nativeContext.promptCache = { lastRequestAt: Date.now(), revision: session.nativeContext.revision ?? 0, modelKey: 'claude-subscription:opus', instanceId: 'claude' }
+    }
+    cached()
+    const { branch } = await call('actions.fork', { actionId: second.id, at: 'start', activate: true }) as { branch: ConversationBranch }
+    expect(mms.orchestrator.getNativeContext(thread.id).promptCache).toBeUndefined()
+    const saved = (id: string) => JSON.parse(readFileSync(join(mms.threads.getThreadDir(thread.id), 'conversation-contexts', `${encodeURIComponent(id)}.json`), 'utf8'))
+    expect(saved(branch.id).nativeContext.promptCache).toBeUndefined()
+    expect(saved('main').nativeContext.promptCache).toBeUndefined()
+
+    cached()
+    await call('actions.activateBranch', { conversationBranchId: 'main' })
+    expect(mms.orchestrator.getNativeContext(thread.id).promptCache).toBeUndefined()
+  })
+
   it('finishes a conversation-only switch that stopped after it was recorded, before the thread named the branch', async () => {
     const { thread, second, call } = await twoTurns()
     const directory = mms.threads.getThreadDir(thread.id)

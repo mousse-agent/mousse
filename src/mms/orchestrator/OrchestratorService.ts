@@ -12150,7 +12150,9 @@ export class OrchestratorService extends EventEmitter {
     if (session.isTurnRunning()) throw new Error('Cannot activate a conversation branch while a turn is running.')
     this.sessionAls.run(session, () => {
       session.messages = structuredClone(messages)
-      session.nativeContext = normalizeNativeContext(nativeContext)
+      // Another history: the prompt cache recorded with it (a snapshot saved before it was dropped there) is cold.
+      const { promptCache: _cold, ...context } = nativeContext
+      session.nativeContext = normalizeNativeContext(context)
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
     })

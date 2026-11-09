@@ -554,7 +554,10 @@ function saveConversationState(
       acceptedSteerItemIds: boundary?.acceptedSteerItemIds
         ? structuredClone(boundary.acceptedSteerItemIds)
         : nativeContext.acceptedSteerItemIds,
-      lastTurnUsage: undefined
+      lastTurnUsage: undefined,
+      // The provider's cache held the history as it was when saved, by then possibly cut here; a runtime resumes a
+      // branch with a fresh session anyway, so nothing of it is cached when the branch is active again.
+      promptCache: undefined
     }
   }
   const directory = join(threadDirectory, 'conversation-contexts')
