@@ -141,7 +141,7 @@ describe('the commit message and its folder', () => {
   it('names the branch in the placeholder and drops the draft when another folder is shown', async () => {
     await render(footer('k1', project))
     const message = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commit message"]')
-    expect(message?.placeholder).toBe('Commit to feature/login')
+    expect(message?.getAttribute('aria-placeholder')).toBe('Commit to feature/login')
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
       setter?.call(message, 'fix the login')

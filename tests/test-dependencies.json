@@ -52,6 +52,8 @@
         "tests/composerRenderingPerformance.test.ts",
         "tests/dialogFooterStyles.test.ts",
         "tests/filesSearch.test.ts",
+        "tests/findInThreadBar.test.ts",
+        "tests/findInThreadLarge.test.ts",
         "tests/gitBranchActions.test.ts",
         "tests/gitSyncLogic.test.ts",
         "tests/lightTextContrast.test.ts",
