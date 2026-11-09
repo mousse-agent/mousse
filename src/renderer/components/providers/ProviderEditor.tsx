@@ -7,7 +7,9 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
+import { AccountRow, ArgsRow, EnvRow, ExecutableRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
+import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
+import { VendorSettingsSection } from './VendorSettings'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
@@ -73,6 +75,16 @@ export function EditorHeader({
           )}
         </div>
       </div>
+    </section>
+  )
+}
+
+/** The editable settings under Advanced: one compact list of rows, no section headings. */
+function AdvancedList({ note, children }: { note?: string; children: ReactNode }) {
+  return (
+    <section className="settings-group prov-editor-section prov-advanced-list" data-testid="prov-advanced-list">
+      {note && <p className="settings-group-desc">{note}</p>}
+      <div className="settings-group-rows">{children}</div>
     </section>
   )
 }
@@ -165,13 +177,11 @@ export function AgentEditor({
         <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
+      {/* Advanced: what the user can change first, in one compact list; the read-only facts last, in Info. */}
       <SettingsAdvanced>
-        <EditorSection title="General">
+        <AdvancedList note={deviceWideNote(snapshot)}>
           <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
           <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
-        </EditorSection>
-        <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
-          <BinaryRow snapshot={snapshot} />
           {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
           {!info.bundled && (
             <>
@@ -180,15 +190,12 @@ export function AgentEditor({
               {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
               {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
               {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
-              <HomeRow snapshot={snapshot} />
+              {!managed && <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />}
             </>
           )}
-        </EditorSection>
-        {!info.bundled && !managed && (
-          <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
-            <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
-          </EditorSection>
-        )}
+        </AdvancedList>
+        <VendorSettingsSection snapshot={snapshot} />
+        <ProviderInfoSection rows={agentInfoRows(snapshot)} />
       </SettingsAdvanced>
     </>
   )
@@ -284,13 +291,14 @@ export function ApiEditor({
         {move}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
-      {onSaveTelemetry && snapshot.telemetry && (
-        <SettingsAdvanced>
-          <EditorSection title="General">
+      <SettingsAdvanced>
+        {onSaveTelemetry && snapshot.telemetry && (
+          <AdvancedList>
             <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />
-          </EditorSection>
-        </SettingsAdvanced>
-      )}
+          </AdvancedList>
+        )}
+        <ProviderInfoSection rows={apiInfoRows(snapshot)} />
+      </SettingsAdvanced>
     </>
   )
 }

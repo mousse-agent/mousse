@@ -3,6 +3,7 @@ import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalize
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { SetVendorSettingInput } from '../../shared/harness/vendorSettings'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
@@ -2863,6 +2864,8 @@ export function registerGuiIpc(
   const respondInstanceSignIn = instanceCommand('providers.instances.respondSignIn', 'ok')
   const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
   const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
+  const instanceVendorSettings = instanceCommand('providers.instances.vendorSettings', 'settings')
+  const setInstanceVendorSetting = instanceCommand('providers.instances.setVendorSetting', 'settings')
   const allowKnownProblem = instanceCommand('providers.instances.allowKnownProblem', 'snapshot')
   const moveInstance = instanceCommand('providers.instances.move', 'result')
   const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
@@ -2893,6 +2896,16 @@ export function registerGuiIpc(
     respondInstanceSignIn({ operationId, response }))
   registerHandler('providers:instances:signOut', async (_e, instanceId: string) => signOutInstance({ instanceId }))
   registerHandler('providers:instances:recheck', async (_e, instanceId: string) => recheckInstance({ instanceId }))
+  // The provider's own settings file, on this computer's service only; secrets come back masked.
+  registerHandler('providers:instances:vendorSettings', async (_e, instanceId: string) => instanceVendorSettings({ instanceId }))
+  registerHandler('providers:instances:setVendorSetting', async (_e, input: SetVendorSettingInput) =>
+    setInstanceVendorSetting({
+      instanceId: input?.instanceId,
+      key: input?.key,
+      value: input?.value,
+      expectedRevision: input?.expectedRevision,
+      ...(input?.confirmShared === true ? { confirmShared: true } : {})
+    }))
   registerHandler('providers:instances:allowKnownProblem', async (_e, instanceId: string, version: string) =>
     allowKnownProblem({ instanceId, version }))
   registerHandler('providers:instances:move', async (_e, instanceId: string, toInstanceId: string, options?: { copyKey?: boolean }) =>

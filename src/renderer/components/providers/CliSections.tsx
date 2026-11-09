@@ -6,9 +6,7 @@ import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
-  DRIVER_INFO,
   binaryOverrideOf,
-  binarySourceLabel,
   formatArgs,
   formatVersion,
   instanceConfigOf,
@@ -214,33 +212,6 @@ export function AccountRow({ snapshot, actions, onOpenUsage }: { snapshot: Insta
   )
 }
 
-/** The executable Mousse resolved: path, version and where it came from. */
-export function BinaryRow({ snapshot }: { snapshot: InstanceSnapshot }) {
-  const { binary } = snapshot
-  const version = formatVersion(binary?.version)
-  return (
-    <SettingsRow
-      title="Executable in use"
-      description={
-        binary?.path ? (
-          <span className="prov-binary">
-            <code className="prov-binary-path" title={binary.path}>
-              {binary.path}
-            </code>
-            <span className="prov-binary-meta">{[version, binarySourceLabel(binary)].filter(Boolean).join(' · ')}</span>
-          </span>
-        ) : binary?.source === 'bundled' ? (
-          binarySourceLabel(binary)
-        ) : snapshot.checkedAt || snapshot.stale ? (
-          'Not found'
-        ) : (
-          'Checking…'
-        )
-      }
-    />
-  )
-}
-
 /**
  * An available update. Mousse's own install updates in place; one its owner made runs the owner's
  * command, shown in its own box to copy as well. A copy whose owner is unknown only names the version.
@@ -276,24 +247,6 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
     >
       {advisory && <CommandBox command={update.command} label="Copy update command" />}
     </SettingsRow>
-  )
-}
-
-/** Where the instance keeps its sign-in and settings. */
-export function HomeRow({ snapshot }: { snapshot: InstanceSnapshot }) {
-  const config = instanceConfigOf(snapshot)
-  if (!config) return null
-  const hint = DRIVER_INFO[snapshot.driver].homeHint
-  return (
-    <SettingsRow
-      title="Account home"
-      anchor="providers-home"
-      description={
-        config.home === 'private'
-          ? 'Private to this provider. It signs in separately from your terminal.'
-          : `Shared with your terminal${hint ? ` (${hint})` : ''}, set up the way you use it.`
-      }
-    />
   )
 }
 

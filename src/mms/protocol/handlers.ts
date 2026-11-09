@@ -3501,6 +3501,30 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.recheck(asInstanceId(p.instanceId)) }
     }
+    // A provider's own settings file (Claude Code's settings.json): read and written for a window or
+    // the CLI on this computer only (`providers.*` is never routed either). Secret values never
+    // leave the daemon, and a value is never logged or put in an error.
+    case 'providers.instances.vendorSettings': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A provider's settings file is read on its own computer")
+      const p = isObject(params) ? params : {}
+      return { settings: harnessGateway(ctx).instances.vendorSettings(asInstanceId(p.instanceId)) ?? null }
+    }
+    case 'providers.instances.setVendorSetting': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', "A provider's settings file is changed on its own computer")
+      const p = isObject(params) ? params : {}
+      const value = p.value === null ? null : typeof p.value === 'string' && p.value.length <= 8192 ? p.value : undefined
+      if (value === undefined) throw new DomainRpcError('invalid_params', 'value must be a string or null')
+      return {
+        settings: await harnessGateway(ctx).instances.setVendorSetting({
+          instanceId: asInstanceId(p.instanceId),
+          key: asString(p.key, 'key', 128),
+          value,
+          // The revision the edit was made on: a file changed on disk since is refused.
+          expectedRevision: asString(p.expectedRevision, 'expectedRevision', 64),
+          ...(p.confirmShared === true ? { confirmShared: true } : {})
+        })
+      }
+    }
     case 'providers.instances.refreshModels': {
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.refreshModels(asInstanceId(p.instanceId)) }

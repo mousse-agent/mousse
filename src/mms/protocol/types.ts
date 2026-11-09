@@ -373,6 +373,8 @@ export const PROTOCOL_METHODS = [
   'providers.instances.signOut',
   'providers.instances.allowKnownProblem',
   'providers.instances.recheck',
+  'providers.instances.vendorSettings',
+  'providers.instances.setVendorSetting',
   'providers.instances.refreshModels',
   'providers.instances.refreshAllModels',
   'providers.instances.setModelPrefs',

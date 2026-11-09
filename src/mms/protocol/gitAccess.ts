@@ -181,6 +181,8 @@ export const GIT_ACCESS = {
   'providers.instances.signOut': 'none',
   'providers.instances.allowKnownProblem': 'none',
   'providers.instances.recheck': 'none',
+  'providers.instances.vendorSettings': 'none',
+  'providers.instances.setVendorSetting': 'none',
   'providers.instances.refreshModels': 'none',
   'providers.instances.refreshAllModels': 'none',
   'providers.instances.setModelPrefs': 'none',

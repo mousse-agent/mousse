@@ -208,6 +208,11 @@ export interface InstanceSnapshot {
   settingsNotice?: { kind: 'older_applied' | 'older_conflict'; message: string }
   /** The entry's agent telemetry; absent on older daemons. */
   telemetry?: InstanceTelemetry
+  /**
+   * The provider's own settings file Mousse can edit (Claude Code's `settings.json`): where it is,
+   * whether the user's terminal reads it too, and its modification time (a change reads as new).
+   */
+  settingsFile?: { path: string; shared: boolean; revision?: number }
 }
 
 /**

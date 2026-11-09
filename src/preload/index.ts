@@ -116,6 +116,7 @@ import type {
 } from '../shared/integrations'
 import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
+import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
 import type { MoveResult } from '../shared/harness/move'
 import type {
   AddInstanceInput,
@@ -1081,6 +1082,12 @@ const api = {
       /** Checks again, bypassing the cached status. */
       recheck: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:recheck', instanceId),
+      /** The provider's own settings file (Claude's settings.json), secrets masked; null when Mousse does not edit it. */
+      vendorSettings: (instanceId: string): Promise<VendorSettingsView | null> =>
+        ipcRenderer.invoke('providers:instances:vendorSettings', instanceId),
+      /** Sets or removes (`value: null`) one setting there; a file shared with the terminal needs `confirmShared`. */
+      setVendorSetting: (input: SetVendorSettingInput): Promise<VendorSettingsView> =>
+        ipcRenderer.invoke('providers:instances:setVendorSetting', input),
       /**
        * Moves a model API entry to the agent that now serves it; lists the defaults rewritten.
        * `copyKey` gives the agent the entry's saved API key.
