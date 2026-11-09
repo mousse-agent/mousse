@@ -1,5 +1,7 @@
 import { dirname, join } from 'path'
 import type { ApiKeyCredential, Credential, MutableModels, Provider } from '@earendil-works/pi-ai'
+import { readVercelGatewayCredits } from './vercelGatewayCredits'
+import { planReplyProblem, UsageProblemError, usageProblemOf } from './planReplies'
 import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 import { builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
@@ -109,7 +111,8 @@ export class ProviderAuthService {
    */
   private static readonly PI_USAGE_READERS: Readonly<Record<string, (service: ProviderAuthService, provider: ConfiguredProvider) => Promise<ProviderUsage>>> = {
     xai: (service, provider) => service.fetchXaiUsage(provider),
-    'opencode-go': (service, provider) => service.fetchOpenCodeGoUsage(provider)
+    'opencode-go': (service, provider) => service.fetchOpenCodeGoUsage(provider),
+    'vercel-ai-gateway': (service, provider) => service.fetchVercelGatewayUsage(provider)
   }
 
   private static usageReaderFor(providerId: string): ((service: ProviderAuthService, provider: ConfiguredProvider) => Promise<ProviderUsage>) | undefined {
@@ -664,7 +667,8 @@ export class ProviderAuthService {
       try {
         await this.models.getAuth(model)
       } catch (error) {
-        throw new Error(friendlyOAuthError(this.getProviderDisplayName(providerId), error))
+        // The sign-in could not be renewed (an `invalid_grant`, an expired refresh token): it has to be redone.
+        throw new UsageProblemError('session_expired', friendlyOAuthError(this.getProviderDisplayName(providerId), error))
       }
     }
     const credential = this.credentials.get(providerId) as unknown as Record<string, unknown> | undefined
@@ -688,8 +692,14 @@ export class ProviderAuthService {
         fetch('https://cli-chat-proxy.grok.com/v1/billing', { headers, signal })
       ])
 
-      if ([creditsRes.status, monthlyRes.status].some((status) => status === 401 || status === 403)) {
-        throw new Error('Grok session expired. Reconnect Grok (xAI) in Settings.')
+      // A reply that says the account has no plan is not a sign-in problem; a 401 is; a bare 403 says neither.
+      const problems = await Promise.all([creditsRes, monthlyRes].filter((res) => !res.ok).map(async (res) => planReplyProblem(res.status, await res.clone().json().catch(() => undefined))))
+      if (problems.includes('no_subscription')) return { ...provider, status: 'unavailable' as const, windows: [], problem: 'no_subscription' as const, message: 'No subscription' }
+      if ([creditsRes.status, monthlyRes.status].includes(401)) {
+        throw new UsageProblemError('session_expired', 'Grok session expired. Reconnect Grok (xAI) in Settings.')
+      }
+      if ([creditsRes.status, monthlyRes.status].includes(403)) {
+        throw new UsageProblemError('unavailable', 'Could not load Grok usage (HTTP 403).')
       }
 
       // Parse each successful response independently. One malformed/empty billing
@@ -735,9 +745,17 @@ export class ProviderAuthService {
         ...provider,
         status: 'error' as const,
         windows: [],
+        problem: usageProblemOf(error),
         message: friendlyUsageMessage(error)
       }
     }
+  }
+
+  /** The AI Gateway's credit balance and spend, read with the stored gateway API key. */
+  private async fetchVercelGatewayUsage(provider: ConfiguredProvider): Promise<ProviderUsage> {
+    const apiKey = this.getStoredApiKey(provider.id)
+    if (!apiKey) return { ...provider, status: 'error', windows: [], message: 'No API key' }
+    return { ...provider, ...(await readVercelGatewayCredits(apiKey)) }
   }
 
   private async fetchOpenCodeGoUsage(provider: ConfiguredProvider) {
@@ -758,8 +776,11 @@ export class ProviderAuthService {
         },
         signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS)
       })
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('OpenCode Go API key was rejected. Check the key in Settings.')
+      if (!response.ok) {
+        const problem = planReplyProblem(response.status, await response.clone().json().catch(() => undefined))
+        if (problem === 'no_subscription') return { ...provider, status: 'unavailable' as const, windows: [], problem, message: 'No subscription' }
+        if (problem === 'key_expired') throw new UsageProblemError(problem, 'OpenCode Go API key expired. Replace it in Settings.')
+        if (problem || response.status === 403) throw new UsageProblemError('key_rejected', 'OpenCode Go API key was rejected. Check the key in Settings.')
       }
       if (response.status === 429) {
         throw new Error('OpenCode Go usage is rate limited. Try again shortly.')
@@ -781,6 +802,7 @@ export class ProviderAuthService {
         ...provider,
         status: 'error' as const,
         windows: [],
+        problem: usageProblemOf(error),
         message: friendlyUsageMessage(error)
       }
     }
@@ -815,7 +837,8 @@ export function friendlyUsageMessage(error: unknown): string {
     error.message.includes('Reconnect') ||
     error.message.includes('Could not load') ||
     error.message.includes('Check your connection') ||
-    error.message.includes('session expired')
+    error.message.includes('session expired') ||
+    error instanceof UsageProblemError
   ) {
     return error.message
   }

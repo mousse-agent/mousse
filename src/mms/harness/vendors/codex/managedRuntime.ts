@@ -9,7 +9,7 @@ import { ChatGptAuth, type ChatGptAuthOptions, type ChatGptStatus } from '../../
 import type { ChatGptModel } from '../../chatgpt/models'
 import type { AuthReading, DriverContext, DriverRuntime, RuntimeUsage } from '../../driver'
 import type { RateLimitSnapshot } from './protocol'
-import { reportedUsageWindows, snapshotPlan } from './rateLimits'
+import { reportedUsageWindows, snapshotPlan, snapshotResets } from './rateLimits'
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
 import { CodexInstallation } from './installation'
 import { CODEX_MANAGED_VERSION } from './release'
@@ -105,7 +105,8 @@ export function managedCodexUsage(signedIn: boolean, reported: { snapshot: RateL
   const windows = reportedUsageWindows(reported.snapshot, nowMs)
   if (!windows.length) return { status: 'unavailable', windows: [], message: 'No limits reported for this plan.', ...link }
   const plan = snapshotPlan(reported.snapshot)
-  return { status: 'available', windows, ...(plan ? { plan } : {}), ...(options.live ? {} : { readAt: new Date(reported.at).toISOString() }), ...link }
+  const resets = snapshotResets(reported.snapshot)
+  return { status: 'available', windows, ...(plan ? { plan } : {}), ...(resets ? { resets } : {}), ...(options.live ? {} : { readAt: new Date(reported.at).toISOString() }), ...link }
 }
 
 /** A turn's snapshot younger than this is shown as it is; an older one is read again. */

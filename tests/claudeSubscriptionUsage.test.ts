@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { claudeLimitWindows, parseClaudeSubscriptionUsage } from '../src/mms/harness/vendors/claude/usage'
+import { claudeLimitWindows, claudeResetGrants, parseClaudeSubscriptionUsage } from '../src/mms/harness/vendors/claude/usage'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 const homes: string[] = []
@@ -41,6 +41,30 @@ const quota = {
 function fakeQuery(read = vi.fn(async () => quota)) {
   return { close: vi.fn(), [sdkMethod]: read } as unknown as Query
 }
+
+describe('limit-reset grants (cedar_ember, juniper_tide)', () => {
+  it('null programs, as every account sends today, are no resets', () => {
+    expect(claudeResetGrants({ cedar_ember: null, juniper_tide: null })).toBeUndefined()
+    expect(claudeResetGrants({})).toBeUndefined()
+  })
+
+  it('reads an obvious count and expiry, and adds both programs up', () => {
+    expect(claudeResetGrants({ cedar_ember: { available: 2, expires_at: '2026-11-14T09:00:00Z', arm: 'reset' }, juniper_tide: null }))
+      .toEqual({ available: 2, credits: [{ expiresAt: '2026-11-14T09:00:00.000Z' }] })
+    expect(claudeResetGrants({ cedar_ember: { remaining: 1 }, juniper_tide: { count: 1, expiresAt: 1_900_000_000 } }))
+      .toEqual({ available: 2, credits: [{ expiresAt: new Date(1_900_000_000_000).toISOString() }] })
+    expect(claudeResetGrants({ juniper_tide: { availableCount: 0 } })).toEqual({ available: 0 })
+  })
+
+  it('an unexpected shape shows nothing and does not throw', () => {
+    for (const odd of [{ cedar_ember: { eligible: true, arm: 'reset', available: true } }, { cedar_ember: 'yes' }, { juniper_tide: [1, 2] }, { cedar_ember: { available: -3 } }, { cedar_ember: { count: 2.5 } }])
+      expect(claudeResetGrants(odd as Record<string, unknown>)).toBeUndefined()
+  })
+
+  it('the direct account path carries them', () => {
+    expect(parseClaudeSubscriptionUsage({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 10 }, cedar_ember: { available: 3 } } }).resets).toEqual({ available: 3 })
+  })
+})
 
 describe('model and surface weekly windows', () => {
   // The account usage shape (field names as the live endpoint sends them; values made up).

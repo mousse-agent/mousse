@@ -1,6 +1,6 @@
 import { isIP } from 'node:net'
 import type { ProviderUsage, ProviderUsageWindow, UsageAccount, UsageProxyKeyResult, UsageProxyState } from '../../shared/providerAuth'
-import { claudeLimitWindows } from '../harness/vendors/claude/usage'
+import { claudeLimitWindows, claudeResetGrants } from '../harness/vendors/claude/usage'
 
 /**
  * Plan limits of a Claude sign-in that runs through a local CLI-to-API proxy (CLIProxyAPI): when
@@ -209,10 +209,11 @@ export function proxyClaudeAccount(account: ProxyClaudeAccount, index: number, u
   if (upstream.status === 429) return { ...group, windows: [], problem: 'Rate limited' }
   if (upstream.status !== 200) return { ...group, windows: [], problem: "Couldn't read limits" }
   const windows = isRecord(upstream.body) ? claudeLimitWindows(upstream.body) : []
-  return windows.length ? { ...group, windows } : { ...group, windows: [], problem: 'No limits reported' }
+  const resets = isRecord(upstream.body) ? claudeResetGrants(upstream.body) : undefined
+  return windows.length ? { ...group, windows, ...(resets ? { resets } : {}) } : { ...group, windows: [], problem: 'No limits reported' }
 }
 
-export type ProxyUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'source' | 'proxy' | 'accounts'>
+export type ProxyUsage = Pick<ProviderUsage, 'status' | 'windows' | 'message' | 'source' | 'proxy' | 'accounts' | 'resets'>
 
 /** `host:port` of a proxy origin, as the usage page shows it. */
 export function proxyAddress(origin: string): string {
@@ -229,6 +230,8 @@ export interface ProxyUsageOptions {
   fetch?: ProxyFetch
   signal?: AbortSignal
   timeouts?: { detectMs?: number; readMs?: number; totalMs?: number }
+  /** Reuse a credential listing from the last few seconds (a page reading the sign-ins one by one). */
+  reuseListing?: boolean
   now?: () => number
 }
 
@@ -258,12 +261,27 @@ async function management(fetchImpl: ProxyFetch, origin: string, key: string, pa
   return request(fetchImpl, `${origin}/v0/management${paths[1]}`, { ...init, headers }, timeoutMs, options.signal)
 }
 
+/** A detected proxy with a key and its Claude sign-ins, ready to read each one's usage. */
+interface ProxyReading {
+  origin: string
+  key: string
+  proxy: UsageProxyState
+  fetchImpl: ProxyFetch
+  reads: ProxyUsageOptions
+  accounts: ProxyClaudeAccount[]
+  unavailable: (message?: string, problem?: UsageProxyState['problem']) => ProxyUsage
+}
+
+/** How long a credential listing is reused, so a page reading accounts one by one lists them once. */
+const LISTING_REUSE_MS = 10_000
+/** The last listing per proxy origin, with the key it was read with: reused only for that key, then dropped. */
+const listings = new Map<string, { at: number; key: string; accounts: ProxyClaudeAccount[] }>()
+
 /**
- * The Claude limits a local proxy reads for its sign-ins, or undefined when the base URL is not a
- * CLIProxyAPI on this computer or the private network (the caller keeps its own answer then).
- * A proxy that cannot tell (no key, refused, no Claude sign-in, no numbers) is "Limits unavailable".
+ * The first steps of every read: the proxy is there, has a key, and lists its Claude sign-ins.
+ * Undefined when the base URL is not a local CLIProxyAPI; a `ProxyUsage` when it cannot go on.
  */
-export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Promise<ProxyUsage | undefined> {
+async function openProxy(options: ProxyUsageOptions): Promise<ProxyReading | ProxyUsage | undefined> {
   const origin = localProxyOrigin(options.baseUrl)
   if (!origin) return undefined
   const fetchImpl = options.fetch ?? cappedFetch
@@ -275,39 +293,86 @@ export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Pro
   if (!key) return unavailable(`${PROXY_LIMITS_UNAVAILABLE}. Set ${PROXY_KEY_VARIABLES[0]} to show them.`)
   const deadline = AbortSignal.timeout(options.timeouts?.totalMs ?? PROXY_TOTAL_TIMEOUT_MS)
   const reads: ProxyUsageOptions = { ...options, signal: options.signal ? AbortSignal.any([options.signal, deadline]) : deadline }
+  const now = options.now?.() ?? Date.now()
+  for (const [listedOrigin, listing] of listings) if (now - listing.at >= LISTING_REUSE_MS) listings.delete(listedOrigin)
+  const cached = options.reuseListing ? listings.get(origin) : undefined
+  if (cached && cached.key === key) return { origin, key, proxy, fetchImpl, reads, accounts: cached.accounts, unavailable }
   try {
     const listed = await management(fetchImpl, origin, key, ['/credentials', '/auth-files'], { method: 'GET' }, reads)
     if (listed.status === 401 || listed.status === 403) return unavailable(PROXY_LIMITS_UNAVAILABLE, 'rejected')
     if (listed.status !== 200) return unavailable()
     const accounts = claudeProxyAccounts(listed.body)
     if (!accounts.length) return unavailable()
-    const several = accounts.length > 1
-    const windows: ProviderUsageWindow[] = []
-    const groups: UsageAccount[] = []
-    for (const [index, account] of accounts.entries()) {
-      // A disabled sign-in or an API key has no plan limits to read: it is listed, not asked.
-      if (account.state !== 'active') {
-        groups.push(proxyClaudeAccount(account, index, undefined))
-        continue
-      }
-      const call = {
-        auth_index: account.authIndex,
-        method: 'GET',
-        url: CLAUDE_USAGE_URL,
-        header: { Authorization: 'Bearer $TOKEN$', Accept: 'application/json', 'anthropic-beta': 'oauth-2025-04-20' }
-      }
-      const reply = await management(fetchImpl, origin, key, ['/requests/api-call', '/api-call'], { method: 'POST', body: JSON.stringify(call) }, reads)
-      const upstream = reply.status === 200 ? proxyApiCallBody(reply.body) : undefined
-      if (upstream?.status === 200) windows.push(...proxyClaudeWindows(upstream.body, account, index, several))
-      groups.push(proxyClaudeAccount(account, index, upstream))
-    }
-    // The flat windows (labelled by account when there are several) serve text readers; the page groups by account.
-    if (!windows.length) return several ? { ...unavailable(), accounts: groups } : unavailable()
-    return { status: 'available', windows, source: LOCAL_PROXY_SOURCE, proxy, ...(several ? { accounts: groups } : {}) }
+    listings.set(origin, { at: now, key, accounts })
+    return { origin, key, proxy, fetchImpl, reads, accounts, unavailable }
   } catch {
-    // A timeout or a dropped connection: the proxy is there but said nothing usable.
     return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
   }
+}
+
+/** One sign-in's usage through the proxy: its group, and the reply's status for the flat windows. */
+async function readProxyAccount(reading: ProxyReading, account: ProxyClaudeAccount, index: number): Promise<{ group: UsageAccount; upstream?: { status: number; body: unknown } }> {
+  // A disabled sign-in or an API key has no plan limits to read: it is listed, not asked.
+  if (account.state !== 'active') return { group: proxyClaudeAccount(account, index, undefined) }
+  const call = {
+    auth_index: account.authIndex,
+    method: 'GET',
+    url: CLAUDE_USAGE_URL,
+    header: { Authorization: 'Bearer $TOKEN$', Accept: 'application/json', 'anthropic-beta': 'oauth-2025-04-20' }
+  }
+  try {
+    const reply = await management(reading.fetchImpl, reading.origin, reading.key, ['/requests/api-call', '/api-call'], { method: 'POST', body: JSON.stringify(call) }, reading.reads)
+    const upstream = reply.status === 200 ? proxyApiCallBody(reply.body) : undefined
+    return { group: proxyClaudeAccount(account, index, upstream), ...(upstream ? { upstream } : {}) }
+  } catch {
+    return { group: proxyClaudeAccount(account, index, undefined) }
+  }
+}
+
+/**
+ * The Claude limits a local proxy reads for its sign-ins, or undefined when the base URL is not a
+ * CLIProxyAPI on this computer or the private network (the caller keeps its own answer then).
+ * A proxy that cannot tell (no key, refused, no Claude sign-in, no numbers) is "Limits unavailable".
+ * The sign-ins are read together, not one after another.
+ */
+export async function readLocalProxyClaudeUsage(options: ProxyUsageOptions): Promise<ProxyUsage | undefined> {
+  const reading = await openProxy(options)
+  if (!reading || !('accounts' in reading && 'key' in reading)) return reading as ProxyUsage | undefined
+  const { accounts, proxy, unavailable } = reading
+  const several = accounts.length > 1
+  const read = await Promise.all(accounts.map((account, index) => readProxyAccount(reading, account, index)))
+  if (read.every(({ group }) => group.problem === 'Not reachable') && accounts.some((account) => account.state === 'active'))
+    return unavailable(PROXY_LIMITS_UNAVAILABLE, 'unreachable')
+  const groups = read.map(({ group }) => group)
+  // The flat windows (labelled by account when there are several) serve text readers; the page groups by account.
+  const windows = read.flatMap(({ upstream }, index) => (upstream?.status === 200 ? proxyClaudeWindows(upstream.body, accounts[index]!, index, several) : []))
+  if (!windows.length) return several ? { ...unavailable(), accounts: groups } : unavailable()
+  // One sign-in: its resets go on the card itself.
+  const resets = !several ? groups[0]?.resets : undefined
+  return { status: 'available', windows, source: LOCAL_PROXY_SOURCE, proxy, ...(several ? { accounts: groups } : {}), ...(resets ? { resets } : {}) }
+}
+
+/**
+ * The proxy's Claude sign-ins before any usage is read, for a page that fills them in one by one:
+ * each active one `pending`, a disabled one or an API key already with its note. Undefined unless
+ * the proxy has several sign-ins (then the caller reads the provider whole).
+ */
+export async function previewLocalProxyClaudeAccounts(options: ProxyUsageOptions): Promise<ProxyUsage | undefined> {
+  const reading = await openProxy({ ...options, reuseListing: true })
+  if (!reading || !('key' in reading) || reading.accounts.length < 2) return undefined
+  const accounts = reading.accounts.map((account, index): UsageAccount => (account.state === 'active'
+    ? { id: account.id, label: account.label ?? `Account ${index + 1}`, windows: [], pending: true }
+    : proxyClaudeAccount(account, index, undefined)))
+  return { status: 'available', windows: [], source: LOCAL_PROXY_SOURCE, proxy: reading.proxy, accounts }
+}
+
+/** One proxy sign-in's group, by its credential id; undefined when the proxy no longer lists it. */
+export async function readLocalProxyClaudeAccount(options: ProxyUsageOptions, accountId: string): Promise<UsageAccount | undefined> {
+  const reading = await openProxy({ ...options, reuseListing: true })
+  if (!reading || !('key' in reading)) return undefined
+  const index = reading.accounts.findIndex((account) => account.id === accountId)
+  if (index < 0) return undefined
+  return (await readProxyAccount(reading, reading.accounts[index]!, index)).group
 }
 
 /**

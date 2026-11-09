@@ -149,6 +149,8 @@ import { listFilesPlaces } from '../files/drives'
 import { browsedRootRefusal, browsedSaveRefusal, normalizedBrowsedRoot } from '../files/browsedRoot'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
+import { keepAccount, keepUsage, steadyAccount, steadyUsage, unreachableUsage, usageSlots, withUsageDeadline } from './usageReads'
+import type { UsageAccount } from '../../shared/providerAuth'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
@@ -157,6 +159,9 @@ import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/r
 import { repoRelativePaths } from '../git/repoPaths'
 import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
 import { resolveReviewScope } from '../actions/reviewRange'
+
+/** The Claude subscription's id on the usage page. */
+const CLAUDE_USAGE_ID = 'claude-subscription'
 
 /** The writer holds of open terminals, one per thread and caller (`pty.create`). */
 const threadTerminalWriters = new ThreadTerminalWriters()
@@ -3154,13 +3159,70 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.claudeSubscription.configured()
           ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
           : Promise.resolve(undefined),
-        ctx.mms.harness?.instances.usage({ kind: 'device' }) ?? Promise.resolve([])
+        // The usage page lists a signed-out agent too, so it can offer Reconnect (`signedOut`).
+        ctx.mms.harness?.instances.usage({ kind: 'device' }, { includeSignedOut: true }) ?? Promise.resolve([])
       ])
       return {
         ...usage,
         providers: [...usage.providers, ...(claude ? [claude] : []), ...agents],
         fetchedAt: new Date().toISOString()
       }
+    }
+    // The usage page's progressive reads (`usageReads.ts`): every provider it shows first, with its
+    // last reading; then one provider (or one proxy sign-in) at a time, each within its own deadline.
+    // Both answer only a window or the CLI on this computer, like the proxy key methods below.
+    case 'providers.usageSlots': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
+      // Claude turned off in Settings is not shown either.
+      const claudeOn = !ctx.mms.providerInstances?.isDisabled?.('claude')
+      const claude = claudeOn && ctx.mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription' }] : []
+      const slots = [
+        ...ctx.mms.providerAccess.usageSlots(),
+        ...claude,
+        ...(ctx.mms.harness?.instances.usageSlots({ kind: 'device' }) ?? [])
+      ]
+      return { slots: usageSlots(ctx.mms, slots) }
+    }
+    case 'providers.getUsageFor': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      const accountId = p.accountId === undefined ? undefined : asString(p.accountId, 'accountId', 256)
+      const preview = p.preview === true
+      if (providerId === CLAUDE_USAGE_ID) {
+        // Turned off in Settings: not on the page, so not read either.
+        if (ctx.mms.providerInstances?.isDisabled?.('claude')) return {}
+        const claude = ctx.mms.claudeSubscription
+        if (accountId !== undefined) {
+          const read = await withUsageDeadline<UsageAccount | undefined>((signal) => claude.usageAccount(accountId, signal), () => ({ id: accountId, label: accountId, windows: [], problem: 'Not reachable' }))
+          const account = read && steadyAccount(ctx.mms, providerId, read)
+          if (account) keepAccount(ctx.mms, providerId, account)
+          return { ...(account ? { account } : {}) }
+        }
+        if (preview) {
+          const provider = await withUsageDeadline((signal) => claude.usageAccountsPreview(signal), () => undefined)
+          if (provider) keepUsage(ctx.mms, provider)
+          return { ...(provider ? { provider } : {}) }
+        }
+        const read = await withUsageDeadline(async () => {
+          await claude.status()
+          return claude.configured() ? claude.getUsage(ctx.mms.worktrees.getRepoRoot()) : undefined
+        }, () => unreachableUsage(providerId, 'Claude subscription'))
+        const provider = read && steadyUsage(ctx.mms, read)
+        if (provider) keepUsage(ctx.mms, provider)
+        return { ...(provider ? { provider } : {}) }
+      }
+      const slot = ctx.mms.harness?.instances.usageSlots({ kind: 'device' }).find((entry) => entry.id === providerId)
+      const listed = slot ?? ctx.mms.providerAccess.usageSlots().find((entry) => entry.id === providerId)
+      // Only a provider the page lists is read, so the kept readings never grow past that list.
+      if (!listed) return {}
+      const label = listed.label
+      const provider = await withUsageDeadline(
+        async () => (slot ? ctx.mms.harness!.instances.usageFor({ kind: 'device' }, providerId) : ctx.mms.providerAccess.usageFor(providerId)),
+        () => unreachableUsage(providerId, label)
+      )
+      if (provider) keepUsage(ctx.mms, provider)
+      return { ...(provider ? { provider } : {}) }
     }
     // The management key of the local CLI-to-API proxy Claude's usage is read through: saved
     // encrypted for that proxy's origin after it accepts the key, and never sent back. Only a window

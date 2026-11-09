@@ -886,6 +886,19 @@ describe('plan usage limits for the usage page', () => {
     await expect(service.rateLimits()).rejects.toThrow(/unavailable/)
   })
 
+  it('keeps the reset credits of a read with the snapshot, and a later turn update does not lose them', async () => {
+    const resetCredits = { availableCount: 2, credits: [{ id: 'rc_secret_id', resetType: 'weekly', status: 'available', grantedAt: 1, expiresAt: 1_900_432_000, title: 'Weekly limit reset', description: 'x' }] }
+    const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { result: { rateLimits: limits(40), rateLimitResetCredits: resetCredits } } : chatgpt))
+    const service = create(server)
+    await service.status({ force: true })
+    const read = await service.rateLimits()
+    expect(read.snapshot.rateLimitResetCredits).toEqual({ availableCount: 2, credits: [{ resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 }] })
+    expect(readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')).not.toContain('rc_secret_id')
+    server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: limits(55) } }) + '\n')
+    await vi.waitFor(() => expect(service.reportedRateLimits()?.snapshot.primary?.usedPercent).toBe(55))
+    expect(service.reportedRateLimits()?.snapshot.rateLimitResetCredits?.availableCount).toBe(2)
+  })
+
   it('with nothing to fall back on, a failed read is thrown', async () => {
     const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { error: { code: -32601, message: 'method not found' } } : chatgpt))
     await expect(create(server).rateLimits()).rejects.toThrow(/method not found/)

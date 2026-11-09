@@ -361,9 +361,14 @@ export interface HarnessInstances {
   /**
    * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
    * for the usage page: keyed by the instance and named like it. An instance that cannot be read
-   * says so in its own entry; one failing never fails the others.
+   * says so in its own entry; one failing never fails the others. `includeSignedOut` (the usage page
+   * only) also lists enabled instances that are not signed in, marked `signedOut` and not asked.
    */
-  usage(scope: ProviderScope): Promise<ProviderUsage[]>
+  usage(scope: ProviderScope, options?: { includeSignedOut?: boolean }): Promise<ProviderUsage[]>
+  /** The instances the usage page lists (enabled ones with a usage reader, signed in or not), without reading any. */
+  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true }>
+  /** One listed instance's usage, as `usage` reads it; undefined for an instance the page does not list. */
+  usageFor(scope: ProviderScope, instanceId: string): Promise<ProviderUsage | undefined>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
   /** `add`, telling whether the entry existed already (a fixed-id entry is then returned unchanged). */
   addInstance(input: AddInstanceInput): Promise<{ snapshot: InstanceSnapshot; existed: boolean }>
@@ -878,7 +883,12 @@ export class Harness implements HarnessGateway {
       .catch(() => {})
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
-      usage: (scope) => this.usage(scope),
+      usage: (scope, options) => this.usage(scope, options),
+      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
+      usageFor: async (scope, instanceId) => {
+        const listed = this.usageIds(scope, true).find((entry) => entry.instanceId === instanceId)
+        return listed ? this.readUsage(listed.instanceId, listed.signedOut) : undefined
+      },
       add: async (input) => (await this.add(input)).snapshot,
       addInstance: (input) => this.add(input),
       setSecret: (instanceId, value) => this.setSecret(instanceId, value),
@@ -2211,15 +2221,28 @@ export class Harness implements HarnessGateway {
     return options.sort((a, b) => a.label.localeCompare(b.label))
   }
 
-  private async usage(scope: ProviderScope): Promise<ProviderUsage[]> {
+  private async usage(scope: ProviderScope, options: { includeSignedOut?: boolean } = {}): Promise<ProviderUsage[]> {
+    return Promise.all(this.usageIds(scope, !!options.includeSignedOut).map(({ instanceId, signedOut }) => this.readUsage(instanceId, signedOut)))
+  }
+
+  /** The instances with a usage reader that are on in `scope`: signed in, and with `includeSignedOut` the rest. */
+  private usageIds(scope: ProviderScope, includeSignedOut: boolean): Array<{ instanceId: string; signedOut: boolean }> {
     const entries = this.instanceMap.list()
-    const ids = Object.keys(entries).filter((instanceId) => {
+    return Object.keys(entries).flatMap((instanceId): Array<{ instanceId: string; signedOut: boolean }> => {
       const record = this.recordOrUndefined(instanceId)
-      return record?.runtime.usage && !record.stopped && this.scopes.enabled(instanceId, entries[instanceId]!.enabled, scope).effective && record.runtime.configured()
+      if (!record?.runtime.usage || record.stopped || !this.scopes.enabled(instanceId, entries[instanceId]!.enabled, scope).effective) return []
+      if (record.runtime.configured()) return [{ instanceId, signedOut: false }]
+      return includeSignedOut ? [{ instanceId, signedOut: true }] : []
     })
-    return Promise.all(ids.map(async (instanceId): Promise<ProviderUsage> => {
+  }
+
+  /** One instance's usage, within `USAGE_READ_MS`; a signed-out one is listed for Reconnect and not asked. */
+  private async readUsage(instanceId: string, signedOut: boolean): Promise<ProviderUsage> {
+    {
       const record = this.record(instanceId, { allowDisabled: true })
       const named = { id: instanceId, label: this.displayName(record) }
+      // Not signed in: listed for Reconnect, never asked (a runtime may need its sign-in to answer).
+      if (signedOut) return { ...named, status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' }
       const controller = new AbortController()
       // A runtime that ignores the signal still cannot hold the page up past the deadline.
       const late = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('The usage did not arrive in time.')), { once: true }))
@@ -2231,7 +2254,7 @@ export class Harness implements HarnessGateway {
       } finally {
         clearTimeout(timer)
       }
-    }))
+    }
   }
 
   /**

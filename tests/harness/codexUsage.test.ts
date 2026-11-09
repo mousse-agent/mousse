@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { USAGE_READ_MS, type Harness } from '../../src/mms/harness/gateway'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import type { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
-import { reportedUsageWindows, snapshotPlan, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
+import { reportedUsageWindows, snapshotPlan, snapshotResets, trimResetCredits, usageWindows } from '../../src/mms/harness/vendors/codex/rateLimits'
 import { managedCodexUsage, userCodexLimits } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { usageText } from '../../src/mms/providers/usageText'
@@ -25,6 +25,46 @@ import type { DriverContext } from '../../src/mms/harness/driver'
 
 const device = { kind: 'device' } as const
 const window = (usedPercent: number, windowDurationMins: number | null, resetsAt: number | null) => ({ usedPercent, windowDurationMins, resetsAt })
+
+describe('reset credits', () => {
+  // `rateLimitResetCredits` as `account/rateLimits/read` sends it (values made up).
+  const reply = (availableCount: number) => ({
+    availableCount,
+    credits: [
+      { id: 'rc_1', resetType: 'weekly', status: 'available', grantedAt: 1_900_000_000, expiresAt: 1_900_432_000, title: 'Weekly limit reset', description: 'Resets your weekly limit.' },
+      { id: 'rc_2', resetType: 'five_hour', status: 'available', grantedAt: 1_900_000_000, expiresAt: 1_900_086_400, title: '5-hour reset', description: '' }
+    ]
+  })
+
+  it('keeps the count and, per credit, its type, status, title and expiry: no ids or descriptions', () => {
+    expect(trimResetCredits(reply(2))).toEqual({
+      availableCount: 2,
+      credits: [
+        { resetType: 'weekly', status: 'available', title: 'Weekly limit reset', expiresAt: 1_900_432_000 },
+        { resetType: 'five_hour', status: 'available', title: '5-hour reset', expiresAt: 1_900_086_400 }
+      ]
+    })
+    expect(trimResetCredits({ availableCount: 0, credits: [] })).toEqual({ availableCount: 0 })
+    for (const odd of [null, undefined, {}, { availableCount: -1 }, { availableCount: 1.5 }, { availableCount: '2' }, []]) expect(trimResetCredits(odd)).toBeUndefined()
+  })
+
+  it('reads as the page\'s resets, each expiry as a time', () => {
+    const snapshot = { primary: null, secondary: null, rateLimitResetCredits: trimResetCredits(reply(2))! }
+    expect(snapshotResets(snapshot)).toEqual({
+      available: 2,
+      credits: [
+        { title: 'Weekly limit reset', type: 'weekly', status: 'available', expiresAt: new Date(1_900_432_000_000).toISOString() },
+        { title: '5-hour reset', type: 'five_hour', status: 'available', expiresAt: new Date(1_900_086_400_000).toISOString() }
+      ]
+    })
+    expect(snapshotResets({ primary: null, secondary: null })).toBeUndefined()
+  })
+
+  it('the ChatGPT card carries them, 0 included (the page hides 0)', () => {
+    const snapshot = { primary: window(10, 300, null), secondary: null, rateLimitResetCredits: { availableCount: 0 } }
+    expect(managedCodexUsage(true, { snapshot, at: 1 }, 2, { live: true })).toMatchObject({ resets: { available: 0 } })
+  })
+})
 
 describe('snapshotPlan', () => {
   it('names the plan as ChatGPT does, and nothing for an unknown or odd value', () => {
@@ -190,6 +230,17 @@ describe('the usage page of the gateway', () => {
     await harness.instances.setEnabled('codex', { kind: 'project', projectId: 'p1' }, false)
     expect((await harness.instances.usage({ kind: 'project', projectId: 'p1' })).map((entry) => entry.id)).toEqual(['claude'])
     expect((await harness.instances.usage(device)).map((entry) => entry.id)).toEqual(['codex', 'claude'])
+  })
+
+  it('the usage page alone also lists a signed-out agent, marked and never asked', async () => {
+    const read = vi.fn(async () => ({ status: 'available' as const, windows: available.windows }))
+    const harness = profile({ configured: false, codex: read })
+    expect((await harness.instances.usage(device)).map((entry) => entry.id)).toEqual(['claude'])
+    expect(await harness.instances.usage(device, { includeSignedOut: true })).toEqual([
+      { id: 'codex', label: 'Test codex', status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' },
+      expect.objectContaining({ id: 'claude' })
+    ])
+    expect(read).not.toHaveBeenCalled()
   })
 
   it('shows a ChatGPT subscription as unavailable with its link, and the text form says the same', async () => {

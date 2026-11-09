@@ -191,9 +191,17 @@ export interface RateLimitSnapshot {
   rateLimitReachedType?: string | null
   /** The ChatGPT plan the limits belong to (`plus`, `pro`), when the server says. */
   planType?: string | null
+  /** Mousse's own: the reset credits of the read reply (`rateLimitResetCredits`), kept with the snapshot. */
+  rateLimitResetCredits?: RateLimitResetCredits
+}
+/** Rate-limit reset credits as `account/rateLimits/read` reports them (only the fields Mousse keeps). */
+export interface RateLimitResetCredits {
+  availableCount: number
+  credits?: Array<{ resetType?: string; status?: string; title?: string; expiresAt?: number }>
 }
 export interface RateLimitsReadResponse {
   rateLimits: RateLimitSnapshot
+  rateLimitResetCredits?: unknown
 }
 export interface CodexTurn {
   id: string

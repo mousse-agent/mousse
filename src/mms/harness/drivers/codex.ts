@@ -12,7 +12,7 @@ import type { LoginSession } from '../../providers/LoginSession'
 import { CODEX_CAPABILITIES, CodexAdapter } from './codex/adapter'
 import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
 import { telemetryOf } from '../telemetry'
-import { reportedUsageWindows, snapshotPlan, usageWindows } from '../vendors/codex/rateLimits'
+import { reportedUsageWindows, snapshotPlan, snapshotResets, usageWindows } from '../vendors/codex/rateLimits'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../vendors/codex/managedRuntime'
 import { ownedHomeProblem } from '../ownedHome'
@@ -175,6 +175,7 @@ async function readUsage(service: CodexProviderService, signal: AbortSignal): Pr
     status: 'available',
     windows,
     ...(snapshotPlan(limits.snapshot) ? { plan: snapshotPlan(limits.snapshot) } : {}),
+    ...(snapshotResets(limits.snapshot) ? { resets: snapshotResets(limits.snapshot) } : {}),
     ...(limits.live ? {} : { message: "Codex couldn't be reached.", readAt: new Date(limits.at).toISOString() })
   }
 }

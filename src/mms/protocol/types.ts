@@ -349,6 +349,8 @@ export const PROTOCOL_METHODS = [
   'settings.getOptions',
   'providers.getUsage',
   'providers.getSubscriptionUsage',
+  'providers.usageSlots',
+  'providers.getUsageFor',
   'providers.setUsageProxyKey',
   'providers.clearUsageProxyKey',
   'providers.synthesizeSpeech',
