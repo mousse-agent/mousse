@@ -11,6 +11,8 @@ export type TurnActions = {
   retry: (promptId: string) => void;
   /** Sends "Continue" to the thread. */
   continueRun: () => void;
+  /** Stops the thread's running compaction; the full history stays. */
+  stopCompaction?: () => void;
 };
 
 export const TurnActionsContext = createContext<TurnActions | null>(null);

@@ -439,3 +439,55 @@
   opacity: 0.55;
   cursor: default;
 }
+
+/* The Full/Compact chip, left of the context ring once the thread's prompt cache has gone cold: a quiet
+   suggestion (neutral fill, the accent only on its icon). While Compact now runs it reads "Compacting…". */
+.composer-idle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: var(--ui-hover);
+  box-shadow: var(--ui-specular);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.composer-idle-chip svg {
+  color: var(--accent);
+}
+
+button.composer-idle-chip:hover,
+.composer-idle-chip.open {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-primary);
+}
+
+.composer-idle-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+}
+
+.composer-idle-chip.is-compacting {
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+}
+
+/* Its menu: the permission menu's rows under one muted line saying how long the cache has been cold. */
+.composer-mode-menu.composer-idle-menu {
+  width: min(280px, calc(100vw - 16px));
+}
+
+.composer-idle-menu-head {
+  padding: 4px var(--ui-menu-row-x) 6px;
+  font-size: 12px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}

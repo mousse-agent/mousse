@@ -552,7 +552,8 @@ export function OrchestratorChat() {
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const compaction = normalizeContextSettings(settings.context)
     setContextCompactionSetting((current) =>
-      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens
+      current?.compactionEnabled === compaction.compactionEnabled && current.compactionTokens === compaction.compactionTokens &&
+        current.idleCompaction === compaction.idleCompaction
         ? current
         : compaction
     )
@@ -972,7 +973,7 @@ export function OrchestratorChat() {
   const resendBusy = turnActive || loading
   const turnActions = useMemo<TurnActions | null>(() => {
     if (!activeThreadId) return null
-    return createTurnActions({
+    const actions = createTurnActions({
       // Read at use: depending on the transcript would rebuild this on every streamed token.
       prompt: (promptId) => useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user'),
       send: (content, images) => {
@@ -980,7 +981,24 @@ export function OrchestratorChat() {
         void sendMessage(content, chatMode, images, activeThreadId)
       }
     })
+    return { ...actions, stopCompaction: () => void window.mousse.threads.stopCompaction(activeThreadId).catch(() => undefined) }
   }, [activeThreadId, resendBusy, sendMessage, chatMode])
+
+  // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
+  // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
+  const [compactingThread, setCompactingThread] = useState<string | null>(null)
+  const compactionRunning = useMemo(
+    () => messages.some((message) => message.kind === 'context_compaction' && message.streaming === true && message.compaction?.manual === true),
+    [messages]
+  )
+  const handleCompactNow = useCallback(() => {
+    const threadId = activeThreadId
+    if (!threadId) return
+    setCompactingThread(threadId)
+    void window.mousse.threads.compact(threadId)
+      .catch((error: unknown) => setSendError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
+  }, [activeThreadId])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1459,7 +1477,9 @@ export function OrchestratorChat() {
                 contextUsage,
                 contextCompactionSetting,
                 contextOpen,
-                onContextOpenChange: setContextOpen
+                onContextOpenChange: setContextOpen,
+                ...(!newChat && activeThreadId ? { onCompactNow: handleCompactNow } : {}),
+                compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId)
               }}
               loading={turnActive || loading}
               stoppable={turnActive || loading || turnStoppable}

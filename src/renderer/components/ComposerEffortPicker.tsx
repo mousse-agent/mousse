@@ -62,7 +62,7 @@ const ROW = '.composer-run-menu-segments'
  * picker moves to the list or its footer).
  * Enter and Space pick the focused item (they are buttons).
  */
-function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
+export function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
   const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
   if (!items.length) return
   const active = document.activeElement as HTMLElement | null
@@ -101,7 +101,7 @@ function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
 }
 
 /** Puts focus on the chosen item of the run settings in `container` (the first item without one). */
-function focusRunSettings(container: HTMLElement | null | undefined, focusVisible?: boolean): boolean {
+export function focusRunSettings(container: HTMLElement | null | undefined, focusVisible?: boolean): boolean {
   const item = container?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]') ?? container?.querySelector<HTMLElement>('[role="menuitemradio"]')
   // `focusVisible` (Chromium) keeps the focus ring off when a pointer opened the menu.
   item?.focus({ preventScroll: true, ...(focusVisible === undefined ? {} : { focusVisible }) } as FocusOptions)

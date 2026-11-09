@@ -8,6 +8,7 @@ import Alert02Icon from '@hugeicons/core-free-icons/Alert02Icon'
 import AlertCircleIcon from '@hugeicons/core-free-icons/AlertCircleIcon'
 import Archive01Icon from '@hugeicons/core-free-icons/Archive01Icon'
 import ArchiveRestoreIcon from '@hugeicons/core-free-icons/ArchiveRestoreIcon'
+import ArrowShrink02Icon from '@hugeicons/core-free-icons/ArrowShrink02Icon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
 import ArrowDown02Icon from '@hugeicons/core-free-icons/ArrowDown02Icon'
 import ArrowDownDoubleIcon from '@hugeicons/core-free-icons/ArrowDownDoubleIcon'
@@ -338,6 +339,7 @@ export const Image = /* @__PURE__ */ createIcon('Image', Image01Icon)
 export const Stop = /* @__PURE__ */ createIcon('Stop', StopIcon)
 export const VolumeHigh = /* @__PURE__ */ createIcon('VolumeHigh', VolumeHighIcon)
 export const ArchiveRestore = /* @__PURE__ */ createIcon('ArchiveRestore', ArchiveRestoreIcon)
+export const ArrowShrink = /* @__PURE__ */ createIcon('ArrowShrink', ArrowShrink02Icon)
 export const Clean = /* @__PURE__ */ createIcon('Clean', CleanIcon)
 export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
 export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)

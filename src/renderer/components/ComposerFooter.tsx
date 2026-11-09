@@ -9,7 +9,9 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { motionScale, scaleMotionMs } from '../lib/motion'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
-import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown } from './ContextUsagePopover'
+import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown, type ContextCacheLine } from './ContextUsagePopover'
+import { IdleCompactionChip } from './IdleCompactionChip'
+import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
 import { useCommandBindings } from '../commands/commandRegistry'
@@ -68,6 +70,10 @@ export interface ComposerRunProps {
   contextCompactionSetting?: ContextSettings
   contextOpen: boolean
   onContextOpenChange: (open: boolean) => void
+  /** Compacts the thread's context now (`threads.compact`); absent where the composer cannot (a new chat). */
+  onCompactNow?: () => void
+  /** A compaction the person started is running: the chip reads "Compacting…". */
+  compacting?: boolean
 }
 
 /** The thread's permission mode and how to change it; it shows beside the model button. */
@@ -280,9 +286,15 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
   )
 }
 
-/** The context ring and its popover, while the context's fill is known. */
-function ComposerContextRing({ run }: { run: ComposerRunProps }) {
-  const { providers, selectedProviderId, contextUsage, contextCompactionSetting, contextOpen, onContextOpenChange } = run
+/**
+ * The context ring and its popover, while the context's fill is known, and left of it the Full/Compact chip
+ * once the prompt cache has gone cold.
+ */
+function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runActive: boolean }) {
+  const { providers, selectedProviderId, contextUsage, contextCompactionSetting, contextOpen, onContextOpenChange, onCompactNow, compacting = false } = run
+  const cache = contextUsage.promptCache
+  const now = useMinuteClock(Boolean(cache), cache?.lastRequestAt)
+  const idleSetting = contextCompactionSetting?.idleCompaction ?? 'suggest'
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   // No ring while the context's fill is unknown: a new chat, a provider that reports none, no capacity.
@@ -293,7 +305,25 @@ function ComposerContextRing({ run }: { run: ComposerRunProps }) {
     if (!contextShown && contextOpen) onContextOpenChange(false)
   }, [contextShown, contextOpen, onContextOpenChange])
   if (!contextShown) return null
-  return (
+  const cacheState = cache ? promptCacheState(cache, now) : undefined
+  const canCompact = Boolean(onCompactNow)
+  const chip = idleCompactionChip({ usage: contextUsage, now, setting: idleSetting, canCompact, runActive, compacting })
+  const historyTokens = contextTokens(contextUsage)
+  const cacheLine: ContextCacheLine | undefined = cacheState && {
+    text: promptCacheText(cacheState),
+    tone: cacheState.kind === 'warm' ? 'warm' : cacheGoneCold(cacheState) ? 'cold' : 'unknown',
+    ...(canCompact && !runActive && !compacting && suggestsCompaction(contextUsage, now, idleSetting) ? { onCompactNow } : {})
+  }
+  return (<>
+    {chip && cache && cacheLine ? (
+      <IdleCompactionChip
+        state={chip}
+        historyTokens={historyTokens}
+        cacheText={cacheLine.text}
+        costText={uncachedCostText(cache, historyTokens)}
+        onCompact={() => onCompactNow?.()}
+      />
+    ) : null}
     <div className="composer-context-anchor">
       <ContextUsageRing
         usage={contextUsage}
@@ -308,9 +338,10 @@ function ComposerContextRing({ run }: { run: ComposerRunProps }) {
         compaction={compaction}
         providerId={selectedProviderId}
         anchorRef={contextBtnRef}
+        cache={cacheLine}
       />
     </div>
-  )
+  </>)
 }
 
 export function ComposerFooter({
@@ -363,7 +394,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run ? <ComposerContextRing run={run} /> : null}
+        {run ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
 
         <button
           type="button"

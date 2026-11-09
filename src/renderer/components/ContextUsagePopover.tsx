@@ -77,6 +77,16 @@ interface ContextUsagePopoverProps {
   /** The selected provider, to name the measured model as the picker does. */
   providerId: string
   anchorRef: React.RefObject<HTMLElement | null>
+  /** The provider's prompt cache: its state in a line, and Compact now once it has gone cold. */
+  cache?: ContextCacheLine
+}
+
+/** The popover's cache line: "Cache warm · 4m left" (green), "Cache expired 1h 12m ago" (amber), "Idle 20m" (no lifetime known). */
+export interface ContextCacheLine {
+  text: string
+  tone: 'warm' | 'cold' | 'unknown'
+  /** Offered when the cache has gone cold and the thread can compact now. */
+  onCompactNow?: () => void
 }
 
 /**
@@ -89,7 +99,8 @@ export function ContextUsagePopover({
   usage,
   providerId,
   anchorRef,
-  compaction
+  compaction,
+  cache
 }: ContextUsagePopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null)
   const floatingStyle = useFloatingPosition({
@@ -186,6 +197,23 @@ export function ContextUsagePopover({
             </li>
           ))}
         </ul>
+
+        {cache && (
+          <div className="context-usage-compaction context-usage-cache">
+            <span className={`context-usage-cache-dot is-${cache.tone}`} aria-hidden="true" />
+            <span className="context-usage-compaction-text context-usage-cache-text">{cache.text}</span>
+            {cache.onCompactNow ? (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm context-usage-compaction-change"
+                title="Summarize older messages now, before you send"
+                onClick={() => { onClose(); cache.onCompactNow?.() }}
+              >
+                Compact now
+              </button>
+            ) : null}
+          </div>
+        )}
 
         {compaction && (
           <div className="context-usage-compaction">
