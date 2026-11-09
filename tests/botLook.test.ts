@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BOT_ACCESSORIES, BOT_COLOURS, normalizeBotLook, pickDistinctLook, type BotLook } from '../src/shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_COLOURS, BOT_EYES, BOT_KINDS, normalizeBotLook, pickDistinctLook, withKindAndEyes, type BotLook } from '../src/shared/bots/personal/look'
 
 describe('bot looks', () => {
   it('reads unknown or missing values as coral and no accessory', () => {
@@ -8,6 +8,16 @@ describe('bot looks', () => {
     expect(normalizeBotLook({ colour: 'mauve', accessory: 'monocle' })).toEqual({ colour: 'coral', accessory: 'none' })
     expect(normalizeBotLook({ colour: 'teal', accessory: 'monocle' })).toEqual({ colour: 'teal', accessory: 'none' })
     expect(normalizeBotLook({ colour: 'teal', accessory: 'chef_hat' })).toEqual({ colour: 'teal', accessory: 'chef_hat' })
+  })
+
+  it('keeps a Mousse and eye shapes, and leaves the default mouse and pill eyes unstored', () => {
+    expect(normalizeBotLook({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    expect(normalizeBotLook({ colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' })).toEqual({ colour: 'pink', accessory: 'crown' })
+    expect(normalizeBotLook({ colour: 'pink', accessory: 'crown', kind: 'dragon', eyes: 'laser' })).toEqual({ colour: 'pink', accessory: 'crown' })
+    expect(withKindAndEyes({ colour: 'teal', accessory: 'none', kind: 'mousse' }, 'mouse', 'code')).toEqual({ colour: 'teal', accessory: 'none', eyes: 'code' })
+    expect(BOT_KINDS).toEqual(['mouse', 'mousse'])
+    expect(BOT_EYES.indexOf('pill')).toBe(0)
+    expect(BOT_EYES).toHaveLength(8)
   })
 
   it('keeps the accessory order of the face shader', () => {

@@ -1,24 +1,38 @@
 /**
- * A bot's look (Bot Phase 1 §5.1.1, bot-ui §4.3): a clay mouse in one of 8 colours wearing one of
- * 12 accessories. Browser-safe. The accessory order matches `ACCS` in the face shader reference
+ * A bot's look (Bot Phase 1 §5.1.1, bot-ui §4.3): a clay mouse, or a Mousse (the app logo as a
+ * character), in one of 8 colours wearing one of 12 accessories, with one of 8 eye shapes. Browser-safe. The accessory order matches `ACCS` in the face shader reference
  * (`docs/plans/mockups/bot-ui/source/mice3d/mice.html`), so an accessory's index is the shader's `uAcc`.
  */
 
 export const BOT_COLOURS = ['coral', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const
 export const BOT_ACCESSORIES = ['none', 'headphones', 'glasses', 'beret', 'goggles', 'beanie', 'cap', 'crown', 'bow_tie', 'scarf', 'chef_hat', 'hood'] as const
+/** The character: the clay mouse, or the Mousse logo (mousse in a goblet, its top tapering into a curled whip). */
+export const BOT_KINDS = ['mouse', 'mousse'] as const
+/** Eye shapes, in the face shader's `uK.y` order. `pill` is the original eye. */
+export const BOT_EYES = ['pill', 'round', 'dot', 'tall', 'square', 'heart', 'star', 'code'] as const
 export type BotColour = (typeof BOT_COLOURS)[number]
 export type BotAccessory = (typeof BOT_ACCESSORIES)[number]
+export type BotKind = (typeof BOT_KINDS)[number]
+export type BotEyes = (typeof BOT_EYES)[number]
 
 /** Stored as plain strings so later builds can add looks; unknown values read as the default. */
 export interface BotLook {
   colour: string
   accessory: string
+  /** Missing means the mouse, so looks from before kinds existed read unchanged. */
+  kind?: string
+  /** Missing means the pill eyes. */
+  eyes?: string
 }
 
 /** A look whose values this build knows. */
 export interface KnownBotLook {
   colour: BotColour
   accessory: BotAccessory
+  /** Present only when not the mouse. */
+  kind?: BotKind
+  /** Present only when not the pill eyes. */
+  eyes?: BotEyes
 }
 
 export const DEFAULT_BOT_LOOK: KnownBotLook = { colour: 'coral', accessory: 'none' }
@@ -51,6 +65,20 @@ export const BOT_ACCESSORY_HEX: Record<BotAccessory, string | null> = {
   hood: '#8f939c'
 }
 
+export const BOT_KIND_LABELS: Record<BotKind, string> = { mouse: 'Mouse', mousse: 'Mousse' }
+
+/** Eye shapes in plain words, for the picker and labels. */
+export const BOT_EYES_LABELS: Record<BotEyes, string> = {
+  pill: 'Pill',
+  round: 'Round',
+  dot: 'Dot',
+  tall: 'Tall',
+  square: 'Square',
+  heart: 'Heart',
+  star: 'Star',
+  code: 'Code'
+}
+
 /** Accessory names in plain words, for the picker and labels. */
 export const BOT_ACCESSORY_LABELS: Record<BotAccessory, string> = {
   none: 'None',
@@ -69,13 +97,37 @@ export const BOT_ACCESSORY_LABELS: Record<BotAccessory, string> = {
 
 const isColour = (value: unknown): value is BotColour => (BOT_COLOURS as readonly unknown[]).includes(value)
 const isAccessory = (value: unknown): value is BotAccessory => (BOT_ACCESSORIES as readonly unknown[]).includes(value)
+const isKind = (value: unknown): value is BotKind => (BOT_KINDS as readonly unknown[]).includes(value)
+const isEyes = (value: unknown): value is BotEyes => (BOT_EYES as readonly unknown[]).includes(value)
 
-/** The look this build draws: each unknown or missing value becomes the default (coral, none). */
+/**
+ * The look this build draws: each unknown or missing value becomes the default (coral, none, the
+ * mouse, pill eyes). `kind` and `eyes` are kept only when they differ from the default.
+ */
 export function normalizeBotLook(look: Partial<BotLook> | null | undefined): KnownBotLook {
-  return {
+  const known: KnownBotLook = {
     colour: isColour(look?.colour) ? look.colour : DEFAULT_BOT_LOOK.colour,
     accessory: isAccessory(look?.accessory) ? look.accessory : DEFAULT_BOT_LOOK.accessory
   }
+  if (isKind(look?.kind) && look.kind !== 'mouse') known.kind = look.kind
+  if (isEyes(look?.eyes) && look.eyes !== 'pill') known.eyes = look.eyes
+  return known
+}
+
+/** The look's character; looks without one are mice. */
+export const botKindOf = (look: Pick<KnownBotLook, 'kind'>): BotKind => look.kind ?? 'mouse'
+/** The look's eye shape; looks without one have pill eyes. */
+export const botEyesOf = (look: Pick<KnownBotLook, 'eyes'>): BotEyes => look.eyes ?? 'pill'
+
+/** Only the fields a look stores (colour, accessory, and kind and eyes when given). */
+export function lookFields(look: BotLook): BotLook {
+  return { colour: look.colour, accessory: look.accessory, ...(look.kind !== undefined ? { kind: look.kind } : {}), ...(look.eyes !== undefined ? { eyes: look.eyes } : {}) }
+}
+
+/** `look` with `kind` and `eyes` set, dropping either when it is the default. */
+export function withKindAndEyes(look: KnownBotLook, kind: BotKind, eyes: BotEyes): KnownBotLook {
+  const { kind: _kind, eyes: _eyes, ...rest } = look
+  return { ...rest, ...(kind !== 'mouse' ? { kind } : {}), ...(eyes !== 'pill' ? { eyes } : {}) }
 }
 
 /** The values of `options` with the fewest `count`s; ties are broken by `random`. */

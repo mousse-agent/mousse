@@ -1,12 +1,12 @@
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { BotState } from '../../../../shared/bots/personal/chat'
-import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, botEyesOf, botKindOf, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import { useMotionScale } from '../../../lib/motion'
 import { sharedFaceRenderer, sharedFaceRendererStatus, subscribeSharedFaceRenderer, type FaceHandle, type FaceSpec } from './faceRenderer'
 import './face.css'
 
 /**
- * A bot's face (Bot Phase 1 §5.12, bot-ui §4.3): its clay mouse, whose pose shows the state.
+ * A bot's face (Bot Phase 1 §5.12, bot-ui §4.3): its clay mouse or Mousse, whose pose shows the state.
  * `happy` is the renderer-only "done" moment. `head` shows the head (lists, header, messages: 34 to
  * 48 px); `full` the whole mouse (About, the empty page: 88 to 104 px). `still` draws the pose
  * without motion; reduced motion does the same.
@@ -91,7 +91,7 @@ function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }
 
   useLayoutEffect(() => {
     handleRef.current?.update(specRef.current)
-  }, [look.colour, look.accessory, state, size, view, still])
+  }, [look.colour, look.accessory, look.kind, look.eyes, state, size, view, still])
 
   return (
     <span
@@ -101,6 +101,8 @@ function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }
       data-view={view}
       data-colour={look.colour}
       data-accessory={look.accessory}
+      data-kind={botKindOf(look)}
+      data-eyes={botEyesOf(look)}
       data-still={still ? 'true' : undefined}
       {...a11y(props.label)}
     >
@@ -115,14 +117,16 @@ function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }
 }
 
 /**
- * The still fallback, with no WebGL: a round head in the look's colour, with ears and eyes, and a
- * badge in the accessory's colour. Unknown look values draw as the default.
+ * The still fallback, with no WebGL: a round head in the look's colour with eyes (a mouse has ears;
+ * a Mousse has its curled whip and a goblet rim), and a badge in the accessory's colour. Unknown
+ * look values draw as the default.
  */
 export function BotFaceStill(props: BotFaceProps) {
   const { look: known, state, size, view } = normalizeFaceProps(props)
   const body = BOT_COLOUR_HEX[known.colour]
   const accessory = BOT_ACCESSORY_HEX[known.accessory]
   const asleep = state === 'paused'
+  const mousse = botKindOf(known) === 'mousse'
   return (
     <svg
       className={`bot-face bot-face-still${props.className ? ` ${props.className}` : ''}`}
@@ -133,12 +137,20 @@ export function BotFaceStill(props: BotFaceProps) {
       data-view={view}
       data-colour={known.colour}
       data-accessory={known.accessory}
+      data-kind={botKindOf(known)}
       style={{ flex: 'none', opacity: asleep ? 0.6 : 1 }}
       {...a11y(props.label)}
     >
-      <circle cx="10" cy="11" r="7" fill={body} />
-      <circle cx="30" cy="11" r="7" fill={body} />
+      {mousse ? (
+        <path d="M20 2C19 7 13 9 9 13C5.5 16.5 6 22 6 25H34C34 19 31 15 26 12C22.5 9.5 21 6 24 3C22.5 2 21 2 20 2Z" fill={body} />
+      ) : (
+        <>
+          <circle cx="10" cy="11" r="7" fill={body} />
+          <circle cx="30" cy="11" r="7" fill={body} />
+        </>
+      )}
       <circle cx="20" cy="23" r="14" fill={body} />
+      {mousse && <path d="M5.5 25.5A14.5 13 0 0 0 34.5 25.5Z" fill={body} style={{ filter: 'brightness(0.62)' }} />}
       {asleep ? (
         <g stroke="#1c1c1f" strokeWidth="1.6" strokeLinecap="round">
           <line x1="13.5" y1="22" x2="17" y2="22" />
@@ -150,7 +162,7 @@ export function BotFaceStill(props: BotFaceProps) {
           <ellipse cx="24.5" cy="21.5" rx="1.8" ry={state === 'needs_you' ? 3 : 2.4} />
         </g>
       )}
-      <circle cx="20" cy="27" r="1.3" fill="#1c1c1f" />
+      {!mousse && <circle cx="20" cy="27" r="1.3" fill="#1c1c1f" />}
       {accessory && (
         <circle cx="33" cy="33" r="5" fill={accessory} stroke="#ffffff" strokeWidth="1.5">
           <title>{BOT_ACCESSORY_LABELS[known.accessory]}</title>

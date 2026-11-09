@@ -5,7 +5,14 @@ import {
   BOT_ACCESSORY_LABELS,
   BOT_COLOUR_HEX,
   BOT_COLOURS,
+  BOT_EYES,
+  BOT_EYES_LABELS,
+  BOT_KIND_LABELS,
+  BOT_KINDS,
+  botEyesOf,
+  botKindOf,
   normalizeBotLook,
+  withKindAndEyes,
   type BotLook,
   type KnownBotLook
 } from '../../../../shared/bots/personal/look'
@@ -13,9 +20,10 @@ import { BotFace } from './BotFace'
 import './face.css'
 
 /**
- * Picks a bot's look (bot-ui §4.2): a large live preview with Shuffle under it, the eight colours
- * and the 12 accessories, each shown on the mouse in the chosen colour. Unknown stored values
- * show, and are picked, as the default.
+ * Picks a bot's look (bot-ui §4.2): a large live preview with Shuffle under it, the character
+ * (mouse or Mousse), the eight colours, the eight eye shapes and the 12 accessories, each shown on
+ * the chosen character in the chosen colour. Unknown stored values show, and are picked, as the
+ * default.
  */
 export interface BotLookPickerProps {
   look: BotLook
@@ -39,7 +47,10 @@ export const BOT_COLOUR_LABELS: Record<(typeof BOT_COLOURS)[number], string> = {
   pink: 'Pink'
 }
 
-/** A random look other than `current`, among the looks `existing` doesn't wear while any is free. */
+/**
+ * A random colour and accessory other than `current`'s, among the looks `existing` doesn't wear
+ * while any is free. The character and eyes stay as picked.
+ */
 export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [], random: () => number = Math.random): KnownBotLook {
   const now = normalizeBotLook(current)
   const worn = new Set(existing.map((look) => normalizeBotLook(look)).map((look) => `${look.colour}/${look.accessory}`))
@@ -47,15 +58,28 @@ export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [],
   const others = all.filter((look) => look.colour !== now.colour || look.accessory !== now.accessory)
   const free = others.filter((look) => !worn.has(`${look.colour}/${look.accessory}`))
   const pool = free.length > 0 ? free : others
-  return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]!
+  const pick = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]!
+  return withKindAndEyes(pick, botKindOf(now), botEyesOf(now))
+}
+
+/** The look in words, for the preview's accessible name: "Purple Mousse with heart eyes and glasses". */
+export function lookLabel(look: KnownBotLook): string {
+  const kind = botKindOf(look)
+  const eyes = botEyesOf(look)
+  const extras = [
+    ...(eyes !== 'pill' ? [`${BOT_EYES_LABELS[eyes].toLowerCase()} eyes`] : []),
+    ...(look.accessory !== 'none' ? [BOT_ACCESSORY_LABELS[look.accessory].toLowerCase()] : [])
+  ]
+  const noun = kind === 'mousse' ? BOT_KIND_LABELS.mousse : BOT_KIND_LABELS.mouse.toLowerCase()
+  return `${BOT_COLOUR_LABELS[look.colour]} ${noun}${extras.length > 0 ? ` with ${extras.join(' and ')}` : ''}`
 }
 
 export function BotLookPicker({ look, onChange, existingLooks = [], className }: BotLookPickerProps) {
   const current = normalizeBotLook(look)
   const id = useId()
-  const colourName = BOT_COLOUR_LABELS[current.colour]
-  const accessoryName = BOT_ACCESSORY_LABELS[current.accessory]
-  const previewLabel = current.accessory === 'none' ? `${colourName} mouse` : `${colourName} mouse with ${accessoryName.toLowerCase()}`
+  const kind = botKindOf(current)
+  const eyes = botEyesOf(current)
+  const previewLabel = lookLabel(current)
   return (
     <div className={`bot-look-picker${className ? ` ${className}` : ''}`}>
       <div className="bot-look-picker__preview">
@@ -66,6 +90,24 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
         </button>
       </div>
       <div className="bot-look-picker__options">
+        <div className="bot-look-picker__label" id={`${id}-kind`}>Character</div>
+        <RadioRow
+          className="bot-look-picker__kinds"
+          labelledBy={`${id}-kind`}
+          options={BOT_KINDS}
+          selected={kind}
+          onSelect={(next) => onChange(withKindAndEyes(current, next, eyes))}
+          render={(next) => ({
+            label: BOT_KIND_LABELS[next],
+            className: 'bot-look-picker__accessory',
+            content: (
+              <>
+                <BotFace look={withKindAndEyes(current, next, eyes)} state="idle" size={THUMB_SIZE} view="head" still />
+                <span>{BOT_KIND_LABELS[next]}</span>
+              </>
+            )
+          })}
+        />
         <div className="bot-look-picker__label" id={`${id}-colour`}>Colour</div>
         <RadioRow
           className="bot-look-picker__colours"
@@ -80,6 +122,24 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
             content: null
           })}
         />
+        <div className="bot-look-picker__label" id={`${id}-eyes`}>Eyes</div>
+        <RadioRow
+          className="bot-look-picker__eyes"
+          labelledBy={`${id}-eyes`}
+          options={BOT_EYES}
+          selected={eyes}
+          onSelect={(next) => onChange(withKindAndEyes(current, kind, next))}
+          render={(next) => ({
+            label: `${BOT_EYES_LABELS[next]} eyes`,
+            className: 'bot-look-picker__accessory',
+            content: (
+              <>
+                <BotFace look={withKindAndEyes(current, kind, next)} state="idle" size={THUMB_SIZE} view="head" still />
+                <span>{BOT_EYES_LABELS[next]}</span>
+              </>
+            )
+          })}
+        />
         <div className="bot-look-picker__label" id={`${id}-accessory`}>Accessory</div>
         <RadioRow
           className="bot-look-picker__accessories"
@@ -92,7 +152,7 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className }:
             className: 'bot-look-picker__accessory',
             content: (
               <>
-                <BotFace look={{ colour: current.colour, accessory }} state="idle" size={THUMB_SIZE} view="head" still />
+                <BotFace look={{ ...current, accessory }} state="idle" size={THUMB_SIZE} view="head" still />
                 <span>{BOT_ACCESSORY_LABELS[accessory]}</span>
               </>
             )

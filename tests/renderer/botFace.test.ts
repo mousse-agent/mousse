@@ -274,6 +274,13 @@ describe('BotFace props', () => {
     expect(normalizeFaceProps({ look: coral, state: 'idle', size: -3, view: 'head' }).size).toBe(40)
   })
 
+  it('draws a Mousse in the fallback and passes its kind and eyes to the shader', () => {
+    render(createElement(BotFaceStill, { look: { colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, state: 'idle', size: 48, view: 'head' }))
+    expect(host.querySelector('svg')!.getAttribute('data-kind')).toBe('mousse')
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([1, 6])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([0, 0])
+  })
+
   it('keeps unknown stored values drawable in the fallback', () => {
     render(createElement(BotFaceStill, { look: { colour: 'mauve', accessory: 'monocle' }, state: 'dancing' as never, size: 48, view: 'head' }))
     const svg = host.querySelector('svg')!

@@ -1,4 +1,4 @@
-import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_EYES, BOT_KINDS, botEyesOf, botKindOf, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
 
 /**
@@ -223,6 +223,8 @@ export interface FaceUniforms {
   uE: [number, number, number, number]
   uE2: [number, number, number, number]
   uV: [number, number, number, number]
+  /** Kind (`BOT_KINDS` index) and eye shape (`BOT_EYES` index). */
+  uK: [number, number]
 }
 
 /** Metal accessories get the bright specular. */
@@ -244,6 +246,7 @@ export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView)
     uH2: [pose.earR, pose.armL, pose.armR, pose.laptop],
     uE: [pose.open, pose.closed, pose.arc, pose.worried],
     uE2: [pose.lookX, pose.lookY, pose.es, pose.sweat],
-    uV: [head ? 0.8 : 0.32, head ? 1.45 : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0]
+    uV: [head ? 0.8 : 0.32, head ? 1.45 : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
+    uK: [BOT_KINDS.indexOf(botKindOf(look)), BOT_EYES.indexOf(botEyesOf(look))]
   }
 }

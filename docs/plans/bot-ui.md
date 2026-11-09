@@ -159,6 +159,11 @@ A face is a **look**, drawn live:
 
 That is 96 looks. A new colour costs nothing, and a new accessory is a small shape in code, not new artwork. Every mouse is the same character: big round ears, a round head on a short body, big solid pill eyes, a dot nose, whiskers, tiny arms and feet, and a curled tail.
 
+Two more choices came later, both optional in a stored look (`kind`, `eyes`; a look without them is the mouse with pill eyes, so older bots and older builds read unchanged):
+
+- **Character** (2): the mouse, or the **Mousse**: the app logo as a character. It has the same round head and face, and no ears, whiskers, nose, arms, feet or tail. Its top tapers gradually into the logo's curled whip, which wags where the mouse's tail would, and it sits in a goblet (bowl, stem and foot) in a deeper shade of its colour. All 12 accessories fit it.
+- **Eyes** (8): pill (the original), round, dot, tall, square, heart, star and code (`< >`, the logo's eyes). Every feeling still works: the shape is the open eye, and blinking, sleeping, happy and worried change it the same way.
+
 The bot stands on its own: no circle, tile or badge behind it. Lists, the header and messages show the head (40 px; 48 px in the Bots row) so the face stays big; About and the empty page show the whole mouse (88 to 104 px). Whiskers are dropped below about 56 px, where they turn to noise.
 
 **New bots get distinct looks.** The first pick is the least-used accessory among the owner's bots, then the least-used colour, so the Bots row never starts with two identical mice.

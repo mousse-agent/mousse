@@ -321,7 +321,8 @@ export class FaceRenderer {
   private update(slot: Slot, next: FaceSpec): void {
     const prev = slot.spec
     if (
-      prev.look.colour === next.look.colour && prev.look.accessory === next.look.accessory && prev.state === next.state &&
+      prev.look.colour === next.look.colour && prev.look.accessory === next.look.accessory && prev.look.kind === next.look.kind &&
+      prev.look.eyes === next.look.eyes && prev.state === next.state &&
       prev.size === next.size && prev.view === next.view && prev.still === next.still
     ) return
     slot.spec = next
@@ -437,7 +438,7 @@ export class FaceRenderer {
     for (const { slot } of due) {
       const { spec } = slot
       const view = { view: spec.view, size: spec.size, samples: 1 as const }
-      const cacheKey = slot.drawnStill ? `${spec.look.colour}|${spec.look.accessory}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
+      const cacheKey = slot.drawnStill ? `${spec.look.colour}|${spec.look.accessory}|${spec.look.kind ?? 'mouse'}|${spec.look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${slot.px}` : undefined
       if (cacheKey) {
         const cached = this.cache.get(cacheKey)
         if (cached) {
@@ -692,6 +693,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       context.uniform4fv(uniforms.uE, u.uE)
       context.uniform4fv(uniforms.uE2, u.uE2)
       context.uniform4fv(uniforms.uV, u.uV)
+      context.uniform2fv(uniforms.uK, u.uK)
       context.drawArrays(context.TRIANGLES, 0, 3)
     },
     timer: timerExt

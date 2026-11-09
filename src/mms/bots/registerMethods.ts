@@ -47,12 +47,15 @@ const MAX_CHAT_TEXT = 64 * 1024
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const whole = (value: unknown, min: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min
 
+const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes'])
+
 function look(value: unknown): BotLook {
-  const given = value as { colour?: unknown; accessory?: unknown } | null
-  if (!given || typeof given !== 'object' || Array.isArray(given) || Object.keys(given).some((key) => key !== 'colour' && key !== 'accessory') ||
-      !text(given.colour, 40) || !text(given.accessory, 40))
-    throw new DomainRpcError('invalid_params', 'A look is a colour and an accessory')
-  return { colour: given.colour, accessory: given.accessory }
+  const given = value as { colour?: unknown; accessory?: unknown; kind?: unknown; eyes?: unknown } | null
+  if (!given || typeof given !== 'object' || Array.isArray(given) || Object.keys(given).some((key) => !LOOK_KEYS.has(key)) ||
+      !text(given.colour, 40) || !text(given.accessory, 40) ||
+      (given.kind !== undefined && !text(given.kind, 40)) || (given.eyes !== undefined && !text(given.eyes, 40)))
+    throw new DomainRpcError('invalid_params', 'A look is a colour and an accessory, with an optional kind and eye shape')
+  return { colour: given.colour, accessory: given.accessory, ...(given.kind !== undefined ? { kind: given.kind } : {}), ...(given.eyes !== undefined ? { eyes: given.eyes } : {}) }
 }
 
 function attachments(value: unknown): BotChatAttachment[] {

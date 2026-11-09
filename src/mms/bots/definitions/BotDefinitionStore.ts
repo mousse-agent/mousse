@@ -14,7 +14,7 @@ import {
   type BotThreadSpec,
   type BotThreadSpecV1
 } from '../../../shared/bots/personal/definition'
-import { pickDistinctLook, type BotLook } from '../../../shared/bots/personal/look'
+import { lookFields, pickDistinctLook, type BotLook } from '../../../shared/bots/personal/look'
 import { canonicalManifest, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { stableStringify } from '../../run/json'
@@ -57,7 +57,8 @@ export function definitionProblem(definition: BotDefinition): string | undefined
   if (typeof definition.name !== 'string' || !definition.name.trim() || definition.name.length > MAX_BOT_NAME_CHARS) return 'The bot needs a name.'
   if (typeof definition.description !== 'string' || definition.description.length > MAX_BOT_DESCRIPTION_CHARS) return 'The description is too long.'
   const look = definition.look as Partial<BotLook> | undefined
-  if (!look || typeof look.colour !== 'string' || typeof look.accessory !== 'string' || look.colour.length > 40 || look.accessory.length > 40) return 'The bot needs a look.'
+  if (!look || typeof look.colour !== 'string' || typeof look.accessory !== 'string' || look.colour.length > 40 || look.accessory.length > 40 ||
+      (look.kind !== undefined && (typeof look.kind !== 'string' || look.kind.length > 40)) || (look.eyes !== undefined && (typeof look.eyes !== 'string' || look.eyes.length > 40))) return 'The bot needs a look.'
   if (definition.owner?.kind !== 'person' || definition.owner.id !== 'self') return 'Bots for a team are not available yet.'
   if (definition.placement?.kind !== 'this_computer') return 'Bots run on this computer only for now.'
   if (typeof definition.role !== 'string' || definition.role.length > 64 * 1024) return 'The role is invalid.'
@@ -115,7 +116,7 @@ export function upgradeDefinitionV1(v1: BotDefinitionV1, look: BotLook): BotDefi
     ...(v1.revision ? { revision: v1.revision } : {}),
     name: (v1.name ?? '').trim().slice(0, MAX_BOT_NAME_CHARS) || 'Bot',
     description: firstLine.slice(0, MAX_BOT_DESCRIPTION_CHARS),
-    look: { colour: look.colour, accessory: look.accessory },
+    look: lookFields(look),
     owner: { kind: 'person', id: 'self' },
     placement: { kind: 'this_computer' },
     role: v1.role ?? '',
