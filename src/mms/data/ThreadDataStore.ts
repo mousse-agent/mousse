@@ -66,6 +66,7 @@ import {
 import { sharedThreadDbClient } from './threadDb/threadDbClient'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
+import { publishStagedBlobs } from './threadDb/threadBlobs'
 
 export { ThreadDataCorruptionError } from './legacyThreadData'
 
@@ -146,7 +147,7 @@ function removeAbandonedImports(threadDir: string): void {
   for (const name of readdirSync(threadDir)) {
     if (!/^thread\.db\.(import|create)-/.test(name)) continue
     try {
-      if (statSync(join(threadDir, name)).mtimeMs < cutoff) rmSync(join(threadDir, name), { force: true })
+      if (statSync(join(threadDir, name)).mtimeMs < cutoff) rmSync(join(threadDir, name), { recursive: true, force: true })
     } catch {
       // Gone already.
     }
@@ -348,11 +349,14 @@ export class ThreadDataStore extends EventEmitter {
           try {
             if (ThreadDbStore.usesDb(threadDir)) return 'already' as const
             if (!sameFingerprint(legacyFingerprint(threadDir), fingerprint)) return 'stale' as const
+            // The import's blobs first, then the database that refers to them.
+            publishStagedBlobs(threadDir, `${tmp}.stage`)
             linkSync(tmp, join(threadDir, THREAD_DB_FILE))
             fsyncDirectorySync(threadDir)
             return 'published' as const
           } finally {
             rmSync(tmp, { force: true })
+            rmSync(`${tmp}.stage`, { recursive: true, force: true })
           }
         })
         if (published === 'stale') continue

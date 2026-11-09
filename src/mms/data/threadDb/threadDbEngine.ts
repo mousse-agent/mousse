@@ -11,6 +11,8 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadData } from './collections'
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
+import { skeletonOf } from './jsonSkeleton'
+import { collectBlobs, encodeRow, hydratePayload, parseBlobPaths, writeBlob, type BlobData, type BlobPath } from './threadBlobs'
 
 export const THREAD_DB_FILE = 'thread.db'
 export const THREAD_DB_FORMAT = 1
@@ -19,7 +21,7 @@ export const ORD_STEP = 1024
 
 export interface DbInfo { seq: number; epoch: number; dbId: string; horizon: number }
 /** A row as read; `seq` is the thread's sequence when it last changed. */
-export interface DbRow { rid: number; coll: string; ord: number; seq: number; payload: string }
+export interface DbRow { rid: number; coll: string; ord: number; seq: number; payload: string; hasBlobs?: boolean; missing?: BlobPath[] }
 export interface DbStateRow { key: string; payload: string }
 export interface DbLoad { info: DbInfo; rows: DbRow[]; state: DbStateRow[] }
 export interface DbChanges extends DbLoad { removed: Array<{ rid: number; coll: string }>; removedState: string[]; reset: boolean }
@@ -27,8 +29,12 @@ export interface DbChanges extends DbLoad { removed: Array<{ rid: number; coll: 
 export interface SaveRequest {
   baseSeq: number
   epochBump: boolean
-  inserts: Array<{ tmp: number; coll: string; ord: number; payload: string }>
-  updates: Array<{ rid: number; coll: string; ord: number; payload?: string }>
+  inserts: Array<{ tmp: number; coll: string; ord: number; payload: string; blobPaths?: string | null }>
+  updates: Array<{ rid: number; coll: string; ord: number; payload?: string; blobPaths?: string | null }>
+  /** Blobs the rows refer to, written before the transaction that commits them. */
+  blobs?: BlobData[]
+  /** Rows that referred to blobs were removed or rewritten: collect blobs nothing refers to any more. */
+  collectBlobs?: boolean
   deletes: Array<{ rid: number; coll: string }>
   state: Array<{ key: string; payload: string | null }>
   info?: Record<string, string>
@@ -97,14 +103,16 @@ function createSchema(db: DatabaseSync): void {
   db.exec(`PRAGMA user_version=${THREAD_DB_FORMAT}`)
 }
 
-function insertAll(db: DatabaseSync, data: StoredThreadData, info: Record<string, string>): number {
+function insertAll(db: DatabaseSync, dir: string, data: StoredThreadData, info: Record<string, string>): number {
   const { collections, state } = decompose(data)
-  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload) VALUES (?, ?, ?, ?, ?, ?, 1, ?)')
+  const insertRow = db.prepare('INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
   let rows = 0
   for (const [coll, items] of collections) {
     items.forEach((item, index) => {
       const fields = rowFields(coll, item)
-      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, JSON.stringify(item))
+      const encoded = encodeRow(skeletonOf(item) ?? null)
+      for (const blob of encoded.blobs) writeBlob(dir, blob)
+      insertRow.run(coll, (index + 1) * ORD_STEP, fields.msgId, fields.role, fields.kind, fields.ts, encoded.payload, encoded.paths ? JSON.stringify(encoded.paths) : null)
       rows += 1
     })
   }
@@ -125,11 +133,21 @@ function readInfo(db: DatabaseSync): DbInfo {
   return { seq: Number(values.get('seq') ?? 0), epoch: Number(values.get('epoch') ?? 1), dbId: values.get('dbId') ?? '', horizon: Number(values.get('horizon') ?? 0) }
 }
 
-function loadFrom(db: DatabaseSync): DbLoad {
+/** Rows as read from the table, with their blobs put back (image data too, unless `images` is false). */
+function hydrateRows(dir: string, raw: Array<DbRow & { blob_paths: string | null }>, options: { images?: boolean } = {}): DbRow[] {
+  return raw.map((row) => {
+    const base = { rid: row.rid, coll: row.coll, ord: row.ord, seq: row.seq }
+    if (!row.blob_paths) return { ...base, payload: row.payload }
+    const hydrated = hydratePayload(dir, row.payload, row.blob_paths, options)
+    return { ...base, payload: hydrated.payload, hasBlobs: true, ...(hydrated.missing.length ? { missing: hydrated.missing } : {}) }
+  })
+}
+
+function loadFrom(db: DatabaseSync, dir: string): DbLoad {
   db.exec('BEGIN')
   try {
     const info = readInfo(db)
-    const rows = db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload FROM items ORDER BY coll, ord, rid').all() as unknown as DbRow[]
+    const rows = hydrateRows(dir, db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload, blob_paths FROM items ORDER BY coll, ord, rid').all() as never)
     const state = db.prepare('SELECT key, payload FROM state').all() as unknown as DbStateRow[]
     return { info, rows, state }
   } finally {
@@ -229,7 +247,7 @@ export class ThreadDbEngine {
   }
 
   load(dir: string): DbLoad {
-    return loadFrom(this.open(dir).db)
+    return loadFrom(this.open(dir).db, dir)
   }
 
   summary(dir: string): ThreadDbSummary {
@@ -247,10 +265,10 @@ export class ThreadDbEngine {
       const info = readInfo(db)
       if (since < info.horizon || (epoch !== undefined && epoch !== info.epoch)) {
         db.exec('COMMIT')
-        const full = loadFrom(db)
+        const full = loadFrom(db, dir)
         return { ...full, removed: [], removedState: [], reset: true }
       }
-      const rows = db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload FROM items WHERE changed_seq > ? ORDER BY coll, ord, rid').all(since) as unknown as DbRow[]
+      const rows = hydrateRows(dir, db.prepare('SELECT rid, coll, ord, changed_seq AS seq, payload, blob_paths FROM items WHERE changed_seq > ? ORDER BY coll, ord, rid').all(since) as never)
       const state = db.prepare('SELECT key, payload FROM state WHERE changed_seq > ?').all(since) as unknown as DbStateRow[]
       const removedRows = db.prepare('SELECT rid, coll FROM removed WHERE changed_seq > ?').all(since) as Array<{ rid: number; coll: string }>
       const removed = removedRows.filter((row) => !row.coll.startsWith('$state:'))
@@ -264,6 +282,8 @@ export class ThreadDbEngine {
   save(dir: string, request: SaveRequest): SaveResult {
     const connection = this.open(dir)
     const { db } = connection
+    // Blobs first: a row is never committed before what it refers to is on disk.
+    for (const blob of request.blobs ?? []) writeBlob(dir, blob)
     db.exec('BEGIN IMMEDIATE')
     try {
       const info = readInfo(db)
@@ -278,7 +298,7 @@ export class ThreadDbEngine {
         remove.run(entry.rid, entry.coll)
         tombstone.run(entry.rid, entry.coll, seq)
       }
-      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, payload = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
+      const update = this.statement(connection, 'UPDATE items SET ord = ?, msg_id = ?, role = ?, kind = ?, ts = ?, payload = ?, blob_paths = ?, rev = rev + 1, changed_seq = ? WHERE rid = ?')
       const move = this.statement(connection, 'UPDATE items SET ord = ?, changed_seq = ? WHERE rid = ?')
       for (const entry of request.updates) {
         if (entry.payload === undefined) {
@@ -286,13 +306,13 @@ export class ThreadDbEngine {
           continue
         }
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, entry.payload, seq, entry.rid)
+        update.run(entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, entry.payload, entry.blobPaths ?? null, seq, entry.rid)
       }
-      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      const insert = this.statement(connection, 'INSERT INTO items(coll, ord, msg_id, role, kind, ts, changed_seq, payload, blob_paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       const rids: number[] = []
       for (const entry of request.inserts) {
         const fields = rowFields(entry.coll, JSON.parse(entry.payload))
-        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, seq, entry.payload)
+        const result = insert.run(entry.coll, entry.ord, fields.msgId, fields.role, fields.kind, fields.ts, seq, entry.payload, entry.blobPaths ?? null)
         rids[entry.tmp] = Number(result.lastInsertRowid)
       }
       const upsertState = this.statement(connection, 'INSERT INTO state(key, changed_seq, payload) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, changed_seq = excluded.changed_seq, rev = rev + 1')
@@ -319,6 +339,7 @@ export class ThreadDbEngine {
         setInfo.run('horizon', String(horizon))
       }
       db.exec('COMMIT')
+      if (request.collectBlobs) this.collectBlobs(dir)
       return { ok: true, info: { ...info, seq, epoch, horizon }, rids }
     } catch (error) {
       if (db.isTransaction) db.exec('ROLLBACK')
@@ -341,8 +362,10 @@ export class ThreadDbEngine {
     const connection = this.open(dir)
     const lowered = needle.toLowerCase()
     const out: Array<{ id: string; content: string }> = []
-    for (const row of this.statement(connection, "SELECT payload FROM items WHERE coll = 'm' ORDER BY ord, rid").iterate() as Iterable<{ payload: string }>) {
-      const message = JSON.parse(row.payload) as { id?: unknown; content?: unknown }
+    for (const row of this.statement(connection, "SELECT payload, blob_paths FROM items WHERE coll = 'm' ORDER BY ord, rid").iterate() as Iterable<{ payload: string; blob_paths: string | null }>) {
+      // Long text lives in blobs; it is put back (image data is not) before the text is compared.
+      const payload = row.blob_paths ? hydratePayload(dir, row.payload, row.blob_paths, { images: false }).payload : row.payload
+      const message = JSON.parse(payload) as { id?: unknown; content?: unknown }
       const content = typeof message.content === 'string' ? message.content : ''
       if (typeof message.id === 'string' && content.toLowerCase().includes(lowered)) out.push({ id: message.id, content })
       if (out.length >= limit) break
@@ -397,7 +420,7 @@ export class ThreadDbEngine {
       db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;')
       createSchema(db)
       db.exec('BEGIN')
-      insertAll(db, { messages: [], agents: [], tasks: [], llmContext: undefined, mousseAgentSessions: [] }, { createdAt: new Date().toISOString() })
+      insertAll(db, dir, { messages: [], agents: [], tasks: [], llmContext: undefined, mousseAgentSessions: [] }, { createdAt: new Date().toISOString() })
       db.exec('COMMIT')
     } finally {
       db.close()
@@ -423,6 +446,15 @@ export class ThreadDbEngine {
     if (!/^thread\.db\.import-[\w.-]+$/.test(request.tmpName)) throw new Error('Invalid import file name')
     const tmp = join(dir, request.tmpName)
     rmSync(tmp, { force: true })
+    // The import's blobs go to a staging folder of its own (`<tmpName>.stage/blobs`), moved into the thread's
+    // `blobs/` only when the database is published, under the thread's lock (`publishStagedBlobs`). A failed or stale
+    // import removes just its staging folder, so it never touches a blob another import or save has published.
+    const stage = join(dir, `${request.tmpName}.stage`)
+    rmSync(stage, { recursive: true, force: true })
+    const discard = (): void => {
+      rmSync(tmp, { force: true })
+      rmSync(stage, { recursive: true, force: true })
+    }
     try {
       const source = readLegacyThreadData(dir, { transactional: request.transactional })
       const db = new DatabaseSync(tmp)
@@ -431,13 +463,13 @@ export class ThreadDbEngine {
         db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;')
         createSchema(db)
         db.exec('BEGIN')
-        rows = insertAll(db, source, {
+        rows = insertAll(db, stage, source, {
           importedFrom: JSON.stringify(request.fingerprint),
           importedAt: new Date().toISOString(),
           jsonFingerprint: JSON.stringify(request.fingerprint)
         })
         db.exec('COMMIT')
-        const back = dataFromLoad(loadFrom(db))
+        const back = dataFromLoad(loadFrom(db, stage))
         if (back.messages.length !== source.messages.length) throw new Error(`Import kept ${back.messages.length} of ${source.messages.length} messages`)
         if (normalizedForCompare(back) !== normalizedForCompare(source)) throw new Error('Imported rows differ from the JSON files')
         const check = db.prepare('PRAGMA quick_check').get() as Record<string, unknown>
@@ -447,14 +479,25 @@ export class ThreadDbEngine {
       }
       fsyncFile(tmp)
       if (!sameFingerprint(legacyFingerprint(dir), request.fingerprint)) {
-        rmSync(tmp, { force: true })
+        discard()
         return { ok: false, stale: true }
       }
       return { ok: true, tmpName: request.tmpName, messages: source.messages.length, rows }
     } catch (error) {
-      rmSync(tmp, { force: true })
+      discard()
       throw error
     }
+  }
+
+  /**
+   * Removes blobs no row refers to, once an hour old (so a blob written by a save still running elsewhere is never
+   * taken). The caller holds the thread's lock. Returns how many files went.
+   */
+  collectBlobs(dir: string, minAgeMs = 60 * 60_000): number {
+    const referenced = new Set<string>()
+    const rows = this.statement(this.open(dir), 'SELECT blob_paths FROM items WHERE blob_paths IS NOT NULL').all() as Array<{ blob_paths: string }>
+    for (const row of rows) for (const ref of parseBlobPaths(row.blob_paths)) referenced.add(ref.sha256)
+    return collectBlobs(dir, referenced, minAgeMs)
   }
 
   /** Checkpoints and closes the thread's database before its folder is moved or purged. */

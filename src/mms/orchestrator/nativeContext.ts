@@ -15,6 +15,7 @@ import type {
 } from '../../shared/types'
 import { contextCompactionPoint, DEFAULT_COMPACTION_RESERVE_TOKENS } from '../../shared/settings'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from './steer'
+import { isMissingPlaceholder } from '../data/threadDb/threadBlobs'
 
 // Shared with Settings, which shows where a thread compacts.
 export { DEFAULT_COMPACTION_RESERVE_TOKENS, EXACT_COMPACTION_USAGE_RATIO } from '../../shared/settings'
@@ -182,7 +183,25 @@ function emptyUsage(): AssistantMessage['usage'] {
 
 /** Provider-visible native messages. Generated compaction memory is supplied separately. */
 export function getActiveMessages(context: NativeLlmContext): Message[] {
-  return structuredClone(context.messages.slice(Math.max(0, context.activeStartIndex)))
+  return withoutMissingImages(structuredClone(context.messages.slice(Math.max(0, context.activeStartIndex))))
+}
+
+/**
+ * An image whose stored bytes could not be read (its data is a missing-blob placeholder) is sent to the model as a
+ * short note instead, never as image data. The stored context keeps its reference, so the image comes back if its
+ * file does.
+ */
+function withoutMissingImages(messages: Message[]): Message[] {
+  for (const message of messages) {
+    const content = (message as { content?: unknown }).content
+    if (!Array.isArray(content)) continue
+    content.forEach((part, index) => {
+      if (part && typeof part === 'object' && (part as { type?: unknown }).type === 'image' && isMissingPlaceholder((part as { data?: unknown }).data)) {
+        content[index] = { type: 'text', text: '[image unavailable]' }
+      }
+    })
+  }
+  return messages
 }
 
 export function getCompactionSummary(context: NativeLlmContext): string | undefined {
