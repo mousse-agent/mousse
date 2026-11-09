@@ -17,6 +17,16 @@ export interface AutomationsClient {
   listKeys(): Promise<string[]>
   /** Stores a key typed into a masked field (`automations.keys.set`). */
   setKey(name: string, value: string): Promise<void>
+  /** Turn on: the draft becomes the person's own automation (`automations.drafts.turnOn`). */
+  turnOn(draftId: string): Promise<ScheduledJob>
+  /** Discard: the draft is deleted (`automations.drafts.discard`). */
+  discard(draftId: string): Promise<void>
+  /** A blank draft to set up by hand (`automations.drafts.create`). */
+  createDraft(projectId?: string): Promise<ScheduledJob>
+  /** The person answered the draft's question; its answer goes to the manager as a message (`automations.drafts.answered`). */
+  answered(draftId: string): Promise<void>
+  /** The Automation manager's hidden thread, made the first time (`automations.manager.thread`). */
+  managerThread(): Promise<string>
 }
 
 /** Uses the host's profile-bound bridge. */
@@ -28,7 +38,12 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node }),
     resend: async (jobId, occurrenceId) => { await transport.request('automations.request.resend', { jobId, occurrenceId }) },
     listKeys: async () => (await transport.request<{ keys: Array<{ name: string }> }>('automations.keys.list', {})).keys.map((key) => key.name),
-    setKey: async (name, value) => { await transport.request('automations.keys.set', { name, value }) }
+    setKey: async (name, value) => { await transport.request('automations.keys.set', { name, value }) },
+    turnOn: async (draftId) => (await transport.request<{ job: ScheduledJob }>('automations.drafts.turnOn', { draftId })).job,
+    discard: async (draftId) => { await transport.request('automations.drafts.discard', { draftId }) },
+    createDraft: async (projectId) => (await transport.request<{ job: ScheduledJob }>('automations.drafts.create', projectId ? { projectId } : {})).job,
+    answered: async (draftId) => { await transport.request('automations.drafts.answered', { draftId }) },
+    managerThread: async () => (await transport.request<{ threadId: string }>('automations.manager.thread', {})).threadId
   }
 }
 

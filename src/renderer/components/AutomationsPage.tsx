@@ -14,7 +14,7 @@ export function AutomationsPage() {
   const profileId = useAppStore((s) => s.profileId)
   const [view, setView] = useState<'list' | 'library'>('list')
   const pageRef = useRef<HTMLDivElement>(null)
-  // Automate… and Repeat this… open the list, where the create row takes what they carry.
+  // Automate… and Repeat this… open the list, where the composer takes what they carry.
   const createRequest = useAutomationCreate((state) => state.request)
   useEffect(() => { if (createRequest) setView('list') }, [createRequest])
   // The page takes focus when it opens, so its page-scoped keys (⌘N) work at once; a click inside keeps it there.

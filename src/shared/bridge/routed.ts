@@ -906,6 +906,14 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'An agent’s ask and Keep are answered on the computer that holds them; Move is run by the computer the automations leave.'
   },
   {
+    methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],
+    reason: 'A request’s stored payload and the saved keys stay on the computer that runs the automation.'
+  },
+  {
+    methods: ['automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.manager.thread'],
+    reason: 'Drafts and the Automation manager’s thread belong to the computer whose manager wrote them; Turn on happens there.'
+  },
+  {
     prefixes: ['providers.'],
     reason:
       'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'

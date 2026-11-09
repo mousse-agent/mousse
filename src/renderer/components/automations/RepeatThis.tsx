@@ -4,8 +4,8 @@ import { useAppStore } from '../../stores/appStore'
 import { openAutomationCreate } from '../../stores/automationCreateStore'
 
 /**
- * A prompt's menu in a thread: Repeat this… opens Automations with the create row prefilled with the prompt, the
- * thread's project and its model. A bot's thread has none: a bot's schedules are set by asking the bot.
+ * A prompt's menu in a thread: Repeat this… opens Automations with the composer prefilled with the prompt and the
+ * thread's project. A bot's thread has none: a bot's schedules are set by asking the bot.
  */
 export function RepeatThisMenu({ text }: { text: string }) {
   const threadId = usePromptThreadId()

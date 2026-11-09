@@ -3,8 +3,8 @@
  * text the scheduler runs), a bot's schedule, and the saved agent a run records.
  */
 import { describe, expect, it } from 'vitest'
-import { botWhen, libraryFrom, matchWorkflows, parseWhoKey, whoKey, whoOptions } from '../src/renderer/components/automations/whoDo'
-import { parseWorkflowCommand, workflowCommandText, workflowInputFields, workflowInputsReady } from '../src/shared/workflows/workflowCommand'
+import { libraryFrom, parseWhoKey, whoKey, whoOptions } from '../src/renderer/components/automations/whoDo'
+import { parseWorkflowCommand, workflowCommandText, workflowInputFields } from '../src/shared/workflows/workflowCommand'
 import { tokenizeWorkflowCommand } from '../src/shared/workflows/commandTokenizer'
 import { ranAgent } from '../src/mms/scheduled/ScheduledJobService'
 import { savedAgentRefusal } from '../src/mms/automations/scheduledAgent'
@@ -48,13 +48,6 @@ describe('Who', () => {
     }
   })
 
-  it('gives a bot only a repeating schedule, at most every 5 minutes', () => {
-    expect(botWhen({ kind: 'cron', expr: '0 8 * * *' })).toEqual({ ok: true, when: { kind: 'cron', expr: '0 8 * * *' } })
-    expect(botWhen({ kind: 'interval', minutes: 30 })).toEqual({ ok: true, when: { kind: 'interval', minutes: 30 } })
-    expect(botWhen({ kind: 'interval', minutes: 2 })).toMatchObject({ ok: false })
-    expect(botWhen({ kind: 'manual' })).toMatchObject({ ok: false, reason: expect.stringMatching(/A bot repeats/) })
-    expect(botWhen({ kind: 'once', runAt: '2026-12-01T09:00:00.000Z' })).toMatchObject({ ok: false })
-  })
 })
 
 describe('Do: a workflow', () => {
@@ -88,18 +81,6 @@ describe('Do: a workflow', () => {
     expect(parseWorkflowCommand('review open PRs')).toBeNull()
   })
 
-  it('is ready once every required input has a value', () => {
-    const fields = workflowInputFields(schema)
-    expect(workflowInputsReady(fields, {})).toBe(false)
-    expect(workflowInputsReady(fields, { tag: 'v1' })).toBe(true)
-  })
-
-  it('is offered when the line starts with /', () => {
-    const workflows = [{ id: 'w', slug: 'release-notes', name: 'Release notes', revisionId: 'h' }, { id: 'v', slug: 'deploy', name: 'Deploy', revisionId: 'h' }]
-    expect(matchWorkflows('/', workflows)).toHaveLength(2)
-    expect(matchWorkflows('/rel', workflows).map((workflow) => workflow.slug)).toEqual(['release-notes'])
-    expect(matchWorkflows('every day /rel', workflows)).toEqual([])
-  })
 })
 
 describe('a job whose Who is a saved agent', () => {

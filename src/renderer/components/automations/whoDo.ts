@@ -1,15 +1,12 @@
 import type { AgentDefinitionSummary } from '../../../shared/agents/types'
-import type { BotSchedule } from '../../../shared/bots/personal/definition'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import type { JobSchedule } from '../../../shared/types'
-import { parseSimpleCron } from '../../../shared/scheduleLabel'
 import type { SelectOption } from '../ui/Select'
 import type { ModelGroup } from '../scheduled/jobDraft'
 
 /**
  * The Who and Do of an automation as data: what the pickers offer (models, saved agents, bots; a prompt or a
- * workflow), how a choice is written as one Select value, and what a bot's schedule can be. Pure, so the create row,
- * the detail and their tests read the same rules.
+ * workflow) and how a choice is written as one Select value. Pure, so the detail's form and its tests read the same
+ * rules.
  */
 
 export interface SavedAgentChoice { id: string; name: string; purpose?: string }
@@ -96,29 +93,4 @@ export function whoName(who: Who, input: { defaultName: string; models: readonly
   if (who.kind === 'model') return input.models.flatMap((group) => group.choices).find((choice) => choice.key === who.key)?.label ?? 'A model'
   if (who.kind === 'agent') return input.library.agents.find((agent) => agent.id === who.id)?.name ?? 'Saved agent'
   return input.library.bots.find((bot) => bot.id === who.id)?.name ?? 'Bot'
-}
-
-/**
- * A bot's schedule from the create row's When. A bot repeats: every N minutes (at least 5) or a cron time; a one-time
- * run or On demand is something you ask the bot in its chat.
- */
-export function botWhen(schedule: JobSchedule): { ok: true; when: BotSchedule['when'] } | { ok: false; reason: string } {
-  if (schedule.kind === 'interval') {
-    const minutes = schedule.minutes ?? 0
-    return minutes >= 5 ? { ok: true, when: { kind: 'interval', minutes } } : { ok: false, reason: 'A bot runs at most every 5 minutes.' }
-  }
-  if (schedule.kind === 'cron' && schedule.expr) {
-    const cron = parseSimpleCron(schedule.expr)
-    if (cron?.kind === 'minutes' && cron.every < 5) return { ok: false, reason: 'A bot runs at most every 5 minutes.' }
-    return { ok: true, when: { kind: 'cron', expr: schedule.expr } }
-  }
-  return { ok: false, reason: 'A bot repeats. For one run, ask it in its chat.' }
-}
-
-/** The workflows whose slug or name starts with what follows `/` in the text; all of them for a bare `/`. */
-export function matchWorkflows(text: string, workflows: readonly WorkflowChoice[]): WorkflowChoice[] {
-  const match = /^\/(\S*)$/.exec(text.trim())
-  if (!match) return []
-  const typed = match[1]!.toLowerCase()
-  return workflows.filter((workflow) => workflow.slug.toLowerCase().startsWith(typed) || workflow.name.toLowerCase().startsWith(typed)).slice(0, 8)
 }

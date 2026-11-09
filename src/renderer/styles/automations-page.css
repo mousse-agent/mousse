@@ -47,7 +47,7 @@
   margin: 0 auto;
 }
 
-/* The Automations page reads like a to-do list: a quiet create row, then the groups (Needs you, Today, Upcoming,
+/* The Automations page reads like a to-do list: the composer, then the groups (Needs you, Today, Upcoming,
    Watching, On demand), each one surface with hairlines between rows. It uses the settings tokens and
    row anatomy (styles/settings.css), declared here because the page is not inside Settings. */
 .automations-page {
@@ -504,29 +504,11 @@ html[data-theme='high-contrast'] .automations-page {
   box-sizing: border-box;
 }
 
-/* ---- create row -------------------------------------------------------- */
+/* ---- composer ---------------------------------------------------------- */
 
-.automation-create-quiet {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  height: 38px;
-  padding: 0 var(--space-12);
-  border: 0;
-  border-radius: 10px;
-  background: var(--settings-surface);
-  box-shadow: var(--settings-surface-edge);
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: var(--settings-fs-row);
-  text-align: left;
-  cursor: pointer;
-}
+.automation-composer-wrap { display: flex; flex-direction: column; gap: 6px; }
 
-.automation-create-quiet:hover { color: var(--text-primary); background: var(--ui-hover); }
-
-.automation-create {
+.automation-composer {
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
@@ -536,24 +518,25 @@ html[data-theme='high-contrast'] .automations-page {
   box-shadow: var(--settings-surface-edge), 0 0 0 1px var(--ui-line);
 }
 
-.automation-create-input,
-.automation-create-input:focus {
+.automation-composer-input,
+.automation-composer-input:focus {
   width: 100%;
-  height: 28px;
+  min-height: 40px;
   border: 0;
   padding: 0;
+  resize: none;
   background: transparent;
   box-shadow: none;
   color: var(--text-primary);
   font: inherit;
   font-size: var(--settings-fs-row);
+  line-height: 1.45;
   outline: none;
 }
 
-.automation-create-input::placeholder { color: var(--text-secondary); opacity: 0.8; }
+.automation-composer-input::placeholder { color: var(--text-secondary); opacity: 0.8; }
 
-.automation-create-chips,
-.automation-create-line {
+.automation-create-chips {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -563,11 +546,88 @@ html[data-theme='high-contrast'] .automations-page {
 }
 
 .automation-create-spacer { flex: 1; }
+.automation-composer-by { margin-left: 4px; }
 
-.automation-create-may {
-  display: inline-flex;
+.automation-composer-status {
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small);
+}
+
+.automation-by-hand { align-self: flex-start; margin-left: 4px; font-size: var(--settings-fs-small); }
+
+/* ---- the card: When → Agent → Result --------------------------------------- */
+
+.automation-drafts { display: flex; flex-direction: column; gap: var(--space-12); }
+
+.automation-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: 10px var(--space-12);
+  border-radius: 10px;
+  background: var(--settings-surface);
+  box-shadow: var(--settings-surface-edge);
+}
+
+.automation-card-head { display: flex; align-items: center; gap: var(--space-8); font-size: var(--settings-fs-row); }
+.automation-card-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-card-head .scheduled-link-btn { margin-left: auto; }
+
+.automation-card-tag {
+  padding: 1px 6px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.automation-card-blocks { display: flex; align-items: stretch; gap: 0; min-width: 0; }
+.automation-card-step { display: flex; align-items: center; flex: 1 1 0; min-width: 0; }
+.automation-card-step:nth-child(2) { flex-grow: 1.4; }
+.automation-card-arrow { padding: 0 8px; color: var(--text-secondary); }
+
+.automation-card-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  padding: 8px 10px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+
+.automation-card-label { color: var(--text-secondary); font-size: 11px; }
+.automation-card-title,
+.automation-card-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-card-title { color: var(--text-primary); font-size: var(--settings-fs-row); }
+.automation-card-sub { color: var(--text-secondary); font-size: var(--settings-fs-small); }
+
+.automation-card-line { display: flex; align-items: center; gap: var(--space-12); font-size: var(--settings-fs-small); color: var(--text-secondary); }
+.automation-card-problem { margin: 0; color: var(--warning); font-size: var(--settings-fs-small); }
+
+.automation-card-ask { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); font-size: var(--settings-fs-small); }
+.automation-card-question { color: var(--text-primary); }
+
+.automation-change { display: flex; align-items: center; gap: var(--space-8); }
+.automation-change-input {
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: var(--settings-surface);
+  box-shadow: var(--settings-surface-edge);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-row);
+  outline: none;
 }
 
 /* A chip: one part of the sentence, in a soft fill. */
@@ -694,6 +754,7 @@ html[data-theme='high-contrast'] .automations-page {
 
 .automation-row-seg { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .automation-row-seg + .automation-row-seg::before { content: '·'; margin: 0 6px; opacity: 0.6; }
+.automation-row-seg + .automation-row-seg[data-arrow='true']::before { content: '→'; }
 .automation-row-seg.tone-bad { color: var(--danger); }
 .automation-row-seg.tone-warn { color: var(--warning); }
 

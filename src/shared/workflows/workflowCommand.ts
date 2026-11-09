@@ -89,8 +89,3 @@ export function parseWorkflowCommand(text: string): { slug: string; values: Reco
   }
   return { slug, values }
 }
-
-/** Whether every required field has a value. */
-export function workflowInputsReady(fields: readonly WorkflowInputField[], values: Readonly<Record<string, string>>): boolean {
-  return fields.every((field) => !field.required || field.type === 'boolean' || Boolean(values[field.key]?.trim()))
-}

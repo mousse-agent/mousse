@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from '../../lib/icons'
 import { listingServes } from '../../../shared/providerInstances'
-import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
+import { normalizePermissionMode } from '../../../shared/permissionMode'
 import type { LlmProviderOption, MousseSettings } from '../../../shared/settings'
-import type { AutomationIndex, AutomationItem } from '../../../shared/automations'
-import type { CreateScheduledJobInput, ScheduledJob, SchedulerStatus, ThreadEventKind } from '../../../shared/types'
+import { managerMessage, type AutomationIndex, type AutomationItem } from '../../../shared/automations'
+import { isThreadActivityActive, type ScheduledJob, type SchedulerStatus, type ThreadEventKind } from '../../../shared/types'
 import { answerAttention, createAutomationsClient } from '../../services/automationsClient'
-import { useCommand, useShortcutTitle } from '../../commands/commandRegistry'
+import { useCommand } from '../../commands/commandRegistry'
 import { openThread } from '../../lib/openThread'
 import { closeRailPages } from '../../lib/railPages'
 import { useAppStore } from '../../stores/appStore'
@@ -18,12 +18,14 @@ import { errorText } from '../scheduled/scheduledLabels'
 import { AutomationDetail } from './AutomationDetail'
 import { AutomationRow, glyphOf, MovePicker, PausePicker } from './AutomationRows'
 import { AskCard } from '../asks/AskCard'
-import { CreateRow, type CreatePrefill } from './CreateRow'
 import { takeAutomationCreate, useAutomationCreate, type AutomationCreateRequest } from '../../stores/automationCreateStore'
-import { modelKeyOf } from '../scheduled/jobDraft'
 import { useAutomationLibrary } from './WhoDoPickers'
 import { createPersonalBotsClient } from '../../services/personalBotsClient'
-import { defaultMay, groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentEntries, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { groupAutomations, matchesSearch, missedText, moveBlocked, moveSummary, primaryOf, recentEntries, runText, SEARCH_AFTER_ROWS, unreachableReason, type MetaContext } from './automationList'
+import { AutomationComposer, MANAGER_KEY, type ComposerSend } from './AutomationComposer'
+import { DraftCard } from './DraftCard'
+import { AutomationOverview } from './AutomationOverview'
+import type { AutomationLibrary } from './whoDo'
 import { deliveryText, type RequestApi } from './RequestTrigger'
 import { KeyDialog } from './KeyDialog'
 import { ownedWhenText, viewerTimeZone } from './automationTime'
@@ -42,25 +44,31 @@ function browserRequestApi(): RequestApi {
   }
 }
 
-/** Whether focus is on the Automations page (the list, its create row or its detail), not elsewhere in the window. */
+/** Whether focus is on the Automations page (the list, its composer or its detail), not elsewhere in the window. */
 export function pageHasFocus(doc: Pick<Document, 'activeElement' | 'querySelector'> | undefined = typeof document === 'undefined' ? undefined : document): boolean {
   const page = doc?.querySelector('[data-automations-workspace]:not([hidden])')
   const focused = doc?.activeElement
   return Boolean(page && focused && page.contains(focused))
 }
 
-/** What the create row opens with for a request from another surface: its Who matched to the pickers' lists. */
-export function prefillOf(request: AutomationCreateRequest, catalog: ScheduledCatalog, providers: LlmProviderOption[]): CreatePrefill {
-  const modelKey = request.selection ? modelKeyOf(request.selection, catalog.models, providers) : ''
-  const known = modelKey !== '' && catalog.models.some((group) => group.choices.some((choice) => choice.key === modelKey))
+/**
+ * What the composer opens with for a request from another surface (Automate…, Repeat this…): the words to send, with
+ * the saved agent or workflow named so the manager uses it, and the project.
+ */
+export function prefillOf(request: AutomationCreateRequest, library: AutomationLibrary): { nonce: number; text: string; projectId?: string } {
+  const agent = request.agentId ? library.agents.find((entry) => entry.id === request.agentId) : undefined
+  const workflow = request.workflowId ? library.workflows.find((entry) => entry.id === request.workflowId) : undefined
+  const lead = agent ? `Have the saved agent “${agent.name}” (${agent.id}) ` : workflow ? `Run the workflow /${workflow.slug} ` : ''
+  const prompt = request.prompt?.trim() ?? ''
   return {
     nonce: request.nonce,
-    ...(request.prompt ? { prompt: request.prompt } : {}),
-    ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
-    ...(request.workflowId ? { workflowId: request.workflowId } : {}),
-    who: request.agentId ? { kind: 'agent', id: request.agentId } : known ? { kind: 'model', key: modelKey } : { kind: 'default' }
+    text: lead ? `${lead}${prompt ? `to: ${prompt}` : 'every '}` : prompt,
+    ...(request.projectId !== undefined ? { projectId: request.projectId } : {})
   }
 }
+
+/** How long the composer says "Setting it up…" for a bot, which reports in its own chat. */
+const BOT_WORKING_MS = 90_000
 
 /** The name the page gives an agent: the provider instance's label (Claude, Codex), else the model. */
 function agentNameOf(providers: LlmProviderOption[], selection: { instanceId?: string; llmProvider?: string; model?: string } | undefined): string | undefined {
@@ -69,9 +77,10 @@ function agentNameOf(providers: LlmProviderOption[], selection: { instanceId?: s
 }
 
 /**
- * The Automations list: the create row, then Needs you, Today, Upcoming, Watching and On demand, with Paused and Recent
- * folded at the end. Rows open their detail (a scheduled job), their bot chat or their thread. ⇧/⌘-click and ⌘A select
- * rows for Pause…, Resume and Delete.
+ * The Automations page: the composer (the manager builds a draft from your words), the drafts, then Needs you, Today,
+ * Upcoming, Watching and On demand, with Paused and Recent folded at the end. Rows open their detail (the card, Change
+ * it…, runs, and Edit details for the full form), their bot chat or their thread. ⇧/⌘-click and ⌘A select rows for
+ * Pause…, Resume and Delete.
  */
 export function AutomationsList({ active, onOpenLibrary }: { active: boolean; onOpenLibrary: () => void }) {
   const client = useMemo(() => createAutomationsClient(window.mousse.platformRequest), [])
@@ -97,8 +106,13 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   // Add key: the automation that needs it (its keys gain the name), and the name a run asked for.
   const [addingKey, setAddingKey] = useState<{ jobId?: string; name?: string } | null>(null)
   const [storedKeys, setStoredKeys] = useState<string[]>([])
-  const [createRequest, setCreateRequest] = useState(0)
-  const [prefill, setPrefill] = useState<CreatePrefill | null>(null)
+  const [prefill, setPrefill] = useState<{ nonce: number; text: string; projectId?: string } | null>(null)
+  // The draft or automation the detail shows; `editing`: its full form (Edit details).
+  const [editing, setEditing] = useState(false)
+  // The manager the composer last sent to, and when: the status line follows it.
+  const [sent, setSent] = useState<{ builtBy: string; at: number } | null>(null)
+  const [managerThreadId, setManagerThreadId] = useState<string | null>(null)
+  const [, setTick] = useState(0)
   const automateRequest = useAutomationCreate((state) => state.request)
   const listRef = useRef<HTMLDivElement>(null)
   const requestApi = useMemo(browserRequestApi, [])
@@ -106,8 +120,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
   const activeProjectId = useAppStore((state) => state.threads.find((thread) => thread.id === state.activeThreadId)?.projectId ?? '')
   const profileId = useAppStore((state) => state.profileId)
   const { library, reload: reloadLibrary } = useAutomationLibrary(profileId)
-  // ⌘N is New thread everywhere else; on this page it opens the create row.
-  const createTitle = useShortcutTitle('New automation', 'thread.new')
+  const managerActivity = useAppStore((state) => (managerThreadId ? state.threadActivity[managerThreadId] : undefined))
 
   const refresh = useCallback(async () => {
     try {
@@ -159,17 +172,22 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return () => clearInterval(timer)
   }, [active, refresh, reloadLibrary])
 
-  // ⌘N is page-scoped: while focus is on this page, the key press opens the create row. The palette and the menu
+  // ⌘N is page-scoped: while focus is on this page, the key press goes to the composer. The palette and the menu
   // keep New thread, and anywhere else ⌘N is New thread too.
-  useCommand('thread.new', () => { setDetail(null); setCreateRequest((count) => count + 1) }, () => active && pageHasFocus(), { keysOnly: true })
+  useCommand('thread.new', () => {
+    setDetail(null)
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.automation-composer-input')?.focus())
+  }, () => active && pageHasFocus(), { keysOnly: true })
 
-  // Automate… and Repeat this…: once the pickers' lists are read, the create row opens with the request.
+  // Automate… and Repeat this…: the composer opens with the request's words.
   useEffect(() => {
     if (!automateRequest || !settings) return
+    // A saved agent or workflow is named once the Library is read.
+    if ((automateRequest.agentId && !library.agents.length) || (automateRequest.workflowId && !library.workflows.length)) return
     setDetail(null)
-    setPrefill(prefillOf(automateRequest, catalog, providers))
+    setPrefill(prefillOf(automateRequest, library))
     takeAutomationCreate()
-  }, [automateRequest, settings, catalog, providers])
+  }, [automateRequest, settings, library])
 
   const items = useMemo(() => index?.items ?? [], [index])
   const detailItem = detail ? items.find((item) => item.key === detail) : undefined
@@ -197,8 +215,6 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return agentNameOf(providers, job?.selection) ?? (job?.selection ? job.selection.model : defaultAgent)
   }
   const ctx: MetaContext = { now, viewerZone, manyComputers, modelName }
-  const profileMode = settings?.permissions?.defaultMode ? normalizePermissionMode(settings.permissions.defaultMode) : undefined
-  const ceiling: PermissionMode = profileMode ?? 'ask'
 
   // A selection keeps only rows that still exist and that it can act on (scheduled jobs).
   useEffect(() => {
@@ -235,18 +251,84 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     return item?.link.kind === 'job' ? [item.link.jobId] : []
   })
 
-  const botChoices = useCallback((botId: string) => createPersonalBotsClient(window.mousse.platformRequest).model(botId), [])
   const openBot = (botId: string) => {
     closeRailPages()
     void useChatsStore.getState().openBot(botId)
   }
   const goThread = (threadId: string) => { void openThread(threadId) }
 
-  const openItem = (item: AutomationItem) => {
+  const openItem = (item: AutomationItem, edit = false) => {
     setSelected([])
     if (item.link.kind === 'thread' || item.link.kind === 'ask') goThread(item.link.threadId)
-    else { setDetail(item.key); void loadCatalog() }
+    else { setDetail(item.key); setEditing(edit); void loadCatalog() }
   }
+
+  // ── The manager: the composer's words go to it as a person's message, with the project and computer picked. ──
+  const knownManagerThread = managerThreadId ?? items.find((item) => item.draft?.managerThreadId)?.draft?.managerThreadId ?? null
+  const botsClient = useMemo(() => createPersonalBotsClient(window.mousse.platformRequest), [])
+  const sendToManager = async (send: ComposerSend & { draftId?: string; automationId?: string }) => {
+    const project = catalog.projects.find((entry) => entry.id === send.projectId)
+    const computer = send.node ? computers.find((entry) => entry.node === send.node)?.name : undefined
+    const message = managerMessage({
+      text: send.text,
+      ...(project ? { project: { id: project.id, name: project.name } } : {}),
+      ...(computer ? { computer } : {}),
+      ...(send.draftId ? { draftId: send.draftId } : {}),
+      ...(send.automationId ? { automationId: send.automationId } : {})
+    })
+    if (send.builtBy === MANAGER_KEY) {
+      const threadId = knownManagerThread ?? await client.managerThread()
+      setManagerThreadId(threadId)
+      await window.mousse.orchestrator.sendToThread(threadId, message)
+    } else {
+      await botsClient.send(send.builtBy.slice('bot:'.length), message, crypto.randomUUID())
+    }
+    setSent({ builtBy: send.builtBy, at: Date.now() })
+  }
+  const sentBot = sent && sent.builtBy !== MANAGER_KEY ? sent.builtBy.slice('bot:'.length) : undefined
+  const working = Boolean(sent) && (sent!.builtBy === MANAGER_KEY ? isThreadActivityActive(managerActivity) || Date.now() - sent!.at < 4_000 : Date.now() - sent!.at < BOT_WORKING_MS)
+  // The status line goes when the manager's turn ends; a bot's after a while (it reports in its chat).
+  useEffect(() => {
+    if (!sent) return
+    const timer = setInterval(() => setTick((count) => count + 1), 2_000)
+    return () => clearInterval(timer)
+  }, [sent])
+  const stopManager = () => {
+    if (!sent) return
+    if (sentBot) void botsClient.stop(sentBot).catch(() => undefined)
+    else if (knownManagerThread) void window.mousse.orchestrator.abort(knownManagerThread)
+    setSent(null)
+  }
+  const openConversation = (item?: AutomationItem) => {
+    const botId = item?.draft?.botId ?? sentBot
+    if (botId) openBot(botId)
+    else if (item?.draft?.managerThreadId ?? knownManagerThread) goThread((item?.draft?.managerThreadId ?? knownManagerThread)!)
+  }
+  /** A draft's or automation's own manager: the bot that wrote it, else the Automation manager. */
+  const builtByOf = (item: AutomationItem) => (item.draft?.botId ? `bot:${item.draft.botId}` : MANAGER_KEY)
+  const projectOf = (item: AutomationItem) => item.where?.projectId ?? ''
+  const answerDraft = (item: AutomationItem, answer: string) => act(async () => {
+    await client.answered(item.id)
+    await sendToManager({ text: answer, projectId: projectOf(item), node: '', builtBy: builtByOf(item), draftId: item.id })
+  })
+  const changeIt = (item: AutomationItem, text: string) => sendToManager({ text, projectId: projectOf(item), node: '', builtBy: builtByOf(item), ...(item.draft ? { draftId: item.id } : { automationId: item.id }) })
+  const turnOn = async (item: AutomationItem) => {
+    await client.turnOn(item.id)
+    await refresh()
+  }
+  const discard = (item: AutomationItem) => act(async () => {
+    await client.discard(item.id)
+    if (detail === item.key) setDetail(null)
+  })
+  const setUpByHand = (projectId: string) => act(async () => {
+    const job = await client.createDraft(projectId || undefined)
+    setJobs(await window.mousse.scheduled.list())
+    await refresh()
+    setDetail(`job:${job.id}`)
+    setEditing(true)
+    void loadCatalog()
+  })
+  const whoOf = (item: AutomationItem) => modelName(item) ?? item.who.name
 
   const runNow = (jobId: string) => act(() => window.mousse.scheduled.run(jobId))
   // Needs you answers an ask in place, with the daemon method its own surface uses.
@@ -314,7 +396,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
         ...notNow,
         { label: 'Open bot chat', onSelect: () => openBot(botId) },
         item.paused ? { label: 'Resume', onSelect: () => void resumeItem(item) } : { label: 'Pause…', onSelect: () => setPausing([item.key]) },
-        { label: 'Edit', onSelect: () => openItem(item) },
+        { label: 'Edit', onSelect: () => openItem(item, true) },
         { label: 'Delete', danger: true, onSelect: () => setDeleting([item.key]) }
       ]
     }
@@ -325,7 +407,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
       ...(notNow.length && askThread ? [{ label: 'Open thread', onSelect: () => goThread(askThread) }] : []),
       ...(kind !== 'run' && kind !== 'retry' ? [{ label: 'Run now', disabled: Boolean(item.active && item.active.state !== 'waiting'), onSelect: () => void runNow(jobId) }] : []),
       item.paused ? { label: 'Resume', onSelect: () => void resume([jobId]) } : { label: 'Pause…', onSelect: () => setPausing([item.key]) },
-      { label: 'Edit', onSelect: () => openItem(item) },
+      { label: 'Edit', onSelect: () => openItem(item, true) },
       ...(item.keepable ? [{ label: 'Keep', testId: 'automation-keep-menu', title: 'Remove its end; nothing else about it changes', onSelect: () => void keep(jobId) }] : []),
       ...(thread ? [{ label: 'Open last thread', onSelect: () => goThread(thread) }] : []),
       { label: 'Delete', danger: true, onSelect: () => setDeleting([item.key]) }
@@ -371,12 +453,6 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     }
   }
 
-  // `node`: another computer stores and runs it; the daemon sends it there, or fails ("Laptop is offline.").
-  const create = async (input: CreateScheduledJobInput, node?: string) => {
-    await (node ? window.mousse.scheduled.create(input, node) : window.mousse.scheduled.create(input))
-    await refresh()
-  }
-
   // Move to computer: made there first, removed here once that computer confirmed; what did not move says why.
   const move = async (keys: string[], node: string) => {
     setActionError(null)
@@ -418,6 +494,35 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
     </>
   )
 
+  if (detail && detailItem && detailJob && detailInitial && !editing) {
+    return (
+      <div className="automations-scroll">
+        <div className="automations-column">
+          <AutomationOverview
+            item={detailItem}
+            job={detailJob}
+            who={whoOf(detailItem)}
+            ctx={ctx}
+            onBack={() => setDetail(null)}
+            onRunNow={() => void runNow(detailJob.id)}
+            onPause={() => setPausing([detailItem.key])}
+            onResume={() => void resumeItem(detailItem)}
+            onDelete={() => setDeleting([detailItem.key])}
+            onTurnOn={() => turnOn(detailItem)}
+            onDiscard={() => void discard(detailItem)}
+            onAnswer={(answer) => void answerDraft(detailItem, answer)}
+            onEditDetails={() => setEditing(true)}
+            onChangeIt={(text) => changeIt(detailItem, text)}
+            onOpenThread={goThread}
+            {...(detailItem.draft ? { onOpenConversation: () => openConversation(detailItem) } : {})}
+          />
+          {actionError ? <p className="scheduled-action-error" role="alert">{actionError}</p> : null}
+        </div>
+        {dialogs}
+      </div>
+    )
+  }
+
   if (detail && detailItem && detailJob && detailInitial) {
     const initial = detailInitial
     return (
@@ -440,7 +545,7 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
               if (!isUnchanged(change)) await window.mousse.scheduled.update(detailJob.id, change)
               await refresh()
             }}
-            onBack={() => setDetail(null)}
+            onBack={() => setEditing(false)}
             onRunNow={() => void runNow(detailJob.id)}
             onPause={() => setPausing([detailItem.key])}
             onResume={() => void resumeItem(detailItem)}
@@ -492,27 +597,17 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
 
       <div className="automations-scroll">
         <div className="automations-column" ref={listRef}>
-          <CreateRow
-            profileId={profileId}
-            catalog={catalog}
-            library={library}
-            defaultName={defaultAgent}
+          <AutomationComposer
+            projects={catalog.projects}
             computers={computers}
-            viewerZone={viewerZone}
+            bots={library.bots}
             initialProjectId={activeProjectId}
-            defaultMay={defaultMay(profileMode, ceiling)}
-            ceiling={ceiling}
-            isGitRepo={async (projectId) => (await window.mousse.git.status({ projectId, workspaceThreadId: null })).isRepo}
-            create={create}
-            addBotSchedule={async (botId, when, prompt, model) => {
-              await createPersonalBotsClient(window.mousse.platformRequest).addSchedule(botId, when, prompt, model)
-              await refresh()
-            }}
-            botChoices={botChoices}
-            onOpenBot={openBot}
-            openRequest={createRequest}
             prefill={prefill}
-            title={createTitle}
+            working={working}
+            onSend={sendToManager}
+            onStop={stopManager}
+            onSetUpByHand={(projectId) => void setUpByHand(projectId)}
+            {...(sentBot || knownManagerThread ? { onOpenConversation: () => openConversation() } : {})}
           />
 
           {schedulerDown ? <p className="scheduled-warning" data-testid="scheduler-state"><span className="settings-status-warn">Scheduler stopped. Nothing will run.</span></p> : null}
@@ -538,7 +633,24 @@ export function AutomationsList({ active, onOpenLibrary }: { active: boolean; on
             </div>
           ) : null}
 
-          {visibleGroups.map((group) => (
+          {visibleGroups.map((group) => group.key === 'draft' ? (
+            <section key={group.key} className="automation-group automation-drafts" data-testid="automation-group" data-group="draft" aria-label={group.label}>
+              {group.items.map((item) => (
+                <DraftCard
+                  key={item.key}
+                  item={item}
+                  job={jobOf(item)}
+                  who={whoOf(item)}
+                  ctx={ctx}
+                  onTurnOn={() => turnOn(item)}
+                  onEditDetails={() => openItem(item, true)}
+                  onDiscard={() => void discard(item)}
+                  onAnswer={(answer) => void answerDraft(item, answer)}
+                  onOpenConversation={() => openConversation(item)}
+                />
+              ))}
+            </section>
+          ) : (
             <section key={group.key} className="automation-group" data-testid="automation-group" data-group={group.key} aria-label={group.label}>
               <h2 className="automation-group-head">{group.key === 'needs' ? `${group.label} · ${group.items.length}` : group.label}</h2>
               <div className="automation-rows" role="listbox" aria-multiselectable="true" aria-label={group.label}>

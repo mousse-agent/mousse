@@ -1,6 +1,5 @@
 import { offlineText, type AutomationIndex } from '../../../shared/automations'
 import type { Project } from '../../../shared/types'
-import { groupProjects } from '../../lib/projectGroups'
 import type { SelectOption } from '../ui/Select'
 
 /**
@@ -27,24 +26,6 @@ export function computerChoicesOf(index: Pick<AutomationIndex, 'computer' | 'com
 /** The projects of one computer, as Where offers them once a computer is chosen. */
 export function projectsOn<P extends GroupProject>(projects: readonly P[], node: string): P[] {
   return projects.filter((project) => (project.node ?? '') === node)
-}
-
-/** The computers that hold a project of the group `projectId` is in; every computer when there is no project. */
-export function computersForProject(computers: readonly ComputerChoice[], projects: readonly GroupProject[], projectId: string): ComputerChoice[] {
-  if (!projectId) return [...computers]
-  const { groups, groupOf } = groupProjects(projects)
-  const group = groups.find((entry) => entry.id === groupOf.get(projectId))
-  if (!group) return computers.filter((computer) => computer.node === '')
-  const nodes = new Set(group.members.map((member) => member.node ?? ''))
-  return computers.filter((computer) => nodes.has(computer.node))
-}
-
-/** The project of `node` in the same group as `projectId` (the same repository there), else none. */
-export function projectOnComputer(projects: readonly GroupProject[], projectId: string, node: string): string {
-  if (!projectId) return ''
-  const { groups, groupOf } = groupProjects(projects)
-  const group = groups.find((entry) => entry.id === groupOf.get(projectId))
-  return group?.members.find((member) => (member.node ?? '') === node)?.id ?? ''
 }
 
 /** The chip's options: an offline computer is greyed and says so. */

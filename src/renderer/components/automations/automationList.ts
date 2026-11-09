@@ -9,7 +9,7 @@ import { agoText, ownedWhenText, zonedDayOffset } from './automationTime'
  * what search keeps. Pure, so the page and its tests read the same rules.
  */
 
-export type GroupKey = 'needs' | 'today' | 'upcoming' | 'watching' | 'on_demand' | 'paused'
+export type GroupKey = 'draft' | 'needs' | 'today' | 'upcoming' | 'watching' | 'on_demand' | 'paused'
 
 export interface AutomationGroup {
   key: GroupKey
@@ -18,6 +18,7 @@ export interface AutomationGroup {
 }
 
 const GROUP_LABELS: Record<GroupKey, string> = {
+  draft: 'Drafts',
   needs: 'Needs you',
   today: 'Today',
   upcoming: 'Upcoming',
@@ -28,6 +29,8 @@ const GROUP_LABELS: Record<GroupKey, string> = {
 
 /** The group a row belongs in. Needs you is open asks and runs that ended Failed or Incomplete; a paused row is paused. */
 export function groupOf(item: AutomationItem, now: Date): GroupKey {
+  // A draft has never run: it waits for Turn on in its own section, under the composer.
+  if (item.draft) return 'draft'
   // A paused automation's old failure is not news; an open ask still waits for an answer.
   if (item.attention && (!item.paused || item.attention.kind === 'ask')) return 'needs'
   if (item.paused) return 'paused'
@@ -51,11 +54,11 @@ export function groupAutomations(items: readonly AutomationItem[], now: Date = n
     const key = groupOf(item, now)
     buckets.set(key, [...(buckets.get(key) ?? []), item])
   }
-  const order: GroupKey[] = ['needs', 'today', 'upcoming', 'watching', 'on_demand', 'paused']
+  const order: GroupKey[] = ['draft', 'needs', 'today', 'upcoming', 'watching', 'on_demand', 'paused']
   return order.flatMap((key) => {
     const list = buckets.get(key)
     if (!list?.length) return []
-    const sorted = [...list].sort(key === 'needs' ? byLastRun : key === 'on_demand' || key === 'watching' || key === 'paused' ? (a, b) => a.name.localeCompare(b.name) : byNext)
+    const sorted = [...list].sort(key === 'draft' ? () => 0 : key === 'needs' ? byLastRun : key === 'on_demand' || key === 'watching' || key === 'paused' ? (a, b) => a.name.localeCompare(b.name) : byNext)
     return [{ key, label: GROUP_LABELS[key], items: sorted }]
   })
 }
@@ -188,8 +191,21 @@ export interface MetaContext {
 }
 
 /** The parts of a row's one meta line, in order. A bot's face is drawn by the row beside the bot part. */
-export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: string; text: string; tone?: 'bad' | 'warn' | 'muted' }> {
-  const parts: Array<{ key: string; text: string; tone?: 'bad' | 'warn' | 'muted' }> = []
+export interface MetaPart {
+  key: string
+  text: string
+  tone?: 'bad' | 'warn' | 'muted'
+  /** It follows an arrow, not a dot: trigger → agent → result. */
+  arrow?: true
+}
+
+/** Where a run's outcome goes, in a word or two: "notify", "notify every run", "notify on problems". */
+export function resultWord(item: Pick<AutomationItem, 'tellMe'>): string {
+  return item.tellMe === 'every' ? 'notify every run' : item.tellMe === 'problems' ? 'notify on problems' : 'notify'
+}
+
+export function metaParts(item: AutomationItem, ctx: MetaContext): MetaPart[] {
+  const parts: MetaPart[] = []
   const owner = item.computer
   const attention = item.attention
   if (attention && (!item.paused || attention.kind === 'ask')) {
@@ -208,10 +224,13 @@ export function metaParts(item: AutomationItem, ctx: MetaContext): Array<{ key: 
   } else if (item.trigger === 'time' && item.schedule) {
     parts.push({ key: 'when', text: describeSchedule(item.schedule, ctx.now) })
   }
-  if (item.kind === 'watch') parts.push({ key: 'who', text: 'Notify' })
-  else if (item.who.kind === 'bot') parts.push({ key: 'bot', text: item.who.name })
-  else if (item.who.kind !== 'none') parts.push({ key: 'who', text: ctx.modelName?.(item) ?? item.who.name })
+  // Trigger → agent → result: the first part after the When is the agent, and the result follows where it works.
+  const arrow = parts.length > 0 && !item.paused ? { arrow: true as const } : {}
+  if (item.kind === 'watch') parts.push({ key: 'who', text: 'Notify', ...arrow })
+  else if (item.who.kind === 'bot') parts.push({ key: 'bot', text: item.who.name, ...arrow })
+  else if (item.who.kind !== 'none') parts.push({ key: 'who', text: ctx.modelName?.(item) ?? item.who.name, ...arrow })
   if (item.where) parts.push({ key: 'where', text: item.where.name })
+  if (item.kind === 'job' && item.who.kind !== 'bot' && item.tellMe) parts.push({ key: 'result', text: resultWord(item), arrow: true })
   if (ctx.manyComputers) parts.push({ key: 'computer', text: owner.name })
   // A thread-event automation whose watch is off wakes on nothing until it is resumed; one held by its rate limit says till when.
   if (item.threadEvent && !item.paused && !item.threadEvent.watching) parts.push({ key: 'watch', text: 'not watching', tone: 'warn' })
@@ -243,19 +262,6 @@ export function primaryOf(item: AutomationItem): { kind: PrimaryKind; label: str
   if (item.active && (item.active.state === 'running' || item.active.state === 'queued') && item.active.threadId) return { kind: 'open', label: 'Open' }
   return { kind: 'run', label: 'Run now' }
 }
-
-/**
- * The May a new automation is created with: the mode the person set as the profile default (the one a new thread
- * gets), held to the ceiling the job will have; Ask before acting when there is none.
- */
-export function defaultMay(profileDefault: PermissionMode | undefined, ceiling?: PermissionMode): PermissionMode {
-  const mode = profileDefault ? normalizePermissionMode(profileDefault) : 'ask'
-  if (!ceiling) return mode
-  const order: PermissionMode[] = ['ask', 'accept_edits', 'auto', 'full']
-  return order.indexOf(mode) <= order.indexOf(ceiling) ? mode : ceiling
-}
-
-export const mayLabel = (mode: PermissionMode) => describePermissionMode(mode)
 
 export type PauseChoice = 'resume' | 'tomorrow' | 'monday' | 'date'
 

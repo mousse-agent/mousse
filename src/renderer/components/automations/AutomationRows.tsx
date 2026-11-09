@@ -62,7 +62,7 @@ export function AutomationRow({ item, selected, ctx, menu, unreachable, onOpen, 
         <span className="automation-row-name">{item.name}</span>
         <span className="automation-row-meta">
           {parts.map((part) => (
-            <span key={part.key} className={`automation-row-seg${part.tone ? ` tone-${part.tone}` : ''}`} data-meta={part.key}>
+            <span key={part.key} className={`automation-row-seg${part.tone ? ` tone-${part.tone}` : ''}`} data-meta={part.key} data-arrow={part.arrow ? 'true' : undefined}>
               {part.key === 'bot' && item.who.kind === 'bot' ? (
                 <span className="automation-bot-face" aria-hidden="true" data-testid="automation-bot-face"><BotFaceStill look={item.who.look} state="idle" size={16} view="head" /></span>
               ) : null}

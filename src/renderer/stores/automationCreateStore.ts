@@ -3,7 +3,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import { useAppStore } from './appStore'
 
 /**
- * A request to open the Automations page's create row, prefilled: "Automate…" on a saved agent or a workflow in the
+ * A request to open the Automations page's composer, prefilled: "Automate…" on a saved agent or a workflow in the
  * Library, and "Repeat this…" on a thread message. The page shows its list and the row opens with what it carries.
  */
 export interface AutomationCreateRequest {
@@ -30,7 +30,7 @@ export function takeAutomationCreate(): void {
   useAutomationCreate.setState({ request: null })
 }
 
-/** Opens Automations with the create row prefilled. */
+/** Opens Automations with the composer prefilled. */
 let nonce = 0
 
 export function openAutomationCreate(prefill: Omit<AutomationCreateRequest, 'nonce'>): void {

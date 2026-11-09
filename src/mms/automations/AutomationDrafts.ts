@@ -508,6 +508,14 @@ export class AutomationDrafts {
     return updated
   }
 
+  /** A draft changed by hand (Edit details): what keeps Turn on off is worked out again. */
+  recheck(draftId: string): void {
+    const job = this.deps.get(draftId)
+    if (!job?.draft) return
+    const { problems } = this.build({}, job)
+    if (JSON.stringify(problems) !== JSON.stringify(job.draft.problems)) this.deps.update(job.id, { draft: { ...job.draft, problems } })
+  }
+
   /** Discard: the draft is deleted. */
   discard(draftId: string): void {
     const job = this.draftJob(draftId)

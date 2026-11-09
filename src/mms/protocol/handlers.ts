@@ -2944,7 +2944,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           canRaise: true
         })
       }))
-      return { job, jobs: ctx.mms.scheduled.listJobs() }
+      // A draft edited by hand: Turn on reads its problems again.
+      if (job?.draft) ctx.mms.automationDrafts?.recheck(id)
+      return { job: job?.draft ? ctx.mms.scheduled.getJob(id) ?? job : job, jobs: ctx.mms.scheduled.listJobs() }
     }
     case 'scheduled.delete': {
       const p = isObject(params) ? params : {}

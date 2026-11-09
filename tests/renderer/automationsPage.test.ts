@@ -10,12 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AutomationIndex, AutomationItem } from '../../src/shared/automations'
 import type { LlmProviderOption } from '../../src/shared/settings'
 import type { Project, ScheduledJob } from '../../src/shared/types'
-import { parseWhen } from '../../src/renderer/components/automations/parseWhen'
-import { parseThreadEvent } from '../../src/renderer/components/automations/parseThreadEvent'
 import type { Thread } from '../../src/shared/types'
-import { defaultMay, groupAutomations, matchesSearch, metaParts, pauseUntil, primaryOf } from '../../src/renderer/components/automations/automationList'
-import { firstRunInZone, nextBeforeAdd, ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
-import { computerOptions, computersForProject, projectOnComputer } from '../../src/renderer/components/automations/computerChoice'
+import { groupAutomations, matchesSearch, metaParts, pauseUntil, primaryOf, resultWord } from '../../src/renderer/components/automations/automationList'
+import { ownedWhenText, skippedDates, whenText, zonedDayOffset } from '../../src/renderer/components/automations/automationTime'
+import { computerOptions } from '../../src/renderer/components/automations/computerChoice'
+import { agentBlock, resultBlock, whenBlock } from '../../src/renderer/components/automations/DraftCard'
+import { builtByOptions, defaultBuiltBy } from '../../src/renderer/components/automations/AutomationComposer'
 import { botComputerOptions } from '../../src/renderer/components/bots/BotAboutPanel'
 import { whenSentence } from '../../src/renderer/components/automations/AutomationDetail'
 import { cronFormOf, cronOfForm, draftFromJob, heldPermissionMode, modelGroups, newDraft, patchOf, validateDraft, type ScheduledCatalog } from '../../src/renderer/components/scheduled/jobDraft'
@@ -47,99 +47,16 @@ function item(patch: Partial<AutomationItem> & { key: string }): AutomationItem 
   }
 }
 
-describe('a pull request\'s activity, read from English', () => {
-  it('reads "when #712 gets a review" and leaves the rest as what to do', () => {
-    expect(parseThreadEvent('when #712 gets a review address the comments')).toMatchObject({ kind: 'ok', number: 712, events: ['review'], prompt: 'address the comments' })
-    expect(parseThreadEvent('when #712 gets a review…')).toMatchObject({ kind: 'ok', events: ['review'], prompt: '' })
-    expect(parseThreadEvent('fix it when PR #9 checks fail')).toMatchObject({ kind: 'ok', number: 9, events: ['checks_failed'], prompt: 'fix it' })
-    expect(parseThreadEvent('when pull request 42 passes CI, then merge it')).toMatchObject({ kind: 'ok', number: 42, events: ['checks_passed'], prompt: 'merge it' })
-    expect(parseThreadEvent('when #7 gets a new comment reply')).toMatchObject({ events: ['comment'], prompt: 'reply' })
-    expect(parseThreadEvent('when #7 is reviewed summarize it')).toMatchObject({ events: ['review'] })
-    expect(parseThreadEvent('when #7 goes red look into it')).toMatchObject({ events: ['checks_failed'] })
-    expect(parseThreadEvent('when #7 gets any activity tell me').kind === 'ok' && parseThreadEvent('when #7 gets any activity tell me')).toMatchObject({ events: ['checks_failed', 'checks_passed', 'review', 'comment'] })
-  })
-
-  it('never guesses: a pull request with no event it can read is ambiguous, and a time is not a pull request', () => {
-    expect(parseThreadEvent('when #712 is ready ship it')).toMatchObject({ kind: 'ambiguous', number: 712 })
-    expect(parseThreadEvent('when 9 check the weather').kind).toBe('none')
-    expect(parseThreadEvent('every weekday at 9 review open PRs').kind).toBe('none')
-  })
-})
-
-describe('When, read from English', () => {
-  const ok = (text: string) => {
-    const parsed = parseWhen(text, NOW)
-    if (parsed.kind !== 'ok') throw new Error(`${text}: ${parsed.kind}`)
-    return parsed
-  }
-
-  it('reads repeating times and leaves the rest as what to do', () => {
-    expect(ok('every weekday at 9 review open PRs and comment on risky ones')).toMatchObject({ schedule: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'review open PRs and comment on risky ones' })
-    expect(ok('review open PRs every weekday at 9:30').schedule).toEqual({ kind: 'cron', expr: '30 9 * * 1-5' })
-    expect(ok('daily at 6pm summarize the day').schedule).toEqual({ kind: 'cron', expr: '0 18 * * *' })
-    expect(ok('every morning at 8 check the weather').schedule).toEqual({ kind: 'cron', expr: '0 8 * * *' })
-    expect(ok('every evening at 7 tidy notes').schedule).toEqual({ kind: 'cron', expr: '0 19 * * *' })
-    expect(ok('every monday and thursday at 10:15 send the digest').schedule).toEqual({ kind: 'cron', expr: '15 10 * * 1,4' })
-    expect(ok('on weekends at 11 water the plants').schedule).toEqual({ kind: 'cron', expr: '0 11 * * 0,6' })
-    expect(ok('at 17:00 every day back up').schedule).toEqual({ kind: 'cron', expr: '0 17 * * *' })
-    expect(ok('every 30 minutes check CI').schedule).toEqual({ kind: 'interval', minutes: 30 })
-    expect(ok('every 2 hours check CI').schedule).toEqual({ kind: 'interval', minutes: 120 })
-    expect(ok('hourly check CI')).toMatchObject({ schedule: { kind: 'interval', minutes: 60 }, prompt: 'check CI' })
-  })
-
-  it('reads one-time phrases on this computer\'s clock', () => {
-    expect(ok('tomorrow at 9am draft the notes').schedule).toEqual({ kind: 'once', runAt: new Date(2026, 10, 10, 9, 0).toISOString() })
-    expect(ok('in 20 minutes remind me').schedule).toEqual({ kind: 'once', runAt: new Date(NOW.getTime() + 20 * 60_000).toISOString() })
-  })
-
-  it('never guesses: an unclear hour, a missing time, a lone time or two times are ambiguous', () => {
-    expect(parseWhen('every day at 5 send it', NOW).kind).toBe('ambiguous')
-    expect(parseWhen('every weekday review PRs', NOW).kind).toBe('ambiguous')
-    expect(parseWhen('at 9 check CI', NOW).kind).toBe('ambiguous')
-    expect(parseWhen('every hour and tomorrow at 9am do it', NOW).kind).toBe('ambiguous')
-    expect(parseWhen('every day at 25:00 do it', NOW).kind).toBe('ambiguous')
-    expect(parseWhen('today at 7am do it', NOW).kind).toBe('ambiguous')
-  })
-
-  it('never makes On demand from text', () => {
-    expect(parseWhen('check CI', NOW).kind).toBe('none')
-    expect(parseWhen('on demand check CI', NOW).kind).toBe('none')
-  })
-})
-
 describe('time on the owning computer\'s clock', () => {
-  it('names the zone only when it differs from this computer\'s, and always before Add', () => {
+  it('names the zone only when it differs from this computer\'s', () => {
     const at = new Date(2026, 10, 10, 9, 0).toISOString()
     expect(ownedWhenText(at, NOW, computer, ZONE)).toBe(`Tomorrow ${new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`)
     const laptop = { name: 'Laptop', timeZone: ZONE === 'Asia/Kolkata' ? 'America/New_York' : 'Asia/Kolkata' }
     expect(ownedWhenText(at, NOW, laptop, ZONE)).toMatch(/ Laptop time$/)
-    expect(nextBeforeAdd(at, NOW, { name: 'Desk', timeZone: 'Asia/Kolkata' })).toMatch(/ Desk time \(.+\)$/)
   })
 
-  it('reads a cron on the owning computer’s clock for Next before Add', () => {
-    const now = new Date('2026-11-09T12:00:00.000Z') // Monday
-    expect(firstRunInZone({ kind: 'cron', expr: '0 9 * * 1-5' }, now, 'Asia/Kolkata')?.toISOString()).toBe('2026-11-10T03:30:00.000Z')
-    expect(firstRunInZone({ kind: 'cron', expr: '0 9 * * 1-5' }, now, 'America/New_York')?.toISOString()).toBe('2026-11-09T14:00:00.000Z')
-    expect(firstRunInZone({ kind: 'interval', minutes: 30 }, now, 'UTC')?.toISOString()).toBe('2026-11-09T12:30:00.000Z')
-    expect(firstRunInZone({ kind: 'manual' }, now, 'UTC')).toBeNull()
-    // 02:30 does not exist on 8 Mar 2026 in New York: the next day's is the first.
-    expect(firstRunInZone({ kind: 'cron', expr: '30 2 * * *' }, new Date('2026-03-08T05:00:00.000Z'), 'America/New_York')?.toISOString()).toBe('2026-03-09T06:30:00.000Z')
-    // A computer that has not said its zone: its name, never a guessed zone.
-    expect(nextBeforeAdd('2026-11-10T03:30:00.000Z', now, { name: 'Laptop', timeZone: '' })).toMatch(/ Laptop time$/)
-  })
-
-  it('offers the computers of the chosen project’s group, and the same repository on each', () => {
-    const groupProjects = [
-      { id: 'p1', name: 'mousse' },
-      { id: 'nod_laptop:p9', name: 'mousse', node: 'nod_laptop', sameAs: 'p1' },
-      { id: 'nod_studio:p3', name: 'site', node: 'nod_studio' }
-    ]
+  it('greys an offline computer in the Computer chip', () => {
     const all = [{ node: '', name: 'Desk', timeZone: ZONE }, { node: 'nod_laptop', name: 'Laptop', timeZone: ZONE }, { node: 'nod_studio', name: 'Studio', timeZone: ZONE, offline: true }]
-    expect(computersForProject(all, groupProjects, 'p1').map((computer) => computer.name)).toEqual(['Desk', 'Laptop'])
-    expect(computersForProject(all, groupProjects, '').map((computer) => computer.name)).toEqual(['Desk', 'Laptop', 'Studio'])
-    expect(projectOnComputer(groupProjects, 'p1', 'nod_laptop')).toBe('nod_laptop:p9')
-    expect(projectOnComputer(groupProjects, 'nod_laptop:p9', '')).toBe('p1')
-    expect(projectOnComputer(groupProjects, 'p1', 'nod_studio')).toBe('')
     expect(computerOptions(all)[2]).toMatchObject({ disabled: true, description: 'Studio is offline.' })
     // A bot runs on the computer that holds it: the others are listed, greyed, with why.
     expect(botComputerOptions([{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }])).toEqual([
@@ -230,12 +147,6 @@ describe('the list as data', () => {
     expect(matchesSearch(studio, 'computer:"desk laptop"')).toBe(false)
     expect(matchesSearch(item({ key: 'job:mine' }), 'computer:desk')).toBe(true)
 
-  })
-
-  it('starts May at the profile default held to its ceiling, else Ask before acting', () => {
-    expect(defaultMay('auto', 'accept_edits')).toBe('accept_edits')
-    expect(defaultMay('accept_edits', 'full')).toBe('accept_edits')
-    expect(defaultMay(undefined)).toBe('ask')
   })
 
   it('ends a pause tomorrow, on Monday, on a chosen day, or never', () => {
@@ -331,7 +242,14 @@ const LIBRARY: Record<string, unknown> = {
   'bots.schedules.add': { runs: [] },
   'automations.asks.answer': { ask: {} },
   'automations.keep': { job: {} },
-  'bots.asks.answer': { message: {} }
+  'bots.asks.answer': { message: {} },
+  'automations.manager.thread': { threadId: 'mgr' },
+  'automations.drafts.turnOn': { job: {} },
+  'automations.drafts.discard': { ok: true },
+  'automations.drafts.answered': { ok: true },
+  'automations.drafts.create': { job: { id: 'd-new' } },
+  'bots.chat.send': { message: {} },
+  'bots.chat.stop': {}
 }
 
 function api(index: AutomationIndex, jobs: ScheduledJob[]) {
@@ -356,7 +274,7 @@ function api(index: AutomationIndex, jobs: ScheduledJob[]) {
     settings: { getOptions: async () => ({ llmProviders: providers }), get: async () => ({ permissions: { defaultMode: 'accept_edits' }, provider: { llmProvider: 'anthropic', instanceId: 'claude:main', model: 'sonnet' } }) },
     projects: { list: async () => projects },
     threads: { listAll: async () => catalogThreads },
-    orchestrator: { answerQuestionsDetailed: vi.fn(async () => ({ ok: true })) },
+    orchestrator: { answerQuestionsDetailed: vi.fn(async () => ({ ok: true })), sendToThread: vi.fn(async () => ({})), abort: vi.fn(async () => true) },
     git: { status: vi.fn(async () => ({ isRepo: true })) }
   }
 }
@@ -380,6 +298,11 @@ const type = async (input: HTMLInputElement, value: string) => {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
   await act(async () => { setter.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) })
 }
+/** A row opens its card; Edit details opens the full form. */
+const openForm = async (key: string) => {
+  await click($(`[data-key="${key}"] .automation-row-main`))
+  await click($('[data-testid="automation-edit-details"]'))
+}
 const option = (text: string) => $$('.ui-select-option-label').find((entry) => entry.textContent === text)?.closest('[role="option"]')
 
 beforeEach(() => {
@@ -394,44 +317,156 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe('the card and the composer as data', () => {
+  const ctx = { now: NOW, viewerZone: ZONE }
+  it('words When → Agent → Result for a time, the CLI, a request and a pull request', () => {
+    const weekly = item({ key: 'job:d1', schedule: { kind: 'cron', expr: '0 5 * * 4' }, where: { projectId: 'p1', name: 'mousse' }, tellMe: 'news', result: { thread: 'new' } })
+    expect(whenBlock(weekly, ctx)).toEqual({ title: describeSchedule({ kind: 'cron', expr: '0 5 * * 4' }, NOW), sub: 'repeats' })
+    expect(whenBlock(item({ key: 'job:c', trigger: 'on_demand', cliName: 'deploy-preview' }), ctx)).toEqual({ title: 'From the CLI', sub: 'mousse-cli automation run deploy-preview' })
+    expect(whenBlock(item({ key: 'job:r', trigger: 'request' }), ctx).title).toBe('On request')
+    expect(whenBlock(item({ key: 'job:e', trigger: 'thread_event', whenText: '#712 gets a review' }), ctx).title).toBe('#712 gets a review')
+    expect(agentBlock(weekly, 'Review open PRs.\nComment on risky ones.', 'Claude')).toEqual({ title: 'Claude · mousse', sub: '“Review open PRs.”' })
+    expect(resultBlock(weekly)).toEqual({ title: 'New thread + notify', sub: 'only news' })
+    expect(resultBlock(item({ key: 'job:x', result: { thread: 'reuse' }, tellMe: 'problems' }))).toEqual({ title: 'Same thread + notify', sub: 'only problems' })
+    expect(resultWord({ tellMe: 'news' })).toBe('notify')
+    expect(resultWord({ tellMe: 'every' })).toBe('notify every run')
+  })
+
+  it('builds with your first bot, and always offers the Automation manager', () => {
+    const pip = { id: 'bot_1', name: 'Pip', look: { colour: 'teal', accessory: 'none' } } as never
+    expect(defaultBuiltBy([pip])).toBe('bot:bot_1')
+    expect(defaultBuiltBy([])).toBe('manager')
+    expect(builtByOptions([pip]).map((entry) => entry.label)).toEqual(['Pip', 'Automation manager'])
+  })
+
+  it('puts drafts in their own section, first, and never in Needs you', () => {
+    const draft = item({ key: 'job:d', draft: { draftId: 'd', problems: [] }, attention: undefined })
+    const failed = item({ key: 'job:f', attention: { kind: 'failed', text: 'boom' } })
+    expect(groupAutomations([failed, draft], NOW).map((group) => group.key)).toEqual(['draft', 'needs'])
+  })
+})
+
 describe('the Automations page', () => {
-  it('creates a thread-event automation from "when #712 gets a review…", on the pull request\'s thread', async () => {
-    catalogThreads = [{ id: 't-pr', name: 'Fix flaky checkout test', projectId: 'p1', pullRequest: { number: 712 } } as Thread]
-    try {
-      const mousse = await mount([])
-      await click($('[data-testid="automation-create"]'))
-      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'when #712 gets a review address the comments')
-      expect($('[data-testid="automation-create-when"]')?.textContent).toBe('When #712 gets a review')
-      expect($('[data-testid="automation-create-next"]')?.textContent).toBe('Runs on Fix flaky checkout test · at most every 10 min')
-      expect($('[aria-label="Where"]')).toBeNull()
-      await click($('[data-testid="automation-create-add"]'))
-      expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({
-        name: 'address the comments',
-        prompt: 'address the comments',
-        schedule: { kind: 'manual' },
-        threadEvent: { threadId: 't-pr', number: 712, events: ['review'] },
-        threadId: 't-pr',
-        projectId: 'p1'
-      }))
-      expect(mousse.scheduled.create.mock.calls[0]![0]).not.toHaveProperty('createThread')
-      // A pull request no thread has linked keeps Add off and says why.
-      await click($('[data-testid="automation-create"]'))
-      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'when #999 checks fail fix them')
-      expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
-      expect($('[data-testid="automation-create-blocked"]')?.textContent).toMatch(/No thread here has #999/)
-      // Or pick When → When a thread…
-      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'fix the failing checks')
-      await click($('[aria-label="When"]'))
-      await click(option('When a thread…'))
-      await click($('[aria-label="Event"]'))
-      await click(option('Checks fail'))
-      expect($('[data-testid="automation-create-when"]')?.textContent).toBe('When #712 checks fail')
-      expect($('[data-testid="automation-create-thread"]')?.textContent).toBe('#712 · Fix flaky checkout test')
-      await click($('[data-testid="automation-create-add"]'))
-      expect(mousse.scheduled.create).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: 'fix the failing checks', threadEvent: { threadId: 't-pr', number: 712, events: ['checks_failed'] } }))
-    } finally {
-      catalogThreads = []
-    }
+  it('starts with the composer: Project and Built by, Computer only with two computers, and Set up by hand', async () => {
+    await mount([])
+    const composer = $('[data-testid="automation-composer"]')!
+    expect(document.querySelector('[data-testid="automations-list"] .automations-column')!.firstElementChild!.contains(composer)).toBe(true)
+    expect(composer.querySelector('textarea')!.getAttribute('placeholder')).toBe('Describe an automation…')
+    expect($('[data-testid="automation-built-by"]')?.textContent).toBe('Pip')
+    expect($('[aria-label="Computer"]')).toBeNull()
+    expect($('[data-testid="automation-set-up-by-hand"]')?.textContent).toBe('Set up by hand')
+    act(() => root.unmount())
+    root = createRoot(host)
+    await mount([], [], vi.fn(), { computers: [{ name: 'Studio', timeZone: ZONE, local: false, node: 'nod_studio', offline: true }] })
+    await click($('[aria-label="Computer"]'))
+    expect(option('Studio')?.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('sends the words to the Automation manager\'s hidden thread with the project, says it is setting it up, and stops it', async () => {
+    const mousse = await mount([])
+    await click($('[aria-label="Built by"]'))
+    await click(option('Automation manager'))
+    await click($('[aria-label="Project"]'))
+    await click(option('mousse'))
+    const input = $<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'Check PRs every Thursday at 5 am')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await click($('[data-testid="automation-composer-send"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.manager.thread', {})
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('mgr', 'Check PRs every Thursday at 5 am\n\n[Project: mousse (p1)]')
+    expect($('[data-testid="automation-composer-status"]')?.textContent).toContain('Setting it up…')
+    await click($('[data-testid="automation-composer-stop"]'))
+    expect(mousse.orchestrator.abort).toHaveBeenCalledWith('mgr')
+    expect($('[data-testid="automation-composer-status"]')).toBeNull()
+  })
+
+  it('sends to a bot when a bot builds it', async () => {
+    const mousse = await mount([])
+    const input = $<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'every morning tell me the weather')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await click($('[data-testid="automation-composer-send"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('bots.chat.send', expect.objectContaining({ botId: 'bot_1', text: 'every morning tell me the weather\n\n[Project: none picked]' }))
+  })
+
+  it('shows a draft as When → Agent → Result with its May, answers its question inline, and turns it on', async () => {
+    const stored = job({ id: 'd1', name: 'PR check', prompt: 'Review open PRs, comment on risky ones', schedule: { kind: 'cron', expr: '0 5 * * 4' }, enabled: false, nextRunAt: null, projectId: 'p1' })
+    const draft = item({
+      key: 'job:d1', name: 'PR check', schedule: stored.schedule, where: { projectId: 'p1', name: 'mousse' }, may: 'accept_edits', tellMe: 'news', result: { thread: 'new' },
+      draft: { draftId: 'd1', managerThreadId: 'mgr', problems: [], ask: { question: 'Want me to skip draft PRs?', options: ['Yes', 'No'] } }
+    })
+    const mousse = await mount([draft], [stored])
+    const card = $('[data-testid="automation-draft-card"]')!
+    expect([...card.querySelectorAll('.automation-card-label')].map((label) => label.textContent)).toEqual(['When', 'Agent', 'Result'])
+    expect(card.querySelector('[data-block="agent"]')!.textContent).toContain('Claude · mousse')
+    expect(card.querySelector('[data-testid="automation-card-may"]')!.textContent).toBe('May: Auto-accept edits')
+    expect($('[data-group="needs"]')).toBeNull()
+    await click([...$('[data-testid="automation-draft-ask"]')!.querySelectorAll('button')].find((button) => button.textContent === 'Yes'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.answered', { draftId: 'd1' })
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('mgr', 'Yes\n\n[Project: mousse (p1) · Draft: d1]')
+    await click($('[data-testid="automation-draft-turn-on"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.turnOn', { draftId: 'd1' })
+    await click($('[data-testid="automation-draft-discard"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.discard', { draftId: 'd1' })
+  })
+
+  it('keeps Turn on off while a draft has a problem, and says the first one', async () => {
+    const draft = item({ key: 'job:d2', name: 'Nightly', draft: { draftId: 'd2', problems: ['Which project should it run in?'] } })
+    await mount([draft], [job({ id: 'd2', enabled: false })])
+    expect($<HTMLButtonElement>('[data-testid="automation-draft-turn-on"]')!.disabled).toBe(true)
+    expect($('[data-testid="automation-draft-problem"]')?.textContent).toBe('Which project should it run in?')
+  })
+
+  it('reads a row as trigger → agent → result', async () => {
+    const later = new Date(Date.now() + 86_400_000 * 3).toISOString()
+    await mount([item({ key: 'job:a', name: 'PR check', next: { at: later, timeZone: ZONE }, where: { projectId: 'p1', name: 'mousse' }, tellMe: 'news' })])
+    const parts = $$('[data-key="job:a"] [data-meta]').map((part) => [part.dataset.meta, part.dataset.arrow ?? ''])
+    expect(parts).toEqual([['when', ''], ['who', 'true'], ['where', ''], ['result', 'true']])
+    expect($('[data-key="job:a"] [data-meta="result"]')?.textContent).toBe('notify')
+  })
+
+  it('opens an automation on its card: Change it… goes to the manager with its id, and Edit details opens the full form', async () => {
+    const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1' })
+    const mousse = await mount([item({ key: 'job:j1', name: 'Nightly', where: { projectId: 'p1', name: 'mousse' }, next: { at: stored.nextRunAt!, timeZone: ZONE }, tellMe: 'news' })], [stored])
+    await click($('[data-key="job:j1"] .automation-row-main'))
+    expect($('[data-testid="automation-card"]')).not.toBeNull()
+    expect($('[data-testid="automation-detail"]')).toBeNull()
+    const change = $<HTMLInputElement>('[data-testid="automation-change-it"]')!
+    expect(change.placeholder).toBe('Change it… (describe the change)')
+    await type(change, 'move it to 8')
+    await act(async () => { change.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('mgr', 'move it to 8\n\n[Project: mousse (p1) · Change automation: j1]')
+    await click($('[data-testid="automation-edit-details"]'))
+    expect($('[data-testid="automation-detail"]')).not.toBeNull()
+  })
+
+  it('sets one up by hand: a blank draft opens in the full form', async () => {
+    const blank = job({ id: 'd-new', name: 'New automation', prompt: '', enabled: false, nextRunAt: null, schedule: { kind: 'manual' } })
+    const mousse = await mount([], [blank])
+    mousse.platformRequest.request.mockImplementation(async (method: string) => {
+      if (method === 'automations.list') return { items: [item({ key: 'job:d-new', name: 'New automation', trigger: 'on_demand', draft: { draftId: 'd-new', problems: ['Say what it should do.'] } })], computer: { name: 'Desk', timeZone: ZONE }, unavailable: [], generatedAt: '' }
+      if (method in LIBRARY) return LIBRARY[method]
+      throw new Error(method)
+    })
+    await click($('[data-testid="automation-set-up-by-hand"]'))
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.drafts.create', {})
+    expect($('[data-testid="automation-detail"]')?.getAttribute('data-job-id')).toBe('d-new')
+  })
+
+  it('fills the composer from Repeat this… and Automate…', async () => {
+    const { openAutomationCreate, useAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
+    openAutomationCreate({ prompt: 'summarize yesterday\'s commits', projectId: 'p1' })
+    await mount([])
+    await act(async () => {})
+    expect($<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!.value).toBe('summarize yesterday\'s commits')
+    expect(useAutomationCreate.getState().request).toBeNull()
+    await act(async () => { openAutomationCreate({ agentId: 'agent-1' }) })
+    await act(async () => {})
+    expect($<HTMLTextAreaElement>('[data-testid="automation-composer"] textarea')!.value).toMatch(/^Have the saved agent “PR reviewer” \(agent-1\)/)
   })
 
   it('shows a thread-event row in Watching next to a notify-only watch, and its (why?) says what it ignores', async () => {
@@ -449,7 +484,7 @@ describe('the Automations page', () => {
     expect([...watching.querySelectorAll('[data-testid="automation-row"]')].map((row) => row.getAttribute('data-key'))).toEqual(['job:j1', 'watch:t-w'])
     expect(watching.querySelector('[data-key="watch:t-w"]')!.textContent).toContain('Notify')
     expect(watching.querySelector('[data-key="job:j1"]')!.textContent).toContain('#712 gets a review')
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     expect($('[data-testid="automation-when"]')?.textContent).toBe('When #712 gets a review')
     await click($('[data-testid="automation-why"]'))
     const why = $('[data-testid="automation-why-panel"]')!.textContent!
@@ -462,70 +497,6 @@ describe('the Automations page', () => {
     await click($('[aria-label="When"]'))
     await click(option('Any of these'))
     expect(mousse.scheduled.update).toHaveBeenCalledWith('j1', { threadEvent: { events: ['checks_failed', 'checks_passed', 'review', 'comment'] } })
-  })
-
-  it('opens the quiet create row in place and adds a real scheduled job from one English line', async () => {
-    const mousse = await mount([])
-    expect($('[data-testid="automation-create"]')?.textContent).toContain('New automation…')
-    expect($('[data-testid="automation-create"]')?.getAttribute('title')).toMatch(/^New automation/)
-    await click($('[data-testid="automation-create"]'))
-    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
-    await type(input, 'every weekday at 9 review open PRs')
-    expect($('[data-testid="automation-create-when"]')?.textContent).toBe(describeSchedule({ kind: 'cron', expr: '0 9 * * 1-5' }))
-    expect($('[data-testid="automation-create-who"]')?.textContent).toBe('Claude')
-    expect($('[data-testid="automation-create-next"]')?.textContent).toMatch(/^Next .+ Desk time \(.+\)$/)
-    expect($('.automation-create-may')?.textContent).toContain('Auto-accept edits')
-    const add = $<HTMLButtonElement>('[data-testid="automation-create-add"]')!
-    expect(add.disabled).toBe(false)
-    await click(add)
-    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'review open PRs',
-      prompt: 'review open PRs',
-      schedule: { kind: 'cron', expr: '0 9 * * 1-5' },
-      createThread: true,
-      permissionMode: 'accept_edits',
-      tellMe: 'news'
-    }))
-  })
-
-  it('adds an automation on another computer from the Computer chip: its projects, its default agent, its clock', async () => {
-    const laptopZone = ZONE === 'Asia/Kolkata' ? 'America/New_York' : 'Asia/Kolkata'
-    const laptop = { name: 'Laptop', timeZone: laptopZone, local: false, node: 'nod_laptop' }
-    const phoneHome = { name: 'Studio', timeZone: ZONE, local: false, node: 'nod_studio', offline: true as const }
-    projects.push({ id: 'nod_laptop:p9', name: 'mousse', path: '', createdAt: '', order: 1, node: 'nod_laptop', sameAs: 'p1' } as Project)
-    try {
-      const mousse = await mount([], [], vi.fn(), { computers: [laptop, phoneHome] })
-      await click($('[data-testid="automation-create"]'))
-      await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'every weekday at 9 review open PRs')
-      await click($('[aria-label="Where"]'))
-      await click(option('mousse'))
-      expect($('[data-testid="automation-create-computer"]')?.textContent).toBe('Desk')
-      await click($('[aria-label="Computer"]'))
-      // Only the computers that have this project; Studio has none of it.
-      expect(option('Studio')).toBeUndefined()
-      await click(option('Laptop'))
-      expect($('[data-testid="automation-create-computer"]')?.textContent).toBe('Laptop')
-      expect($('[data-testid="automation-create-who"]')?.textContent).toBe('Laptop\'s default agent')
-      // Next is on Laptop's clock, and always names its zone before Add.
-      expect($('[data-testid="automation-create-next"]')?.textContent).toMatch(/^Next .+ Laptop time \(.+\)$/)
-      await click($('[data-testid="automation-create-add"]'))
-      expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'nod_laptop:p9', schedule: { kind: 'cron', expr: '0 9 * * 1-5' } }), 'nod_laptop')
-      expect(mousse.scheduled.create.mock.calls[0]![0]).not.toHaveProperty('selection')
-    } finally {
-      projects.pop()
-    }
-  })
-
-  it('greys an offline computer in the chip, and shows no chip with one computer', async () => {
-    await mount([])
-    await click($('[data-testid="automation-create"]'))
-    expect($('[aria-label="Computer"]')).toBeNull()
-    act(() => root.unmount())
-    root = createRoot(host)
-    await mount([], [], vi.fn(), { computers: [{ name: 'Studio', timeZone: ZONE, local: false, node: 'nod_studio', offline: true }] })
-    await click($('[data-testid="automation-create"]'))
-    await click($('[aria-label="Computer"]'))
-    expect(option('Studio')?.getAttribute('aria-disabled')).toBe('true')
   })
 
   it('moves selected rows to another computer, and says which did not move and why', async () => {
@@ -557,20 +528,6 @@ describe('the Automations page', () => {
     await click($('[aria-label="Search automations"]'))
     await type($<HTMLInputElement>('[data-testid="automations-search"]')!, 'computer:laptop')
     expect($$('[data-testid="automation-row"]').map((row) => row.getAttribute('data-key'))).toEqual(['job:0', 'job:1'])
-  })
-
-  it('says Choose when and keeps Add off while When is unread; On demand only when picked', async () => {
-    const mousse = await mount([])
-    await click($('[data-testid="automation-create"]'))
-    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
-    await type(input, 'at 5 check CI')
-    expect($('[data-testid="automation-create-when"]')?.textContent).toBe('Choose when')
-    expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
-    await click($('.automation-chip-select.when'))
-    await click(option('On demand'))
-    expect($('[data-testid="automation-create-when"]')?.textContent).toBe('On demand')
-    await click($('[data-testid="automation-create-add"]'))
-    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'at 5 check CI', schedule: { kind: 'manual' } }))
   })
 
   it('shows the groups that have rows, Needs you with its count, and Retry only on the failed row', async () => {
@@ -617,7 +574,7 @@ describe('the Automations page', () => {
   it('opens a job\'s detail, where the sentence is the editor and Tell me saves alone', async () => {
     const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1' })
     const mousse = await mount([item({ key: 'job:j1', name: 'Nightly', next: { at: stored.nextRunAt!, timeZone: ZONE }, tellMe: 'news' })], [stored])
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     expect($('[data-testid="automation-detail"]')).not.toBeNull()
     expect($('[data-testid="automation-sentence"]')?.textContent).toMatch(/^Every 30 minutes, Claude does this in mousse\.$/)
     await click($('[aria-labelledby$="tell-label"]'))
@@ -635,7 +592,7 @@ describe('the Automations page', () => {
     await mount([item({ key: 'job:j1', name: 'Deps bump', runs: [run], last: run })], [stored])
     await click($('[data-testid="automation-recent"]'))
     expect($('[data-testid="automation-recent-runs"] [data-testid="automation-run-missed"]')?.textContent).toBe('Missed while offline')
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     const mark = $('[data-testid="automation-detail"] [data-testid="automation-run-missed"]')!
     expect(mark.textContent).toBe('Missed while offline')
     expect(mark.title).toMatch(/^4 runs fell while the computer was off/)
@@ -668,7 +625,7 @@ describe('the Automations page', () => {
     await click($('[data-testid="automation-recent-resend"]'))
     expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.request.resend', { jobId: 'j1', occurrenceId: 'occ-1' })
 
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     expect($$('[data-testid="request-field"]').map((entry) => entry.textContent)).toEqual(['ref'])
     const prompt = $<HTMLTextAreaElement>('textarea.scheduled-prompt')!
     prompt.setSelectionRange(prompt.value.length, prompt.value.length)
@@ -723,7 +680,7 @@ describe('the Automations page', () => {
     expect(mousse.scheduled.update).not.toHaveBeenCalled()
     expect(document.body.textContent).not.toContain('ghp_typed_secret')
 
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     await click($('[data-testid="automation-more"]'))
     expect($$('[data-testid="automation-key"]').map((entry) => [entry.dataset.stored, entry.textContent])).toEqual([['false', expect.stringContaining('GITHUB_TOKEN · missing')]])
     await click($('[data-testid="automation-key-add"]'))
@@ -739,7 +696,7 @@ describe('the Automations page', () => {
     const stored = job({ id: 'j1', name: 'Rerun test', schedule: { kind: 'manual' }, nextRunAt: null, createdBy: { threadId: 't1' }, expiresAt: new Date(Date.now() + 86_400_000).toISOString() })
     const mousse = await mount([item({ key: 'job:j1', name: 'Rerun test', trigger: 'on_demand', addedBy: { threadId: 't1' }, keepable: true })], [stored])
     mousse.scheduled.webhook.enable.mockResolvedValue({ job: stored, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/j1', listening: true })
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     await click($('[data-testid="automation-more"]'))
     expect($<HTMLButtonElement>('[data-testid="request-enable"]')!.disabled).toBe(true)
     expect($('[data-testid="request-refusal"]')?.textContent).toMatch(/^Keep it first/)
@@ -749,7 +706,7 @@ describe('the Automations page', () => {
     const stored = job({ id: 'j1', name: 'Deploy preview', prompt: 'Deploy {{body.ref}}', schedule: { kind: 'manual' }, nextRunAt: null })
     const mousse = await mount([item({ key: 'job:j1', name: 'Deploy preview', trigger: 'on_demand' })], [stored])
     mousse.scheduled.webhook.enable.mockResolvedValue({ job: stored, secret: 'whsec_shown_once', url: 'http://127.0.0.1:18790/hooks/j1', listening: true })
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     await click($('[data-testid="automation-more"]'))
     await click($('[data-testid="request-enable"]'))
     expect(mousse.scheduled.webhook.enable).toHaveBeenCalledWith('j1')
@@ -788,62 +745,6 @@ describe('the Automations page', () => {
     expect(openLibrary).toHaveBeenCalledOnce()
   })
 
-  it('lets a saved agent do it: the Who picker lists published saved agents, and Add sends a real agent reference', async () => {
-    const mousse = await mount([])
-    await click($('[data-testid="automation-create"]'))
-    await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'every weekday at 9 review open PRs')
-    await click($('[data-testid="automation-create-who"]'))
-    expect(option('Draft only')).toBeUndefined()
-    await click(option('PR reviewer'))
-    expect($('[data-testid="automation-create-who"]')?.textContent).toBe('PR reviewer')
-    expect($('[data-testid="automation-create-may"]')?.textContent).toBe('May: what PR reviewer may use')
-    await click($('[data-testid="automation-create-add"]'))
-    const sent = mousse.scheduled.create.mock.calls[0]![0] as Record<string, unknown>
-    expect(sent).toMatchObject({ prompt: 'review open PRs', agent: { definitionId: 'agent-1' } })
-    expect(sent.permissionMode).toBeUndefined()
-  })
-
-  it('swaps the prompt for a workflow inputs when / picks one, hides Who, and runs it as /slug --input', async () => {
-    const mousse = await mount([])
-    await click($('[data-testid="automation-create"]'))
-    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
-    await type(input, '/rel')
-    const suggestions = $('[data-testid="automation-do-suggestions"]')
-    expect(suggestions?.textContent).toContain('/release-notes')
-    await click(suggestions!.querySelector('button'))
-    await act(async () => {})
-    expect($('[data-testid="automation-do"]')?.textContent).toBe('/release-notes')
-    expect($('[data-testid="automation-create-who"]')).toBeNull()
-    expect($('[data-testid="automation-workflow-inputs"]')?.textContent).toContain('Tag *')
-    await type(input, 'every friday at 16')
-    expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
-    await type($<HTMLInputElement>('[data-input="tag"]')!, 'v1.2 beta')
-    await click($('[data-testid="automation-create-add"]'))
-    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Release notes', prompt: '/release-notes --tag "v1.2 beta"', schedule: { kind: 'cron', expr: '0 16 * * 5' } }))
-  })
-
-  it('gives a bot the schedule when the bot is Who, and says a bot repeats', async () => {
-    const mousse = await mount([])
-    await click($('[data-testid="automation-create"]'))
-    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
-    await type(input, 'every day at 8 tell me the weather')
-    await click($('[data-testid="automation-create-who"]'))
-    await click(option('Pip'))
-    expect($('[data-testid="automation-create-may"]')?.textContent).toContain("Pip's grant")
-    expect($('[aria-label="Where"]')).toBeNull()
-    await click($('[data-testid="automation-create-add"]'))
-    expect(mousse.platformRequest.request).toHaveBeenCalledWith('bots.schedules.add', { botId: 'bot_1', when: { kind: 'cron', expr: '0 8 * * *' }, prompt: 'tell me the weather' })
-    expect(mousse.scheduled.create).not.toHaveBeenCalled()
-    await click($('[data-testid="automation-create"]'))
-    await click($('[data-testid="automation-create-who"]'))
-    await click(option('Pip'))
-    await click($('.automation-chip-select.when'))
-    await click(option('On demand'))
-    await type($<HTMLInputElement>('[data-testid="automation-create-input"]')!, 'check the news')
-    expect($('[data-testid="automation-create-blocked"]')?.textContent).toMatch(/A bot repeats/)
-    expect($<HTMLButtonElement>('[data-testid="automation-create-add"]')!.disabled).toBe(true)
-  })
-
   it('shows who actually ran each run, and when its saved agent changed since the run before', async () => {
     const stored = job({ id: 'j1', name: 'Nightly', projectId: 'p1', agent: { definitionId: 'agent-1' } })
     const runs = [
@@ -851,42 +752,11 @@ describe('the Automations page', () => {
       { at: new Date(Date.now() - 86_400_000).toISOString(), state: 'done' as const, ranBy: 'PR reviewer' }
     ]
     await mount([item({ key: 'job:j1', name: 'Nightly', who: { kind: 'saved_agent', name: 'PR reviewer', definitionId: 'agent-1' }, mayIsGrant: true, runs })], [stored])
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     expect($('[data-testid="automation-who"]')?.textContent).toBe('PR reviewer')
     expect($('[data-testid="automation-may-agent"]')?.textContent).toBe('What PR reviewer may use')
     expect($$('[data-testid="automation-run-who"]').map((entry) => entry.textContent)).toEqual(['PR reviewer', 'PR reviewer'])
     expect($$('[data-testid="automation-run-changed"]')).toHaveLength(1)
-  })
-
-  it('opens the create row prefilled from Automate… on a saved agent and on a workflow', async () => {
-    const { openAutomationCreate, useAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
-    openAutomationCreate({ agentId: 'agent-1' })
-    await mount([])
-    await act(async () => {})
-    expect($('[data-testid="automation-create"]')?.dataset.open).toBe('true')
-    expect($('[data-testid="automation-create-who"]')?.textContent).toBe('PR reviewer')
-    // The request is taken once: the page does not open it again later.
-    expect(useAutomationCreate.getState().request).toBeNull()
-
-    await act(async () => { openAutomationCreate({ workflowId: 'wf-1' }) })
-    await act(async () => {})
-    expect($('[data-testid="automation-do"]')?.textContent).toBe('/release-notes')
-    expect($('[data-testid="automation-create-who"]')).toBeNull()
-  })
-
-  it('opens the create row from Repeat this… with the prompt, the project and the thread\'s model', async () => {
-    const { openAutomationCreate } = await import('../../src/renderer/stores/automationCreateStore')
-    const selection = { instanceId: providers[0]!.instanceId, llmProvider: providers[0]!.id, model: providers[0]!.models[0]!.id }
-    openAutomationCreate({ prompt: 'summarize yesterday\'s commits', projectId: 'p1', selection })
-    const mousse = await mount([])
-    await act(async () => {})
-    const input = $<HTMLInputElement>('[data-testid="automation-create-input"]')!
-    expect(input.value).toBe('summarize yesterday\'s commits')
-    expect($('[data-testid="automation-create-when"]')?.textContent).toBe('Choose when')
-    expect($('[data-testid="automation-create-who"]')?.textContent).not.toBe('Claude')
-    await type(input, 'every day at 7 summarize yesterday\'s commits')
-    await click($('[data-testid="automation-create-add"]'))
-    expect(mousse.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'summarize yesterday\'s commits', projectId: 'p1', selection: expect.objectContaining({ model: selection.model }) }))
   })
 
   it('answers asks in place from Needs you: Allow is the primary action, Not now is in "…"', async () => {
@@ -924,7 +794,7 @@ describe('the Automations page', () => {
     expect($('[data-testid="automation-keep-menu"]')).not.toBeNull()
     await click($('[data-testid="automation-keep-menu"]'))
     expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.keep', { jobId: 'j1' })
-    await click($('[data-key="job:j1"] .automation-row-main'))
+    await openForm('job:j1')
     await click($('[data-testid="automation-more"]'))
     await click($('[data-testid="automation-keep"]'))
     expect(mousse.platformRequest.request.mock.calls.filter(([method]) => method === 'automations.keep')).toHaveLength(2)
