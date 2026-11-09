@@ -4,6 +4,7 @@ import { open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { resolve } from 'node:path'
 import { countLineEdits } from '../../../../shared/lineEditStats'
+import { longerTtl, writtenCacheTtl } from '../../promptCache'
 
 export type ClaudeSubscriptionMetrics = {
   usage: AssistantMessage['usage'] | null
@@ -19,6 +20,8 @@ export type ClaudeSubscriptionMetrics = {
     contextWindow?: number
     modelName?: string
   }
+  /** When the main conversation's last request was answered, and the longest cache lifetime it wrote this turn. */
+  promptCache?: { at: number; ttlMs?: number }
 }
 export type ClaudeUsageBaseline = {
   sessionId: string
@@ -32,6 +35,8 @@ type NativeUsage = {
   output_tokens?: number
   cache_read_input_tokens?: number | null
   cache_creation_input_tokens?: number | null
+  /** What was written per lifetime: Claude Code passes the API's usage through (`BetaUsage.cache_creation`). */
+  cache_creation?: { ephemeral_5m_input_tokens?: number | null; ephemeral_1h_input_tokens?: number | null } | null
 }
 const number = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
@@ -86,6 +91,8 @@ export class ClaudeMetricsCollector {
   private readonly settledAssistantIds = new Set<string>()
   private readonly pendingAssistants = new Map<string, AssistantMessage['usage']>()
   private latestContext?: ClaudeSubscriptionMetrics['context']
+  private lastRequestAt?: number
+  private cacheTtlMs?: number
   private realModelName?: string
   constructor(resume?: string, baseline?: ClaudeUsageBaseline) {
     this.beginQuery(resume, baseline)
@@ -100,6 +107,10 @@ export class ClaudeMetricsCollector {
       const assistantId = message.message.id || message.uuid
       if (this.settledAssistantIds.has(assistantId)) return
       const usage = nativeUsage(message.message.usage)
+      // The cache this request read or wrote lives from now; the longest lifetime written this turn applies.
+      const written = (message.message.usage as NativeUsage).cache_creation
+      this.cacheTtlMs = longerTtl(this.cacheTtlMs, writtenCacheTtl({ oneHour: written?.ephemeral_1h_input_tokens, fiveMinute: written?.ephemeral_5m_input_tokens }))
+      this.lastRequestAt = Date.now()
       const modelName = message.message.model || undefined
       if (modelName) this.realModelName = modelName
       this.latestContext = {
@@ -242,7 +253,10 @@ export class ClaudeMetricsCollector {
             usageScope: this.scope
           }
         : {}),
-      ...(this.latestContext ? { context: { ...this.latestContext } } : {})
+      ...(this.latestContext ? { context: { ...this.latestContext } } : {}),
+      ...(this.lastRequestAt
+        ? { promptCache: { at: this.lastRequestAt, ...(this.cacheTtlMs ? { ttlMs: this.cacheTtlMs } : {}) } }
+        : {})
     }
   }
 }

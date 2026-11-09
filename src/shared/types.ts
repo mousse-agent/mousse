@@ -949,6 +949,24 @@ export interface ContextUsageSnapshot {
    * size does not apply. Absent: Mousse compacts it at that size.
    */
   compactedByRuntime?: boolean
+  /**
+   * The provider's prompt cache for this context: when the last request was answered and how long the
+   * provider said what it wrote lives. Absent when no request has been answered on this history (a
+   * new thread, or the history changed since, which starts a fresh session).
+   */
+  promptCache?: ContextPromptCache
+}
+
+export interface ContextPromptCache {
+  /** Epoch ms of the last provider request of the thread's last turn. */
+  lastRequestAt: number
+  /** Longest lifetime the provider reported for what it cached; absent when it reports none (show idle time). */
+  ttlMs?: number
+  /**
+   * What one token re-read uncached costs, in USD per million, when the model has a price and the thread
+   * bills by API key. Absent for subscriptions (Claude Code, Codex) and models without a price.
+   */
+  uncachedUsdPerMTok?: number
 }
 
 export interface PtyCreateRequest {
@@ -1359,6 +1377,23 @@ export interface NativeLlmContext {
   }
   /** Restored on session load so context usage stays measured after persist/reload. */
   lastTurnUsage?: NativeLastTurnUsage
+  /** The provider's prompt cache after the last turn; it holds only while `revision` is unchanged. */
+  promptCache?: NativePromptCache
+}
+
+/**
+ * When the provider last read or wrote its prompt cache for this thread, and for how long. Any change
+ * of the history (`NativeLlmContext.revision`) starts a fresh runtime session, so the record then no
+ * longer applies (`promptCacheOf`).
+ */
+export interface NativePromptCache {
+  lastRequestAt: number
+  /** Longest lifetime the provider reported writing; a turn that only read the cache keeps the previous one. */
+  ttlMs?: number
+  /** `NativeLlmContext.revision` after the turn that made the request. */
+  revision: number
+  /** `provider:model` the turn ran: another model has its own cache. */
+  modelKey?: string
 }
 
 export interface FileEntry {

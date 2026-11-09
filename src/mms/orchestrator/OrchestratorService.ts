@@ -29,6 +29,7 @@ import {
   type AgentAccessLevel
 } from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
@@ -312,7 +313,9 @@ import {
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
+  nextPromptCache,
   normalizeNativeContext,
+  promptCacheOf,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
@@ -8008,10 +8011,12 @@ export class OrchestratorService extends EventEmitter {
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
       let compactsNearWindow = false
+      let driver: string | undefined
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
         compactsNearWindow = resolved.compactsNearWindow === true
+        driver = resolved.driver
       } catch {
         caps = undefined
       }
@@ -8039,11 +8044,26 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
+      // The cache of the history as it is now, on the model the composer would send to (another model has its own).
+      const cache = promptCacheOf(this.nativeContext)
+      const cacheKey = cache?.modelKey
+      const cached = cache && (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
+      // A price only where the thread pays per token: pi with a saved API key and a priced model.
+      const price = cached && driver === 'pi' && typeof this.providerAuth?.uncachedInputPrice === 'function'
+        ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)
+        : undefined
       return {
         ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
         // A runtime that compacts its own session near the window gets only the on/off; the other
         // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
-        ...(compactsNearWindow ? { compactedByRuntime: true } : {})
+        ...(compactsNearWindow ? { compactedByRuntime: true } : {}),
+        ...(cached ? {
+          promptCache: {
+            lastRequestAt: cache.lastRequestAt,
+            ...(cache.ttlMs ? { ttlMs: cache.ttlMs } : {}),
+            ...(price ? { uncachedUsdPerMTok: price } : {})
+          }
+        } : {})
       }
     }
     if (threadId && threadId !== this.session.threadId) {
@@ -10089,6 +10109,8 @@ export class OrchestratorService extends EventEmitter {
     // Prompt-injected runtimes keep their own transcript; their reply and reported metrics reach
     // the canonical transcript once, through `commitPromptTurn`.
     let promptMetrics: ProviderMetrics | undefined
+    /** When the runtime last reported usage this turn: its last request, for runtimes that do not say when it was answered. */
+    let lastUsageAt: number | undefined
     let promptTurnCommitted = false
     const promptContextKey = `${selectedModel.llmProvider}:${selectedModel.model}`
     const commitPromptTurn = (text: string): void => {
@@ -10107,6 +10129,13 @@ export class OrchestratorService extends EventEmitter {
           measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
         })
       }
+      // The provider's cache now holds this history (its revision includes the reply): when the last
+      // request was answered (else the turn's end) and the lifetime the turn wrote, if the runtime says.
+      this.nativeContext.promptCache = nextPromptCache(this.nativeContext, {
+        at: promptMetrics?.promptCache?.at ?? lastUsageAt ?? Date.now(),
+        ...(promptMetrics?.promptCache?.ttlMs ? { ttlMs: promptMetrics.promptCache.ttlMs } : {}),
+        modelKey: promptContextKey
+      })
       this.persist(true)
     }
     try {
@@ -10214,11 +10243,14 @@ export class OrchestratorService extends EventEmitter {
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
         // Usage statistics, as each runtime reports them.
-        usage: (usage) => this.lineEditStats?.recordUsage({
-          timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
-          model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
-          cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
-        }),
+        usage: (usage) => {
+          lastUsageAt = Date.now()
+          this.lineEditStats?.recordUsage({
+            timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
+            model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
+            cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
+          })
+        },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
         steerAccepted: (text) => {
           this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
@@ -10228,7 +10260,10 @@ export class OrchestratorService extends EventEmitter {
           this.persist(true)
           this.acknowledgeDrainedSteers(session)
         },
-        providerMetrics: (metrics) => { promptMetrics = metrics },
+        providerMetrics: (metrics) => {
+          promptMetrics = metrics
+          if (metrics.usage || metrics.context) lastUsageAt = Date.now()
+        },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
       // Every drain is remembered under its own token until the provider has taken the text, so a drain
