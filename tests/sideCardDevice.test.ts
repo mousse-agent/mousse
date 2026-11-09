@@ -330,7 +330,7 @@ describe('DeviceSection rendering', () => {
     expect(html).not.toContain('aria-haspopup')
   })
 
-  it('names the project and the computer in one row', () => {
+  it('names the project in one row, leaving this computer to the icon and the tooltip', () => {
     seed({
       activeThreadId: 't1',
       threads: [thread({ startedAt: '2026-01-01T00:00:01Z' })],
@@ -339,10 +339,14 @@ describe('DeviceSection rendering', () => {
     })
     const html = renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: 'p1' }))
     expect(html).toContain('title="acme-web on Mac mini"')
-    expect(html).toMatch(/side-card-header-project">acme-web<\/span><span class="side-card-header-computer"> · Mac mini</)
+    expect(html).toContain('side-card-header-project">acme-web</span>')
+    expect(html).not.toContain('side-card-header-computer')
     expect(html).not.toContain('side-card-section-name')
+    // Without a project the computer is the name.
+    expect(renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))).toContain('side-card-header-computer">Mac mini</span>')
     seed({ projects: [] })
   })
+
 
   it('names the other computer, and offers no editor, for a thread that runs there', () => {
     seed({

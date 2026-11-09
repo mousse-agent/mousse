@@ -362,12 +362,26 @@
   min-width: 0;
 }
 
+/* The project gives way first: computer names are short, project names may not be. */
+.side-card-header-name {
+  display: flex;
+}
+
 .side-card-header-project {
+  flex: 0 1 auto;
+  min-width: 2ch;
+  overflow: hidden;
   font-weight: 500;
+  text-overflow: ellipsis;
 }
 
 .side-card-header-computer {
+  flex: 0 0 auto;
+  max-width: 70%;
+  overflow: hidden;
   color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: pre;
 }
 
 .side-card-header-tag {

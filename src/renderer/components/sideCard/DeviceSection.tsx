@@ -55,7 +55,7 @@ export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
         <Icon className="side-card-header-icon" size={14} aria-hidden="true" />
         {isNew
           ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
-          : <HeaderName project={project} computer={computerName} />}
+          : <HeaderName project={project} computer={computerName} remote={remote} />}
         {state === 'offline' && <span className="side-card-header-tag">offline</span>}
         {!remote && <OpenInEditor compact />}
       </div>
@@ -66,13 +66,16 @@ export function DeviceSection({ threadId, projectId }: SideCardSectionContext) {
   )
 }
 
-/** "acme-web · DEV-LAPTOP": the project in full, the computer quieter; the full text is the tooltip. */
-function HeaderName({ project, computer }: { project: string | null; computer: string }) {
+/**
+ * The project, and the computer when it is another one ("acme-web · Mac mini"). On this computer the laptop icon
+ * says where, so the name is left to the tooltip; a thread without a project shows the computer instead.
+ */
+function HeaderName({ project, computer, remote }: { project: string | null; computer: string; remote: boolean }) {
   const title = project ? `${project} on ${computer}` : computer
   return (
     <p className="side-card-device-name side-card-header-name" title={title}>
       {project && <span className="side-card-header-project">{project}</span>}
-      <span className="side-card-header-computer">{project ? ` · ${computer}` : computer}</span>
+      {(remote || !project) && <span className="side-card-header-computer">{project ? ` · ${computer}` : computer}</span>}
     </p>
   )
 }
