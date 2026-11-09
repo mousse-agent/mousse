@@ -199,18 +199,27 @@ describe('going back to an older build and coming back', () => {
 
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
     move()
-    const draft = jobs.createJob({ name: 'Draft', prompt: 'x', schedule: { kind: 'manual' }, draft: { draft: true, draftId: 'd1' } })
+    const draft = jobs.createJob({ name: 'Draft', prompt: 'x', schedule: { kind: 'interval', minutes: 30 }, draft: { draft: true, draftId: 'd1' } })
     const keyed = jobs.createJob({ name: 'Keyed', prompt: 'x', schedule: { kind: 'manual' }, keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
-    // The older build saves, and pauses a bot's job on its guard thread.
-    olderBuildSaves((job) => job.id === 'bot-b--daily' ? { ...job, enabled: false, state: 'paused', pausedAt: NOW.toISOString(), pausedReason: 'Its thread was deleted' } : job)
+    // The older build saves: it pauses a bot's job on its guard thread, gives another bot's job a thread of its own,
+    // and the person turns on the draft there, which that build shows as an ordinary paused job.
+    olderBuildSaves((job) =>
+      job.id === 'bot-b--daily' ? { ...job, enabled: false, state: 'paused', pausedAt: NOW.toISOString(), pausedReason: 'Its thread was deleted' }
+        : job.id === 'bot-a--news' ? { ...job, threadId: 'a-real-thread' }
+          : job.id === draft.id ? { ...job, enabled: true, state: 'scheduled', nextRunAt: NOW.toISOString() }
+            : job)
     expect(jobs.getJob('bot-b--daily')).toMatchObject({ state: 'paused' })
     expect(jobs.getJob('bot-b--daily')?.bot).toBeUndefined()
     const before = jobs.getJob(keyed.id)
     expect(before?.keys).toBeUndefined()
     expect(jobs.restoreDroppedFields().sort()).toEqual(['bot-a--news', 'bot-a--tidy', 'bot-b--daily', draft.id, keyed.id].sort())
-    expect(jobs.getJob(draft.id)).toMatchObject({ draft: { draft: true, draftId: 'd1' }, enabled: false })
+    // The draft is a draft again, never on, and never due.
+    expect(jobs.getJob(draft.id)).toMatchObject({ draft: { draft: true, draftId: 'd1' }, enabled: false, state: 'paused', nextRunAt: null })
+    expect(jobs.getJob('bot-a--news')).toMatchObject({ bot: { botId: 'bot-a', scheduleId: 'news' }, threadId: botJobThreadGuard('bot-a') })
     expect(jobs.getJob(keyed.id)).toMatchObject({ keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
     expect(jobs.getJob('bot-b--daily')).toMatchObject({ bot: { botId: 'bot-b', scheduleId: 'daily' }, enabled: true, state: 'scheduled' })
+    // The scheduler never starts a draft.
+    expect(jobs.claimDueJobs(new Date(NOW.getTime() + 86_400_000)).map((job) => job.id)).not.toContain(draft.id)
     // Nothing more to put back; an edit this build makes afterwards is never undone.
     expect(jobs.restoreDroppedFields()).toEqual([])
     jobs.updateJob(keyed.id, { keys: undefined })

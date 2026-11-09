@@ -253,6 +253,18 @@ describe('automation drafts', () => {
     expect(service.getJob(other)).toMatchObject({ enabled: false, pausedReason: 'Quiet week' })
   })
 
+  it('takes a name only as words of its own, never inside other words', () => {
+    const { drafts, service } = setup()
+    const test = drafts.save({ ...PR_CHECK, name: 'Test', project: 'p1' }, {}).draftId
+    drafts.turnOn(test)
+    const refuse = (request: string) => expect(() => drafts.update({ id: test, name: 'Test 2' }, { managerThreadId: 'manager', request })).toThrow(/Ask the person to name it/)
+    refuse('retest the build')
+    refuse('run the tests')
+    refuse('attest it')
+    expect(service.getJob(test)!.name).toBe('Test')
+    expect(drafts.update({ id: test, name: 'Test 2' }, { managerThreadId: 'manager', request: 'Rename "test" to Test 2' }).name).toBe('Test 2')
+  })
+
   it('never leaves both the draft and the bot\'s schedule when Turn on cannot remove the draft', () => {
     const { drafts, service } = setup()
     drafts.nextWho({}, { kind: 'bot', botId: 'bot_1' })

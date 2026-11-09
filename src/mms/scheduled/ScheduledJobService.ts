@@ -181,9 +181,23 @@ export class ScheduledJobService extends EventEmitter {
     })
   }
 
-  /** Where bots' occurrences run; without it a bot's occurrence is skipped as "bots unavailable". */
+  /**
+   * Where bots' occurrences run; without it a bot's occurrence is skipped as "bots unavailable", and its schedule is
+   * paused for that reason. Once bots are back, the schedules paused only for that reason resume.
+   */
   setBotRunner(runner: ScheduledBotRunner | null): void {
     this.botRunner = runner
+    if (!runner) return
+    let resumed = false
+    for (const job of this.store.listJobs()) {
+      if (!job.bot || job.enabled || job.pausedReason !== LASTING_BOT_SKIPS.bots_unavailable) continue
+      try {
+        if (this.store.resumeJob(job.id)) resumed = true
+      } catch (error) {
+        console.warn('a bot schedule paused while bots were unavailable could not resume', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (resumed) this.emitUpdated()
   }
 
   /** Runs after every tick of this process (bot upkeep); its failure never stops the scheduler. */

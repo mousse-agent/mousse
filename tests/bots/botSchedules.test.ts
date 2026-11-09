@@ -259,11 +259,20 @@ describe('bot schedules in the shared scheduler', () => {
     expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: 'Its bot was deleted.' })
   })
 
-  it('pauses a bot\'s schedule once in a profile where bots could not be opened', async () => {
+  it('pauses a bot\'s schedule once in a profile where bots could not be opened, and resumes it once they open', async () => {
     await scheduled()
+    const runner = (f.scheduler as unknown as { botRunner: Parameters<typeof f.scheduler.setBotRunner>[0] }).botRunner
     f.scheduler.setBotRunner(null)
     await f.tickSchedules(new Date(T0 + 5 * MIN))
     expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, state: 'paused', pausedReason: expect.stringMatching(/^Bots could not be opened/) })
+    // Bots open at the next start: the schedule paused only for that runs again.
+    f.scheduler.setBotRunner(runner)
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: true, state: 'scheduled' })
+    expect(f.scheduler.getJob(entry().jobId)!.pausedReason).toBeUndefined()
+    // One paused for any other reason stays paused.
+    f.scheduler.pauseJob(entry().jobId, 'Owner paused it')
+    f.scheduler.setBotRunner(runner)
+    expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, pausedReason: 'Owner paused it' })
   })
 
   it('a run report of a schedule told Only problems is quiet; other rows notify as before', async () => {

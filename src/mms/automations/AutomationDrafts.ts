@@ -111,12 +111,17 @@ const EVENT_KINDS: readonly ThreadEventKind[] = ['checks_failed', 'checks_passed
 
 export class AutomationDraftError extends Error {}
 
-/** Whether the person's request names the automation: its id, or its whole name (three letters or more), in any case. */
+/**
+ * Whether the person's request names the automation: its id, or its whole name (three letters or more) as words of
+ * their own, in any case: "retest the build" names neither "Test" nor "Build check".
+ */
 function namedIn(request: string | undefined, job: ScheduledJob): boolean {
   if (!request) return false
-  if (request.includes(job.id)) return true
-  const name = job.name.trim().toLowerCase()
-  return name.length >= 3 && request.toLowerCase().includes(name)
+  if (job.id && request.includes(job.id)) return true
+  const name = job.name.trim()
+  if (name.length < 3) return false
+  const words = name.split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+  return new RegExp(`(?<![\\p{L}\\p{N}])${words}(?![\\p{L}\\p{N}])`, 'iu').test(request)
 }
 
 function fail(message: string): never {

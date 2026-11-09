@@ -547,7 +547,15 @@ export class ScheduledJobStore {
         if (!fields || typeof fields !== 'object') continue
         if (Object.keys(keptFieldsOf(job)).length) continue
         Object.assign(job, fields)
-        if (fields.bot && job.threadId === botJobThreadGuard(fields.bot.botId) && job.pausedReason === GUARD_PAUSE) Object.assign(job, resumeFields(job))
+        if (fields.bot) {
+          // A bot's job runs on its guard, as the repair from `bots.db` sets it, whatever thread that build gave it.
+          const guard = botJobThreadGuard(fields.bot.botId)
+          const guardPaused = job.threadId === guard && job.pausedReason === GUARD_PAUSE
+          job.threadId = guard
+          if (guardPaused) Object.assign(job, resumeFields(job))
+        }
+        // A draft never runs, even one that build turned on: it waits for Turn on again.
+        if (fields.draft) Object.assign(job, { enabled: false, ...(job.state === 'running' ? {} : { state: 'paused' as const }), nextRunAt: null, resumeAt: undefined })
         restored.push(job.id)
       }
       if (restored.length) this.saveJobs(jobs)
@@ -1100,8 +1108,8 @@ export class ScheduledJobStore {
       const droppedDeliveries: Array<{ jobId: string; occurrenceId: string }> = []
 
       for (const job of jobs) {
-        // A pause with an end is over once its time has come: the job resumes on its schedule from now.
-        if (job.state === 'paused' && job.resumeAt && Date.parse(job.resumeAt) <= now.getTime() && !job.runClaim) {
+        // A pause with an end is over once its time has come: the job resumes on its schedule from now. A draft never does.
+        if (job.state === 'paused' && job.resumeAt && Date.parse(job.resumeAt) <= now.getTime() && !job.runClaim && !job.draft) {
           Object.assign(job, resumeFields(job), { updatedAt: now.toISOString() })
           dirty = true
         }
@@ -1126,7 +1134,7 @@ export class ScheduledJobStore {
             continue
           }
         }
-        if (!job.enabled || job.state === 'paused' || job.state === 'running' || job.runClaim) continue
+        if (!job.enabled || job.draft || job.state === 'paused' || job.state === 'running' || job.runClaim) continue
         // A job this process is already running is not claimed again: the caller would drop the claim.
         if (options.skipJobIds?.has(job.id)) continue
         // A bounded start (catch-up after downtime): the rest stay due for the next tick.
