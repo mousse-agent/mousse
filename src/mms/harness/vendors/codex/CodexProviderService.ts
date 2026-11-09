@@ -111,6 +111,8 @@ export const CODEX_DEFAULT_MODEL_ID = 'default'
  */
 export const CODEX_MODEL_PROVIDER = 'openai'
 const INTERRUPT_TIMEOUT_MS = 5_000
+/** A stopped `/compact`: how long Codex gets to end its compaction turn before Mousse stops relying on the thread. */
+const COMPACT_SETTLE_MS = 5_000
 /** A stopped turn must settle on the server before the thread takes a new one. */
 const PREVIOUS_TURN_SETTLE_MS = 10_000
 /**
@@ -337,6 +339,8 @@ export type CodexServiceDependencies = {
   stopGraceMs?: number
   /** Kills the processes below `roots` running one of `commands` (`stopCommandProcesses`; tests substitute it). */
   stopCommands?: typeof stopCommandProcesses
+  /** How long a stopped `/compact` waits for Codex to end its compaction turn (tests). */
+  compactSettleMs?: number
 }
 
 /** `stopAll`: a closed process gets this long before its tree is killed. */
@@ -1113,8 +1117,11 @@ export class CodexProviderService {
   private readonly orphans = new Set<NativeHelpers>()
   private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
-  /** Codex threads compacting for `/compact`, by Codex thread id: resolved by the compaction's `turn/completed`. */
-  private readonly compactions = new Map<string, (turn: CodexTurn) => void>()
+  /**
+   * Codex threads compacting for `/compact`, by Codex thread id: the compaction's turn once Codex started it, and
+   * its end, resolved by the compaction's `turn/completed`.
+   */
+  private readonly compactions = new Map<string, { turnId?: string; done: (turn: CodexTurn) => void }>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
   /** Threads whose last turn was stopped or ended on a usage limit after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
@@ -1542,6 +1549,11 @@ export class CodexProviderService {
    * turn. False when no saved thread holds this history (the next turn starts a new one anyway) or this
    * Codex has no compaction, so the caller compacts Mousse's copy instead. The thread keeps its
    * fingerprint: the next turn resumes the compacted thread.
+   *
+   * Stopped (`signal`: a Stop, the time limit): Codex compacts on until told to stop, so its compaction turn is
+   * interrupted and its end awaited before the thread is let go, and this rejects. When Codex cannot be shown to
+   * have stopped short (the interrupt failed, no end came, or the compaction completed anyway), the saved thread
+   * is dropped: the next turn starts a new Codex thread with the full history in the prompt.
    */
   async compactConversation(threadId: string, history: string, instanceId: string | undefined, signal: AbortSignal): Promise<boolean> {
     const saved = this.settings.threads?.[threadId]
@@ -1563,11 +1575,26 @@ export class CodexProviderService {
           config: { model_provider: this.modelProvider }
         }, { signal })
       // Codex runs the compaction as a turn of its own: its `turn/completed` says how it went.
-      const completed = new Promise<CodexTurn>((resolve) => this.compactions.set(codexThreadId, resolve))
+      let done!: (turn: CodexTurn) => void
+      const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
+      const compaction: { turnId?: string; done: (turn: CodexTurn) => void } = { done }
+      this.compactions.set(codexThreadId, compaction)
       try {
-        await conn.request('thread/compact/start', { threadId: codexThreadId }, { signal })
-        const turn = await abortable(completed, signal)
-        if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? 'Codex could not compact this thread'))
+        if (signal.aborted) throw stopReason(signal)
+        // Not tied to the signal: once sent, a stop has to interrupt what Codex started.
+        const start = conn.request('thread/compact/start', { threadId: codexThreadId })
+        try {
+          await abortable(start, signal)
+          const turn = await abortable(completed, signal)
+          if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? 'Codex could not compact this thread'))
+          if (turn.status !== 'completed') throw new Error('Codex stopped compacting this thread')
+        } catch (error) {
+          if (!signal.aborted) throw error
+          start.catch(() => undefined)
+          if (!(await this.interruptCompaction(conn, codexThreadId, compaction, start, completed))) this.forgetConversation(threadId)
+          if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
+          throw stopReason(signal)
+        }
       } finally {
         this.compactions.delete(codexThreadId)
       }
@@ -1576,11 +1603,34 @@ export class CodexProviderService {
       return true
     } catch (error) {
       // An older Codex without `thread/compact/start`, or a thread it no longer has.
-      if (error instanceof CodexRpcError) return false
+      if (error instanceof CodexRpcError && !signal.aborted) return false
       throw error
     } finally {
       this.activeThreads.delete(threadId)
     }
+  }
+
+  /**
+   * Ends a stopped `/compact` on Codex's side: once Codex accepted it, its compaction turn (by id when Codex named
+   * it, else whatever turn the thread runs) is interrupted, and its end awaited. True when the thread still holds the
+   * full history: Codex refused the compaction, or its turn ended interrupted or failed. False when that cannot be
+   * shown in time, or the compaction completed anyway.
+   */
+  private async interruptCompaction(
+    conn: CodexConnection,
+    codexThreadId: string,
+    compaction: { turnId?: string },
+    start: Promise<unknown>,
+    completed: Promise<CodexTurn>
+  ): Promise<boolean> {
+    const deadline = Date.now() + (this.dependencies.compactSettleMs ?? COMPACT_SETTLE_MS)
+    const accepted = await settleWithin(start.then(() => true, () => false), deadline - Date.now())
+    if (accepted === false) return true
+    void conn.request('turn/interrupt', { threadId: codexThreadId, turnId: compaction.turnId ?? '' }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+      /* the compaction ended meanwhile, or the process is gone: its end (or none) decides */
+    })
+    const turn = await settleWithin(completed, deadline - Date.now())
+    return turn?.status === 'interrupted' || turn?.status === 'failed'
   }
 
   /**
@@ -1942,8 +1992,10 @@ export class CodexProviderService {
     if (typeof threadId !== 'string') return
     const compaction = this.compactions.get(threadId)
     if (compaction) {
+      const started = notificationParams(notification, 'turn/started')
+      if (started?.turn?.id) compaction.turnId = started.turn.id
       const completed = notificationParams(notification, 'turn/completed')
-      if (completed) compaction(completed.turn)
+      if (completed) compaction.done(completed.turn)
       return
     }
     const run = this.turns.get(threadId)
@@ -3011,6 +3063,22 @@ function pinnedProvider<T extends { modelProvider?: string }>(expected: string, 
 
 function textInput(text: string): UserInput {
   return { type: 'text', text, text_elements: [] }
+}
+
+/** The reason a stopped `/compact` rejects with. */
+function stopReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error('Compaction stopped')
+}
+
+/** What `promise` resolves to, or undefined when it does not within `ms`. */
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), Math.max(0, ms))
+    })
+  ]).finally(() => clearTimeout(timer))
 }
 
 /** Whether `exited` settles within `ms`. */

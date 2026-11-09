@@ -482,6 +482,89 @@ describe('CodexProviderService options (managed Codex)', () => {
       service.commitConversation('t', 'h')
       await expect(compact(service, 'h')).rejects.toThrow('context too small')
     })
+
+    /**
+     * A Codex whose compaction runs until the test or a `turn/interrupt` ends it. `onInterrupt` says how the
+     * interrupt goes: the turn ends `interrupted`, the compaction completes anyway, or the interrupt fails and no end comes.
+     */
+    function stoppableServer(onInterrupt: 'interrupted' | 'completed' | 'fails') {
+      const write = (method: string, params: unknown) => server.processes.at(-1)!.stdout.write(JSON.stringify({ method, params }) + '\n')
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        const threadId = (message.params as { threadId?: string } | undefined)?.threadId
+        if (method === 'account/read') return chatgpt
+        if (method === 'thread/start') return { result: { thread: { id: `thr-${server.messages.filter((entry) => entry.method === 'thread/start').length}` }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          setImmediate(() => write('turn/completed', { threadId, turn: { id: 'turn-1', status: 'completed', error: null } }))
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        if (method === 'thread/compact/start') {
+          setImmediate(() => write('turn/started', { threadId, turn: { id: 'turn-c', status: 'inProgress', error: null } }))
+          return { result: {} }
+        }
+        if (method === 'turn/interrupt') {
+          if (onInterrupt === 'fails') return { error: { code: -32600, message: 'no active turn' } }
+          setImmediate(() => write('turn/completed', { threadId, turn: { id: 'turn-c', status: onInterrupt, error: null } }))
+          return { result: {} }
+        }
+        if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
+        return { result: {} }
+      })
+      return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+    }
+
+    /** Starts a `/compact`, stops it once Codex runs the compaction turn, and returns how it ended. */
+    async function stopWhileCompacting(server: ReturnType<typeof stoppableServer>, service: CodexProviderService) {
+      const stop = new AbortController()
+      const running = service.compactConversation('t', 'h', undefined, stop.signal)
+      const outcome = running.then(() => 'resolved', (error: unknown) => error)
+      const startedAt = Date.now()
+      while (!server.requests('thread/compact/start').length) {
+        if (Date.now() - startedAt > 5_000) throw new Error('the compaction never started')
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      // The server answers with `turn/started`; give the service a moment to read it.
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      stop.abort(new Error('Compaction stopped'))
+      return outcome
+    }
+
+    it('a Stop interrupts the compaction turn and waits for it to end; the thread keeps the full history', async () => {
+      const server = stoppableServer('interrupted')
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      const outcome = await stopWhileCompacting(server, service)
+      expect(outcome).toBeInstanceOf(Error)
+      expect((outcome as Error).message).toBe('Compaction stopped')
+      expect(server.requests('turn/interrupt').map((message) => message.params)).toEqual([{ threadId: 'thr-1', turnId: 'turn-c' }])
+      // Codex stopped short: the next turn resumes the same thread.
+      await chat(service, { history: 'h' })
+      expect(server.requests('thread/start')).toHaveLength(1)
+    })
+
+    it('drops the saved thread when the compaction completed anyway', async () => {
+      const server = stoppableServer('completed')
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      expect(await stopWhileCompacting(server, service)).toBeInstanceOf(Error)
+      // The Codex thread was compacted after all: the next turn starts a new one with the full history.
+      await chat(service, { history: 'h' })
+      expect(server.requests('thread/start')).toHaveLength(2)
+    })
+
+    it('drops the saved thread when the interrupt fails and no end comes in time', async () => {
+      const server = stoppableServer('fails')
+      const service = new CodexProviderService(home, questions, { launch: server.launch, compactSettleMs: 50 }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+      services.push(service)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      expect(await stopWhileCompacting(server, service)).toBeInstanceOf(Error)
+      expect(server.requests('turn/interrupt')).toHaveLength(1)
+      await chat(service, { history: 'h' })
+      expect(server.requests('thread/start')).toHaveLength(2)
+    })
   })
 
   it('managed pins its own provider on start, fork and resume, and never reads the account from Codex', async () => {
