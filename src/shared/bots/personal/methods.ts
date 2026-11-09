@@ -19,7 +19,7 @@ export interface BotComputerChoice {
  * These v1 form methods are no longer registered for clients (the v2 set below is); they stay
  * engine functions that tests use.
  */
-const BOTS_PERSONAL_METHODS = [
+export const BOTS_PERSONAL_METHODS = [
   'bots.definitions.list',
   'bots.definitions.get',
   'bots.definitions.save',

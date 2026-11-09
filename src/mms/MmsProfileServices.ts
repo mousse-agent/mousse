@@ -2255,6 +2255,8 @@ export class MmsProfileServices {
       this.orchestrator.setBotAppTools(null)
       this.personalBots?.close()
       this.botStore?.close()
+      // The inbox's database too: an open SQLite file keeps the profile's folder from being removed on Windows.
+      this.automationRuns?.close()
       this.runEngine.store.db.close()
     } catch (error) {
       console.warn('run engine database close failed', error)
