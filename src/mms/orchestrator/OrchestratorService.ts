@@ -12142,6 +12142,11 @@ export class OrchestratorService extends EventEmitter {
     // The hold is renewed while the compaction runs: one nobody renews is taken as left behind.
     const renewal = threadDir ? setInterval(() => this.renewCompactionHold(threadId, threadDir, note.id, stop), this.queueHoldRenewMs) : undefined
     renewal?.unref?.()
+    // The context as it was: a result taken but not saved is undone to it.
+    const original = session.nativeContext
+    let native = false
+    let instanceId: string | undefined
+    let taken = false
     // From here on the hold and the Stop are released however this ends, a failed write of the row included.
     try {
       this.sessionAls.run(session, () => {
@@ -12149,8 +12154,8 @@ export class OrchestratorService extends EventEmitter {
         this.emitMessageAdded(note)
         this.persist(true)
       })
-      let native = false
-      const instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
+      native = false
+      instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
       if (instanceId) {
         try {
           native = await this.harness.compactConversation({
@@ -12176,6 +12181,7 @@ export class OrchestratorService extends EventEmitter {
         finish(COMPACTION_STOPPED_TEXT, 'stopped')
         return 'stopped'
       }
+      taken = true
       const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
         const compacted = compactNativeContext(this.nativeContext, undefined, focus)
         if (compacted === this.nativeContext) return 'unchanged' as const
@@ -12198,7 +12204,19 @@ export class OrchestratorService extends EventEmitter {
           : 'Context compacted')
       return outcome
     } catch (error) {
-      // The row says why; the queue then goes on with the full history.
+      // The row says why; the queue then goes on with the full history. A result taken but not saved is undone:
+      // Mousse's context goes back to what it was, and a runtime session the compaction changed is dropped.
+      if (taken) {
+        try {
+          this.sessionAls.run(session, () => {
+            this.nativeContext = original
+            if (original.lastTurnUsage) this.recordLastTurnUsage(original.lastTurnUsage)
+          })
+        } catch (restoreError) {
+          logDebug('OrchestratorService', 'the context before a failed compaction could not be restored', restoreError, { threadId })
+        }
+        if (native && instanceId) this.forgetNativeCompaction(threadId, instanceId)
+      }
       const reason = error instanceof Error ? error.message : String(error)
       try {
         finish(reason ? `Context not compacted · ${reason}` : 'Context not compacted', 'failed')

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -189,6 +190,72 @@ it('shows the prompt cache a Claude turn left, until the history changes or is c
     expect((await usage()).promptCache).toBeDefined()
     main.orchestrator.clearConversationContext(thread.id)
     expect((await usage()).promptCache).toBeUndefined()
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 60_000)
+
+it('undoes a compaction whose result could not be saved: the next turn resumes no compacted session and has the full history', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-compact-failed-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+    const thread = main.threads.createThread('Compaction not saved')
+    // A conversation long enough for Mousse's own cut.
+    const native = []
+    const shown = []
+    for (let index = 0; index < 12; index += 1) {
+      const question = `question ${index} ${'q'.repeat(12_000)}`
+      const answer = `answer ${index} ${'a'.repeat(12_000)}`
+      native.push(userMessage(question), nativeAgentAssistantMessage(answer, 'opus', 'claude-subscription'))
+      shown.push({ id: `u${index}`, role: 'user' as const, content: question, timestamp: new Date().toISOString() }, { id: `a${index}`, role: 'assistant' as const, content: answer, timestamp: new Date().toISOString() })
+    }
+    main.orchestrator.replaceConversationState(thread.id, shown, createNativeContext(native))
+    const key = (history: string) => createHash('sha256').update(history).digest('hex')
+    // The Claude service's own record of its sessions: a turn resumes the one saved for exactly the history it is sent.
+    const claude = main.claudeSubscription as unknown as { settings: { sessions?: Record<string, { sessionId: string; historyKey?: string }> } }
+    const orchestrator = main.orchestrator as unknown as { persist: (immediate?: boolean) => void }
+    const realPersist = orchestrator.persist.bind(main.orchestrator)
+    for (const runtimeCompacts of [true, false]) {
+      const before = main.orchestrator.getNativeContext(thread.id)
+      const fullHistory = nativeAgentHistory(before)
+      claude.settings.sessions = { ...claude.settings.sessions, [thread.id]: { sessionId: `vendor-${runtimeCompacts}`, cwd: home, instanceId: 'claude', historyKey: key(fullHistory) } as never }
+      // Claude Code compacts its session (or has nothing to compact, and Mousse cuts its copy); saving the result fails.
+      vi.spyOn(main.claudeSubscription, 'compactConversation').mockResolvedValue(runtimeCompacts)
+      const persist = vi.spyOn(orchestrator, 'persist').mockImplementation((immediate) => {
+        const row = main.orchestrator.getMessagesForPersistence(thread.id).at(-1)
+        if (row?.kind === 'context_compaction' && row.content.startsWith('Context compacted')) throw new Error('disk full')
+        return realPersist(immediate)
+      })
+      await expect(main.orchestrator.compactConversationContext(thread.id)).rejects.toThrow('disk full')
+      persist.mockRestore()
+      // The session Claude would resume for this thread now.
+      const left = claude.settings.sessions?.[thread.id]
+      expect(main.orchestrator.getMessagesForPersistence(thread.id).at(-1)).toMatchObject({ content: 'Context not compacted · disk full', compaction: { kept: 'failed' } })
+      const after = main.orchestrator.getNativeContext(thread.id)
+      expect(after.compaction).toBeUndefined()
+      expect(after.activeStartIndex).toBe(before.activeStartIndex)
+
+      // The next turn: the history it is sent.
+      let sent: string | undefined
+      const chat = vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+        sent = input.history
+        input.onText('answer')
+        return 'answer'
+      })
+      await main.orchestrator.send({ content: `next (${runtimeCompacts})`, mode: 'agent' }, false, { threadId: thread.id })
+      chat.mockRestore()
+      // Mousse's own cut is undone: the turn goes with the full history. A compacted Claude session is dropped, so
+      // the turn cannot resume it; a session Claude left as it was still holds exactly that history.
+      expect(sent).toBe(fullHistory)
+      expect(sent).toContain('question 0')
+      if (runtimeCompacts) expect(left).toBeUndefined()
+      else expect(left?.historyKey).toBe(key(sent!))
+    }
   } finally {
     await main.stop()
     vi.restoreAllMocks()
