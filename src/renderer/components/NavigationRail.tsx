@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Gauge, House, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { CircleGauge, House, Search, Settings, Workflow, type LucideIcon } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { openPalette } from '../commands/paletteActions'
 import { activeRailPage, sidebarProfileShown, escapeLeavesRailPage, leaveRailPage, toggleRailPage, type RailPage } from '../lib/railPages'
@@ -82,7 +82,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
       {/* Pinned to the bottom; the empty space above it is still rail, so hovering it peeks. */}
       <div className="navigation-rail-bottom">
         <DownloadsIndicator variant="rail" />
-        {shortcut('usage', 'Subscription usage', Gauge)}
+        {shortcut('usage', 'Subscription usage', CircleGauge)}
         {shortcut('settings', 'Settings', Settings)}
         {profileReady && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
           <ProfileSwitcher variant="rail" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
