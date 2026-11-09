@@ -34,8 +34,8 @@ export interface AutomationsDomain {
     /** The person's Who for the next drafts a manager (the Automation manager, or a bot) writes. */
     nextWho(botId: string | undefined, who: DraftWho): void
   }
-  /** The Automation manager's hidden thread, made the first time. */
-  managerThread(): { id: string }
+  /** The Automation manager's hidden thread, made the first time. Its turns work in the project the composer picked. */
+  managerThread(projectId?: string): { id: string }
 }
 
 /**
@@ -261,10 +261,14 @@ export function registerAutomationMethods(
     method: 'automations.manager.thread',
     scope: 'profile',
     capability: AUTOMATIONS_CAPABILITY,
-    validate: (params) => domainObject(params ?? {}, ['profileId']),
-    async handle(context, _params, binding) {
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'projectId'])
+      if (p.projectId !== undefined && (typeof p.projectId !== 'string' || p.projectId.length > 256)) throw new DomainRpcError('invalid_params', 'projectId is a project id')
+      return p
+    },
+    async handle(context, params, binding) {
       if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'The Automation manager is used from a Mousse window.')
-      return { threadId: (await bound(binding)).managerThread().id }
+      return { threadId: (await bound(binding)).managerThread(params.projectId as string | undefined || undefined).id }
     }
   })
   domains.register({

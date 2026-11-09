@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -7,6 +7,7 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { AutomationDrafts, cliNameOf } from '../src/mms/automations/AutomationDrafts'
 import { buildAutomationIndex } from '../src/mms/automations/AutomationIndex'
+import { automationManagerWorkspace } from '../src/mms/automations/automationManager'
 import { automationTools, type AutomationToolHost } from '../src/mms/run/mcp/appTools/automations'
 import type { AppToolHost } from '../src/mms/run/mcp/appTools/host'
 import type { ToolCallContext } from '../src/mms/run/mcp/appTools/types'
@@ -234,5 +235,21 @@ describe('the tool list', () => {
     expect(names('t1')).toEqual(expect.arrayContaining(['schedule_list', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_run']))
     expect(names('t1')).not.toContain('automation_draft_save')
     expect(names('manager')).toEqual(expect.arrayContaining(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']))
+  })
+})
+
+describe("the Automation manager's workspace", () => {
+  it("is the picked project, else the profile's own manager folder", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'manager-ws-'))
+    try {
+      expect(automationManagerWorkspace(dir, dir)).toBe(dir)
+      const own = join(dir, 'automation-manager')
+      expect(automationManagerWorkspace(dir, undefined)).toBe(own)
+      expect(existsSync(own)).toBe(true)
+      // A project that is gone (or on another computer) falls back too.
+      expect(automationManagerWorkspace(dir, join(dir, 'missing'))).toBe(own)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

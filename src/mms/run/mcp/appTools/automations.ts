@@ -7,6 +7,8 @@ export interface AutomationToolHost {
   drafts: AutomationDrafts
   /** Whether the thread is a profile's hidden Automation manager thread. */
   isManagerThread(threadId: string): boolean
+  /** The folder the manager's turns work in (`automationManagerWorkspace`). */
+  managerWorkspace?(): string
   /** The bot whose thread this is, on a bot's turn. */
   botOf(threadId: string): string | undefined
 }

@@ -364,7 +364,7 @@ describe('the Automations page', () => {
     expect(option('Studio')?.getAttribute('aria-disabled')).toBe('true')
   })
 
-  it('sends the words to the Automation manager\'s hidden thread with the project, says it is setting it up, and stops it', async () => {
+  it('sends the words to the Automation manager\'s hidden thread with the project (its turn works there), says it is setting it up, and stops it', async () => {
     const mousse = await mount([])
     await click($('[aria-label="Built by"]'))
     await click(option('Automation manager'))
@@ -376,7 +376,7 @@ describe('the Automations page', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }))
     })
     await click($('[data-testid="automation-composer-send"]'))
-    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.manager.thread', {})
+    expect(mousse.platformRequest.request).toHaveBeenCalledWith('automations.manager.thread', { projectId: 'p1' })
     expect(mousse.orchestrator.sendToThread).toHaveBeenCalledWith('mgr', 'Check PRs every Thursday at 5 am\n\n[Project: mousse (p1)]')
     expect($('[data-testid="automation-composer-status"]')?.textContent).toContain('Setting it up…')
     await click($('[data-testid="automation-composer-stop"]'))

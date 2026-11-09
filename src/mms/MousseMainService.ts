@@ -261,7 +261,7 @@ export class MousseMainService extends MmsProfileServices {
           setWho: (draftId, who) => services.automationDrafts.setWho(draftId, who),
           nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
         },
-        managerThread: () => services.automationManagerThread()
+        managerThread: (projectId) => services.automationManagerThread(projectId)
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>

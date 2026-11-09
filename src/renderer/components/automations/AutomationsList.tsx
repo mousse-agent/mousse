@@ -276,7 +276,8 @@ export function AutomationsList({ active }: { active: boolean }) {
     // The drafts this manager writes next take the Who the person picked.
     if (send.who !== undefined) await client.nextWho(send.builtBy === MANAGER_KEY ? undefined : send.builtBy.slice('bot:'.length), pickOf(send.who))
     if (send.builtBy === MANAGER_KEY) {
-      const threadId = knownManagerThread ?? await client.managerThread()
+      // Asked on every send: it also tells the daemon which project the manager's turn works in.
+      const threadId = await client.managerThread(project?.id)
       setManagerThreadId(threadId)
       await window.mousse.orchestrator.sendToThread(threadId, message)
     } else {

@@ -1007,6 +1007,11 @@ export class OrchestratorService extends EventEmitter {
   /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
   private automationTools?: AutomationToolHost
   setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
+  /** The Automation manager's thread has no project; its turns work in the composer's project or the manager's folder. */
+  private automationManagerCwd(threadId: string): string | null {
+    if (!this.automationTools?.managerWorkspace || !this.threadStore?.getThread(threadId)?.automationManager) return null
+    return resolveProjectWorkingDirectory(this.automationTools.managerWorkspace())
+  }
 
   private remoteComputers?: RemoteComputersPort
   /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
@@ -10069,7 +10074,7 @@ export class OrchestratorService extends EventEmitter {
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
-          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
+          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : this.automationManagerCwd(session.threadId)
         }
         if (threadDir && !opts?.bot && modeMutatesFiles(request.mode)) snapshotFolder = this.snapshotFolderFor(session, request.mode, threadDir, projectPath, opts?.modelOverride)
         // Only move worktree root when this is the bound session and no concurrent turn

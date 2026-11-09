@@ -87,7 +87,7 @@ import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
 import { isKeyName } from '../shared/automationKeys'
 import { AutomationDrafts } from './automations/AutomationDrafts'
-import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY } from './automations/automationManager'
+import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -895,6 +895,7 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
+      managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId
     })
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
@@ -1378,8 +1379,12 @@ export class MmsProfileServices {
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
   automationDrafts!: AutomationDrafts
 
+  /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
+  private automationManagerProjectId: string | undefined
+
   /** The profile's Automation manager thread: hidden, reusable, made the first time the composer sends. */
-  automationManagerThread(): { id: string } {
+  automationManagerThread(projectId?: string): { id: string } {
+    this.automationManagerProjectId = projectId
     return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
   }
 
