@@ -123,7 +123,8 @@ export type UserCodexLimits = Pick<CodexProviderService, 'status' | 'account' | 
 export async function useUserCodexReset(userCodex: UserCodexLimits | undefined, email: string | null | undefined, creditId: string | undefined, signal?: AbortSignal): Promise<UseLimitResetResponse> {
   const wanted = email?.trim().toLowerCase()
   if (!userCodex || !wanted) throw new Error('Codex CLI is not available to use a reset.')
-  await userCodex.status()
+  // Read the CLI's sign-in now, not a cached one: a credit must never be spent for an account that just changed.
+  await userCodex.status({ force: true })
   if (userCodex.account()?.subject !== `chatgpt:${wanted}`) throw new Error('Codex CLI is signed in to another account.')
   return userCodex.consumeResetCredit(creditId, signal)
 }

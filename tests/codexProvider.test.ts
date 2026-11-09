@@ -1161,6 +1161,23 @@ describe('plan usage limits for the usage page', () => {
     expect(methods.lastIndexOf('account/rateLimits/read')).toBeGreaterThan(methods.lastIndexOf('account/rateLimitResetCredit/consume'))
   })
 
+  it('uses one reset at a time: a second while one is out is refused, and nothing is sent for it', async () => {
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/rateLimitResetCredit/consume') return undefined
+      if (message.method === 'account/rateLimits/read') return { result: { rateLimits: limits(0) } }
+      return chatgpt
+    })
+    const service = create(server)
+    await service.status({ force: true })
+    const first = service.consumeResetCredit('rc_1')
+    await vi.waitFor(() => expect(server.methods()).toContain('account/rateLimitResetCredit/consume'))
+    await expect(service.consumeResetCredit('rc_2')).rejects.toThrow('A reset is already being used.')
+    const sent = server.messages.filter((message) => message.method === 'account/rateLimitResetCredit/consume')
+    expect(sent).toHaveLength(1)
+    server.processes[0]!.stdout.write(JSON.stringify({ id: sent[0]!.id, result: { outcome: 'reset' } }) + '\n')
+    expect(await first).toEqual({ outcome: 'reset' })
+  })
+
   it('with nothing to fall back on, a failed read is thrown', async () => {
     const server = scriptedServer((message) => (message.method === 'account/rateLimits/read' ? { error: { code: -32601, message: 'method not found' } } : chatgpt))
     await expect(create(server).rateLimits()).rejects.toThrow(/method not found/)

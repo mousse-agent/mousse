@@ -140,6 +140,8 @@ describe("using a limit reset through the user's own Codex CLI", () => {
   it('only for the same ChatGPT account: another account\'s credit is never used', async () => {
     const same = cli('chatgpt:me@example.com')
     expect(await useUserCodexReset(same, 'Me@Example.com', 'rc_1')).toEqual({ outcome: 'reset' })
+    // The sign-in is read afresh, not taken from a cached check.
+    expect(same.status).toHaveBeenCalledWith({ force: true })
     expect(same.consumeResetCredit).toHaveBeenCalledWith('rc_1', undefined)
     const other = cli('chatgpt:other@example.com')
     await expect(useUserCodexReset(other, 'me@example.com', 'rc_1')).rejects.toThrow('another account')

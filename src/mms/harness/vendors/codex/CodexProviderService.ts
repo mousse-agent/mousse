@@ -1480,6 +1480,9 @@ export class CodexProviderService {
    * Each call is its own attempt (a fresh idempotency key); it is never retried here.
    */
   async consumeResetCredit(creditId: string | undefined, signal?: AbortSignal): Promise<{ outcome: ConsumeResetCreditResponse['outcome'] }> {
+    // One at a time for this Codex sign-in, whichever window or entry asks: each call spends a credit.
+    if (this.resetInFlight) throw new Error('A reset is already being used.')
+    this.resetInFlight = true
     this.listing += 1
     try {
       const conn = await this.connection()
@@ -1487,10 +1490,14 @@ export class CodexProviderService {
       await this.rateLimits(signal).catch(() => undefined)
       return { outcome }
     } finally {
+      this.resetInFlight = false
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
     }
   }
+
+  /** A limit reset is being used (`consumeResetCredit`); a second one waits for it to finish. */
+  private resetInFlight = false
 
   /**
    * The plan's usage limits (`account/rateLimits/read`), read now from Codex itself: the same
