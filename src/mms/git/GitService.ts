@@ -14,7 +14,7 @@ import { commitIndexAsync, discardProvenAsync, IndexLockedError, stagedEntryDige
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
-import { explicitActionGitEnv, privateIndexEnv } from './gitEnv'
+import { explicitActionGitEnv, nonInteractiveGitEnv, privateIndexEnv } from './gitEnv'
 import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarker, gitFailure, headEntryOf, indexState, markerMatches, readOverlay, readSelection, recordMarker, sameEntry, selectionErrors, storeBlob, writeOverlay, type Choices, type Entry, type FileView, type OverlayEntry, type SelectionGit, type SelectionPlace, type SelectionView } from './gitSelection'
 import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, notPutBack, pathDigest, recordRestored, recordRevert, revertsOf, revertSummary, REVERTED_LIST_MAX, sameFolder, UNKNOWN_DIGEST, writeProven, writeProvenUndoable, type FoundRevert, type PathDigest, type ProvenWrite, type RevertedPath, type RevertRecord, type Replacement } from './gitRevert'
 import { PRESERVED_REFS } from '../../shared/resourceLifecycle'
@@ -52,6 +52,7 @@ import type {
   GitDiffStats,
   GitFetchResult,
   GitFileChange,
+  GitUpstreamCheck,
   GitInProgress,
   GitOperationKind,
   GitOperationOptions,
@@ -131,6 +132,26 @@ const COMMIT_SILENCE_MS = 10 * 60_000
  * starts no background gc.
  */
 const FETCH = ['fetch', '--no-auto-gc', '--progress', '--no-prune', '--no-prune-tags', '--recurse-submodules=no'] as const
+
+/** Where an upstream check puts the remote branch while it counts: Mousse's own namespace, never a tracking ref. */
+const UPSTREAM_CHECK_REFS = 'refs/mousse/upstream-check/'
+/** An upstream check that has not finished by now gives up: the remote is too slow to say anything useful. */
+const UPSTREAM_CHECK_TIMEOUT_MS = 30_000
+/**
+ * A check's ref older than this belongs to no check still running (each gives up after 30 s): the service stopped
+ * part way, or a lock refused the delete. The next check of the repository removes it.
+ */
+const UPSTREAM_CHECK_STALE_MS = 10 * 60_000
+/**
+ * The quiet fetch of an upstream check: nothing prompts, nothing is pruned or collected, no commit graph is
+ * written and FETCH_HEAD is left alone, so the only thing it writes is the one private ref it names.
+ */
+const UPSTREAM_CHECK_FETCH = [
+  '-c', 'credential.interactive=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'fetch.writeCommitGraph=false',
+  'fetch', '--quiet', '--no-tags', '--no-auto-gc', '--no-prune', '--no-prune-tags', '--recurse-submodules=no', '--no-write-fetch-head',
+  // Without it, fetching from a named remote also moves that remote's tracking ref (Git's opportunistic update).
+  '--refmap='
+] as const
 
 /**
  * A push sends the one ref it names, and no tags through `push.followTags`. `push.recurseSubmodules` is the
@@ -1130,6 +1151,53 @@ export class GitService {
       }
       return { behindBefore, behindAfter: await this.behindCount(git) }
     }, live.signal))
+  }
+
+  /**
+   * How far the branch and its upstream are apart on the remote now, for the side card to say Pull before anything
+   * else. The remote branch is fetched into a private ref of Mousse's, counted against HEAD and dropped again: the
+   * tracking ref, FETCH_HEAD and everything a person sees stay as they were. No repository lease is taken, so a slow
+   * remote never holds up a commit or a checkpoint, and no prompt can open. A shallow clone is left alone, since a
+   * fetch there may rewrite its shallow boundary.
+   */
+  async checkUpstream(cwd: string): Promise<GitUpstreamCheck> {
+    if (!await this.isRepo(cwd)) return { state: 'none' }
+    const branch = await this.currentBranch(cwd)
+    const target = branch ? await this.branchUpstream(cwd, branch) : null
+    const head = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    if (!branch || !target || !head) return { state: 'none' }
+    if (await this.read(cwd, ['rev-parse', '--is-shallow-repository']) === 'true') return { state: 'none' }
+    await this.sweepUpstreamCheckRefs(cwd)
+    // Named by when it started, so a later check can tell a leftover from a ref another check is using now.
+    const ref = `${UPSTREAM_CHECK_REFS}${Date.now()}-${randomUUID()}`
+    try {
+      const run = await this.runGit(cwd, [...UPSTREAM_CHECK_FETCH, '--', target.remote, `+refs/heads/${target.branch}:${ref}`], {
+        env: nonInteractiveGitEnv(),
+        signal: AbortSignal.timeout(UPSTREAM_CHECK_TIMEOUT_MS)
+      })
+      if (!run.ok) {
+        const code = remoteFailureCode(run.output)
+        const reason = /couldn't find remote ref/i.test(run.output) ? 'gone' : code === 'git_auth_failed' || code === 'git_host_key_unverified' ? 'signed-out' : 'offline'
+        return { state: 'unreachable', branch, head, reason, checkedAt: Date.now() }
+      }
+      const counts = await this.read(cwd, ['rev-list', '--left-right', '--count', `${ref}...${head}`])
+      const [behind, ahead] = (counts ?? '').split(/\s+/).map((value) => Number(value) || 0)
+      return { state: 'checked', branch, head, ahead: ahead ?? 0, behind: behind ?? 0, checkedAt: Date.now() }
+    } finally {
+      // A delete a lock refuses leaves the ref for a later check's sweep.
+      await this.runGit(cwd, ['update-ref', '-d', ref]).catch(() => undefined)
+    }
+  }
+
+  /** Removes refs of upstream checks that never cleaned up after themselves, once no check can still be using them. */
+  private async sweepUpstreamCheckRefs(cwd: string, now = Date.now()): Promise<void> {
+    const listed = await this.read(cwd, ['for-each-ref', '--format=%(refname)', UPSTREAM_CHECK_REFS])
+    for (const ref of listed ? listed.split(/\r?\n/) : []) {
+      const started = Number(/^refs\/mousse\/upstream-check\/(\d+)-/.exec(ref)?.[1])
+      if (Number.isFinite(started) && now - started > UPSTREAM_CHECK_STALE_MS) {
+        await this.runGit(cwd, ['update-ref', '-d', ref]).catch(() => undefined)
+      }
+    }
   }
 
   private async behindCount(git: SimpleGit): Promise<number> {

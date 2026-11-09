@@ -14,8 +14,10 @@ import type {
   GitInProgress,
   GitPullRequestInfo,
   GitPullRequestLookup,
+  GitPullStrategy,
   GitScope,
-  GitStatusSnapshot
+  GitStatusSnapshot,
+  GitUpstreamCheck
 } from '../../../shared/types'
 import { ipcErrorLine } from '../../lib/errorText'
 import type { CommitPhase } from '../../stores/gitStatusStore'
@@ -905,4 +907,123 @@ export function openPullRequestFailedMessage(error: unknown): string {
 export function existingPullRequestNotice(pullRequest: { number: number; state: 'open' | 'closed' | 'merged' }): string {
   const state = pullRequest.state === 'open' ? 'already open' : pullRequest.state
   return `Pushed. #${pullRequest.number} is ${state} for this branch.`
+}
+
+/**
+ * The branch against its upstream as the side card counts it: the last quiet look at the remote when it was made
+ * on this branch at this HEAD, else what the tracking ref says. A look made before a commit, pull or switch says
+ * nothing about now, so it is set aside until the next one.
+ */
+export interface UpstreamFigures {
+  ahead: number
+  behind: number
+  /** `checked`: the counts are the remote's as of `checkedAt`; `unreachable`: the remote did not answer; null: no look applies. */
+  look: 'checked' | 'unreachable' | null
+  unreachable: 'signed-out' | 'offline' | 'gone' | null
+  checkedAt: number | null
+}
+
+export function upstreamFigures(status: GitStatusSnapshot | null, head: string | null, check: GitUpstreamCheck | null): UpstreamFigures {
+  const ahead = status?.ahead ?? 0
+  const behind = status?.behind ?? 0
+  if (!check || check.state === 'none' || status?.tracking !== 'tracked' || check.branch !== status.branch || head === null || check.head !== head) {
+    return { ahead, behind, look: null, unreachable: null, checkedAt: null }
+  }
+  if (check.state === 'unreachable') return { ahead, behind, look: 'unreachable', unreachable: check.reason, checkedAt: check.checkedAt }
+  return { ahead: check.ahead, behind: check.behind, look: 'checked', unreachable: null, checkedAt: check.checkedAt }
+}
+
+/** The stopped merge or rebase Abort gives up; other stopped operations have no Abort here. */
+export type AbortableKind = 'merge' | 'rebase'
+
+/** The one thing the side card offers to do next, most urgent first. Commit is not one: it lives on the changes row. */
+export type NextStep =
+  | { kind: 'resolve'; label: string; title: string; abort: AbortableKind | null }
+  | { kind: 'finish'; label: string; title: string; abort: AbortableKind | null }
+  | { kind: 'pull'; label: string; title: string; strategies: GitPullStrategy[] }
+  | { kind: 'push'; label: string; title: string }
+  | { kind: 'pull-request'; label: string; title: string }
+
+const abortable = (what: GitInProgress | null | undefined): AbortableKind | null => (what === 'merge' || what === 'rebase' ? what : null)
+
+/**
+ * The next step for the side card, in the order a person must act: conflicts, then a stopped merge or rebase, then
+ * commits on the remote to pull, then commits to push or a branch to publish, then a pull request to open. A
+ * thread's own worktree never pulls (only the thread moves its branch). Null when there is nothing to do.
+ */
+export function nextStep(input: {
+  status: GitStatusSnapshot | null
+  figures: UpstreamFigures
+  scope: Pick<GitScope, 'workspaceThreadId'>
+  commitCount: number
+  pullRequest: GitPullRequestLookup | null
+}): NextStep | null {
+  const { status, figures, scope } = input
+  if (!status?.isRepo) return null
+  const counts = gitChangeCounts(status)
+  const inProgress = status.inProgress ?? null
+  if (counts.conflictedCount > 0) {
+    return { kind: 'resolve', label: `Resolve ${plural(counts.conflictedCount, 'conflict')}`, title: 'Open Changes to resolve them', abort: abortable(inProgress) }
+  }
+  if (inProgress) {
+    return { kind: 'finish', label: `Finish the ${IN_PROGRESS_NAMES[inProgress]}`, title: 'Open Changes to finish it', abort: abortable(inProgress) }
+  }
+  const tracked = status.tracking === 'tracked' && Boolean(status.branch)
+  if (tracked && figures.behind > 0 && scope.workspaceThreadId === null) {
+    const diverged = figures.ahead > 0
+    const from = status.upstream ?? 'the upstream branch'
+    return {
+      kind: 'pull',
+      label: `Pull ${plural(figures.behind, 'commit')}`,
+      title: diverged ? `${from} has ${plural(figures.behind, 'new commit')}; you have ${plural(figures.ahead, 'commit')} it does not` : `From ${from}, fast-forward`,
+      strategies: diverged ? ['rebase', 'merge'] : ['ff-only']
+    }
+  }
+  // The look's counts stand in for the tracking ref's, so Push and Create PR agree with Pull.
+  const current = { ...status, ahead: figures.ahead, behind: figures.behind }
+  const push = pushButtonModel(current, input.commitCount, scope)
+  if (push && push.disabledReason === undefined) {
+    return { kind: 'push', label: push.label === 'Publish' ? 'Publish branch' : `Push ${plural(push.count ?? 0, 'commit')}`, title: push.title }
+  }
+  const row = pullRequestRow(input.pullRequest, current)
+  if (row?.kind === 'create' && row.enabled) return { kind: 'pull-request', label: 'Open pull request', title: 'Create a pull request for this branch' }
+  return null
+}
+
+/** What each pull strategy is called in the next step's menu. */
+export const PULL_STRATEGY_LABELS: Record<GitPullStrategy, string> = { 'ff-only': 'Pull', rebase: 'Rebase mine on top', merge: 'Merge' }
+
+const IN_PROGRESS_TAGS: Record<GitInProgress, string> = { merge: 'merging', rebase: 'rebasing', 'cherry-pick': 'cherry-picking', revert: 'reverting' }
+
+const UNREACHABLE_TITLES = {
+  'signed-out': (remote: string) => `${remote} refused the check; sign in to see its new commits`,
+  offline: (remote: string) => `${remote} could not be reached to check for new commits`,
+  gone: (remote: string) => `${remote} no longer has this branch`
+} as const
+
+/** A quiet word after the branch name: a stopped operation, a remote that could not be checked, or that it is up to date. */
+export interface BranchTag {
+  text: string
+  tone: 'quiet' | 'warn'
+  title: string
+}
+
+export function branchTag(status: GitStatusSnapshot | null, figures: UpstreamFigures, step: NextStep | null, now: number): BranchTag | null {
+  if (!status?.isRepo) return null
+  if (status.inProgress) return { text: IN_PROGRESS_TAGS[status.inProgress], tone: 'warn', title: `A ${IN_PROGRESS_NAMES[status.inProgress]} is stopped part way` }
+  const remote = status.upstream?.split('/')[0] || 'The remote'
+  if (figures.look === 'unreachable' && figures.unreachable) {
+    return { text: figures.unreachable === 'gone' ? 'gone from remote' : `can’t check ${remote}`, tone: 'quiet', title: UNREACHABLE_TITLES[figures.unreachable](remote) }
+  }
+  if (step === null && figures.look === 'checked' && figures.ahead === 0 && figures.behind === 0) {
+    const when = figures.checkedAt === null ? '' : relativeTime(new Date(figures.checkedAt).toISOString(), now)
+    const ago = when === '' ? '' : when === 'now' ? ', checked just now' : `, checked ${when} ago`
+    return { text: 'up to date', tone: 'quiet', title: `Same as ${status.upstream ?? 'the upstream branch'}${ago}` }
+  }
+  return null
+}
+
+/** What a failed pull from the side card says: overlapping edits get a fixed line, everything else Git's own. */
+export function pullFailureMessage(error: unknown): string {
+  return gitErrorCode(error) === 'git_pull_dirty' ? 'Edits overlap. Commit or stash first.' : gitErrorMessage(error)
 }

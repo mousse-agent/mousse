@@ -456,10 +456,24 @@ function updateRefInput(stdin: string | undefined): string[] | null {
 
 const isObjectName = (value: string): boolean => /^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(value)
 
+/** Every value an option is given before `--`, whether as `--flag=value` or `--flag value`. */
+function optionValues(rest: readonly string[], flag: string): string[] {
+  const values: string[] = []
+  for (let index = 0; index < rest.length && rest[index] !== '--'; index += 1) {
+    const arg = rest[index]
+    if (arg === flag) values.push(rest[++index] ?? '')
+    else if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1))
+  }
+  return values
+}
+
 function fetchEffect(rest: readonly string[]): Effect {
   const withValue = new Set(['--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--refmap', '-j', '--jobs', '--negotiation-tip', '-o', '--server-option', '--filter', '--upload-pack', '--recurse-submodules-default', '--submodule-prefix'])
   const [, ...refspecs] = positionals(rest, withValue)
-  const widening = has(rest, '--prune', '-p', '--prune-tags', '-P', '--all', '--multiple', '--tags', '-t', '--refmap', '--upload-pack', '--update-head-ok', '-u')
+  // An empty `--refmap=` narrows a fetch: the remote's configured refspecs then update no tracking ref next to the
+  // refspecs given. Any other refmap names refs the arguments do not list.
+  const widening = has(rest, '--prune', '-p', '--prune-tags', '-P', '--all', '--multiple', '--tags', '-t', '--upload-pack', '--update-head-ok', '-u') ||
+    optionValues(rest, '--refmap').some((value) => value !== '')
   const refs: string[] = []
   let unlisted = widening || !has(rest, '--no-tags', '-n') || refspecs.length === 0
   for (const refspec of refspecs) {

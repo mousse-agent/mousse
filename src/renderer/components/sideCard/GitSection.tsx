@@ -11,13 +11,18 @@ import {
 import { openSurface } from '../../lib/surfaces'
 import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
-import { initGitRepository, type GitStatusView } from '../../stores/gitStatusStore'
+import { abortGitInProgress, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
+import { cancelGitOperation, useGitOperation } from '../../stores/gitOperationStore'
+import { useUpstreamCheck } from '../../stores/upstreamCheckStore'
+import { isActive } from '../git/gitOperationLogic'
+import { pullResultNotice } from '../git/gitSyncLogic'
 import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
 import { gitScopeFor } from '../../lib/activeProject'
-import type { GitPullRequestLookup } from '../../../shared/types'
+import type { GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { BranchPicker } from './BranchPicker'
+import { NextStepButton, type NextStepChoice } from './NextStepButton'
 import {
   PullRequestConfirm,
   pullRequestActions,
@@ -27,6 +32,7 @@ import {
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import {
   branchActionState,
+  branchTag,
   canInitRepository,
   changedFileCount,
   diffStatLabel,
@@ -35,12 +41,17 @@ import {
   gitActionLock,
   gitCollapsedLabel,
   gitErrorMessage,
+  isGitCancelled,
+  nextStep,
+  pullFailureMessage,
   pullRequestList,
   pullRequestReadThreadId,
   pullRequestRow,
   pullRequestRows,
   THREAD_BRANCH_SWITCH_REASON,
   untrackedFileCount,
+  upstreamFigures,
+  type AbortableKind,
   type GitAction,
   type PullRequestFoundRow
 } from './gitSectionLogic'
@@ -214,6 +225,10 @@ interface GitSectionViewProps {
   canInitialize?: boolean
   /** "Worktree removed by cleanup on …" while a cleanup rule's retirement of the thread's worktree stands. */
   retiredNote?: string | null
+  /** The last quiet look at the remote, which says Pull before anything else when it has new commits. */
+  upstreamCheck?: GitUpstreamCheck | null
+  /** Clock for "checked 3m ago"; tests pin it. */
+  now?: number
 }
 
 /**
@@ -233,7 +248,9 @@ export function GitSectionView({
   pullRequestLink = null,
   collapsedLabel,
   canInitialize = false,
-  retiredNote = null
+  retiredNote = null,
+  upstreamCheck = null,
+  now
 }: GitSectionViewProps) {
   const retired = retiredNote ? <p className="side-card-git-quiet side-card-git-retired">{retiredNote}</p> : null
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
@@ -241,6 +258,9 @@ export function GitSectionView({
   const [actionError, setActionError] = useTransientError()
   // Said once and left for long enough to read, unlike an error it is not a failure.
   const [notice, setNotice] = useTransientError(NOTICE_MS)
+  // Which of Pull and Abort holds the section's `sync` action, for the busy label.
+  const [syncing, setSyncing] = useState<'pull' | 'abort' | null>(null)
+  const operation = useGitOperation(path)
 
   if (collapsedLabel !== null || !path) {
     const initialize = async () => {
@@ -307,6 +327,61 @@ export function GitSectionView({
     onNotice: setNotice
   })
   const files = fileCount === 1 ? '1 file' : `${fileCount} files`
+  const figures = upstreamFigures(git.status, git.commits[0]?.hash ?? null, upstreamCheck)
+  const step = nextStep({ status: git.status, figures, scope, commitCount: git.commits.length, pullRequest })
+  const tag = branchTag(git.status, figures, step, now ?? Date.now())
+  const stepRunning = running === 'push' || running === 'sync'
+  const canCancel = stepRunning && operation !== null && isActive(operation) && operation.cancellable && !operation.cancelling
+  const busy = !stepRunning ? null : {
+    label: running === 'push' ? 'Pushing…' : syncing === 'abort' ? 'Aborting…' : 'Pulling…',
+    onCancel: canCancel ? () => void cancelGitOperation(path) : null
+  }
+
+  const pull = async (strategy: GitPullStrategy) => {
+    if (!begin('sync')) return
+    setSyncing('pull')
+    setActionError(null)
+    try {
+      const { result } = await pullGit(path, scope, { strategy })
+      setNotice(pullResultNotice(result))
+    } catch (error) {
+      if (!isGitCancelled(error)) setActionError(pullFailureMessage(error))
+    } finally {
+      setSyncing(null)
+      end()
+    }
+  }
+  const push = async () => {
+    if (!begin('push')) return
+    setActionError(null)
+    try {
+      await pushGitBranch(path, scope)
+    } catch (error) {
+      if (!isGitCancelled(error)) setActionError(gitErrorMessage(error))
+    } finally {
+      end()
+    }
+  }
+  const abort = async (what: AbortableKind) => {
+    if (!begin('sync')) return
+    setSyncing('abort')
+    setActionError(null)
+    try {
+      setNotice(await abortGitInProgress(path, what, scope) ?? `${what === 'merge' ? 'Merge' : 'Rebase'} aborted`)
+    } catch (error) {
+      setActionError(gitErrorMessage(error))
+    } finally {
+      setSyncing(null)
+      end()
+    }
+  }
+  const choose = (choice: NextStepChoice) => {
+    if (choice.kind === 'open-changes') openSurface('git')
+    else if (choice.kind === 'open-pull-request') openSurface('pullRequest')
+    else if (choice.kind === 'pull') void pull(choice.strategy)
+    else if (choice.kind === 'push') void push()
+    else void abort(choice.what)
+  }
 
   return (
     <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
@@ -325,17 +400,35 @@ export function GitSectionView({
           onEnd={end}
           onActionError={setActionError}
           onNotice={setNotice}
+          tag={tag}
         />
+        {step && (
+          <NextStepButton
+            step={step}
+            busy={busy}
+            blockedReason={running !== null && !stepRunning ? GIT_BUSY_REASON : null}
+            onChoose={choose}
+          />
+        )}
         {fileCount > 0 && (
-          <button
-            type="button"
-            className="side-card-git-changes"
-            title={`${stat.text}. Open Changes`}
-            aria-label={`${files}, ${stat.text}. Open Changes`}
-            onClick={() => openSurface('git')}
-          >
-            <span className="side-card-git-summary">{files}</span>
-          </button>
+          <div className="side-card-git-changes-row">
+            <button
+              type="button"
+              className="side-card-git-changes"
+              title={`${stat.text}. Open Changes`}
+              aria-label={`${files}, ${stat.text}. Open Changes`}
+              onClick={() => openSurface('git')}
+            >
+              <span className="side-card-git-summary">{files}</span>
+              <span className="side-card-git-stat" aria-hidden="true">
+                <span className="side-card-git-added" data-zero={stat.addedZero || undefined}>{stat.added}</span>
+                <span className="side-card-git-removed" data-zero={stat.removedZero || undefined}>{stat.removed}</span>
+              </span>
+            </button>
+            <button type="button" className="side-card-git-commit-open" title="Write the commit in Changes" onClick={() => openSurface('git')}>
+              Commit
+            </button>
+          </div>
         )}
       </div>
       {/* An open Merge or Close question ends with the thread, folder or branch it was asked in. */}
@@ -373,6 +466,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
   const retiredNote = useRetiredWorktreeNote(ownThreadId, !loading)
+  const upstreamCheck = useUpstreamCheck(path, gitScopeFor({ projectId, workspaceThreadId: location.workspaceThreadId }), git.status?.tracking === 'tracked')
   return (
     <GitSectionView
       threadId={threadId}
@@ -388,6 +482,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
       retiredNote={retiredNote}
+      upstreamCheck={upstreamCheck}
     />
   )
 }

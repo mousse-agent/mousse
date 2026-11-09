@@ -22,6 +22,7 @@ import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
 import { gitOperationOwner, trackGitOperation } from './gitOperationStore'
+import { forgetUpstreamCheck } from './upstreamCheckStore'
 import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitPullRequestStore, type PullRequestFormHost } from './pullRequestStore'
 
 /**
@@ -224,6 +225,8 @@ export async function fetchGit(key: string, scope: GitScope): Promise<GitFetchRe
     const result = await trackGitOperation(key, 'fetch', (operationId) => window.mousse.git.fetch(scope, { operationId }), gitOperationOwner(scope))
     return { behindBefore: result.behindBefore, behindAfter: result.behindAfter }
   } finally {
+    // A look at the remote made before or during this says nothing about the branch now.
+    forgetUpstreamCheck(key)
     await refreshAfterMutation(key, scope)
   }
 }
@@ -234,6 +237,7 @@ export async function pullGit(key: string, scope: GitScope, options: GitPullOpti
     const result = await trackGitOperation(key, 'pull', (operationId) => window.mousse.git.pull(scope, { ...options, operationId }), gitOperationOwner(scope))
     return { result: result.result }
   } finally {
+    forgetUpstreamCheck(key)
     // A conflicted pull rejects nothing, but a failed one may still have changed the folder.
     await refreshAfterMutation(key, scope)
   }
@@ -418,6 +422,7 @@ export async function suggestGitCommitMessage(key: string, scope: GitScope, sele
 export async function pushGitBranch(key: string, scope: GitScope): Promise<void> {
   const expectedBranch = useGitStatusStore.getState().entries[key]?.status?.branch ?? undefined
   await trackGitOperation(key, 'push', (operationId) => window.mousse.git.push(scope, { expectedBranch, operationId }), gitOperationOwner(scope))
+  forgetUpstreamCheck(key)
   await refreshAfterMutation(key, scope)
   await refreshBranchPullRequest(key, refreshProjectId(scope))
 }

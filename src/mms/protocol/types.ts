@@ -427,6 +427,7 @@ export const PROTOCOL_METHODS = [
   'git.branches',
   'git.diffStats',
   'git.lastCommitMessage',
+  'git.checkUpstream',
   'git.checkout',
   'git.commit',
   'git.suggestCommitMessage',

@@ -48,6 +48,7 @@ import type {
   GitDiffStats,
   GitFetchOptions,
   GitFetchResult,
+  GitUpstreamCheck,
   GitOperationEvent,
   GitMutationResult,
   GitKeptCopy,
@@ -577,7 +578,9 @@ const api = {
     deleteBranch: (scope: GitScope, name: string, options?: GitDeleteBranchOptions): Promise<GitMutationResult> =>
       storageInvoke('git:deleteBranch', scope, name, options),
     lastCommitMessage: (scope: GitScope): Promise<string | null> =>
-      ipcRenderer.invoke('git:lastCommitMessage', scope)
+      ipcRenderer.invoke('git:lastCommitMessage', scope),
+    checkUpstream: (scope: GitScope): Promise<GitUpstreamCheck> =>
+      ipcRenderer.invoke('git:checkUpstream', scope)
   },
   pullRequests: {
     get: (ref: PullRequestRef, branch: string, force?: boolean): Promise<GitPullRequestLookup> =>
