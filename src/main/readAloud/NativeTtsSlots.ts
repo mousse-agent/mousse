@@ -115,6 +115,11 @@ export class NativeTtsSlots {
       this.idleCheck(engine)
       throw new Error('The window reloaded')
     }
+    // Checked again right before the slot is added: opens that waited together all passed the first check.
+    if (this.slotsOf(owner).length >= MAX_SLOTS_PER_OWNER) {
+      this.idleCheck(engine)
+      throw new Error('Too many voice engines are running')
+    }
     if (engine.idleTimer) clearTimeout(engine.idleTimer)
     engine.idleTimer = null
     const slot: Slot = { id: this.nextSlotId++, owner, engine, opening: true, requests: new Set() }

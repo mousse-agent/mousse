@@ -424,6 +424,22 @@ describe('native read aloud slots in main', () => {
     expect(slots.size).toBe(5)
   })
 
+  it('keeps the four-slot limit when many opens wait for a cold engine together', async () => {
+    const answers: Array<(path: string) => void> = []
+    slots = create({ modelPath: () => new Promise<string>((resolve) => answers.push(resolve)) })
+    const opens = Array.from({ length: 6 }, () => slots.open(owner, 'kokoro-82m').then(() => 'opened', (error: Error) => error.message))
+    await flush()
+    // All six passed the first check and wait for the cold engine together.
+    expect(answers).toHaveLength(6)
+    for (const answer of answers) answer('/models/kokoro-82m/onnx/model_quantized.onnx')
+    await flush()
+    for (const engine of FakeEngine.all) engine.send(event.ready())
+    const results = await Promise.all(opens)
+    expect(results.filter((result) => result === 'opened')).toHaveLength(4)
+    expect(results.filter((result) => result.includes('Too many'))).toHaveLength(2)
+    expect(slots.size).toBe(4)
+  })
+
   it.each([
     ['reloads', (by: FakeOwner) => by.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })],
     ['crashes', (by: FakeOwner) => by.emit('render-process-gone')]
