@@ -17,6 +17,13 @@ export function activeRailPage(state: RailState): RailPage | null {
   return null
 }
 
+/**
+ * Whether the expanded threads sidebar, and so its profile footer, is on screen. Automations and Usage replace the
+ * workspace and hide it whatever the sidebar setting; a hover peek has no footer. The rail shows the profile otherwise.
+ */
+export const sidebarProfileShown = (state: Pick<ReturnType<typeof useAppStore.getState>, 'threadsSidebarOpen' | 'scheduledOpen' | 'usageOpen'>): boolean =>
+  state.threadsSidebarOpen && !state.scheduledOpen && !state.usageOpen
+
 /** Closes every rail page at once, without asking the guards (the caller already did). */
 export function closeRailPages(): void {
   const store = useAppStore.getState()
