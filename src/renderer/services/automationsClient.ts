@@ -1,4 +1,4 @@
-import type { AttentionAnswer, AutomationIndex, AutomationMoveResult } from '../../shared/automations'
+import type { AttentionAnswer, AutomationIndex } from '../../shared/automations'
 import type { AutomationInbox, InboxCounts, TuningNote } from '../../shared/automationInbox'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { ScheduledJob, QuestionAnswerOutcome } from '../../shared/types'
@@ -10,8 +10,6 @@ export interface AutomationsClient {
   answerAsk(askId: string, answer: 'allow' | 'not_now'): Promise<void>
   /** Keep: an agent-added automation loses only its end (`automations.keep`). */
   keep(jobId: string): Promise<ScheduledJob>
-  /** Move to computer: this computer's automations to another of the person's computers (`automations.move`). */
-  move(jobIds: string[], node: string): Promise<AutomationMoveResult>
   /** Resend: runs a request automation again with a delivery's stored payload (`automations.request.resend`). */
   resend(jobId: string, occurrenceId: string): Promise<void>
   /** The saved keys' names in the profile's secret store (`automations.keys.list`); never their values. */
@@ -56,7 +54,6 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     list: () => transport.request<AutomationIndex>('automations.list', {}),
     answerAsk: async (askId, answer) => { await transport.request('automations.asks.answer', { askId, answer }) },
     keep: async (jobId) => (await transport.request<{ job: ScheduledJob }>('automations.keep', { jobId })).job,
-    move: (jobIds, node) => transport.request<AutomationMoveResult>('automations.move', { jobIds, node }),
     resend: async (jobId, occurrenceId) => { await transport.request('automations.request.resend', { jobId, occurrenceId }) },
     listKeys: async () => (await transport.request<{ keys: Array<{ name: string }> }>('automations.keys.list', {})).keys.map((key) => key.name),
     setKey: async (name, value) => { await transport.request('automations.keys.set', { name, value }) },

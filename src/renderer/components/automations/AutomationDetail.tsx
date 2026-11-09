@@ -30,7 +30,7 @@ import {
 import { describeScheduleLong, errorText, nameFromPrompt, scheduleCode, WEEKDAY_OPTIONS } from '../scheduled/scheduledLabels'
 import { ownedWhenText, skippedDates, whenText, zoneName } from './automationTime'
 import { missedText, runText } from './automationList'
-import { computerOptions, projectsOn, type ComputerChoice } from './computerChoice'
+import { projectsOn, type ComputerChoice } from './computerChoice'
 import { isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { parseWhoKey, whoKey, whoName as nameOfWho, whoOptions, type AutomationLibrary, type Who } from './whoDo'
 import { BotFaceStill } from '../bots/face/BotFace'
@@ -152,7 +152,6 @@ export function AutomationDetail({
   profileId,
   viewerZone,
   computers = [],
-  onMove,
   save,
   onBack,
   onRunNow,
@@ -180,8 +179,6 @@ export function AutomationDetail({
   viewerZone: string
   /** This computer first, then the person's other computers; with two or more the sentence names the computer. */
   computers?: ComputerChoice[]
-  /** Move to computer: another computer stores and runs it from now on. Absent, the computer cannot be changed here. */
-  onMove?: (node: string) => void
   save: (draft: JobDraft) => Promise<void>
   onBack: () => void
   onRunNow: () => void
@@ -438,17 +435,7 @@ export function AutomationDetail({
         {manyComputers && !bot ? (
           <span className="automation-sentence-glue">
             {' on '}
-            <Select
-              ariaLabel="Computer"
-              className="automation-chip-select"
-              size="small"
-              value={remoteNode ?? ''}
-              options={computerOptions(computers.filter((computer) => computer.node === (remoteNode ?? '') || !remoteNode))}
-              disabled={!onMove}
-              title={onMove ? 'Move to computer: it is stored and run there from now on' : `It is stored and run on ${owner.name}`}
-              renderValue={() => <span data-testid="automation-computer">{owner.name}</span>}
-              onChange={(node) => { if (node !== (remoteNode ?? '')) onMove?.(node) }}
-            />
+            <span className="automation-chip readonly" data-testid="automation-computer" title={`It is stored and run on ${owner.name}`}>{owner.name}</span>
             .
           </span>
         ) : null}

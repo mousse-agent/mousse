@@ -48,7 +48,6 @@ describe('saved keys', () => {
       index: () => { throw new Error('unused') },
       answerAsk: () => { throw new Error('unused') },
       keep: () => null,
-      move: async () => ({ moved: [], failed: [] }),
       resend: () => ({ occurrenceId: 'x' }),
       keys: { list: () => listProfileKeyNames(home), set }
     }))

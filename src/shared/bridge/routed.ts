@@ -901,9 +901,8 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'Settings and services of the computer, not thread features.'
   },
   {
-    methods: ['automations.asks.answer', 'automations.keep', 'automations.move'],
-    reason:
-      'An agent’s ask and Keep are answered on the computer that holds them; Move is run by the computer the automations leave.'
+    methods: ['automations.asks.answer', 'automations.keep'],
+    reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
   },
   {
     methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],

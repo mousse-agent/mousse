@@ -19,7 +19,6 @@ import { KeyDialog } from '../KeyDialog'
 import type { RequestApi } from '../RequestTrigger'
 import { viewerTimeZone } from '../automationTime'
 import { computerChoicesOf } from '../computerChoice'
-import { moveBlocked, moveSummary } from '../automationList'
 import { useAutomationLibrary } from '../WhoDoPickers'
 import { closePane, refreshInbox, useInboxStore } from './inboxStore'
 
@@ -110,13 +109,6 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
     }
     return act(() => window.mousse.scheduled.resume(job.id))
   }
-  const move = async (node: string) => {
-    const to = computers.find((computer) => computer.node === node)?.name ?? 'the other computer'
-    const result = await client.move([job.id], node)
-    setError(moveSummary(result, to))
-    if (result.moved.length) closePane()
-    void refreshInbox()
-  }
 
   return (
     <div className="inbox-edit" data-testid="inbox-edit">
@@ -132,7 +124,6 @@ export function EditDetailsPane({ item, onDelete }: { item: AutomationItem; onDe
           profileId={profileId}
           viewerZone={viewerZone}
           computers={computers}
-          {...(item.computer.local && !moveBlocked([item]) ? { onMove: (node: string) => void move(node).catch((cause) => setError(errorText(cause))) } : {})}
           save={async (draft) => {
             const change = patchOf(initial, draft, catalog)
             if (!isUnchanged(change)) await window.mousse.scheduled.update(job.id, change)

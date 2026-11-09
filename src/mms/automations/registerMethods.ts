@@ -1,4 +1,4 @@
-import { AUTOMATIONS_CAPABILITY, type AutomationIndex, type AutomationMoveResult } from '../../shared/automations'
+import { AUTOMATIONS_CAPABILITY, type AutomationIndex } from '../../shared/automations'
 import { isId } from '../../shared/net'
 import { isKeyName, MAX_KEY_VALUE_BYTES } from '../../shared/automationKeys'
 import type { ScheduledJob } from '../../shared/types'
@@ -18,8 +18,6 @@ export interface AutomationsDomain {
   answerAsk(askId: string, answer: 'allow' | 'not_now'): AgentJobAsk
   /** Keep on an agent-added automation: removes only its end. */
   keep(jobId: string): ScheduledJob | null
-  /** Move to computer: this computer's automations to another online computer of the person. */
-  move(jobIds: string[], node: string, signal?: AbortSignal): Promise<AutomationMoveResult>
   /** Resend: runs a request automation again with the payload one of its deliveries stored. */
   resend(jobId: string, occurrenceId: string): { occurrenceId: string }
   /** Saved keys: their names in the profile's secret store (never values), and storing one typed into a masked field. */
@@ -92,23 +90,6 @@ export function registerAutomationMethods(
         if (error instanceof DomainRpcError) throw error
         throw new DomainRpcError('ask_refused', error instanceof Error ? error.message : String(error))
       }
-    }
-  })
-  domains.register({
-    method: 'automations.move',
-    scope: 'profile',
-    capability: AUTOMATIONS_CAPABILITY,
-    validate: (params) => {
-      const p = domainObject(params ?? {}, ['profileId', 'jobIds', 'node'])
-      if (!Array.isArray(p.jobIds) || !p.jobIds.length || p.jobIds.length > 100 || !p.jobIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 256))
-        throw new DomainRpcError('invalid_params', 'jobIds is a list of 1 to 100 automation ids')
-      if (!isId('node', p.node)) throw new DomainRpcError('invalid_params', 'node is not a computer')
-      return p
-    },
-    async handle(context, params, binding) {
-      // A person in a window moves them; the CLI and agents never move an automation to another computer.
-      if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Only a Mousse window can move an automation to another computer.')
-      return (await bound(binding)).move(params.jobIds as string[], params.node as string, context.connection?.lifetime)
     }
   })
   domains.register({

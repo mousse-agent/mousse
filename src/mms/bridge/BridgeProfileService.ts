@@ -437,7 +437,6 @@ export class BridgeProfileService {
       enabled: () => this.router.enabled(),
       self: () => rt.identity.self()?.node,
       cacheFile: join(services.getProfileHomeDir(), 'automations', 'other-computers.json'),
-      matchProject: (node, path, signal) => computersPort.matchProject(node, path, signal),
       clock: this.clock
     })
     services.remoteAutomations = automations

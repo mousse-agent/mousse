@@ -10,7 +10,7 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
  */
 
 export const AUTOMATIONS_METHODS = [
-  'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
+  'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
   'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho',
   'automations.manager.thread',
   'automations.inbox.list', 'automations.inbox.counts', 'automations.inbox.resolve', 'automations.inbox.undo', 'automations.inbox.calibrate', 'automations.tuning.remove'
@@ -20,9 +20,9 @@ export const AUTOMATIONS_CAPABILITY = 'automations.v1'
 
 /**
  * What an automation is, underneath: where its record lives and what opens it. A bot's schedule is a job whose Who is
- * the bot. `moved` is one that moved to another computer: only its run history stays here, read-only (Recent).
+ * the bot.
  */
-export type AutomationKind = 'job' | 'watch' | 'ask' | 'moved'
+export type AutomationKind = 'job' | 'watch' | 'ask'
 
 /** What starts it: a time, a signed request (webhook), something on its thread (a pull request), or a person. */
 export type AutomationTrigger = 'time' | 'request' | 'thread_event' | 'on_demand'
@@ -195,8 +195,6 @@ export type AutomationLink =
   /** An agent's first-creation ask: Allow makes the automation (`automations.asks.answer`). */
   | { kind: 'ask'; askId: string; threadId: string }
   | { kind: 'thread'; threadId: string }
-  /** Moved to another computer (`jobId` qualified there); only its history is here. */
-  | { kind: 'moved'; node: string; jobId: string }
 
 /**
  * How Needs you answers an open ask in place, with the same daemon method its own surface uses: a thread's permission
@@ -331,12 +329,6 @@ export interface AutomationIndex {
   /** Sources that could not be read now; their rows are missing, not empty. */
   unavailable: Array<'bots' | 'watches'>
   generatedAt: string
-}
-
-/** What Move to computer answers: each automation that moved (its new qualified id), and each that did not, with why. */
-export interface AutomationMoveResult {
-  moved: Array<{ id: string; to: string; warning?: string }>
-  failed: Array<{ id: string; name?: string; error: string }>
 }
 
 /** The words for an action on an automation of a computer that cannot be reached now. */

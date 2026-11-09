@@ -1,30 +1,10 @@
-import type { AutomationItem, AutomationMoveResult, AutomationRun } from '../../../shared/automations'
+import type { AutomationRun } from '../../../shared/automations'
 import { agoText, ownedWhenText } from './automationTime'
 
 /**
- * Automations as data, for Edit details and its dialogs: what a run says, the mark of a run missed while offline, why
- * an automation cannot move to another computer, and when a Pause… ends. Pure, so the page and its tests share them.
+ * Automations as data, for Edit details and its dialogs: what a run says, the mark of a run missed while offline, and
+ * when a Pause… ends. Pure, so the page and its tests share them.
  */
-
-/**
- * Why the selected rows cannot move to another computer, or undefined when they can: only this computer's automations
- * move from here, and a bot's computer changes in its About.
- */
-export function moveBlocked(items: readonly AutomationItem[]): string | undefined {
-  const other = items.find((item) => !item.computer.local)
-  if (other) return `Move it from ${other.computer.name}.`
-  if (items.some((item) => item.who.kind === 'bot')) return 'A bot’s computer changes in its About.'
-  return undefined
-}
-
-/** What Move to computer says when it is done: how many moved, and each one that did not, with why. */
-export function moveSummary(result: AutomationMoveResult, to: string): string | null {
-  const parts: string[] = []
-  const warned = result.moved.filter((entry) => entry.warning)
-  if (result.failed.length) parts.push(`${result.moved.length ? `Moved ${result.moved.length} to ${to}. ` : ''}Not moved: ${result.failed.map((entry) => `${entry.name ?? 'an automation'} (${entry.error.replace(/\.$/, '')})`).join('; ')}.`)
-  for (const entry of warned) parts.push(entry.warning!)
-  return parts.length ? parts.join(' ') : null
-}
 
 /** The mark on a run that stands for repeats missed while its computer was off, with its tooltip. */
 export function missedText(run: AutomationRun): { text: string; title: string } | undefined {

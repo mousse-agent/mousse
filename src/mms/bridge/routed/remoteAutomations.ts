@@ -3,7 +3,7 @@ import type { AutomationComputer, AutomationIndex, AutomationItem } from '../../
 import { qualifyRoutedResult } from '../../../shared/bridge/routedIds'
 import type { NodeId } from '../../../shared/net'
 import { qualifyId } from '../../../shared/threadRef'
-import type { CreateScheduledJobInput, ScheduledJob } from '../../../shared/types'
+import type { ScheduledJob } from '../../../shared/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from '../../protocol/remoteAutomationsPort'
 import type { ComputerRef } from './computerErrors'
@@ -34,7 +34,6 @@ export interface RemoteAutomationsOptions {
   self(): NodeId | undefined
   /** Where the last copy of each computer's automations is kept. */
   cacheFile: string
-  matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null>
   clock?: { now(): number }
   readDeadlineMs?: number
 }
@@ -116,21 +115,6 @@ export class RemoteAutomations implements RemoteAutomationsPort {
     }))
     if (dirty) this.writeCache(cache)
     return parts
-  }
-
-  async create(node: string, input: CreateScheduledJobInput, options: { idem?: string; signal?: AbortSignal } = {}): Promise<ScheduledJob> {
-    const result = await this.options.client.call(node as NodeId, 'scheduled.create', { input }, options)
-    const job = isRecord(result) ? result.job : undefined
-    if (!isRecord(job) || typeof job.id !== 'string') throw new Error('The other computer did not confirm the automation.')
-    return job as unknown as ScheduledJob
-  }
-
-  async resume(node: string, jobId: string, options: { idem?: string; signal?: AbortSignal } = {}): Promise<void> {
-    await this.options.client.call(node as NodeId, 'scheduled.resume', { id: jobId }, options)
-  }
-
-  matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null> {
-    return this.options.matchProject(node, projectPath, signal)
   }
 
   private loadCache(): Record<string, CachedPart> {

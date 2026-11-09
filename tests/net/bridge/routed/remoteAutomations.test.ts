@@ -3,7 +3,6 @@
  * the computer that owns it: a window of the other computer adds and edits it there through the routed rows, and the
  * owner keeps to its own limits for that computer. No provider runs: every automation here runs on demand only.
  */
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,8 +16,6 @@ beforeAll(async () => {
 }, 120_000)
 afterAll(cleanupAll)
 
-const git = (cwd: string, ...args: string[]): string =>
-  execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@example.com', ...args], { cwd, encoding: 'utf8' }).trim()
 const folders: string[] = []
 afterAll(() => { for (const path of folders) rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) })
 const folder = (): string => {
@@ -204,67 +201,5 @@ describe('the merged list', () => {
     } finally {
       t.routing(true)
     }
-  }, 60_000)
-})
-
-describe('Move to computer', () => {
-  it('moves what can move, keeps the rest as it was, and keeps the moved one’s history here', async () => {
-    // The same folder is a project on both computers: the same repository there.
-    const repo = folder()
-    git(repo, 'init', '-q')
-    git(repo, 'commit', '-q', '--allow-empty', '-m', `root ${Math.random()}`)
-    const mine = t.caller.projects.openProject(repo)
-    const theirs = t.owner.projects.openProject(repo)
-    const movable = t.caller.scheduled.createJob({ name: 'Movable', prompt: 'audit', schedule: { kind: 'cron', expr: '0 3 * * 1' }, projectId: mine.id })
-    t.caller.scheduled.updateJob(movable.id, { runHistory: [{ runAt: '2026-11-02T03:00:00.000Z', status: 'ok', output: 'Done' }] })
-    t.caller.scheduled.pauseJob(movable.id)
-    const thread = t.caller.threads.createThread('Here only')
-    const bound = t.caller.scheduled.createJob({ name: 'Bound', prompt: 'x', schedule: { kind: 'manual' }, threadId: thread.id })
-    // A model the owner does not have: the owner refuses it, so it stays here, running as before.
-    const tooWide = t.caller.scheduled.createJob({ name: 'Too wide', prompt: 'x', schedule: { kind: 'manual' }, selection: { instanceId: 'nowhere:main', llmProvider: 'nowhere', model: 'none' } })
-
-    const result = await t.dispatch('automations.move', { jobIds: [movable.id, bound.id, tooWide.id], node: t.node })
-    expect(result.moved).toEqual([{ id: movable.id, to: expect.stringMatching(new RegExp(`^${t.node}:`)) }])
-    expect(result.failed).toEqual([
-      { id: bound.id, name: 'Bound', error: 'It runs in a thread of this computer.' },
-      { id: tooWide.id, name: 'Too wide', error: expect.any(String) }
-    ])
-    // Made there, in its project there, paused as it was here.
-    const there = t.owner.scheduled.getJob(result.moved[0].to.split(':')[1])!
-    expect(there).toMatchObject({ name: 'Movable', projectId: theirs.id, state: 'paused', enabled: false })
-    // Removed here; what did not move is as it was (not left paused by the attempt).
-    expect(t.caller.scheduled.getJob(movable.id)).toBeUndefined()
-    expect(t.caller.scheduled.getJob(bound.id)).toBeDefined()
-    expect(t.caller.scheduled.getJob(tooWide.id)).toMatchObject({ enabled: true, state: 'scheduled' })
-    // Its run history stays here, read-only, with no row of its own.
-    const index = await t.dispatch('automations.list', {})
-    const moved = index.items.find((item: { key: string }) => item.key === `moved:${movable.id}`)
-    expect(moved).toMatchObject({ kind: 'moved', whenText: expect.stringMatching(/^moved to /), runs: [{ state: 'done' }] })
-    expect(index.items.some((item: { id: string }) => item.id === result.moved[0].to)).toBe(true)
-  }, 60_000)
-
-  it('turns the copy on there only if it was on here, with its keys and CLI name, and never wider than it ran here', async () => {
-    const on = t.caller.scheduled.createJob({ name: 'On here', prompt: 'x', schedule: { kind: 'manual' }, keys: ['GITHUB_TOKEN'], cliName: 'on-here', permissionMode: 'ask', permissionCeiling: 'accept_edits' })
-    // Full access here; the owner lets this computer have Auto-accept edits at most, so it stays here, still on.
-    const full = t.caller.scheduled.createJob({ name: 'Full here', prompt: 'x', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'full' })
-    const result = await t.dispatch('automations.move', { jobIds: [on.id, full.id], node: t.node })
-    expect(result.moved).toEqual([{ id: on.id, to: expect.stringMatching(new RegExp(`^${t.node}:`)) }])
-    expect(result.failed).toEqual([{ id: full.id, name: 'Full here', error: expect.stringMatching(/cannot run above/) }])
-    const there = t.owner.scheduled.getJob(result.moved[0].to.split(':')[1])!
-    expect(there).toMatchObject({ name: 'On here', enabled: true, state: 'scheduled', keys: ['GITHUB_TOKEN'], cliName: 'on-here', permissionMode: 'ask' })
-    expect(there.pausedReason).toBeUndefined()
-    expect(t.caller.scheduled.getJob(full.id)).toMatchObject({ enabled: true, state: 'scheduled', permissionMode: 'full' })
-  }, 60_000)
-
-  it('refuses while the other computer is offline, and changes nothing', async () => {
-    const job = t.caller.scheduled.createJob({ name: 'Stays', prompt: 'x', schedule: { kind: 'manual' } })
-    const refused = await whileOffline(() => t.refused(t.dispatch('automations.move', { jobIds: [job.id], node: t.node })))
-    expect(refused).toMatchObject({ code: 'computer_offline', message: expect.stringMatching(/ is offline\.$/) })
-    expect(t.caller.scheduled.getJob(job.id)).toMatchObject({ state: 'scheduled' })
-  }, 60_000)
-
-  it('is a person’s action in a window, never the CLI’s', async () => {
-    const job = t.caller.scheduled.createJob({ name: 'CLI', prompt: 'x', schedule: { kind: 'manual' } })
-    expect((await t.refused(t.dispatch('automations.move', { jobIds: [job.id], node: t.node }, t.connection('cli-2', 'cli')))).code).toBe('forbidden')
   }, 60_000)
 })

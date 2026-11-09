@@ -757,12 +757,7 @@ export type CreateScheduledJobInputValidated = {
   tellMe?: TellMe
   threadEvent?: { threadId: string; events: ThreadEventKind[]; number?: number }
   keys?: string[]
-  paused?: { reason?: string; until?: string }
-  cliName?: string
 }
-
-/** A CLI trigger's name, as `cliNameOf` makes it: lower-case letters, digits and dashes. */
-const CLI_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 /** The saved keys a job names: up to 20 distinct key names (never values). */
 export function asJobKeys(v: unknown, name = 'keys'): string[] {
@@ -859,20 +854,6 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (o.tellMe !== undefined) input.tellMe = asTellMe(o.tellMe)
   if (o.threadEvent !== undefined) input.threadEvent = asThreadEventInput(o.threadEvent)
   if (o.keys !== undefined) input.keys = asJobKeys(o.keys)
-  // Made paused: nothing runs until a person (or the move that made it) resumes it.
-  if (o.paused !== undefined) {
-    const paused = asPlainObject(o.paused, 'paused')
-    for (const key of Object.keys(paused)) if (key !== 'reason' && key !== 'until') throw new Error(`input.paused.${key} is not allowed`)
-    const reason = asOptionalString(paused.reason, 512)
-    const until = asOptionalString(paused.until, 64)
-    if (until !== undefined && !Number.isFinite(Date.parse(until))) throw new Error('input.paused.until must be a date and time')
-    input.paused = { ...(reason ? { reason } : {}), ...(until ? { until: new Date(Date.parse(until)).toISOString() } : {}) }
-  }
-  if (o.cliName !== undefined) {
-    const cliName = asString(o.cliName, 'cliName', 48)
-    if (!CLI_NAME.test(cliName)) throw new Error('input.cliName must be lower-case letters, digits and dashes')
-    input.cliName = cliName
-  }
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
@@ -894,9 +875,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'repeat',
     'tellMe',
     'threadEvent',
-    'keys',
-    'paused',
-    'cliName'
+    'keys'
   ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`input.${key} is not allowed`)

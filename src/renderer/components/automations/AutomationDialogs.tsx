@@ -1,44 +1,7 @@
-// The Automations dialogs: Move to computer, Pause… (until a time or until the person resumes it), and Delete.
+// The Automations dialogs: Pause… (until a time or until the person resumes it), and Delete.
 import { useState } from 'react'
 import { Modal } from '../ui/Modal'
-import { Select } from '../ui/Select'
-import { computerOptions, type ComputerChoice } from './computerChoice'
 import { pauseUntil, type PauseChoice } from './automationList'
-
-export function MovePicker({ count, computers, onCancel, onMove }: { count: number; computers: ComputerChoice[]; onCancel: () => void; onMove: (node: string) => Promise<void> }) {
-  const [node, setNode] = useState(computers.find((computer) => !computer.offline)?.node ?? '')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const move = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      await onMove(node)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String((cause as { message?: unknown })?.message ?? cause))
-      setBusy(false)
-    }
-  }
-  return (
-    <Modal
-      open
-      title={count === 1 ? 'Move to computer' : `Move ${count} automations`}
-      onClose={onCancel}
-      closeDisabled={busy}
-      footer={
-        <>
-          <button type="button" className="settings-btn" disabled={busy} onClick={onCancel}>Cancel</button>
-          <button type="button" className="settings-btn primary" data-testid="automation-move-confirm" disabled={busy || !node} title="Made there first; removed here once it confirms. Run history stays here." onClick={() => void move()}>Move</button>
-        </>
-      }
-    >
-      <div className="automation-pause-picker" data-testid="automation-move-picker">
-        <Select ariaLabel="Move to" size="small" value={node} options={computerOptions(computers)} onChange={setNode} />
-        {error ? <p className="scheduled-item-error" role="alert">{error}</p> : null}
-      </div>
-    </Modal>
-  )
-}
 
 const PAUSE_CHOICES: Array<{ value: PauseChoice; label: string }> = [
   { value: 'resume', label: 'Until I resume' },
