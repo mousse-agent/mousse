@@ -878,7 +878,9 @@ export async function readSelection(git: SelectionGit, top: string, place: Selec
     let choices: Choices | null = null
     if (untouched || sameEntry(view.selected, view.work)) choices = uniformChoices(hunks, true)
     else if (sameEntry(view.selected, view.head)) choices = uniformChoices(hunks, false)
-    else if (view.selected && REGULAR.has(view.selected.mode) && blobs.has(view.selected.oid)) choices = alignChoices(head, hunks, splitLines(blobs.get(view.selected.oid)!))
+    // Only a selection with the file's mode is HEAD plus some of the hunks: a mode staged alone (`+x` in the index,
+    // the file on disk unchanged) is neither, and reads as diverged below.
+    else if (view.selected && view.selected.mode === (view.work ?? view.head)!.mode && blobs.has(view.selected.oid)) choices = alignChoices(head, hunks, splitLines(blobs.get(view.selected.oid)!))
     view.text = { head, work, hunks, choices }
   })
 

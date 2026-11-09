@@ -202,6 +202,14 @@ describe('project folder selection', () => {
     expect(fileIn(changes, 'sub')).toMatchObject({ kind: 'submodule', wholeFileOnly: true, hunks: [] })
   })
 
+  // Windows reads a file's mode from the index, so a mode is never staged apart from the file there.
+  it.skipIf(process.platform === 'win32')('shows a mode staged without the file on disk as diverged, not as left out', async () => {
+    const cwd = repo(), place = projectPlace(), service = new GitService()
+    git(cwd, 'update-index', '--chmod=+x', 'b.txt')
+    const file = fileIn(await service.readChanges(cwd, place), 'b.txt')
+    expect(file).toMatchObject({ included: 'partial', indexDiverged: true, wholeFileOnly: true, hunks: [] })
+  })
+
   it('gives repeated identical hunks their own ids and chooses them apart', async () => {
     const cwd = repo(), place = projectPlace(), service = new GitService()
     const doubled = [...LINES.slice(0, 5), 'import x', ...LINES.slice(5, 20), 'import x', ...LINES.slice(20)]
