@@ -58,6 +58,7 @@ import {
   readJsonFile,
   readLegacyThreadData,
   sameFingerprint,
+  hasUnsettledGenerations,
   settleLegacyGenerations,
   ThreadDataCorruptionError,
   validateArray,
@@ -460,12 +461,19 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
+  private readonly settledDirs = new Set<string>()
+
   /**
    * Ends a thread's use of the transactional store of earlier builds before anything reads or writes its JSON files
    * (`settleLegacyGenerations`), under the thread's lock. One stat when there is nothing to settle.
    */
   private settleGenerations(threadDir: string, id: string): void {
-    if (!existsSync(join(threadDir, 'manifest.json'))) return
+    if (this.settledDirs.has(threadDir)) return
+    if (!existsSync(join(threadDir, 'manifest.json')) && (!existsSync(join(threadDir, 'generations')) || !hasUnsettledGenerations(threadDir))) {
+      // Settled, or never used the transactional store; the folder is checked again only if a generation appears.
+      if (existsSync(join(threadDir, 'generations'))) this.settledDirs.add(threadDir)
+      return
+    }
     withThreadDataMutationLock(threadDir, () => {
       const outcome = settleLegacyGenerations(threadDir, (data) => this.writeJsonFiles(threadDir, { ...data, messageQueue: [] }))
       if (outcome.kept === 'none') return
@@ -499,7 +507,13 @@ export class ThreadDataStore extends EventEmitter {
           try { threadDir = this.listedThreadDir(thread.id) } catch { continue }
           if (ThreadDbStore.usesDb(threadDir) || existsSync(join(threadDir, EXPORTED_MARKER))) continue
           const state = this.importState.get(thread.id)
-          if (state?.running) continue
+          if (state?.running) {
+            // An import a read started: wait for it, so a failure is still retried by this pass.
+            await state.running.catch(() => undefined)
+            const after = this.importState.get(thread.id)
+            if (after && after.failures > 0 && !ThreadDbStore.usesDb(threadDir)) nextRetry = Math.min(nextRetry, after.retryAt)
+            continue
+          }
           if (state && Date.now() < state.retryAt) {
             if (state.failures > 0) nextRetry = Math.min(nextRetry, state.retryAt)
             continue

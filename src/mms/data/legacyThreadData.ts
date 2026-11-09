@@ -3,7 +3,7 @@
  * thread is imported from. Reads are pure file reads, so the thread database worker can use them too;
  * `settleLegacyGenerations` is the one writer, run by the daemon under the thread's lock.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { Agent, ChatMessage, MousseAgentSessionSnapshot, NativeLlmContext, Task } from '../../shared/types'
 import { parseMousseAgentSessions } from '../agents/legacyAgentSessions'
@@ -222,9 +222,23 @@ export interface SettleOutcome {
  * `manifest.json.settled-<time>`. When times cannot tell the copies apart (equal times, a clock change, copied
  * files), the outcome says so.
  */
+/**
+ * True when a thread folder still has the transactional store's files to settle: a generation pointer, or
+ * generations a crash left before the first pointer was written, and no record that it was settled.
+ */
+export function hasUnsettledGenerations(threadDir: string): boolean {
+  if (existsSync(join(threadDir, 'manifest.json'))) return true
+  if (!existsSync(join(threadDir, 'generations'))) return false
+  try {
+    return !readdirSync(threadDir).some((name) => name.startsWith('manifest.json.settled-'))
+  } catch {
+    return false
+  }
+}
+
 export function settleLegacyGenerations(threadDir: string, writeFlat: (data: StoredThreadData) => void): SettleOutcome {
   const manifestPath = join(threadDir, 'manifest.json')
-  if (!existsSync(manifestPath)) return { kept: 'none' }
+  if (!hasUnsettledGenerations(threadDir)) return { kept: 'none' }
   // When the generation was selected: before a crash's unfinished generation is finished here, the pointer's time;
   // a generation finished now was written when that crash happened, not now.
   const selectedBefore = mtimeOf(manifestPath)
@@ -242,9 +256,12 @@ export function settleLegacyGenerations(threadDir: string, writeFlat: (data: Sto
       return comparable(ours) !== comparable(theirs)
     })
     if (differing.length) {
-      const times = differing.map((field) => mtimeOf(flat.sources[field]))
-      const filesWin = times.every((time) => time > selectedAt)
-      outcome.ambiguous = times.some((time) => time === selectedAt) || (!filesWin && times.some((time) => time > selectedAt))
+      // A field whose file is gone (the plain writer removes the sessions or context file when there are none)
+      // says nothing about when it was written; the files that are there decide.
+      const present = differing.filter((field) => existsSync(flat.sources[field]))
+      const times = present.map((field) => mtimeOf(flat.sources[field]))
+      const filesWin = times.length > 0 && times.every((time) => time > selectedAt)
+      outcome.ambiguous = present.length < differing.length || times.some((time) => time === selectedAt) || (!filesWin && times.some((time) => time > selectedAt))
       if (!filesWin) {
         const backup = join(threadDir, 'legacy-json', `settled-${stamp}`)
         mkdirSync(backup, { recursive: true })
@@ -261,7 +278,10 @@ export function settleLegacyGenerations(threadDir: string, writeFlat: (data: Sto
       outcome.kept = 'generation'
     }
   }
-  renameSync(manifestPath, join(threadDir, `manifest.json.settled-${stamp}`))
+  // The record that the thread was settled: the old pointer, or an empty one when a crash left none.
+  const settled = join(threadDir, `manifest.json.settled-${stamp}`)
+  if (existsSync(manifestPath)) renameSync(manifestPath, settled)
+  else writeFileSync(settled, '{}\n')
   return outcome
 }
 

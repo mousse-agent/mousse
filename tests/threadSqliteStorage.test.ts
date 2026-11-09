@@ -113,6 +113,39 @@ describe('threads kept in thread.db', () => {
     expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
   })
 
+  it('finishes a first generation a crash left before any pointer was written', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('base', 'base')])
+    const journal = new ThreadJournal(dir)
+    const intent = journal.append({ operationId: 'first', operationType: 'thread-data-save', state: 'planned' })
+    const durable = new ThreadGenerationStore(dir).createGeneration({ messages: [message('base', 'base'), message('durable', 'durable')], agents: [], tasks: [], queue: [] }, intent.sequence)
+    journal.append({ operationId: 'first', operationType: 'thread-data-save', state: 'running', resultGenerationId: durable.generationId, details: { intentSequence: intent.sequence, generationDurable: true } })
+    expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
+    const { threads } = open(path, false)
+    expect(threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['base', 'durable'])
+    // Settled once: a later read does not settle again.
+    expect(readdirSync(dir).filter((name) => name.startsWith('manifest.json.settled-'))).toHaveLength(1)
+    expect(open(path, false).threads.loadThreadData(id).messages.map((m) => m.id)).toEqual(['base', 'durable'])
+    expect(readdirSync(dir).filter((name) => name.startsWith('manifest.json.settled-'))).toHaveLength(1)
+  })
+
+  it('keeps newer plain files when the old writer removed a file the generation still had', () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('base', 'base')])
+    const session = { version: 2, agentId: 'helper', worktreePath: '/w', task: 't', assignment: {}, runState: 'idle', updatedAt: 'u', messages: [], history: [] }
+    new ThreadGenerationStore(dir).publish({ messages: [message('base', 'base')], agents: [], tasks: [], llmContext, mousseAgentSessions: [session], queue: [] } as never, 1)
+    const old = Date.now() / 1000 - 60
+    utimesSync(join(dir, 'manifest.json'), old, old)
+    // A later save with the store off: a newer transcript, and no sessions file (it had none).
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('base', 'base'), message('later', 'later')]))
+    writeFileSync(join(dir, 'conversation-state.json'), JSON.stringify({ schemaVersion: 1, messages: [message('base', 'base'), message('later', 'later')], llmContext }))
+    rmSync(join(dir, 'mousse-agent-sessions.json'), { force: true })
+    const { threads } = open(path, false)
+    const data = threads.loadThreadData(id)
+    expect(data.messages.map((m) => m.id)).toEqual(['base', 'later'])
+    expect(data.mousseAgentSessions ?? []).toEqual([])
+  })
+
   it('keeps the generation when a copy into the plain files was cut short', () => {
     const path = home()
     const { id, dir } = jsonThread(path, [message('m1', 'one')])
@@ -200,6 +233,21 @@ describe('threads kept in thread.db', () => {
     for (let i = 0; i < 100 && !existsSync(join(dir, 'thread.db')); i++) await new Promise((resolve) => setTimeout(resolve, 20))
     threads.stopBackgroundImport()
     expect(threads.threadStorageStatus()).toEqual({ database: 1, json: 0, failed: [] })
+  })
+
+  it('retries an import that a read started and that failed while the background pass waited for it', async () => {
+    const path = home()
+    const { id, dir } = jsonThread(path, [message('m1', 'one')])
+    const { threads } = open(path)
+    writeFileSync(join(dir, 'messages.json'), '{ not json')
+    const first = threads.importThreadStorage(id)
+    threads.startBackgroundImport({ delayMs: 0, pauseMs: 10, recheckMs: 50 })
+    expect((await first).status).toBe('failed')
+    ;(threads as unknown as { importState: Map<string, { retryAt: number }> }).importState.get(id)!.retryAt = Date.now() + 100
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify([message('m1', 'fixed')]))
+    for (let i = 0; i < 100 && !existsSync(join(dir, 'thread.db')); i++) await new Promise((resolve) => setTimeout(resolve, 20))
+    threads.stopBackgroundImport()
+    expect(existsSync(join(dir, 'thread.db'))).toBe(true)
   })
 
   it('a thread whose import fails keeps working from JSON and says why', async () => {
