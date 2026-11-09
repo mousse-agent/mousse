@@ -859,6 +859,8 @@ const api = {
     clearContext: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:clearContext', threadId),
     /** `/compact`: summarizes the thread's context now; `focus` says what the summary keeps. */
     compact: (threadId: string, focus?: string): Promise<void> => ipcRenderer.invoke('threads:compact', threadId, focus),
+    /** Stops the thread's running `/compact`; the full history stays. */
+    stopCompaction: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:stopCompaction', threadId),
     /** `/fork`: a new thread from the thread's latest finished turn, selected. */
     fork: (threadId: string): Promise<{ threadId: string }> => ipcRenderer.invoke('threads:fork', threadId),
     setModel: (

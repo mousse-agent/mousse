@@ -245,7 +245,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           totalTokensUsed: report.totalTokensUsed,
           tokensPerSecond: report.tokensPerSecond,
           usage: report.usage ?? undefined,
-          context: report.context
+          context: report.context,
+          ...(report.promptCache ? { promptCache: report.promptCache } : {})
         })
         if (report.usage)
           sink.usage({

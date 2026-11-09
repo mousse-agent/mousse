@@ -16,9 +16,12 @@ import {
   estimateMessagesTokens,
   getActiveMessages,
   migrateLegacyContext,
+  nextPromptCache,
+  promptCacheOf,
   shouldCompactNativeContext,
   userMessage
 } from '../src/mms/orchestrator/nativeContext'
+import { ThreadSession } from '../src/mms/orchestrator/ThreadSession'
 import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from '../src/mms/orchestrator/steer'
 import { nativeAgentHistory } from '../src/mms/providers/nativeAgentHistory'
 
@@ -330,5 +333,40 @@ describe('Pi-native thread context', () => {
       else process.env.MOUSSE_HOME = previousHome
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('the prompt cache record', () => {
+  const hour = 60 * 60_000
+  const withTurn = () => appendNativeMessage(appendNativeMessage(createNativeContext(), userMessage('hello')), assistant('stop'))
+
+  it('holds while the history is the one the turn left, and is cold after any change to it', () => {
+    let context = withTurn()
+    context = { ...context, promptCache: nextPromptCache(context, { at: 1_000, ttlMs: hour, modelKey: 'claude-subscription:opus' }) }
+    expect(promptCacheOf(context)).toEqual({ lastRequestAt: 1_000, ttlMs: hour, revision: context.revision, modelKey: 'claude-subscription:opus' })
+    // A message, a compaction, a /clear: each starts a fresh runtime session, so nothing of it is cached.
+    expect(promptCacheOf(appendNativeMessage(context, userMessage('later')))).toBeUndefined()
+    expect(promptCacheOf(clearNativeContext(context))).toBeUndefined()
+    expect(promptCacheOf(commitNativeMessages(context, [userMessage('replaced')]))).toBeUndefined()
+  })
+
+  it('keeps the earlier lifetime for a turn that only read the cache, on the same model', () => {
+    const first = withTurn()
+    const cached = { ...first, promptCache: nextPromptCache(first, { at: 1_000, ttlMs: hour, modelKey: 'm' }) }
+    const next = appendNativeMessage(appendNativeMessage(cached, userMessage('again')), assistant('stop'))
+    expect(nextPromptCache(next, { at: 2_000, modelKey: 'm' })).toEqual({ lastRequestAt: 2_000, ttlMs: hour, revision: next.revision, modelKey: 'm' })
+    // A write says its own lifetime; another model has its own cache.
+    expect(nextPromptCache(next, { at: 2_000, ttlMs: 5 * 60_000, modelKey: 'm' }).ttlMs).toBe(5 * 60_000)
+    expect(nextPromptCache(next, { at: 2_000, modelKey: 'other' }).ttlMs).toBeUndefined()
+  })
+
+  it('drops an unreadable record when a session loads, and keeps a good one', () => {
+    const context = withTurn()
+    const session = new ThreadSession('t')
+    session.load([], { ...context, promptCache: { lastRequestAt: 'yesterday', revision: -1 } as never })
+    expect(session.nativeContext.promptCache).toBeUndefined()
+    const good = { lastRequestAt: 1_000, revision: context.revision ?? 0 }
+    session.load([], { ...context, promptCache: good })
+    expect(promptCacheOf(session.nativeContext)).toEqual(good)
   })
 })

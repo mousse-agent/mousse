@@ -754,6 +754,11 @@
     "digest": "d45007f32a42eb40",
     "security": "ceacd93869361a7a"
   },
+  "threads.stopCompaction": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
+  },
   "workflowRuns.answer": {
     "version": 1,
     "digest": "1846cbdbdbc3fd53",

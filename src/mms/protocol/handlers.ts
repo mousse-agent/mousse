@@ -1829,6 +1829,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const ran = await localActionRun(ctx, threadId, 'compact', () => ctx.mms.orchestrator.compactConversationContext(threadId, focus))
       return { outcome: 'result' in ran ? ran.result : 'unchanged' }
     }
+    case 'threads.stopCompaction': {
+      // The compaction row's Stop: the running `/compact` ends with the full history kept.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return { stopped: ctx.mms.orchestrator.stopCompaction(threadId) }
+    }
     case 'threads.pin': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)

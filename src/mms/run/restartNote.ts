@@ -84,15 +84,33 @@ export function cutOffActivityOf(messages: readonly ChatMessage[], runIds: reado
   return entries.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
 }
 
+/** A compaction row a daemon restart cut short: the compaction never finished, so nothing was cut. */
+export const COMPACTION_INTERRUPTED_TEXT = 'Compaction interrupted · full history kept'
+
+/** A row a previous daemon may have left running: a `running` item, or a compaction row still streaming. */
+export function isOpenActivityRow(message: ChatMessage): boolean {
+  return message.activity?.status === 'running' || (message.kind === 'context_compaction' && message.streaming === true)
+}
+
 /**
- * Ends the items a previous daemon left `running`: they can never report back. Returns the changed
- * rows by message id, and leaves `messages` alone. Call it only for a session with no live turn
- * (a `running` item there is always stale). Items already ended are untouched, so a second sweep
- * changes nothing.
+ * Ends the items a previous daemon left `running`: they can never report back. A compaction row left
+ * streaming is settled as interrupted with the full history kept (its history only changes when it
+ * finishes). Returns the changed rows by message id, and leaves `messages` alone. Call it only for a
+ * session with no live turn or compaction (a `running` item there is always stale). Items already ended
+ * are untouched, so a second sweep changes nothing.
  */
 export function closeStaleActivity(messages: readonly ChatMessage[], endedAt: string): Map<string, ChatMessage> {
   const closed = new Map<string, ChatMessage>()
   for (const message of messages) {
+    if (message.kind === 'context_compaction' && message.streaming === true) {
+      closed.set(message.id, {
+        ...message,
+        content: COMPACTION_INTERRUPTED_TEXT,
+        streaming: false,
+        compaction: { ...message.compaction, kept: 'interrupted' }
+      })
+      continue
+    }
     const item = message.activity
     if (!item || item.status !== 'running') continue
     const { interruptedBy: _by, ...rest } = item

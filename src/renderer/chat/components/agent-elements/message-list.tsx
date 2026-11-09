@@ -24,7 +24,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
+import { ArrowShrink, History, ThinkingIcon, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -54,6 +54,7 @@ import {
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
   type ToolPartBase,
@@ -215,7 +216,8 @@ function turnDurationMs(
   if (start == null) return null;
   let end = start;
   for (const message of assistants) {
-    if (isThreadNotice(message)) continue;
+    // A compaction started after the turn (Compact now, hours later) is no part of its work.
+    if (isThreadNotice(message) || isCompactionRow(message)) continue;
     const at = readCreatedAt(message);
     if (at != null && at > end) end = at;
   }
@@ -2032,6 +2034,29 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
   </div>;
 }
 
+type CompactionMetadata = { compaction?: boolean; compacting?: boolean; compactionManual?: boolean; compactionKept?: "stopped" | "interrupted" };
+
+/**
+ * A compaction in the transcript: a spinner while it runs (with Stop when a person started it), then what it
+ * did ("Context compacted · 182K → 9K"), or that it ended with the full history kept.
+ */
+function CompactionRow({ text, metadata }: { text: string; metadata: CompactionMetadata }) {
+  const actions = useTurnActions();
+  const compacting = metadata.compacting === true;
+  const stop = compacting && metadata.compactionManual ? actions?.stopCompaction : undefined;
+  return <div role="status"><ToolRowBase
+    icon={compacting ? <SpiralLoader size={12} /> : metadata.compactionKept ? <History size={14} /> : <ArrowShrink size={14} />}
+    shimmerLabel="Compacting context…"
+    completeLabel={text || "Context compacted"}
+    isAnimating={compacting}
+    trailingContent={stop ? (
+      <button type="button" className="an-compaction-stop" title="Stop compacting" aria-label="Stop compacting" onClick={stop}>
+        <Square size={10} strokeWidth={2} fill="currentColor" />
+      </button>
+    ) : undefined}
+  /></div>;
+}
+
 function AssistantParts({
   msg,
   isLast,
@@ -2205,11 +2230,10 @@ function AssistantParts({
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)
     return <ContextClearedDivider text={parts.filter(isTextPart).map((part) => part.text).join('') || 'Context cleared'} />;
-  const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
+  const compactionMetadata = msg.metadata as CompactionMetadata | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
-    return <div role="status"><ToolRowBase icon={compactionMetadata.compacting ? <SpiralLoader size={12} /> : undefined}
-      shimmerLabel="Compacting context…" completeLabel={text || 'Context compacted'} isAnimating={compactionMetadata.compacting === true} /></div>;
+    return <CompactionRow text={text} metadata={compactionMetadata} />;
   }
   // A scheduled job's result appended here links to the thread where its turn ran.
   const scheduledRun = (msg.metadata as { scheduledRun?: { threadId?: unknown } } | undefined)?.scheduledRun;

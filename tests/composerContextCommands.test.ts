@@ -25,6 +25,9 @@ import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../src/shared/settings'
+import { createNativeContext, userMessage } from '../src/mms/orchestrator/nativeContext'
+import { nativeAgentAssistantMessage } from '../src/mms/providers/nativeAgentHistory'
+import type { ChatMessage } from '../src/shared/types'
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {
@@ -102,7 +105,7 @@ async function setup() {
     const response = await orch.send(text, false, { threadId: thread.id, clientRequestId: `send-${++sends}` })
     expect(response.error).toBeUndefined()
   }
-  return { orch, thread, sessions, prompts, send }
+  return { orch, thread, sessions, prompts, send, harness, store }
 }
 
 describe('/clear', () => {
@@ -140,5 +143,87 @@ describe('/compact', () => {
     // An unchanged context is still the whole conversation.
     await send('next')
     expect(prompts.at(-1)?.text).toContain('a short thread')
+  }, 30_000)
+})
+
+describe('/compact that is stopped or runs out of time', () => {
+  /** A thread long enough that Mousse's own cut would compact it. */
+  function longThread(orch: OrchestratorService, threadId: string) {
+    const native = []
+    const shown: ChatMessage[] = []
+    for (let index = 0; index < 12; index += 1) {
+      const question = `question ${index} ${'q'.repeat(12_000)}`
+      const answer = `answer ${index} ${'a'.repeat(12_000)}`
+      native.push(userMessage(question), nativeAgentAssistantMessage(answer, 'default', 'acp'))
+      shown.push(
+        { id: `u${index}`, role: 'user', content: question, timestamp: new Date().toISOString() },
+        { id: `a${index}`, role: 'assistant', content: answer, timestamp: new Date().toISOString() }
+      )
+    }
+    orch.replaceConversationState(threadId, shown, createNativeContext(native))
+    return orch.getNativeContext(threadId)
+  }
+  /** The runtime's compaction never finishes on its own; it rejects once stopped. */
+  const hangs = (harness: { compactConversation: (request: { signal: AbortSignal }) => Promise<boolean> }) => {
+    harness.compactConversation = (request) => new Promise<boolean>((_resolve, reject) => {
+      request.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+  }
+  const lastRow = (orch: OrchestratorService, threadId: string) => orch.getMessagesForPersistence(threadId).at(-1)
+
+  it('keeps the full history when a person stops it: no local cut, and the row says so', async () => {
+    const { orch, thread, harness } = await setup()
+    const before = longThread(orch, thread.id)
+    hangs(harness as never)
+    const running = orch.compactConversationContext(thread.id)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(lastRow(orch, thread.id)).toMatchObject({ kind: 'context_compaction', streaming: true, compaction: { manual: true } })
+    expect(orch.stopCompaction(thread.id)).toBe(true)
+    expect(await running).toBe('stopped')
+    const after = orch.getNativeContext(thread.id)
+    expect(after.revision).toBe(before.revision)
+    expect(after.activeStartIndex).toBe(before.activeStartIndex)
+    expect(after.compaction).toBeUndefined()
+    expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', streaming: false, compaction: { manual: true, kept: 'stopped' } })
+    // Nothing runs any more: a second Stop has nothing to stop.
+    expect(orch.stopCompaction(thread.id)).toBe(false)
+  }, 30_000)
+
+  it('stops the same way at the time limit, and with a thread Stop', async () => {
+    const { orch, thread, harness } = await setup()
+    const before = longThread(orch, thread.id)
+    hangs(harness as never)
+    ;(orch as unknown as { nativeCompactTimeoutMs: number }).nativeCompactTimeoutMs = 30
+    expect(await orch.compactConversationContext(thread.id)).toBe('stopped')
+    expect(orch.getNativeContext(thread.id).revision).toBe(before.revision)
+    expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
+
+    ;(orch as unknown as { nativeCompactTimeoutMs: number }).nativeCompactTimeoutMs = 60_000
+    const running = orch.compactConversationContext(thread.id)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect((await orch.stopThread(thread.id, 'user')).ok).toBe(true)
+    expect(await running).toBe('stopped')
+    expect(orch.getNativeContext(thread.id).compaction).toBeUndefined()
+  }, 30_000)
+
+  it('cuts Mousse\'s copy when the runtime has no compaction, and says the sizes', async () => {
+    const { orch, thread, harness } = await setup()
+    longThread(orch, thread.id)
+    ;(harness as unknown as { compactConversation: () => Promise<boolean> }).compactConversation = async () => false
+    expect(await orch.compactConversationContext(thread.id)).toBe('compacted')
+    expect(lastRow(orch, thread.id)?.content).toMatch(/^Context compacted · \d+K → \d+K$/)
+    expect(orch.getNativeContext(thread.id).compaction).toBeDefined()
+  }, 30_000)
+})
+
+describe('a compaction row a restart cut short', () => {
+  it('is settled when the thread loads: interrupted, full history kept', async () => {
+    const { orch, store } = await setup()
+    const thread = store.createThread('interrupted')
+    const row: ChatMessage = { id: 'compacting', role: 'assistant', kind: 'context_compaction', content: 'Compacting context…', streaming: true, compaction: { manual: true }, timestamp: new Date().toISOString() }
+    store.mutateThreadData(thread.id, () => ({ messages: [{ id: 'u1', role: 'user', content: 'hi', timestamp: new Date().toISOString() }, row] }))
+    const settled = { content: 'Compaction interrupted · full history kept', streaming: false, compaction: { manual: true, kept: 'interrupted' } }
+    expect(orch.getMessagesForPersistence(thread.id).at(-1)).toMatchObject(settled)
+    expect(store.loadThreadData(thread.id).messages.at(-1)).toMatchObject(settled)
   }, 30_000)
 })

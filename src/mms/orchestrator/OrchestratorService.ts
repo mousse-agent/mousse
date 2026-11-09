@@ -29,6 +29,7 @@ import {
   type AgentAccessLevel
 } from '../../shared/settings'
 import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
@@ -92,7 +93,7 @@ import { DevGuiTools } from '../devgui/DevGuiTools'
 import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
-import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
+import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow } from '../run/restartNote'
 import type { OneShotTask } from '../harness/driver'
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
@@ -312,7 +313,9 @@ import {
   getActiveMessages,
   getCompactionSummary,
   migrateLegacyContext,
+  nextPromptCache,
   normalizeNativeContext,
+  promptCacheOf,
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
@@ -776,8 +779,17 @@ interface ContinuationTurnPayload {
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
 const CONTINUATION_CALL_WAIT_MS = 10_000
-/** How long `/compact` waits for a runtime's own compaction before compacting Mousse's copy instead. */
+/** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
 const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
+/** The compaction row of a `/compact` that was stopped or ran out of time. */
+const COMPACTION_STOPPED_TEXT = 'Compaction stopped · full history kept'
+
+/** "182K", "9K", "1.2M": a compaction row's sizes. */
+function shortTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}K`
+  return String(tokens)
+}
 
 function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
@@ -1565,6 +1577,10 @@ export class OrchestratorService extends EventEmitter {
   private startupDrainScheduled = new Set<string>()
   private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
   private turnStates = new Map<string, TurnState>()
+  /** Each thread's running `/compact`, so a Stop can end it (`stopCompaction`). */
+  private readonly compactions = new Map<string, AbortController>()
+  /** How long a `/compact` waits for the runtime's own compaction (tests shorten it). */
+  private nativeCompactTimeoutMs = NATIVE_COMPACT_TIMEOUT_MS
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
   private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor' | 'pause'>> & { blockedOnWait?: boolean }): void {
@@ -2545,12 +2561,14 @@ export class OrchestratorService extends EventEmitter {
     reason: string,
     opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string; actor?: AgentActor } = {}
   ): Promise<StopThreadOutcome> {
+    // A `/compact` the thread runs stops with it; the full history stays.
+    const compactionStopped = this.stopCompaction(threadId)
     const engine = this.runEngine
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
-      return { ok: aborted || ended, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+      return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
@@ -2603,7 +2621,7 @@ export class OrchestratorService extends EventEmitter {
     // A person's Stop reaches the threads the stopped ones launched while they run work an agent started: a creator
     // that is stopped leaves no fan-out running behind it (an agent's own Stop of a thread does not cascade).
     if (!result.replayed && !opts.actor) await this.stopLaunchedThreads(result.threads)
-    const stoppedAnything = aborted || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
+    const stoppedAnything = aborted || compactionStopped || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
   }
 
@@ -6797,7 +6815,7 @@ export class OrchestratorService extends EventEmitter {
     if (
       this.boundSession.threadId !== '__unbound__' &&
       this.boundSession.threadId !== threadId &&
-      this.boundSession.isTurnRunning()
+      (this.boundSession.isTurnRunning() || this.compactions.has(this.boundSession.threadId))
     ) {
       this.sessions.set(this.boundSession.threadId, this.boundSession)
     }
@@ -6929,8 +6947,9 @@ export class OrchestratorService extends EventEmitter {
    * second hydration, or one from an older snapshot, writes nothing and changes nothing.
    */
   private closeStaleActivity(session: ThreadSession): void {
-    if (session.isTurnRunning()) return
-    const stale = new Set(session.messages.filter((message) => message.activity?.status === 'running').map((message) => message.id))
+    // A `/compact` this daemon runs keeps its row open until it ends.
+    if (session.isTurnRunning() || this.compactions.has(session.threadId)) return
+    const stale = new Set(session.messages.filter(isOpenActivityRow).map((message) => message.id))
     if (!stale.size) return
     const store = this.threadStore
     if (!store || session.threadId === '__unbound__') {
@@ -6943,7 +6962,7 @@ export class OrchestratorService extends EventEmitter {
       const threadDir = store.getThreadDir(threadId)
       if (isLeaseHeldByLivePeer(threadDir).held) return
       let saved = store.loadThreadData(threadId).messages
-      if (saved.some((message) => stale.has(message.id) && message.activity?.status === 'running')) {
+      if (saved.some((message) => stale.has(message.id) && isOpenActivityRow(message))) {
         saved = store.mutateThreadData(threadId, (current) => {
           // Under the write lock: a peer may have taken the thread, or finished rows, since the read above.
           if (isLeaseHeldByLivePeer(threadDir).held) throw new StaleActivitySkipped()
@@ -8008,10 +8027,12 @@ export class OrchestratorService extends EventEmitter {
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
       let compactsNearWindow = false
+      let driver: string | undefined
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
         compactsNearWindow = resolved.compactsNearWindow === true
+        driver = resolved.driver
       } catch {
         caps = undefined
       }
@@ -8039,11 +8060,26 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
+      // The cache of the history as it is now, on the model the composer would send to (another model has its own).
+      const cache = promptCacheOf(this.nativeContext)
+      const cacheKey = cache?.modelKey
+      const cached = cache && (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
+      // A price only where the thread pays per token: pi with a saved API key and a priced model.
+      const price = cached && driver === 'pi' && typeof this.providerAuth?.uncachedInputPrice === 'function'
+        ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)
+        : undefined
       return {
         ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed,
         // A runtime that compacts its own session near the window gets only the on/off; the other
         // runtimes reporting context go through `prepareNativeContext` and the Compact context size.
-        ...(compactsNearWindow ? { compactedByRuntime: true } : {})
+        ...(compactsNearWindow ? { compactedByRuntime: true } : {}),
+        ...(cached ? {
+          promptCache: {
+            lastRequestAt: cache.lastRequestAt,
+            ...(cache.ttlMs ? { ttlMs: cache.ttlMs } : {}),
+            ...(price ? { uncachedUsdPerMTok: price } : {})
+          }
+        } : {})
       }
     }
     if (threadId && threadId !== this.session.threadId) {
@@ -10089,6 +10125,8 @@ export class OrchestratorService extends EventEmitter {
     // Prompt-injected runtimes keep their own transcript; their reply and reported metrics reach
     // the canonical transcript once, through `commitPromptTurn`.
     let promptMetrics: ProviderMetrics | undefined
+    /** When the runtime last reported usage this turn: its last request, for runtimes that do not say when it was answered. */
+    let lastUsageAt: number | undefined
     let promptTurnCommitted = false
     const promptContextKey = `${selectedModel.llmProvider}:${selectedModel.model}`
     const commitPromptTurn = (text: string): void => {
@@ -10107,6 +10145,13 @@ export class OrchestratorService extends EventEmitter {
           measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
         })
       }
+      // The provider's cache now holds this history (its revision includes the reply): when the last
+      // request was answered (else the turn's end) and the lifetime the turn wrote, if the runtime says.
+      this.nativeContext.promptCache = nextPromptCache(this.nativeContext, {
+        at: promptMetrics?.promptCache?.at ?? lastUsageAt ?? Date.now(),
+        ...(promptMetrics?.promptCache?.ttlMs ? { ttlMs: promptMetrics.promptCache.ttlMs } : {}),
+        modelKey: promptContextKey
+      })
       this.persist(true)
     }
     try {
@@ -10214,11 +10259,14 @@ export class OrchestratorService extends EventEmitter {
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
         // Usage statistics, as each runtime reports them.
-        usage: (usage) => this.lineEditStats?.recordUsage({
-          timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
-          model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
-          cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
-        }),
+        usage: (usage) => {
+          lastUsageAt = Date.now()
+          this.lineEditStats?.recordUsage({
+            timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
+            model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
+            cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
+          })
+        },
         providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
         steerAccepted: (text) => {
           this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
@@ -10228,7 +10276,10 @@ export class OrchestratorService extends EventEmitter {
           this.persist(true)
           this.acknowledgeDrainedSteers(session)
         },
-        providerMetrics: (metrics) => { promptMetrics = metrics },
+        providerMetrics: (metrics) => {
+          promptMetrics = metrics
+          if (metrics.usage || metrics.context) lastUsageAt = Date.now()
+        },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
       // Every drain is remembered under its own token until the provider has taken the text, so a drain
@@ -11747,15 +11798,24 @@ export class OrchestratorService extends EventEmitter {
    * `/compact`: compacts the thread's context now. The runtime's own compaction of its native session comes
    * first (Claude Code's `/compact`, Codex's `thread/compact/start`); Mousse compacts its own copy when the
    * runtime has none, holds no session for this history, or fails. `focus` says what the summary keeps.
+   *
+   * A runtime compaction stopped by a person (`stopCompaction`, a thread Stop) or not done within the time
+   * limit ends `stopped`: the full history stays, and Mousse's own cut never stands in for it.
    */
-  async compactConversationContext(threadId: string, focus?: string): Promise<'native' | 'compacted' | 'unchanged'> {
+  async compactConversationContext(threadId: string, focus?: string): Promise<'native' | 'compacted' | 'unchanged' | 'stopped'> {
     const session = this.getOrCreateSession(threadId)
     if (session.isTurnRunning()) throw new Error('Cannot compact the context while a turn is running.')
+    if (this.compactions.has(threadId)) throw new Error('The context is already being compacted.')
+    const stop = new AbortController()
+    this.compactions.set(threadId, stop)
+    const timeout = setTimeout(() => stop.abort(), this.nativeCompactTimeoutMs)
+    timeout.unref?.()
     const note: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
-      content: 'Compacting context…', streaming: true, timestamp: new Date().toISOString() }
-    const finish = (content: string): void => this.sessionAls.run(session, () => {
+      content: 'Compacting context…', streaming: true, compaction: { manual: true }, timestamp: new Date().toISOString() }
+    const finish = (content: string, kept?: 'stopped'): void => this.sessionAls.run(session, () => {
       note.content = content
       note.streaming = false
+      if (kept) note.compaction = { manual: true, kept }
       this.emitMessageUpdated(note)
       this.persist(true)
     })
@@ -11772,11 +11832,17 @@ export class OrchestratorService extends EventEmitter {
           native = await this.harness.compactConversation({
             threadId, instanceId, focus,
             history: nativeAgentHistory(session.nativeContext),
-            signal: AbortSignal.timeout(NATIVE_COMPACT_TIMEOUT_MS)
+            signal: stop.signal
           })
         } catch (error) {
-          console.warn('[orchestrator] native compaction failed; compacting Mousse\'s copy', { threadId, error: error instanceof Error ? error.message : String(error) })
+          if (!stop.signal.aborted)
+            console.warn('[orchestrator] native compaction failed; compacting Mousse\'s copy', { threadId, error: error instanceof Error ? error.message : String(error) })
         }
+      }
+      // Stopped or out of time before the runtime finished: nothing is cut.
+      if (!native && stop.signal.aborted) {
+        finish(COMPACTION_STOPPED_TEXT, 'stopped')
+        return 'stopped'
       }
       const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
         const compacted = compactNativeContext(this.nativeContext, undefined, focus)
@@ -11784,14 +11850,36 @@ export class OrchestratorService extends EventEmitter {
         this.nativeContext = compacted
         return 'compacted' as const
       })
-      // The measured size is the context before compaction.
-      if (outcome !== 'unchanged') this.sessionAls.run(session, () => this.clearLastTurnUsage())
-      finish(outcome === 'unchanged' ? 'Context checked — no older messages to compact' : 'Context compacted')
+      if (outcome !== 'unchanged') this.sessionAls.run(session, () => {
+        // The measured size is the context before compaction, and the provider's cache held that context.
+        this.clearLastTurnUsage()
+        if (this.nativeContext.promptCache) {
+          const { promptCache: _cold, ...rest } = this.nativeContext
+          this.nativeContext = rest
+        }
+      })
+      const sizes = outcome === 'compacted' ? session.nativeContext.compaction : undefined
+      finish(outcome === 'unchanged'
+        ? 'Context checked — no older messages to compact'
+        : sizes?.tokensAfter !== undefined
+          ? `Context compacted · ${shortTokenCount(sizes.tokensBefore)} → ${shortTokenCount(sizes.tokensAfter)}`
+          : 'Context compacted')
       return outcome
     } catch (error) {
       finish('Context not compacted')
       throw error
+    } finally {
+      clearTimeout(timeout)
+      this.compactions.delete(threadId)
     }
+  }
+
+  /** Stops the thread's running `/compact` (Compact now); false when none runs. The full history stays. */
+  stopCompaction(threadId: string): boolean {
+    const running = this.compactions.get(threadId)
+    if (!running || running.signal.aborted) return false
+    running.abort()
+    return true
   }
 
   replaceConversationState(

@@ -162,9 +162,17 @@ export type TurnSegment =
 /** A note the agent wrote while it worked, as a row of a finished turn's activity. */
 export const NOTE_PART_TYPE = "tool-Note";
 
+/**
+ * A compaction row: Mousse's line about the context, drawn after the turn it follows. It is never the
+ * agent's answer, so a `/compact` after a reply leaves that reply where it was.
+ */
+export function isCompactionRow(message: SettleTurnMessage): boolean {
+  return (message.metadata as { compaction?: boolean } | undefined)?.compaction === true;
+}
+
 /** The text of a reply row, or "" when the message is not one. */
 function replyText(message: SettleTurnMessage): string {
-  if (message.role !== "assistant") return "";
+  if (message.role !== "assistant" || isCompactionRow(message)) return "";
   return (message.parts ?? [])
     .filter(isTextPart)
     .map((part) => part.text.trim())
@@ -172,7 +180,7 @@ function replyText(message: SettleTurnMessage): string {
     .join("\n\n");
 }
 
-export type SettleTurnMessage = { id: string; role?: string; parts?: unknown[] };
+export type SettleTurnMessage = { id: string; role?: string; parts?: unknown[]; metadata?: unknown };
 
 /** The text of a turn's answer: its last reply row, the one a finished turn draws last. */
 export function turnAnswerText(messages: SettleTurnMessage[]): string {

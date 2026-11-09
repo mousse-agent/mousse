@@ -2557,7 +2557,8 @@ html.platform-darwin .titlebar-left {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(280px, calc(100vw - 48px));
+  /* Wide enough that the cache line and Compact now share one line. */
+  width: min(300px, calc(100vw - 48px));
   padding: 10px 12px 12px;
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
@@ -6171,4 +6172,52 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   width: 100%;
   max-width: none;
   box-sizing: border-box;
+}
+
+/* The context popover's cache line: a status dot, "Cache warm · 4m left" / "Cache expired 1h 12m ago" /
+   "Idle 20m", and Compact now once it has gone cold. One line: the text never wraps. */
+.context-usage-cache-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ui-faint);
+}
+
+.context-usage-cache-dot.is-warm { background: var(--success); }
+.context-usage-cache-dot.is-cold { background: var(--warning); }
+
+.context-usage-cache-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-usage-cache {
+  gap: 6px;
+}
+
+/* Stop on a running compaction row: a small icon button, faint until hovered. */
+.an-compaction-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.an-compaction-stop:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.an-compaction-stop:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+  opacity: 1;
 }

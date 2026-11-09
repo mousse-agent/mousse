@@ -207,6 +207,11 @@ export interface ProviderMetrics {
     contextWindow?: number
     modelName?: string
   }
+  /**
+   * The prompt cache the turn left: when its last request was answered, and the longest lifetime its
+   * requests wrote (absent when they wrote none or the provider does not say).
+   */
+  promptCache?: { at?: number; ttlMs?: number }
 }
 
 export interface TurnControl {

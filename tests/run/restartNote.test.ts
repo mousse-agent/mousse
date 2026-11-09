@@ -269,4 +269,13 @@ describe('closeStaleActivity', () => {
     const closed = closeStaleActivity([parent, child], endedAt)
     expect([...closed.values()].map((message) => message.activity?.status)).toEqual(['interrupted', 'interrupted'])
   })
+
+  it('settles a compaction row left streaming: interrupted, full history kept', () => {
+    const compacting: ChatMessage = { id: 'k1', role: 'assistant', kind: 'context_compaction', content: 'Compacting context…', streaming: true, compaction: { manual: true }, timestamp: at }
+    const done: ChatMessage = { id: 'k2', role: 'assistant', kind: 'context_compaction', content: 'Context compacted', streaming: false, timestamp: at }
+    const closed = closeStaleActivity([compacting, done], endedAt)
+    expect([...closed.keys()]).toEqual(['k1'])
+    expect(closed.get('k1')).toMatchObject({ content: 'Compaction interrupted · full history kept', streaming: false, compaction: { manual: true, kept: 'interrupted' } })
+    expect(closeStaleActivity([...closed.values()], endedAt).size).toBe(0)
+  })
 })

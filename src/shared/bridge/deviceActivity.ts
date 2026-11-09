@@ -229,6 +229,7 @@ const PHRASES: Record<string, Phrase> = {
   'threads.regenerateTitle': RENAME,
   'threads.clearContext': CONTEXT,
   'threads.compact': CONTEXT,
+  'threads.stopCompaction': CONTEXT,
   'threads.setWorktreeEnabled': THREAD_SETTING,
   'threads.setExpiry': THREAD_SETTING,
   'thread.fork': FORK,
