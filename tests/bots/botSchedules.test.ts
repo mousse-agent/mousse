@@ -41,7 +41,7 @@ const entry = () => f.book.list(botId)[0]!
 describe('bot schedules in the shared scheduler', () => {
   it('nothing runs before the startup pass, and a new schedule starts from now', async () => {
     const { scheduleId } = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Tidy the site.' }, 'owner')
-    expect(entry()).toMatchObject({ scheduleId, nextAt: iso(T0 + 5 * MIN), createdBy: 'owner', tellMe: 'news' })
+    expect(entry()).toMatchObject({ scheduleId, nextAt: iso(T0 + 5 * MIN), createdBy: 'owner', tellMe: 'look' })
     // The record is an ordinary job, whose Who is the bot.
     expect(f.scheduler.getJob(botJobId(botId, scheduleId))).toMatchObject({ bot: { botId, scheduleId, createdBy: 'owner' }, prompt: 'Tidy the site.', schedule: { kind: 'interval', minutes: 5 } })
     // Before the pass the occurrence stays due: nothing is inserted and the time does not move.
@@ -151,7 +151,7 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.book.update(job, { schedule: { kind: 'once', runAt: iso(T0 + MIN) } })).toThrow(/A bot repeats/)
     expect(() => f.book.update(job, { schedule: { kind: 'interval', minutes: 2 } })).toThrow(/every 5 minutes/)
     f.book.update(job, { name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'problems' })
-    expect(entry()).toMatchObject({ name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'problems' })
+    expect(entry()).toMatchObject({ name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'needs_you' })
     // The bot's own list shows the same record.
     expect(f.bots.listSchedules(botId)).toEqual([{ scheduleId: entry().scheduleId, label: 'every 5 minutes', nextAt: iso(T0 + 5 * MIN) }])
   })

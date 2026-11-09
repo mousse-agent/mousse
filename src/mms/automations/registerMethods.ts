@@ -2,6 +2,7 @@ import { AUTOMATIONS_CAPABILITY, type AutomationIndex, type AutomationMoveResult
 import { isId } from '../../shared/net'
 import { isKeyName, MAX_KEY_VALUE_BYTES } from '../../shared/automationKeys'
 import type { ScheduledJob } from '../../shared/types'
+import type { AutomationInbox, InboxCounts, TuningNote } from '../../shared/automationInbox'
 import type { AgentJobAsk } from './AgentJobAsks'
 import type { DraftWho } from './AutomationDrafts'
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
@@ -36,6 +37,18 @@ export interface AutomationsDomain {
   }
   /** The Automation manager's hidden thread, made the first time. Its turns work in the project the composer picked. */
   managerThread(projectId?: string): { id: string }
+  /** The inbox: runs, the Needs you queue, Tuning notes and this month's usage. */
+  inbox: {
+    list(): AutomationInbox
+    counts(): InboxCounts
+    /** Resolve: every open item of the run. Opening a run never does this. */
+    resolve(runId: string): number
+    /** Undo the person's last Resolve; the run it reopened. */
+    undo(): string | undefined
+    /** Too noisy / Should have told me: a Tuning note, or taken back when given again. */
+    calibrate(runId: string, kind: TuningNote['kind']): TuningNote | undefined
+    removeTuning(noteId: string): boolean
+  }
 }
 
 /**
@@ -269,6 +282,94 @@ export function registerAutomationMethods(
     async handle(context, params, binding) {
       if (context.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'The Automation manager is used from a Mousse window.')
       return { threadId: (await bound(binding)).managerThread(params.projectId as string | undefined || undefined).id }
+    }
+  })
+  // ── The inbox ──
+  const runIdOf = (params: unknown, extra: string[] = []) => {
+    const p = domainObject(params ?? {}, ['profileId', 'runId', ...extra])
+    if (typeof p.runId !== 'string' || !/^run_[0-9a-f-]{36}$/i.test(p.runId)) throw new DomainRpcError('invalid_params', 'A run id is required')
+    return p
+  }
+  /** The queue and the notes are changed by the person in a window (or the CLI), never from another computer. */
+  const notBridge = (client: string | undefined) => {
+    if (client === 'bridge') throw new DomainRpcError('forbidden', 'Runs are resolved on the computer that ran them.')
+  }
+  domains.register({
+    method: 'automations.inbox.list',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => domainObject(params ?? {}, ['profileId']),
+    async handle(_context, _params, binding) {
+      try {
+        return (await bound(binding)).inbox.list()
+      } catch (error) {
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError('inbox_unavailable', error instanceof Error ? error.message : String(error))
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.inbox.counts',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => domainObject(params ?? {}, ['profileId']),
+    async handle(_context, _params, binding) {
+      return (await bound(binding)).inbox.counts()
+    }
+  })
+  domains.register({
+    method: 'automations.inbox.resolve',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => runIdOf(params),
+    async handle(context, params, binding) {
+      notBridge(context.connection?.clientType)
+      return { resolved: (await bound(binding)).inbox.resolve(params.runId as string) }
+    }
+  })
+  domains.register({
+    method: 'automations.inbox.undo',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => domainObject(params ?? {}, ['profileId']),
+    async handle(context, _params, binding) {
+      notBridge(context.connection?.clientType)
+      const runId = (await bound(binding)).inbox.undo()
+      return runId ? { runId } : {}
+    }
+  })
+  domains.register({
+    method: 'automations.inbox.calibrate',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = runIdOf(params, ['kind'])
+      if (p.kind !== 'noisy' && p.kind !== 'missed') throw new DomainRpcError('invalid_params', 'kind is noisy or missed')
+      return p
+    },
+    async handle(context, params, binding) {
+      notBridge(context.connection?.clientType)
+      try {
+        const note = (await bound(binding)).inbox.calibrate(params.runId as string, params.kind as TuningNote['kind'])
+        return note ? { note } : {}
+      } catch (error) {
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError('run_not_found', error instanceof Error ? error.message : String(error))
+      }
+    }
+  })
+  domains.register({
+    method: 'automations.tuning.remove',
+    scope: 'profile',
+    capability: AUTOMATIONS_CAPABILITY,
+    validate: (params) => {
+      const p = domainObject(params ?? {}, ['profileId', 'noteId'])
+      if (typeof p.noteId !== 'string' || !/^tune_[0-9a-f-]{36}$/i.test(p.noteId)) throw new DomainRpcError('invalid_params', 'A note id is required')
+      return p
+    },
+    async handle(context, params, binding) {
+      notBridge(context.connection?.clientType)
+      return { removed: (await bound(binding)).inbox.removeTuning(params.noteId as string) }
     }
   })
   domains.register({

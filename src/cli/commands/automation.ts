@@ -1,5 +1,5 @@
 import {
-  isTellMe,
+  parseTellMe,
   type CreateScheduledJobInput,
   type JobSchedule,
   type ScheduledJob,
@@ -248,8 +248,9 @@ export function buildScheduleAddInput(
   if (thread) input.threadId = thread
   const tellMe = flagString(flags, 'tell-me')
   if (tellMe !== undefined) {
-    if (!isTellMe(tellMe)) throw new Error('--tell-me must be every, news or problems.')
-    input.tellMe = tellMe
+    const level = parseTellMe(tellMe)
+    if (!level) throw new Error('--tell-me must be needs_you, look, fyi or every.')
+    input.tellMe = level
   }
   return input
 }

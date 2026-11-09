@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { BotSchedule } from '../../shared/bots/personal/definition'
 import { MAX_BOT_SCHEDULES } from '../../shared/bots/personal/definition'
-import { isTellMe, tellMeOf, type JobSchedule, type ScheduledJob, type ScheduledJobPatch, type TellMe } from '../../shared/types'
+import { parseTellMe, tellMeOf, type JobSchedule, type ScheduledJob, type ScheduledJobPatch, type TellMe } from '../../shared/types'
 import { computeNextRun, cronProblem, minCronGapMinutes } from './computeNextRun'
 
 /**
@@ -262,8 +262,9 @@ export class BotScheduleBook {
       changes.name = name
     }
     if (patch.tellMe !== undefined) {
-      if (!isTellMe(patch.tellMe)) throw new BotScheduleError('schedule_invalid', 'Tell me is every, news or problems.')
-      changes.tellMe = patch.tellMe
+      const level = parseTellMe(patch.tellMe)
+      if (!level) throw new BotScheduleError('schedule_invalid', 'Tell me is needs_you, look, fyi or every.')
+      changes.tellMe = level
     }
     const updated = this.options.jobs.updateJob(job.id, changes)
     this.options.jobs.wake()

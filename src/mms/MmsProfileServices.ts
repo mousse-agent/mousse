@@ -33,7 +33,7 @@ import { createCodexProviderService, findCodexBinary, type CodexProviderService 
 import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
-import type { ScheduledJob } from '../shared/types'
+import type { ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -87,6 +87,8 @@ import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
 import { isKeyName } from '../shared/automationKeys'
 import { AutomationDrafts } from './automations/AutomationDrafts'
+import { AutomationRuns } from './automations/AutomationRuns'
+import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
 import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
@@ -711,12 +713,27 @@ export class MmsProfileServices {
         readThread: (threadId) => this.threads.loadThreadData(threadId),
         listThreads: () => botThreadsForCatchUp(store.captureThreads())
       })
-      const context = createBotContextProvider({
+      const pack = createBotContextProvider({
         store: memory,
         journal,
         situation: (botId) => this.botSituation(botId),
         scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt
       })
+      // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
+      const context: typeof pack = {
+        ...pack,
+        runPreamble: async (input) => {
+          const text = await pack.runPreamble(input)
+          const jobId = input.scheduleId ? this.botSchedules?.get(input.botId, input.scheduleId)?.jobId : undefined
+          if (!jobId || !this.automationRuns) return text
+          try {
+            const notice = this.automationRuns.notice(jobId, this.scheduled.getJob(jobId)?.name)
+            return text ? `${text}\n\n${notice}` : notice
+          } catch {
+            return text
+          }
+        }
+      }
       const admin = createBotMemoryAdmin({
         store: memory,
         definition: (botId) => {
@@ -819,9 +836,37 @@ export class MmsProfileServices {
         console.warn('bot schedules could not be moved; the next start tries again', { error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // The Automations inbox: every run, its report, usage and the Needs you queue (`automations/automations.db`).
+    try {
+      this.automationRuns = new AutomationRuns({ profileHome: homeDir })
+    } catch (error) {
+      console.warn('the automations inbox could not be opened; runs are kept only in each automation\'s history', { error: error instanceof Error ? error.message : String(error) })
+    }
+    const runs = this.automationRuns
+    if (runs) {
+      this.scheduled.setRunLedger(runs)
+      let pending: NodeJS.Timeout | null = null
+      // The page and the project dots read again; a burst of changes is one event.
+      runs.onChange(() => {
+        if (pending) return
+        pending = setTimeout(() => {
+          pending = null
+          this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+        }, 200)
+        pending.unref?.()
+      })
+      // A deleted automation's Tuning notes and meta go; its runs and their threads stay in the inbox.
+      this.scheduled.on('jobRemoved', (jobId: string) => {
+        try { runs.forgetAutomation(jobId) } catch { /* the notes stay; nothing reads them */ }
+      })
+    }
     if (personalBots) {
       this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
-      this.scheduled.setTickHook((now) => personalBots.maintain(now))
+      // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
+      this.scheduled.setTickHook(async (now) => {
+        await personalBots.maintain(now)
+        this.syncBotRuns()
+      })
     }
     this.orchestrator.setScheduledHooks({
       onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
@@ -831,6 +876,19 @@ export class MmsProfileServices {
       }
     })
     this.scheduled.setQuestionProbe((threadId) => this.questions.listPendingForThread(threadId).length > 0)
+    // An approval or a question on an automation run's thread is a Needs you item until it is answered where it was asked.
+    if (runs) {
+      this.questions.on('pending', (event: { requestId: string; threadId: string; approval?: unknown }) => {
+        try { runs.openAsk(event.threadId, event.requestId, event.approval ? 'approval' : 'ask') } catch { /* the run still asks in its thread */ }
+      })
+      this.questions.on('cleared', (event: { requestId: string }) => {
+        try { runs.closeAsk(event.requestId) } catch { /* the item stays until Resolve */ }
+      })
+      this.orchestrator.setAutomationRunHooks({
+        notice: (jobId, jobName) => runs.notice(jobId, jobName),
+        usage: ({ threadId, runId, ...usage }) => { runs.addUsage({ threadId, ...(runId ? { runId } : {}) }, usage) }
+      })
+    }
     // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
     // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
     try {
@@ -890,13 +948,23 @@ export class MmsProfileServices {
         return this.scheduled.updateJob(entry.jobId, { name: input.name, tellMe: input.tellMe }) ?? this.scheduled.getJob(entry.jobId)!
       },
       personCeiling: (threadId) => this.orchestrator.scheduledCreatorCeiling(threadId),
-      reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId)
+      reuseThread: (jobId, name, projectId) => this.threads.ensureExecutionThread(`automation-thread:${jobId}`, name.slice(0, 120), projectId),
+      ...(runs ? { meta: { get: (jobId: string) => runs.meta(jobId), set: (jobId: string, meta: { originThreadId?: string; context?: string }) => runs.setMeta(jobId, meta), move: (from: string, to: string) => runs.moveMeta(from, to) } } : {})
     })
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
-      botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId
+      botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
+      activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
+      // "Check this daily" in an ordinary chat: a person's thread, not a run's, a bot's or the manager's.
+      ordinaryThread: (threadId) => {
+        const thread = this.threads.getThread(threadId)
+        if (!thread || thread.automationManager || thread.botOwned || thread.scheduledJobId || thread.settledAt) return false
+        if (this.personalBots?.tools.activationOf(threadId)) return false
+        return !runs?.liveRunFor({ threadId })
+      },
+      ...(runs ? { runs: { liveRunFor: (caller) => runs.liveRunFor(caller), report: (caller, level, summary) => runs.report(caller, level, summary) } } : {})
     })
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
     // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
@@ -1386,6 +1454,52 @@ export class MmsProfileServices {
   automationManagerThread(projectId?: string): { id: string } {
     this.automationManagerProjectId = projectId
     return this.threads.ensureExecutionThread(AUTOMATION_MANAGER_THREAD_KEY, AUTOMATION_MANAGER_NAME, undefined, undefined, { automationManager: true })
+  }
+
+  /** The Automations inbox (`automations/automations.db`); absent when it could not be opened. */
+  automationRuns: AutomationRuns | undefined
+
+  /** Brings the inbox's bot runs up to date with their activations. */
+  syncBotRuns(): void {
+    const runs = this.automationRuns
+    const bots = this.personalBots
+    if (!runs || !bots) return
+    for (const job of this.scheduled.listJobs()) {
+      if (!job.bot) continue
+      try {
+        const facts = bots.service.automationFacts(job.bot.botId, job.bot.scheduleId)
+        if (facts) runs.syncBotRuns(job.id, facts.runs)
+      } catch {
+        // That bot's runs follow at the next read.
+      }
+    }
+  }
+
+  /** `automations.inbox.list`: every run (newest first) with its report, items and usage, the Tuning notes and this month's cost. */
+  automationInbox(): AutomationInbox {
+    const runs = this.automationRuns
+    if (!runs) throw new Error('The automations inbox is not available in this profile.')
+    this.syncBotRuns()
+    const inbox = runs.list()
+    // A run's pull request is its thread's link, read now.
+    const threads = new Map<string, Thread | undefined>()
+    return {
+      ...inbox,
+      runs: inbox.runs.map((run) => {
+        if (!run.threadId) return run
+        if (!threads.has(run.threadId)) threads.set(run.threadId, this.threads.getThread(run.threadId))
+        const link = threads.get(run.threadId)?.pullRequest
+        return link ? { ...run, pr: { number: link.number, url: link.url } } : run
+      })
+    }
+  }
+
+  /** `automations.inbox.counts`: the project dots. */
+  automationInboxCounts(): InboxCounts {
+    const runs = this.automationRuns
+    if (!runs) return { byProject: {}, total: 0 }
+    this.syncBotRuns()
+    return runs.counts()
   }
 
   automationIndex(): AutomationIndex {

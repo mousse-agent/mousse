@@ -9,21 +9,29 @@ export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
 /**
- * When an automation tells the person about a run: every run, only runs with news (the default, and what a job
- * saved before Tell me existed reads as), or only runs that failed or stopped short. The agent still says
- * "nothing new" with `[SILENT]`; that stays internal and maps to the Nothing new outcome.
+ * When an automation tells the person about a run: the lowest report level that notifies (`run_report`). Failures
+ * always notify; a run with no report counts as worth a look. The default is Worth a look. The agent's `[SILENT]`
+ * stays internal and reads as quiet. Jobs saved before levels said `news` (now `look`) or `problems` (now `needs_you`).
  */
-export type TellMe = 'every' | 'news' | 'problems'
-export const TELL_ME_VALUES: readonly TellMe[] = ['every', 'news', 'problems']
-export const DEFAULT_TELL_ME: TellMe = 'news'
+export type TellMe = 'needs_you' | 'look' | 'fyi' | 'every'
+export const TELL_ME_VALUES: readonly TellMe[] = ['needs_you', 'look', 'fyi', 'every']
+export const DEFAULT_TELL_ME: TellMe = 'look'
 
 export function isTellMe(value: unknown): value is TellMe {
   return typeof value === 'string' && (TELL_ME_VALUES as readonly string[]).includes(value)
 }
 
-/** A job's Tell me; absent or unknown reads as Only news. */
+/** A Tell me in any form a job or a request may carry: the levels, or the words saved before them. */
+export function parseTellMe(value: unknown): TellMe | undefined {
+  if (isTellMe(value)) return value
+  if (value === 'news') return 'look'
+  if (value === 'problems') return 'needs_you'
+  return undefined
+}
+
+/** A job's Tell me; absent or unknown reads as Worth a look. */
 export function tellMeOf(job: { tellMe?: unknown }): TellMe {
-  return isTellMe(job.tellMe) ? job.tellMe : DEFAULT_TELL_ME
+  return parseTellMe(job.tellMe) ?? DEFAULT_TELL_ME
 }
 
 /** `manual` has no clock: the job runs only when started (Run now, or a later trigger). */
@@ -347,6 +355,8 @@ export interface AutomationDraftState {
   managerThreadId?: string
   /** A bot wrote it (Built by a bot); absent: the Automation manager or a person. */
   botId?: string
+  /** An agent wrote it in this ordinary chat (`automation_draft_save` there); the chat shows its card. */
+  originThreadId?: string
   /** Who does it, as the person picked: a bot; absent: the default agent. */
   who?: { kind: 'bot'; botId: string }
   /** What still keeps Turn on off, in the manager's and the person's words. */

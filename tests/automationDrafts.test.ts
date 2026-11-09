@@ -88,7 +88,7 @@ describe('automation drafts', () => {
 
     expect(drafts.save({ draftId: saved.draftId, project: 'Mousse' }, { managerThreadId: 'manager' }).problems).toEqual([])
     const on = drafts.turnOn(saved.draftId)
-    expect(on).toMatchObject({ enabled: true, state: 'scheduled', projectId: 'p1', createThread: true, tellMe: 'news', permissionCeiling: 'accept_edits', permissionMode: 'accept_edits' })
+    expect(on).toMatchObject({ enabled: true, state: 'scheduled', projectId: 'p1', createThread: true, tellMe: 'look', permissionCeiling: 'accept_edits', permissionMode: 'accept_edits' })
     expect(on.draft).toBeUndefined()
     // A person's creation: no agent label, no end.
     expect(on.createdBy).toBeUndefined()
@@ -177,9 +177,9 @@ describe('automation drafts', () => {
     const reuse = drafts.save({ ...PR_CHECK, project: 'p1', result: { thread: 'reuse', tellMe: 'problems' } }, {})
     const on = drafts.turnOn(reuse.draftId)
     expect(reused).toEqual([reuse.draftId])
-    expect(on).toMatchObject({ threadId: `thread-for-${reuse.draftId}`, tellMe: 'problems' })
+    expect(on).toMatchObject({ threadId: `thread-for-${reuse.draftId}`, tellMe: 'needs_you' })
     expect(on.createThread).toBeUndefined()
-    expect(drafts.list().find((entry) => entry.id === reuse.draftId)).toMatchObject({ draft: false, result: { thread: 'reuse', tellMe: 'problems' } })
+    expect(drafts.list().find((entry) => entry.id === reuse.draftId)).toMatchObject({ draft: false, result: { thread: 'reuse', tellMe: 'needs_you' } })
   })
 
   it('changes and pauses an automation for "Change it…", never raising its May', () => {
@@ -203,9 +203,9 @@ describe('the automation tools', () => {
     const { drafts } = setup()
     const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: (id) => (id === 'bot-thread' ? 'bot_1' : undefined) }
     const list = automationTools({ automations: () => tools } as unknown as AppToolHost)
-    expect(list.map((tool) => tool.name)).toEqual(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'])
+    expect(list.map((tool) => tool.name)).toEqual(['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause', 'run_report'])
     const save = list[0]!
-    expect(save.available!({ threadId: 'other' } as never)).toMatch(/Only the Automation manager/)
+    expect(save.available!({ threadId: 'other' } as never)).toMatch(/Only a conversation, the Automation manager or a bot/)
     expect(save.available!({ threadId: 'manager' } as never)).toBe(true)
     const result = JSON.parse((await save.handler({ ...PR_CHECK, project: 'mousse' }, ctx('manager'))).text) as { draftId: string; problems: string[] }
     expect(result.problems).toEqual([])

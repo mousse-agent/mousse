@@ -201,7 +201,7 @@ export interface MetaPart {
 
 /** Where a run's outcome goes, in a word or two: "notify", "notify every run", "notify on problems". */
 export function resultWord(item: Pick<AutomationItem, 'tellMe'>): string {
-  return item.tellMe === 'every' ? 'notify every run' : item.tellMe === 'problems' ? 'notify on problems' : 'notify'
+  return item.tellMe === 'every' ? 'notify every run' : item.tellMe === 'needs_you' ? 'notify when it needs you' : 'notify'
 }
 
 export function metaParts(item: AutomationItem, ctx: MetaContext): MetaPart[] {

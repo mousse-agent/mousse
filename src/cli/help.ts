@@ -123,7 +123,7 @@ Options for add:
                                     you create the job (its thread's, else the default for new threads).
                                     Without it the run follows its thread's mode, up to that limit. A workflow
                                     job (a prompt starting with /) runs its workflow under the same mode
-  --tell-me every|news|problems     When you hear about a run (default news: not when it finds nothing new)
+  --tell-me needs_you|look|fyi|every  The lowest report level you hear about (default look; failures always)
   --project <id>                    Project the run works in
   --thread <id>                     Run as a turn on this thread, with its history
   --workspace project|new-worktree|<path>

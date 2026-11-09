@@ -1,5 +1,6 @@
 import type { BotLook } from './bots/personal/look'
 import { missingKeyText } from './automationKeys'
+import { levelNotifies, NOTIFY_LEVEL_LABELS, type RunLevel } from './automationInbox'
 import type { PermissionMode } from './permissionMode'
 import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRunRecord, ScheduledOccurrenceResult, ScheduledWebhookDeliveryOutcome, TellMe, ThreadEventKind } from './types'
 
@@ -11,7 +12,8 @@ import type { JobSchedule, ScheduledEventLogEntry, ScheduledJob, ScheduledJobRun
 export const AUTOMATIONS_METHODS = [
   'automations.list', 'automations.asks.answer', 'automations.keep', 'automations.move', 'automations.request.resend', 'automations.keys.list', 'automations.keys.set',
   'automations.drafts.turnOn', 'automations.drafts.discard', 'automations.drafts.create', 'automations.drafts.answered', 'automations.drafts.setWho', 'automations.drafts.nextWho',
-  'automations.manager.thread'
+  'automations.manager.thread',
+  'automations.inbox.list', 'automations.inbox.counts', 'automations.inbox.resolve', 'automations.inbox.undo', 'automations.inbox.calibrate', 'automations.tuning.remove'
 ] as const
 export type AutomationsMethod = (typeof AUTOMATIONS_METHODS)[number]
 export const AUTOMATIONS_CAPABILITY = 'automations.v1'
@@ -151,18 +153,16 @@ export function jobLastEndedRun(job: ScheduledJob): AutomationRun | undefined {
 
 // ── Tell me ───────────────────────────────────────────────────────────────────────────────────────
 
-/** Whether a run that ended this way tells the person, under `tellMe`. */
-export function tellMeNotifies(tellMe: TellMe, outcome: RunEndState): boolean {
-  if (tellMe === 'every') return true
-  if (tellMe === 'problems') return outcome === 'failed' || outcome === 'incomplete'
-  return outcome !== 'nothing_new'
+/**
+ * Whether a run that ended this way tells the person, under `tellMe` (the lowest report level that notifies). A
+ * failure always does; a run that found nothing new is quiet; a run without a report counts as worth a look.
+ */
+export function tellMeNotifies(tellMe: TellMe, outcome: RunEndState, level?: RunLevel): boolean {
+  const failed = outcome === 'failed' || outcome === 'incomplete'
+  return levelNotifies(tellMe, { failed, ...(outcome === 'nothing_new' ? { level: 'quiet' as const } : level ? { level } : {}) })
 }
 
-export const TELL_ME_LABELS: Record<TellMe, string> = {
-  every: 'Every run',
-  news: 'Only news',
-  problems: 'Only problems'
-}
+export const TELL_ME_LABELS: Record<TellMe, string> = NOTIFY_LEVEL_LABELS
 
 /** What the scheduler tells listeners when an occurrence ends (`scheduled.runEnded`). */
 export interface ScheduledRunEnded {
@@ -171,6 +171,10 @@ export interface ScheduledRunEnded {
   outcome: RunEndState
   /** The job's Tell me lets this run notify. */
   notify: boolean
+  /** The level the run's agent reported (`run_report`); absent: no report. */
+  level?: RunLevel
+  /** The report's one line. */
+  summary?: string
   threadId?: string
   error?: string
 }

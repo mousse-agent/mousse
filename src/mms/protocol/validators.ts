@@ -6,7 +6,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 
 import { isExpiryPreset } from '../../shared/threadExpiry'
 import { isKeyName, MAX_KEYS_PER_AUTOMATION } from '../../shared/automationKeys'
-import { isTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe, type ThreadEventKind } from '../../shared/types'
+import { parseTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe, type ThreadEventKind } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
@@ -820,10 +820,11 @@ export function asJobWorkspace(v: unknown, name = 'workspace'): ScheduledJobWork
   throw new Error(`${name}.kind must be project|newWorktree|worktree`)
 }
 
-/** A job's Tell me: every run, only news, or only problems. */
+/** A job's Tell me: the lowest report level that notifies (the words saved before levels are read too). */
 export function asTellMe(v: unknown, name = 'tellMe'): TellMe {
-  if (!isTellMe(v)) throw new Error(`${name} must be every|news|problems`)
-  return v
+  const level = parseTellMe(v)
+  if (!level) throw new Error(`${name} must be needs_you|look|fyi|every`)
+  return level
 }
 
 /** A job's saved agent: `{ definitionId }` and nothing else. */

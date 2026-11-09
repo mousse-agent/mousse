@@ -261,7 +261,18 @@ export class MousseMainService extends MmsProfileServices {
           setWho: (draftId, who) => services.automationDrafts.setWho(draftId, who),
           nextWho: (botId, who) => services.automationDrafts.nextWho(botId ? { botId } : {}, who)
         },
-        managerThread: (projectId) => services.automationManagerThread(projectId)
+        managerThread: (projectId) => services.automationManagerThread(projectId),
+        inbox: {
+          list: () => services.automationInbox(),
+          counts: () => services.automationInboxCounts(),
+          resolve: (runId) => services.automationRuns?.resolve(runId) ?? 0,
+          undo: () => services.automationRuns?.undo(),
+          calibrate: (runId, kind) => {
+            if (!services.automationRuns) throw new Error('The automations inbox is not available in this profile.')
+            return services.automationRuns.calibrate(runId, kind)
+          },
+          removeTuning: (noteId) => services.automationRuns?.removeTuning(noteId) ?? false
+        }
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>

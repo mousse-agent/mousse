@@ -26,7 +26,7 @@ import type {
   ScheduledJobDefinition
 } from './types'
 import { MOUSSE_CONF_VERSION } from './types'
-import { isTellMe, type ScheduledJob } from '../../shared/types'
+import { parseTellMe, type ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
 import { pathsEqual } from '../profiles/pathSafety'
 import {
@@ -141,8 +141,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createdBy: job.createdBy,
     accessCap: job.accessCap,
     expiresAt: job.expiresAt,
-    // Only a chosen value is written: a job without one keeps reading as Only news.
-    ...(isTellMe(job.tellMe) ? { tellMe: job.tellMe } : {}),
+    // Only a chosen value is written: a job without one keeps reading as Worth a look.
+    ...(parseTellMe(job.tellMe) ? { tellMe: parseTellMe(job.tellMe) } : {}),
     trigger: job.trigger,
     ...(job.keys?.length ? { keys: [...job.keys] } : {}),
     ...(job.draft ? { draft: job.draft } : {}),
@@ -320,11 +320,12 @@ export class MousseConfigStore {
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
         // A job's model with a level packed into it (written before #490) is upgraded.
-        // A Tell me this version does not know is dropped, so the job reads as Only news (as every job saved before Tell me does).
+        // A Tell me saved before levels is read as its level; one this version does not know is dropped (Worth a look).
         jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => {
           if (!job) return job
           const { tellMe, ...rest } = job.selection ? { ...job, selection: upgradeSelection(job.selection) } : job
-          return isTellMe(tellMe) ? { ...rest, tellMe } : rest
+          const level = parseTellMe(tellMe)
+          return level ? { ...rest, tellMe: level } : rest
         }),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),

@@ -36,7 +36,7 @@ export function agentBlock(item: AutomationItem, prompt: string | undefined, who
 /** The Result block: the run's thread, then when it tells you. */
 export function resultBlock(item: AutomationItem): CardBlock {
   const thread = item.result?.thread === 'reuse' ? 'Same thread' : item.notifyOnly ? 'Its thread' : 'New thread'
-  return { title: `${thread} + notify`, sub: TELL_ME_LABELS[item.tellMe ?? 'news'].toLowerCase() }
+  return { title: `${thread} + notify`, sub: TELL_ME_LABELS[item.tellMe ?? 'look'].toLowerCase() }
 }
 
 /**

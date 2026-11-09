@@ -1,5 +1,5 @@
 import { narrowPermissionMode, isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
-import { isTellMe, tellMeOf, type CreateScheduledJobInput, type JobSchedule, type ScheduledJob, type TellMe, type Thread, type ThreadEventKind } from '../../shared/types'
+import { DEFAULT_TELL_ME, parseTellMe, tellMeOf, type CreateScheduledJobInput, type JobSchedule, type ScheduledJob, type TellMe, type Thread, type ThreadEventKind } from '../../shared/types'
 import { asCreateScheduledJobInput } from '../protocol/validators'
 import { computeNextRun, cronProblem } from '../scheduled/computeNextRun'
 import { botScheduleProblem, botWhenOf } from '../scheduled/botJobs'
@@ -47,12 +47,25 @@ export interface AutomationContract {
   cliName?: string
   problems?: string[]
   ask?: { question: string; options: string[] }
+  /** What "this" meant in the chat it was made from. */
+  context?: string
+  /** The ordinary chat it was made from. */
+  createdFrom?: { threadId: string }
 }
 
-/** Who wrote a draft: the manager's hidden thread, or a bot. */
+/** Who wrote a draft: the manager's hidden thread, a bot, or an agent in an ordinary chat (`originThreadId`). */
 export interface DraftAuthor {
   managerThreadId?: string
   botId?: string
+  originThreadId?: string
+}
+
+/** What the drafts keep beside a job: the chat it was made from and what "this" meant there (`AutomationRuns`). */
+export interface DraftMetaPort {
+  get(jobId: string): { originThreadId?: string; context?: string } | undefined
+  set(jobId: string, meta: { originThreadId?: string; context?: string }): void
+  /** A draft turned on as a bot's schedule is a new job: its meta moves with it. */
+  move(fromJobId: string, toJobId: string): void
 }
 
 export interface AutomationDraftsDeps {
@@ -75,6 +88,8 @@ export interface AutomationDraftsDeps {
   /** The scheduler and the page hear of a change. */
   changed?(): void
   now?(): Date
+  /** Where the context and the chat a draft came from are kept; without it they are not kept. */
+  meta?: DraftMetaPort
 }
 
 const MAX_NAME = 120
@@ -127,12 +142,12 @@ function parseTrigger(value: unknown): DraftTrigger {
 }
 
 function parseResult(value: unknown): DraftResult {
-  if (value === undefined || value === null) return { thread: 'new', tellMe: 'news' }
+  if (value === undefined || value === null) return { thread: 'new', tellMe: DEFAULT_TELL_ME }
   const raw = object(value, 'result')
   const thread = raw.thread === undefined ? 'new' : raw.thread
   if (thread !== 'new' && thread !== 'reuse') fail('result.thread is new or reuse')
-  const tellMe = raw.tellMe === undefined ? 'news' : raw.tellMe
-  if (!isTellMe(tellMe)) fail('result.tellMe is every, news or problems')
+  const tellMe = raw.tellMe === undefined ? DEFAULT_TELL_ME : parseTellMe(raw.tellMe)
+  if (!tellMe) fail('result.tellMe is needs_you, look, fyi or every')
   return { thread, tellMe, ...(typeof raw.botChat === 'string' && raw.botChat ? { botChat: raw.botChat } : {}) }
 }
 
@@ -144,7 +159,12 @@ interface DraftFields {
   project?: string | null
   result?: DraftResult
   permissionMode?: PermissionMode
+  /** What "this" means in the chat the draft was made from; every run's first message carries it. */
+  context?: string
 }
+
+/** The longest context a draft keeps. */
+const MAX_CONTEXT = 1_000
 
 function parseFields(args: Record<string, unknown>): DraftFields {
   const fields: DraftFields = {}
@@ -159,11 +179,12 @@ function parseFields(args: Record<string, unknown>): DraftFields {
     if (!isPermissionMode(args.permissionMode)) fail('permissionMode is ask, accept_edits, auto or full')
     fields.permissionMode = args.permissionMode
   }
+  if (args.context !== undefined && args.context !== null) fields.context = text(args.context, 'context', MAX_CONTEXT)
   return fields
 }
 
 /** The automation's Trigger, Agent and Result read back from its job. */
-export function contractOf(job: ScheduledJob, projectName: (id: string) => string | undefined): AutomationContract {
+export function contractOf(job: ScheduledJob, projectName: (id: string) => string | undefined, meta?: { originThreadId?: string; context?: string }): AutomationContract {
   const wakesOn = job.trigger?.threadEvent
   const trigger: DraftTrigger = wakesOn
     ? { kind: 'thread_event', threadId: wakesOn.threadId, events: [...wakesOn.events] }
@@ -192,7 +213,9 @@ export function contractOf(job: ScheduledJob, projectName: (id: string) => strin
     nextRunAt: job.nextRunAt,
     ...(job.cliName ? { cliName: job.cliName } : {}),
     ...(job.draft ? { problems: job.draft.problems } : {}),
-    ...(job.draft?.ask ? { ask: { question: job.draft.ask.question, options: job.draft.ask.options } } : {})
+    ...(job.draft?.ask ? { ask: { question: job.draft.ask.question, options: job.draft.ask.options } } : {}),
+    ...(meta?.context ? { context: meta.context } : {}),
+    ...(meta?.originThreadId ? { createdFrom: { threadId: meta.originThreadId } } : {})
   }
 }
 
@@ -208,6 +231,28 @@ export class AutomationDrafts {
   }
 
   private projectName = (id: string): string | undefined => this.deps.projects().find((project) => project.id === id)?.name
+
+  private metaOf(jobId: string): { originThreadId?: string; context?: string } | undefined {
+    try {
+      return this.deps.meta?.get(jobId)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The automation in the contract, with its context and the chat it came from. */
+  contract(job: ScheduledJob): AutomationContract {
+    return contractOf(job, this.projectName, this.metaOf(job.id))
+  }
+
+  /** Keeps a draft's context, and the chat it was made from, beside its job. */
+  private keepMeta(jobId: string, fields: DraftFields, author: DraftAuthor): void {
+    if (!this.deps.meta || (fields.context === undefined && !author.originThreadId)) return
+    const current = this.metaOf(jobId) ?? {}
+    const origin = current.originThreadId ?? author.originThreadId
+    const context = fields.context !== undefined ? fields.context : current.context
+    this.deps.meta.set(jobId, { ...(origin ? { originThreadId: origin } : {}), ...(context ? { context } : {}) })
+  }
 
   private draftJob(draftId: string): ScheduledJob {
     const job = this.deps.get(draftId)
@@ -244,7 +289,7 @@ export class AutomationDrafts {
     const name = fields.name ?? before?.name ?? ''
     const trigger = fields.trigger ?? before?.trigger ?? { kind: 'cli' }
     const prompt = fields.prompt ?? before?.prompt ?? ''
-    const result = fields.result ?? before?.result ?? { thread: 'new', tellMe: 'news' }
+    const result = fields.result ?? before?.result ?? { thread: 'new', tellMe: DEFAULT_TELL_ME }
     // A bot works where its grant lets it; the default agent needs a project.
     const bot = who?.kind === 'bot' ? who.botId : undefined
     const projectId = fields.project !== undefined ? this.resolveProject(fields.project, bot ? [] : problems) : current?.projectId ?? (bot ? undefined : this.resolveProject(undefined, problems))
@@ -321,8 +366,9 @@ export class AutomationDrafts {
   save(args: Record<string, unknown>, author: DraftAuthor): { draftId: string; problems: string[] } {
     const draftId = args.draftId === undefined ? undefined : text(args.draftId, 'draftId', 256)
     const current = draftId ? this.draftJob(draftId) : undefined
-    // A bot changes only its own drafts, and the manager only its own and the person's.
+    // A bot changes only its own drafts, an ordinary chat only the ones it wrote, and the manager its own and the person's.
     if (current && current.draft!.botId !== author.botId) fail(`No draft ${draftId}.`)
+    if (current && author.originThreadId && current.draft!.originThreadId !== author.originThreadId) fail(`No draft ${draftId}.`)
     const fields = parseFields(args)
     const who = current ? current.draft!.who : this.pendingWho.get(this.authorKey(author))
     const { job, problems, reuseThread } = this.build(fields, current, who)
@@ -334,6 +380,7 @@ export class AutomationDrafts {
       draftId: current?.id ?? '',
       ...(author.managerThreadId ?? current?.draft?.managerThreadId ? { managerThreadId: author.managerThreadId ?? current?.draft?.managerThreadId } : {}),
       ...(author.botId ? { botId: author.botId } : {}),
+      ...(author.originThreadId ?? current?.draft?.originThreadId ? { originThreadId: author.originThreadId ?? current?.draft?.originThreadId } : {}),
       ...(who?.kind === 'bot' ? { who } : {}),
       problems,
       // A new save answers the open question unless it asks again (`automation_ask`).
@@ -342,6 +389,7 @@ export class AutomationDrafts {
     if (current) {
       const updated = this.deps.update(current.id, { ...job, permissionMode, permissionCeiling: ceiling, draft: { ...draft, draftId: current.id } })
       if (!updated) fail(`No draft ${draftId}.`)
+      this.keepMeta(current.id, fields, author)
       this.deps.changed?.()
       return { draftId: current.id, problems }
     }
@@ -361,6 +409,7 @@ export class AutomationDrafts {
     })
     // The draft's id is the job's: it is known once the job is stored.
     this.deps.update(created.id, { draft: { ...draft, draftId: created.id } })
+    this.keepMeta(created.id, fields, author)
     this.deps.changed?.()
     return { draftId: created.id, problems }
   }
@@ -412,7 +461,7 @@ export class AutomationDrafts {
 
   /** `automation_list`: the profile's automations (not a bot's own schedules) and drafts, in the contract. */
   list(): AutomationContract[] {
-    return this.deps.list().filter((job) => !job.bot).map((job) => contractOf(job, this.projectName))
+    return this.deps.list().filter((job) => !job.bot).map((job) => this.contract(job))
   }
 
   /**
@@ -426,8 +475,8 @@ export class AutomationDrafts {
     const fields = parseFields(args)
     if (!Object.keys(fields).length) fail('Pass at least one field to change.')
     if (job.draft) {
-      this.save({ ...args, draftId: id }, { ...(job.draft.managerThreadId ? { managerThreadId: job.draft.managerThreadId } : {}), ...(job.draft.botId ? { botId: job.draft.botId } : {}) })
-      return contractOf(this.deps.get(id)!, this.projectName)
+      this.save({ ...args, draftId: id }, { ...(job.draft.managerThreadId ? { managerThreadId: job.draft.managerThreadId } : {}), ...(job.draft.botId ? { botId: job.draft.botId } : {}), ...(job.draft.originThreadId ? { originThreadId: job.draft.originThreadId } : {}) })
+      return this.contract(this.deps.get(id)!)
     }
     const { job: next, problems, reuseThread } = this.build(fields, job)
     if (problems.length) fail(problems.join(' '))
@@ -439,8 +488,9 @@ export class AutomationDrafts {
     const nextRun = scheduleChanged && job.enabled && job.state !== 'paused' && job.state !== 'running' ? { nextRunAt: computeNextRun(next.schedule) } : {}
     const updated = this.deps.update(job.id, { ...next, ...nextRun, permissionMode, threadId, ...(reuseThread ? { createThread: undefined } : {}) })
     if (!updated) fail(`No automation ${id}.`)
+    this.keepMeta(job.id, fields, {})
     this.deps.changed?.()
-    return contractOf(updated, this.projectName)
+    return this.contract(updated)
   }
 
   /** `automation_pause`: pauses an automation, until a time or until the person resumes it. */
@@ -460,7 +510,7 @@ export class AutomationDrafts {
     const paused = this.deps.pause(job.id, reason, until)
     if (!paused) fail(`No automation ${id}.`)
     this.deps.changed?.()
-    return contractOf(paused, this.projectName)
+    return this.contract(paused)
   }
 
   /**
@@ -480,6 +530,11 @@ export class AutomationDrafts {
     if (who?.kind === 'bot') {
       if (!this.deps.addBotSchedule) fail('Bots are not available now.')
       const made = this.deps.addBotSchedule(who.botId, { schedule: job.schedule, prompt: job.prompt, name: job.name, tellMe: tellMeOf(job) })
+      try {
+        this.deps.meta?.move(job.id, made.id)
+      } catch {
+        // Its context stays behind; the runs still start.
+      }
       this.deps.remove(job.id)
       this.deps.changed?.()
       return made

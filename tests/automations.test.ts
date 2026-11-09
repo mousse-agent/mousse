@@ -94,25 +94,30 @@ describe('Needs you', () => {
 })
 
 describe('Tell me', () => {
-  it('notifies every run, only news, or only problems', () => {
+  it('notifies from the level it is set to: every run, FYI, worth a look (no report counts here), or only what needs you', () => {
     expect(tellMeNotifies('every', 'nothing_new')).toBe(true)
-    expect(tellMeNotifies('news', 'nothing_new')).toBe(false)
-    expect(tellMeNotifies('news', 'done')).toBe(true)
-    expect(tellMeNotifies('news', 'failed')).toBe(true)
-    expect(tellMeNotifies('problems', 'done')).toBe(false)
-    expect(tellMeNotifies('problems', 'incomplete')).toBe(true)
+    expect(tellMeNotifies('look', 'nothing_new')).toBe(false)
+    expect(tellMeNotifies('look', 'done')).toBe(true)
+    expect(tellMeNotifies('look', 'done', 'fyi')).toBe(false)
+    expect(tellMeNotifies('fyi', 'done', 'fyi')).toBe(true)
+    expect(tellMeNotifies('look', 'failed')).toBe(true)
+    expect(tellMeNotifies('needs_you', 'done')).toBe(false)
+    expect(tellMeNotifies('needs_you', 'done', 'needs_you')).toBe(true)
+    expect(tellMeNotifies('needs_you', 'incomplete')).toBe(true)
   })
 
-  it('reads a job saved before Tell me, or with a value it does not know, as Only news', () => {
-    expect(tellMeOf({})).toBe('news')
-    expect(tellMeOf({ tellMe: 'loud' })).toBe('news')
-    expect(tellMeOf({ tellMe: 'problems' })).toBe('problems')
+  it('reads a job saved before levels as its level, and a value it does not know as Worth a look', () => {
+    expect(tellMeOf({})).toBe('look')
+    expect(tellMeOf({ tellMe: 'loud' })).toBe('look')
+    expect(tellMeOf({ tellMe: 'news' })).toBe('look')
+    expect(tellMeOf({ tellMe: 'problems' })).toBe('needs_you')
   })
 
-  it('is accepted on create and change, and nothing else is', () => {
+  it('is accepted on create and change (the old words too), and nothing else is', () => {
     expect(asCreateScheduledJobInput({ name: 'a', prompt: 'b', schedule: { kind: 'manual' }, tellMe: 'every' }).tellMe).toBe('every')
-    expect(asScheduledJobPatch({ tellMe: 'problems' }).tellMe).toBe('problems')
-    expect(() => asScheduledJobPatch({ tellMe: 'loud' })).toThrow(/every\|news\|problems/)
+    expect(asScheduledJobPatch({ tellMe: 'problems' }).tellMe).toBe('needs_you')
+    expect(asScheduledJobPatch({ tellMe: 'fyi' }).tellMe).toBe('fyi')
+    expect(() => asScheduledJobPatch({ tellMe: 'loud' })).toThrow(/needs_you\|look\|fyi\|every/)
   })
 })
 
@@ -151,10 +156,10 @@ describe('the automation index', () => {
     expect(index.computer).toEqual({ name: 'Desk', timeZone: 'Asia/Kolkata' })
     expect(index.items.map((item) => item.key)).toEqual(['job:j1', 'job:bot-1--weather', 'watch:t-watch'])
     const [jobItem, botItem, watchItem] = index.items
-    expect(jobItem).toMatchObject({ trigger: 'time', where: { projectId: 'p1', name: 'mousse' }, tellMe: 'problems', may: 'accept_edits', next: { timeZone: 'Asia/Kolkata' }, link: { kind: 'job', jobId: 'j1' } })
+    expect(jobItem).toMatchObject({ trigger: 'time', where: { projectId: 'p1', name: 'mousse' }, tellMe: 'needs_you', may: 'accept_edits', next: { timeZone: 'Asia/Kolkata' }, link: { kind: 'job', jobId: 'j1' } })
     // The Incomplete run and the ask that stopped it are one Needs you item, answered in place with the bot's method.
     expect(botItem).toMatchObject({
-      kind: 'job', name: 'Weather', schedule: { kind: 'cron', expr: '0 8 * * *' }, who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, tellMe: 'news',
+      kind: 'job', name: 'Weather', schedule: { kind: 'cron', expr: '0 8 * * *' }, who: { kind: 'bot', name: 'Pip' }, mayIsGrant: true, tellMe: 'look',
       next: { at: '2026-11-09T02:30:00.000Z' },
       attention: { kind: 'ask', text: 'Wants to read files in Notes', answer: { kind: 'bot_ask', botId: 'bot-1', askId: 'esc_1' } },
       link: { kind: 'job', jobId: 'bot-1--weather', botId: 'bot-1' }

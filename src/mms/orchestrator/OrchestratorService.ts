@@ -1007,6 +1007,23 @@ export class OrchestratorService extends EventEmitter {
   /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
   private automationTools?: AutomationToolHost
   setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
+  /**
+   * The Automations inbox's hooks: each scheduled run's hidden first message (the report levels, the automation's
+   * context and Tuning notes), and each request's usage on a thread, which the inbox adds to the run going there.
+   */
+  private automationRunHooks?: {
+    notice(jobId: string, jobName?: string): string
+    usage(input: { threadId: string; runId?: string; provider?: string; model: string; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd?: number }): void
+  }
+  setAutomationRunHooks(hooks: OrchestratorService['automationRunHooks']): void { this.automationRunHooks = hooks }
+  /** A scheduled run's hidden first message; the plain [SILENT] notice when the inbox cannot say more. */
+  private scheduledNotice(scheduled: ScheduledTurnRef): string {
+    try {
+      return this.automationRunHooks?.notice(scheduled.jobId, scheduled.jobName) ?? SCHEDULED_SILENT_NOTICE
+    } catch {
+      return SCHEDULED_SILENT_NOTICE
+    }
+  }
   /** The Automation manager's thread has no project; its turns work in the composer's project or the manager's folder. */
   private automationManagerCwd(threadId: string): string | null {
     if (!this.automationTools?.managerWorkspace || !this.threadStore?.getThread(threadId)?.automationManager) return null
@@ -8540,9 +8557,10 @@ export class OrchestratorService extends EventEmitter {
     const decisionNotice: ChatMessage | null = approvalNote
       ? { id: uuidv4(), role: 'user', content: approvalNote, timestamp: new Date().toISOString(), hidden: true }
       : null
-    // A scheduled run's agent says "nothing new" with [SILENT]; the person never writes it (Tell me decides who hears).
+    // A scheduled run's agent reports with run_report (the levels, the automation's context and Tuning notes are in
+    // this hidden message), or says "nothing new" with [SILENT]; the person never writes either.
     const silentNotice: ChatMessage | null = scheduled && displayUserMessage
-      ? { id: uuidv4(), role: 'user', content: SCHEDULED_SILENT_NOTICE, timestamp: new Date().toISOString(), hidden: true }
+      ? { id: uuidv4(), role: 'user', content: this.scheduledNotice(scheduled), timestamp: new Date().toISOString(), hidden: true }
       : null
     const addedMessage: ChatMessage = {
       id: uuidv4(),
@@ -10561,12 +10579,22 @@ export class OrchestratorService extends EventEmitter {
         compaction: onCompaction,
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
-        // Usage statistics, as each runtime reports them.
+        // Usage statistics, as each runtime reports them; an automation run's turn adds it to the run in the inbox.
         usage: (usage) => {
           lastUsageAt = Date.now()
+          const model = promptMetrics?.realModelName ?? selectedModel.model
+          try {
+            this.automationRunHooks?.usage({
+              threadId: session.threadId, ...(engineRunId ? { runId: engineRunId } : {}), provider: selectedModel.llmProvider, model,
+              input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+              ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {})
+            })
+          } catch (error) {
+            logDebug('OrchestratorService', 'automation run usage could not be recorded', error, { threadId: session.threadId })
+          }
           this.lineEditStats?.recordUsage({
             timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
-            model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
+            model, input: usage.input, output: usage.output,
             cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
           })
         },
