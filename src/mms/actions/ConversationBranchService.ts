@@ -184,6 +184,9 @@ export class ConversationBranchService {
       // A switch to or from a branch that shares the thread's files (an edited prompt's) changes the conversation
       // only: no file is read, merged, restored or refused, so it can't conflict and the folder stays as it is.
       const conversationOnly = selected.files === 'shared' || branches.find((branch) => branch.id === leaving)?.files === 'shared'
+      // A switch that stopped is finished by recovery first; a newer one never goes ahead of it, or recovery would
+      // later put the older one back over it.
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       if (conversationOnly && leaving !== selected.id) {
         // No file is read or recorded: the thread's files, and the ref and snapshot that record them, stay as they are.
         // The branch being left has its conversation saved first; then the switch is recorded as pending before the
@@ -196,7 +199,7 @@ export class ConversationBranchService {
           throw error
         }
         this.journal.append({ operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: selected.id, restoreContext: Boolean(restoreContext), conversationOnly: true } })
-        this.settleConversation(branches, selected)
+        await this.settleConversation(workspacePath, branches, selected)
         if (restoreContext) await restoreContext(selected)
         this.journal.append({ operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: selected.id, conversationOnly: true } })
         return { branch: selected }
@@ -283,19 +286,25 @@ export class ConversationBranchService {
   }
 
   /**
-   * A conversation-only switch: the selected branch is active and the thread's record says so. The thread's files are
-   * the same, so the ref that holds them (`retainedRef`, moved by every turn's record), its snapshot and HEAD stay as
-   * they are; a rebuilt worktree comes back with these files. `switchedIn` named the code a branch arrived with by a
-   * file switch and no longer applies. Idempotent: recovery runs it again.
+   * A conversation-only switch: the selected branch is active and the thread's record says so. The files are the same,
+   * so the selected branch takes them as its own: its ref is moved to the commit that records the files now (the
+   * thread's `retainedRef`, which every turn's record moves), and becomes the thread's `retainedRef`. The branch left
+   * keeps its ref as it was, so an inactive branch that owns its files never has them written over by turns on
+   * another. The snapshot, HEAD and `switchedIn` (what a file switch brought along, which a later file switch merges
+   * from) stay as they are. Reads a ref, never a file. Idempotent: recovery runs it again.
    */
-  private settleConversation(branches: ConversationBranch[], selected: ConversationBranch): void {
+  private async settleConversation(workspacePath: string, branches: ConversationBranch[], selected: ConversationBranch): Promise<void> {
     for (const branch of branches) if (branch.lifecycle !== 'tombstoned') branch.lifecycle = branch.id === selected.id ? 'active' : 'inactive'
     atomicWriteJsonSync(this.path, branches)
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const metadata = manager.load()
-    if (!metadata || metadata.conversationBranchId === selected.id) return
-    const { switchedIn: _arrived, ...rest } = metadata
-    atomicWriteJsonSync(manager.workspacePath, { ...rest, conversationBranchId: selected.id, generation: (metadata.generation ?? 0) + 1 })
+    if (!metadata) return
+    const files = metadata.retainedRef ? (await tryGitAsync(workspacePath, ['rev-parse', '--verify', '-q', `${metadata.retainedRef}^{commit}`])).stdout.trim() : ''
+    if (files && metadata.retainedRef !== selected.retainedRef) await gitAsync(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, files])
+    if (metadata.conversationBranchId === selected.id && (!files || metadata.retainedRef === selected.retainedRef)) return
+    atomicWriteJsonSync(manager.workspacePath, {
+      ...metadata, conversationBranchId: selected.id, ...(files ? { retainedRef: selected.retainedRef } : {}), generation: (metadata.generation ?? 0) + 1
+    })
   }
 
   /** Restores the selected branch's conversation and records the switch as done. */
@@ -455,7 +464,7 @@ export class ConversationBranchService {
         // The files were switched before this entry was written; only the conversation side is left to restore.
         if (!branch) throw new Error('Conversation branch recovery does not match the recorded branch.')
         // A conversation-only switch may have stopped before the branch list or the thread's record named the branch.
-        if (details.conversationOnly) this.settleConversation(branches, branch)
+        if (details.conversationOnly) await this.settleConversation(workspacePath, branches, branch)
         if (details.restoreContext) await restoreContext(branch)
         this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: branch.id, recovered: true } })
       }

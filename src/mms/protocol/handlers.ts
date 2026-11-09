@@ -500,6 +500,14 @@ export function promptVersionsOf(
   return shown
 }
 
+/** Finishes a branch switch that stopped (a crash), so a new switch or edit can go ahead after it, never before. */
+async function recoverBranchSwitch(ctx: HandlerContext, threadId: string, threadDirectory: string, workspacePath: string): Promise<void> {
+  await new ConversationBranchService(threadDirectory).recoverPending(workspacePath, (branch) => {
+    const state = loadConversationState(threadDirectory, branch.id)
+    ctx.mms.orchestrator.replaceConversationState(threadId, state.messages, state.nativeContext)
+  })
+}
+
 /** Refuses a change of conversation history (a branch made or switched to) while the thread's turn or queue is busy. */
 function assertHistoryIdle(ctx: HandlerContext, threadId: string): void {
   if (ctx.mms.orchestrator.isConversationHistoryBusy(threadId)) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
@@ -3426,6 +3434,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? { presentationEnd: action.presentationMessageStart, nativeEnd: branch.contextBoundary.messageIndex, boundary: branch.contextBoundary }
         : { presentationEnd: action.presentationMessageEnd, nativeEnd: action.nativeContextBoundary.messageIndex, boundary: action.nativeContextBoundary })
       if (activate) {
+        await recoverBranchSwitch(ctx, operation.threadId, operation.threadDirectory, workspace.worktreePath)
+        operation.currentGeneration = new ThreadActionService(operation.threadDirectory).currentRevision()
         // An edited prompt: the branch is made and switched to in one step under the thread's locks, conversation only.
         const { branch, notice } = await service.edit(workspace.worktreePath, sourceBranchId, actionId, name, {
           expectedJournalRevision: operation.currentGeneration,
@@ -3449,12 +3459,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       const branchId = asString(p.conversationBranchId, 'conversationBranchId', 256)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      const loaded = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!loaded || loaded.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      // Refused at once while a turn runs (the locks would wait for it), and again under the locks below. A switch
+      // that stopped is finished first; the branch being left is read after it.
+      assertHistoryIdle(ctx, operation.threadId)
+      await recoverBranchSwitch(ctx, operation.threadId, operation.threadDirectory, loaded.worktreePath)
+      // Recovery is Mousse's own write: the generation the caller checked against moves past it.
+      operation.currentGeneration = new ThreadActionService(operation.threadDirectory).currentRevision()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load() ?? loaded
       const branches = new ConversationBranchService(operation.threadDirectory)
       const leaving = workspace.conversationBranchId ?? FIRST_BRANCH_ID
-      // Refused at once while a turn runs (the locks would wait for it), and again under the locks below.
-      assertHistoryIdle(ctx, operation.threadId)
       // A branch with no record, a removed one, or one whose conversation was never saved or can't be read is refused
       // before anything changes. The branch being left has its conversation saved by the switch itself.
       const unavailable = (message = `Conversation branch ${branchId} is not available to switch to. Nothing was changed.`) => new DomainRpcError('conversation_branch_unavailable', message, { branchId })

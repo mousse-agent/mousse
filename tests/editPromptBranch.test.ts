@@ -140,6 +140,53 @@ describe('editing a prompt through the daemon', { timeout: 60_000 }, () => {
     expect(new ThreadJournal(directory).latestByOperation().get('stopped-switch')?.state).toBe('completed')
   })
 
+  it('turns on an edited version never write over the files an inactive branch owns', async () => {
+    const { cwd, first, record, call } = await twoTurns()
+    // B owns its files: a branch after the first turn, switched to by a file switch, with a turn of its own.
+    const { branch: b } = await call('actions.fork', { actionId: first.id }) as { branch: ConversationBranch }
+    await call('actions.activateBranch', { conversationBranchId: b.id })
+    expect(existsSync(join(cwd, 'second.txt'))).toBe(false)
+    const own = await record('b1', 2, 'b.txt', b.id)
+    // Edit B's prompt and run the edited version, which writes a file of its own.
+    const { branch: e } = await call('actions.fork', { actionId: own.id, at: 'start', activate: true }) as { branch: ConversationBranch }
+    await record('e1', 2, 'edited.txt', e.id)
+    // Back on Main (conversation only: the files stay), then a file switch to B brings back B's own files.
+    await call('actions.activateBranch', { conversationBranchId: 'main' })
+    expect(existsSync(join(cwd, 'edited.txt'))).toBe(true)
+    await call('actions.activateBranch', { conversationBranchId: b.id })
+    expect(existsSync(join(cwd, 'b.txt'))).toBe(true)
+    expect(existsSync(join(cwd, 'edited.txt'))).toBe(false)
+  })
+
+  it('keeps edits a file switch brought along through a conversation-only round trip', async () => {
+    const { thread, cwd, first, second, call } = await twoTurns()
+    const { branch: e } = await call('actions.fork', { actionId: second.id, at: 'start', activate: true }) as { branch: ConversationBranch }
+    await call('actions.activateBranch', { conversationBranchId: 'main' })
+    const { branch: b } = await call('actions.fork', { actionId: first.id }) as { branch: ConversationBranch }
+    writeFileSync(join(cwd, 'notes.txt'), 'my notes\n')
+    await call('actions.activateBranch', { conversationBranchId: b.id })
+    expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('my notes\n')
+    // B → E → B changes the conversation only; the notes still travel with the next file switch.
+    await call('actions.activateBranch', { conversationBranchId: e.id })
+    await call('actions.activateBranch', { conversationBranchId: b.id })
+    await call('actions.activateBranch', { conversationBranchId: 'main' })
+    expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('my notes\n')
+    expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!.conversationBranchId).toBe('main')
+  })
+
+  it('finishes a switch that stopped before a newer one goes ahead, so recovery never puts it back over the newer one', async () => {
+    const { thread, first, second, call } = await twoTurns()
+    const directory = mms.threads.getThreadDir(thread.id)
+    const { branch: a } = await call('actions.fork', { actionId: second.id, at: 'start' }) as { branch: ConversationBranch }
+    const { branch: b } = await call('actions.fork', { actionId: first.id, at: 'start' }) as { branch: ConversationBranch }
+    new ThreadJournal(directory).append({ operationId: 'stopped-a', operationType: 'conversation-activate', state: 'context_pending', details: { branchId: a.id, restoreContext: true, conversationOnly: true } })
+    await call('actions.activateBranch', { conversationBranchId: b.id })
+    expect(new ThreadJournal(directory).latestByOperation().get('stopped-a')?.state).toBe('completed')
+    expect(new ThreadWorkspaceManager(directory).load()!.conversationBranchId).toBe(b.id)
+    await new ConversationBranchService(directory).recoverPending(new ThreadWorkspaceManager(directory).load()!.worktreePath, () => undefined)
+    expect(new ThreadWorkspaceManager(directory).load()!.conversationBranchId).toBe(b.id)
+  })
+
   it('refuses to make or switch a branch while a turn or queued work is busy, before anything changes', async () => {
     const { second, call } = await twoTurns()
     const { branch } = await call('actions.fork', { actionId: second.id, at: 'start' }) as { branch: ConversationBranch }
