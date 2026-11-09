@@ -45,6 +45,70 @@ describe('MMS dev restart activity probe', () => {
   })
 })
 
+describe('MMS dev restart probe against a daemon with several profiles', () => {
+  /** A daemon that refuses personal methods until the connection is bound, like one with two profiles. */
+  async function withProfilesDaemon(activeIn: Record<string, string | undefined>, run: (home: string, requests: string[]) => Promise<void>) {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-dev-probe-profiles-'))
+    const endpoint = resolveLocalEndpoint(home).path
+    const requests: string[] = []
+    const server = createServer((socket) => {
+      const decoder = new FrameDecoder()
+      let bound: string | undefined
+      socket.on('data', (chunk) => {
+        decoder.push(chunk)
+        for (const frame of decoder.shiftAll() as Array<{ kind: string; id?: string; method?: string; params?: { profile?: string; threadId?: string }; requestedCapabilities?: string[] }>) {
+          if (frame.kind === 'hello') {
+            const capabilities = frame.requestedCapabilities?.includes('profiles-v1') ? ['profiles-v1'] : []
+            socket.write(encodeFrame({ kind: 'hello_ok', protocolVersion: DAEMON_PROTOCOL_VERSION, instanceId: 'profiles-daemon', capabilities, globalSequence: 0 }))
+            continue
+          }
+          if (frame.kind !== 'req') continue
+          requests.push(bound ? `${bound}:${frame.method}` : frame.method!)
+          const reply = (result: unknown) => socket.write(encodeFrame({ kind: 'res', id: frame.id, ok: true, result }))
+          if (frame.method === 'profiles.list') {
+            reply({ defaultProfileId: 'p1', profiles: [{ id: 'p1', status: 'active' }, { id: 'p2', status: 'active' }, { id: 'p3', status: 'archived' }] })
+          } else if (frame.method === 'profiles.bind') {
+            bound = frame.params!.profile
+            reply({ profile: { id: bound }, epoch: 1 })
+          } else if (!bound) {
+            socket.write(encodeFrame({ kind: 'res', id: frame.id, ok: false, error: { code: 'upgrade_required', message: 'Multiple profiles exist; upgrade the client and bind a profile' } }))
+          } else if (frame.method === 'threads.list') {
+            reply({ threads: [{ id: `${bound}-thread` }] })
+          } else {
+            reply({ active: activeIn[bound] === frame.params!.threadId })
+          }
+        }
+      })
+      socket.on('error', () => {})
+    })
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve))
+    try {
+      writeFileSync(join(home, 'mms.owner.json'), JSON.stringify({ token: 'fixture-token', endpoint, protocolVersion: 1 }))
+      await run(home, requests)
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+      rmSync(home, { recursive: true, force: true })
+    }
+  }
+
+  it('checks every active profile and reports idle', async () => {
+    await withProfilesDaemon({}, async (home, requests) => {
+      expect(await probeMmsActiveTurn(home)).toEqual({ active: false })
+      expect(requests).toEqual([
+        'profiles.list',
+        'profiles.bind', 'p1:threads.list', 'p1:orchestrator.isTurnActive',
+        'p1:profiles.bind', 'p2:threads.list', 'p2:orchestrator.isTurnActive'
+      ])
+    })
+  })
+
+  it('finds a turn running in a profile other than the default', async () => {
+    await withProfilesDaemon({ p2: 'p2-thread' }, async (home) => {
+      expect(await probeMmsActiveTurn(home)).toEqual({ active: true, threadId: 'p2-thread' })
+    })
+  })
+})
+
 describe('MMS dev restart probe against a daemon from before a protocol bump', () => {
   it('speaks the version the running daemon names, so the rebuilt one can replace it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-dev-probe-old-'))
