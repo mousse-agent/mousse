@@ -470,17 +470,24 @@ function optionValues(rest: readonly string[], flag: string): string[] {
 function fetchEffect(rest: readonly string[]): Effect {
   const withValue = new Set(['--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--refmap', '-j', '--jobs', '--negotiation-tip', '-o', '--server-option', '--filter', '--upload-pack', '--recurse-submodules-default', '--submodule-prefix'])
   const [, ...refspecs] = positionals(rest, withValue)
+  const refmaps = optionValues(rest, '--refmap')
   // An empty `--refmap=` narrows a fetch: the remote's configured refspecs then update no tracking ref next to the
   // refspecs given. Any other refmap names refs the arguments do not list.
   const widening = has(rest, '--prune', '-p', '--prune-tags', '-P', '--all', '--multiple', '--tags', '-t', '--upload-pack', '--update-head-ok', '-u') ||
-    optionValues(rest, '--refmap').some((value) => value !== '')
+    refmaps.some((value) => value !== '')
+  // Without one, fetching a ref from a configured remote also moves whatever tracking ref the remote's own fetch
+  // refspecs map it to (Git's opportunistic update), and those are in the config, not the arguments.
+  const noRefmap = !refmaps.includes('')
   const refs: string[] = []
   let unlisted = widening || !has(rest, '--no-tags', '-n') || refspecs.length === 0
   for (const refspec of refspecs) {
     const spec = refspec.replace(/^\+/, '')
     const colon = spec.indexOf(':')
+    const source = colon < 0 ? spec : spec.slice(0, colon)
+    // A bare object name writes no ref (and with `--no-write-fetch-head`, not even FETCH_HEAD), and no configured
+    // refspec maps it anywhere.
+    if (!isObjectName(source) && noRefmap) unlisted = true
     if (colon < 0) {
-      // A bare object name writes no ref (and with `--no-write-fetch-head`, not even FETCH_HEAD).
       if (!isObjectName(spec)) unlisted = true
       continue
     }

@@ -85,7 +85,7 @@ describe('Mousse may change what it owns', () => {
   })
 
   it('allows a fetch only into owned refs, without tags and with every refspec named', () => {
-    const into = ['fetch', '--no-tags', '--no-write-fetch-head', '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head']
+    const into = ['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head']
     expect(decide({ args: into })).toMatchObject({ access: 'owned', allowed: true })
     // A commit by name only downloads objects: no ref changes.
     expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', 'a'.repeat(40)] })).toMatchObject({ access: 'read', allowed: true })
@@ -94,6 +94,18 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['fetch', '--no-tags', '--prune', 'origin', 'x:refs/mousse/x'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['fetch', '--progress'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['fetch', '--progress'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
+  })
+
+  it('refuses an own fetch of a ref without an empty refmap, since the remote’s configured refspecs could move a tracking ref', () => {
+    // `remote.origin.fetch` maps refs/heads/* (or a refs/pull/* mapping someone added) onto tracking refs, which
+    // Git updates next to the refspec given. The arguments cannot list them.
+    expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', '--', 'origin', '+refs/heads/main:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', '--', 'origin', '+refs/pull/7/head:refs/mousse/pull/7/head'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', '--', 'origin', '+refs/heads/main:refs/mousse/x'] })).toMatchObject({ access: 'owned', allowed: true })
+    // A commit by name maps to nothing, so it needs none.
+    expect(decide({ args: ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', `${'a'.repeat(40)}:refs/mousse/x`] })).toMatchObject({ access: 'owned', allowed: true })
+    // What the person asks for is theirs to have.
+    expect(decide({ args: ['fetch', '--no-tags', 'origin', '+refs/heads/main:refs/mousse/x'], userRequested: USER })).toMatchObject({ allowed: true })
   })
 
   it('treats an empty refmap as narrowing a fetch, and any other refmap as widening it', () => {

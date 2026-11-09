@@ -1176,12 +1176,13 @@ export class GitHubCodeHost implements CodeHost {
     const source = `refs/pull/${pullRequest.number}/head`
     const destination = `refs/mousse/pull/${pullRequest.number}/head`
     try {
-      // The head is read through the base repository, into a ref of Mousse's own: no remote is added, no branch is
-      // touched and the working tree stays as it is (FETCH_HEAD too). Objects are checked on the way in, submodules are
+      // The head is read through the base repository, into a ref of Mousse's own: no remote is added, no branch or
+      // tracking ref is touched (an empty refmap keeps a configured `refs/pull/*` mapping from moving one) and the
+      // working tree stays as it is (FETCH_HEAD too). Objects are checked on the way in, submodules are
       // not followed, a credential prompt cannot wait for a person, and a large pull request gets five minutes.
       await this.runExecutable(
         'git',
-        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
+        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', '--', remote, `+${source}:${destination}`],
         { cwd, env: { GIT_TERMINAL_PROMPT: '0' }, timeoutMs: FETCH_TIMEOUT_MS }
       )
     } catch (error) {
