@@ -362,6 +362,32 @@ describe('a message sent while the context compacts', () => {
     expect(existsSync(getQueueHoldPath(dir))).toBe(false)
   }, 30_000)
 
+  it('does not take a result that ends right after a stop was asked for, or after its hold was lifted elsewhere, before any renewal', async () => {
+    for (const ending of ['stop asked', 'hold lifted'] as const) {
+      for (const runtimeCompacted of [true, false]) {
+        const { orch, thread, harness, engine, store } = await setup()
+        const before = longThread(orch, thread.id)
+        const finish = controlled(harness as never)
+        const forget = vi.fn()
+        ;(harness as unknown as { forgetConversation: typeof forget }).forgetConversation = forget
+        // No renewal runs in between: the check happens as the result is taken.
+        ;(orch as unknown as { queueHoldRenewMs: number }).queueHoldRenewMs = 60_000
+        const compaction = compactNow(orch, engine, thread.id)
+        await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+        const dir = store.getThreadDir(thread.id)
+        if (ending === 'stop asked') expect(requestQueueHoldStop(dir, readQueueHold(dir)!.id)).toBe(true)
+        else rmSync(getQueueHoldPath(dir))
+        finish(runtimeCompacted)
+        expect(await compaction).toBe('stopped')
+        expect(lastRow(orch, thread.id)).toMatchObject({ content: 'Compaction stopped · full history kept', compaction: { kept: 'stopped' } })
+        expect(fullHistory(orch, thread.id, before)).toBe(true)
+        // The runtime's compacted session is dropped: the next turn starts a new one with the full history.
+        expect(forget.mock.calls).toEqual(runtimeCompacted ? [[{ threadId: thread.id, instanceId: 'acp:echo' }]] : [])
+        expect(existsSync(getQueueHoldPath(dir))).toBe(false)
+      }
+    }
+  }, 60_000)
+
   it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
     const { orch, thread, harness, engine, prompts, store } = await setup()
     longThread(orch, thread.id)

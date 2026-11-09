@@ -298,6 +298,7 @@ import {
   renewQueueHold,
   requestQueueHoldStop,
   setQueueHold,
+  takeQueueHold,
   type QueueHold
 } from '../queue/queueHold'
 import {
@@ -12167,6 +12168,14 @@ export class OrchestratorService extends EventEmitter {
         finish(COMPACTION_STOPPED_TEXT, 'stopped')
         return 'stopped'
       }
+      // The result stands only while this compaction still owns its hold and nobody asked it to stop (a Stop here,
+      // Send now in another process), checked under the queue lock just before it is taken. A runtime session it
+      // compacted is then dropped: the next turn starts a new one with the full history.
+      if (!this.takeCompactionResult(threadId, threadDir, note.id, stop)) {
+        if (native && instanceId) this.forgetNativeCompaction(threadId, instanceId)
+        finish(COMPACTION_STOPPED_TEXT, 'stopped')
+        return 'stopped'
+      }
       const outcome = native ? 'native' as const : this.sessionAls.run(session, () => {
         const compacted = compactNativeContext(this.nativeContext, undefined, focus)
         if (compacted === this.nativeContext) return 'unchanged' as const
@@ -12238,6 +12247,38 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       // A missed renewal is retried on the next beat; the hold stays well within its lifetime meanwhile.
       logDebug('OrchestratorService', 'the queue hold of a compaction could not be renewed', error, { threadId })
+    }
+  }
+
+  /**
+   * Whether a finished compaction's result may be taken: it was not stopped, and its saved hold is still its own
+   * with no stop asked for. The hold is then marked taken, so a stop asked for later comes too late instead of being
+   * lost. A stop found here ends the compaction as a Stop would.
+   */
+  private takeCompactionResult(threadId: string, threadDir: string | null | undefined, holdId: string, stop: AbortController): boolean {
+    if (stop.signal.aborted) return false
+    if (!threadDir) return true
+    let taken: ReturnType<typeof takeQueueHold>
+    try {
+      taken = takeQueueHold(threadDir, holdId, this.queueHoldClock())
+    } catch (error) {
+      console.warn('[orchestrator] the queue hold of a compaction could not be checked; its result is not taken', { threadId, error: error instanceof Error ? error.message : String(error) })
+      taken = 'gone'
+    }
+    if (taken !== 'taken') {
+      if (taken === 'gone') console.warn('[orchestrator] the queue hold of a compaction was lifted elsewhere; its result is not taken', { threadId })
+      if (!stop.signal.aborted) stop.abort()
+      return false
+    }
+    return !stop.signal.aborted
+  }
+
+  /** A runtime's compaction whose result was not taken: its session is dropped, so the next turn has the full history. */
+  private forgetNativeCompaction(threadId: string, instanceId: string): void {
+    try {
+      this.harness.forgetConversation({ threadId, instanceId })
+    } catch (error) {
+      console.warn('[orchestrator] the runtime session of a compaction not taken could not be dropped', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 

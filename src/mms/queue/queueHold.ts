@@ -9,7 +9,9 @@
  * (its process hung, or the pid now belongs to another program), holds nothing; the next reader removes it.
  *
  * Another process asks the owner to stop the compaction through the hold (`stopRequested`, Send now on a
- * held message there); the owner reads it when it renews the hold and stops as a Stop would.
+ * held message there); the owner reads it when it renews the hold and stops as a Stop would. Before the owner
+ * takes the compaction's result it checks the hold once more and marks it `taken`, under the queue lock: a request
+ * made before that stops the compaction, one made after is too late (the compaction had ended).
  */
 
 import { existsSync, readFileSync, rmSync } from 'fs'
@@ -37,6 +39,8 @@ export interface QueueHold {
   ownerInstance: string
   /** Another process asked the owner to stop the compaction (Send now on a held message). */
   stopRequested?: true
+  /** The owner took the compaction's result: the hold lifts once it is saved, and a stop comes too late. */
+  taken?: true
 }
 
 export function getQueueHoldPath(threadDir: string): string {
@@ -49,6 +53,7 @@ function isQueueHold(value: unknown): value is QueueHold {
   return hold.kind === 'compaction' && typeof hold.id === 'string' && typeof hold.since === 'string' &&
     (hold.renewedAt === undefined || typeof hold.renewedAt === 'string') &&
     (hold.stopRequested === undefined || hold.stopRequested === true) &&
+    (hold.taken === undefined || hold.taken === true) &&
     typeof hold.ownerPid === 'number' && typeof hold.ownerInstance === 'string'
 }
 
@@ -96,9 +101,24 @@ export function renewQueueHold(threadDir: string, id: string, now = Date.now()):
 export function requestQueueHoldStop(threadDir: string, id: string): boolean {
   return withQueueMutationLock(threadDir, () => {
     const hold = readQueueHold(threadDir)
-    if (!hold || hold.id !== id) return false
+    if (!hold || hold.id !== id || hold.taken) return false
     if (!hold.stopRequested) atomicWriteJsonSync(getQueueHoldPath(threadDir), { ...hold, stopRequested: true })
     return true
+  })
+}
+
+/**
+ * The owner of the hold `id` takes its compaction's result, under the queue lock: `taken` when the hold is still
+ * its own and nobody asked it to stop (the hold is marked so, and renewed); `stop_requested` when another process
+ * asked it to stop; `gone` when the hold was lifted (found stale) or replaced. Only `taken` lets the result stand.
+ */
+export function takeQueueHold(threadDir: string, id: string, now = Date.now()): 'taken' | 'stop_requested' | 'gone' {
+  return withQueueMutationLock(threadDir, () => {
+    const hold = readQueueHold(threadDir)
+    if (!hold || hold.id !== id || hold.ownerInstance !== PROCESS_INSTANCE_ID) return 'gone'
+    if (hold.stopRequested) return 'stop_requested'
+    atomicWriteJsonSync(getQueueHoldPath(threadDir), { ...hold, renewedAt: new Date(now).toISOString(), taken: true })
+    return 'taken'
   })
 }
 

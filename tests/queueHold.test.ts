@@ -15,6 +15,7 @@ import {
   renewQueueHold,
   requestQueueHoldStop,
   setQueueHold,
+  takeQueueHold,
   type QueueHold
 } from '../src/mms/queue/queueHold'
 
@@ -85,6 +86,25 @@ describe('a queue hold this process set', () => {
     expect(renewQueueHold(dir, 'row', t0 + 10_000)).toMatchObject({ stopRequested: true })
     rmSync(getQueueHoldPath(dir))
     expect(requestQueueHoldStop(dir, 'row')).toBe(false)
+  })
+
+  it('lets the result be taken only while the hold is its own and no stop was asked for; a later stop comes too late', () => {
+    const dir = threadDir()
+    setQueueHold(dir, { kind: 'compaction', id: 'row' }, t0)
+    expect(takeQueueHold(dir, 'other', t0)).toBe('gone')
+    expect(takeQueueHold(dir, 'row', t0 + 1_000)).toBe('taken')
+    expect(readQueueHold(dir)).toMatchObject({ taken: true, renewedAt: new Date(t0 + 1_000).toISOString() })
+    expect(requestQueueHoldStop(dir, 'row')).toBe(false)
+    expect(readQueueHold(dir)!.stopRequested).toBeUndefined()
+
+    setQueueHold(dir, { kind: 'compaction', id: 'next' }, t0)
+    expect(requestQueueHoldStop(dir, 'next')).toBe(true)
+    expect(takeQueueHold(dir, 'next', t0)).toBe('stop_requested')
+    rmSync(getQueueHoldPath(dir))
+    expect(takeQueueHold(dir, 'next', t0)).toBe('gone')
+    // Another process's hold is never this one's to take.
+    writeFileSync(getQueueHoldPath(dir), JSON.stringify(peerHold(t0)))
+    expect(takeQueueHold(dir, 'row', t0)).toBe('gone')
   })
 
   it('holds while this process says it still runs it, however long ago it was renewed', () => {
