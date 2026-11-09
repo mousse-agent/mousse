@@ -10,7 +10,8 @@ import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { threadPlacement } from '../src/mms/workspace/threadPlacement'
 import { PublishService } from '../src/mms/actions/PublishService'
-import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
+import { describeRecovery, liveCheckpointTest, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
+import { getExecutionLeasePath, releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { abortKeptNotice, keptCopyRestoreCommand } from '../src/mms/actions/keptCopies'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
@@ -225,6 +226,66 @@ describe('what a thread is waiting on', () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     await leftPublishMerge(f.thread)
     expect(await status()).toEqual(expect.objectContaining({ kind: 'merge', folder: f.repo, operationId: 'old-publish', operationType: 'publish' }))
+  })
+
+  describe('a turn still recording its end-of-turn checkpoint', () => {
+    /** What `workspace.getStatus` reads: verify and describe, both told which records a live writer is finishing. */
+    const liveStatus = async () => {
+      const inFlight = liveCheckpointTest(f.thread)
+      return describeRecovery(f.thread, await new ThreadWorkspaceManager(f.thread).verify(undefined, { inFlight }), { inFlight })
+    }
+    const checkpointing = (state: 'prepared' | 'git_applied' | 'recovery_required', operationType = 'action-checkpoint') =>
+      new ThreadJournal(f.thread).append({ operationId: 'turn-end', operationType, state, ...(state === 'recovery_required' ? { details: { error: 'Error: snapshot failed' } } : {}) })
+
+    it('is not a pause while its turn holds the thread lease, in either in-flight state', async () => {
+      await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+      const lease = tryAcquireExecutionLease(f.thread, { source: 'test-turn' })!
+      try {
+        checkpointing('prepared')
+        expect(await liveStatus()).toBeUndefined()
+        expect((await new ThreadWorkspaceManager(f.thread).verify(undefined, { inFlight: liveCheckpointTest(f.thread) })).lifecycle).toBe('ready')
+        checkpointing('git_applied', 'change-checkpoint')
+        expect(await liveStatus()).toBeUndefined()
+        // Turn admission and recovery never pass the test: for them it is still waiting.
+        expect(new ThreadWorkspaceManager(f.thread).hasPendingOperation()).toBe(true)
+        expect(await status()).toMatchObject({ kind: 'paused', operationId: 'turn-end' })
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+      // The lease is free and the record never finished: a leftover.
+      expect(await liveStatus()).toEqual({ kind: 'paused', reason: 'The change-checkpoint operation did not finish.', operationId: 'turn-end', operationType: 'change-checkpoint' })
+    })
+
+    it('is a pause when the lease was left by an earlier instance of the daemon (a crash or a restart)', async () => {
+      await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+      const at = new Date().toISOString()
+      writeFileSync(getExecutionLeasePath(f.thread), JSON.stringify({ pid: process.pid, token: 'before-restart', processInstanceId: 'an-earlier-instance', acquiredAt: at, heartbeatAt: at }))
+      checkpointing('prepared')
+      expect(await liveStatus()).toEqual({ kind: 'paused', reason: 'The action-checkpoint operation did not finish.', operationId: 'turn-end', operationType: 'action-checkpoint' })
+    })
+
+    it('is a pause when it failed, even while the lease is held', async () => {
+      await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+      const lease = tryAcquireExecutionLease(f.thread, { source: 'test-turn' })!
+      try {
+        checkpointing('prepared')
+        checkpointing('recovery_required')
+        expect(await liveStatus()).toEqual({ kind: 'paused', reason: 'snapshot failed', operationId: 'turn-end', operationType: 'action-checkpoint' })
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+    })
+
+    it('never hides another operation that waits, while the lease is held', async () => {
+      await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+      const lease = tryAcquireExecutionLease(f.thread, { source: 'test-turn' })!
+      try {
+        new ThreadJournal(f.thread).append({ operationId: 'revert-1', operationType: 'code-revert', state: 'prepared' })
+        expect(await liveStatus()).toMatchObject({ kind: 'paused', operationId: 'revert-1' })
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+    })
   })
 
   it('reports a Publish that did not finish, without pausing the thread', async () => {
@@ -497,6 +558,24 @@ describe('through the daemon', () => {
         await d.mms.stop()
       }
     })
+  })
+
+  it('workspace.getStatus reports no pause for a checkpoint its live turn is still recording, and a pause once nothing holds it', async () => {
+    const d = await daemonThread()
+    try {
+      const lease = tryAcquireExecutionLease(d.directory, { source: 'test-turn' })!
+      new ThreadJournal(d.directory).append({ operationId: 'turn-end', operationType: 'action-checkpoint', state: 'prepared' })
+      try {
+        const live = await d.call('workspace.getStatus') as { recovery?: unknown; metadata?: { lifecycle?: string } }
+        expect(live.recovery).toBeUndefined()
+        expect(live.metadata?.lifecycle).toBe('ready')
+      } finally {
+        releaseExecutionLeaseHandle(lease)
+      }
+      expect(await d.recovery()).toMatchObject({ kind: 'paused', operationId: 'turn-end', operationType: 'action-checkpoint' })
+    } finally {
+      await d.mms.stop()
+    }
   })
 
   it('operations.recover refuses with what stopped recovery, not an internal error', async () => {

@@ -104,7 +104,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
+import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -3247,12 +3247,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
-      const metadata = stored && lookup.projectPath ? await manager.verify(stored) : stored
+      // A turn still recording its end-of-turn checkpoint under its live lease is not waiting on recovery.
+      const inFlight = liveCheckpointTest(lookup.threadDirectory)
+      const metadata = stored && lookup.projectPath ? await manager.verify(stored, { inFlight }) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
-      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath)
+      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
