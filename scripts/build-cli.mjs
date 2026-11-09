@@ -47,6 +47,23 @@ export function getCursorHostBuildOptions(projectRoot = root) {
   }
 }
 
+/**
+ * The thread database worker (`docs/thread-storage.md`), one self-contained file beside each bundle that starts it:
+ * `out/cli/threadDbWorker.js` for the daemon run from the CLI bundle, `out/main/threadDbWorker.js` for the one run from
+ * the app's. It imports Node built-ins only, so it loads the same from a packaged app's unpacked files.
+ */
+export function getThreadDbWorkerBuildOptions(projectRoot = root, outDir = 'out/cli') {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/mms/data/threadDb/threadDbWorkerMain.ts')],
+    outfile: resolve(projectRoot, outDir, 'threadDbWorker.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: false
+  }
+}
+
 /** The ChatGPT token helper on its own (`out/cli/chatgpt-token.js`): Node built-ins only. */
 export function getChatgptTokenBuildOptions(projectRoot = root) {
   return {
@@ -111,6 +128,8 @@ export async function buildCli(opts = {}) {
     await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token', reuse })
     await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy', reuse })
     await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor', reuse })
+    await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'thread-db-worker-cli', reuse })
+    await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'thread-db-worker-main', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -140,6 +159,8 @@ export async function buildCli(opts = {}) {
   await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token' })
   await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy' })
   await cachedBuild(getBotSupervisorBuildOptions(root), { projectRoot: root, name: 'bot-supervisor' })
+  await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/cli'), { projectRoot: root, name: 'thread-db-worker-cli' })
+  await cachedBuild(getThreadDbWorkerBuildOptions(root, 'out/main'), { projectRoot: root, name: 'thread-db-worker-main' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {
