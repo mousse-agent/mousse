@@ -13,6 +13,8 @@ import { KeepMounted } from './components/KeepMounted'
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { AutomationsPage } from './components/AutomationsPage'
+import { RunStrip } from './components/automations/inbox/RunStrip'
+import { useInboxShowsThread } from './components/automations/inbox/inboxStore'
 import { NavigationRail } from './components/NavigationRail'
 import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
@@ -86,12 +88,18 @@ export default function App() {
   const profileReady = useAppStore((s) => s.profileReady)
   const overlayOpen = useAppStore((s) => s.settingsOpen)
   const railPageOpen = useAppStore((s) => s.scheduledOpen || s.usageOpen)
+  const automationsOpen = useAppStore((s) => s.scheduledOpen)
+  // The Automations page shows a run's thread: the workspace's conversation (and its panel) beside the Runs list,
+  // which takes the threads sidebar's place.
+  const inboxThread = useInboxShowsThread() && automationsOpen
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
   // fades out, inert, then the new one fades in, in step with the sidebar lists (sidebar-view-motion.css).
   const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
+  // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
+  const layoutMode = inboxThread ? 'projects' : workspaceMode
   useEffect(() => {
     if (!profileReady) return
     useChatsStore.getState().activate(profileId)
@@ -492,7 +500,7 @@ export default function App() {
         {profileReady && usageOpen && <div className="usage-rail-page">
           <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />
         </div>}
-        <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
+        <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} data-inbox-thread={inboxThread || undefined} style={{ display: railPageOpen && !inboxThread ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
@@ -502,7 +510,7 @@ export default function App() {
         {/* Profile-scoped panels need the trusted binding before their mount effects run. */}
         {profileReady && <>
           <SlidingThreadsPane
-            open={threadsSidebarOpen}
+            open={threadsSidebarOpen && !inboxThread}
             width={threadsSidebarWidth}
             paneRef={threadsPaneRef}
             resizing={resizing === 'threads'}
@@ -523,7 +531,7 @@ export default function App() {
             <ThreadsSidebar />
           </SlidingThreadsPane>
 
-        {!threadsSidebarOpen && (
+        {!threadsSidebarOpen && !inboxThread && (
           <>
             <div
               className="threads-sidebar-edge-trigger"
@@ -547,9 +555,10 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={workspaceMode === 'chats' ? { display: 'none' } : undefined}
+          style={layoutMode === 'chats' ? { display: 'none' } : undefined}
           inert={workspaceSwap === 'out' || undefined}
         >
+          {inboxThread && <RunStrip />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
@@ -561,13 +570,13 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {workspaceMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
+        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <ChatWorkspace key={profileId} />}
         </KeepMounted>}
 
-        {mainAreaOpen && workspaceMode === 'projects' && (
+        {mainAreaOpen && layoutMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
             inert={workspaceSwap === 'out' || undefined}
@@ -584,9 +593,9 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && workspaceMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
-          // Beside it: the threads sidebar and its divider when open, and the 1px divider before it.
-          style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen ? threadsSidebarWidth + 1 : 0) + 1)}>
+        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
+          // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
+          style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
           <MainViewPanel />
         </KeepMounted>

@@ -1,4 +1,5 @@
 import type { AttentionAnswer, AutomationIndex, AutomationMoveResult } from '../../shared/automations'
+import type { AutomationInbox, InboxCounts, TuningNote } from '../../shared/automationInbox'
 import type { PlatformRequestApi } from '../../shared/platform'
 import type { ScheduledJob, QuestionAnswerOutcome } from '../../shared/types'
 
@@ -32,6 +33,18 @@ export interface AutomationsClient {
   setWho(draftId: string, who: AutomationWhoPick): Promise<void>
   /** The person's Who for the next drafts this manager writes (`automations.drafts.nextWho`). */
   nextWho(botId: string | undefined, who: AutomationWhoPick): Promise<void>
+  /** The inbox: runs, the Needs you queue, Tuning notes and this month's usage (`automations.inbox.list`). */
+  inbox(): Promise<AutomationInbox>
+  /** Unresolved Needs you items assigned to the person, by project (`automations.inbox.counts`). */
+  counts(): Promise<InboxCounts>
+  /** Resolve every open item of a run (`automations.inbox.resolve`). */
+  resolve(runId: string): Promise<void>
+  /** Undo the last Resolve (`automations.inbox.undo`); the run it reopened. */
+  undo(): Promise<string | undefined>
+  /** Too noisy / Should have told me (`automations.inbox.calibrate`); undefined when it was taken back. */
+  calibrate(runId: string, kind: TuningNote['kind']): Promise<TuningNote | undefined>
+  /** Remove a Tuning note (`automations.tuning.remove`). */
+  removeTuning(noteId: string): Promise<void>
 }
 
 /** Who does it, as the person picks it: the default agent or a bot. */
@@ -53,7 +66,13 @@ export function createAutomationsClient(transport: PlatformRequestApi): Automati
     answered: async (draftId) => { await transport.request('automations.drafts.answered', { draftId }) },
     managerThread: async (projectId) => (await transport.request<{ threadId: string }>('automations.manager.thread', projectId ? { projectId } : {})).threadId,
     setWho: async (draftId, who) => { await transport.request('automations.drafts.setWho', { draftId, who }) },
-    nextWho: async (botId, who) => { await transport.request('automations.drafts.nextWho', { ...(botId ? { botId } : {}), who }) }
+    nextWho: async (botId, who) => { await transport.request('automations.drafts.nextWho', { ...(botId ? { botId } : {}), who }) },
+    inbox: () => transport.request<AutomationInbox>('automations.inbox.list', {}),
+    counts: () => transport.request<InboxCounts>('automations.inbox.counts', {}),
+    resolve: async (runId) => { await transport.request('automations.inbox.resolve', { runId }) },
+    undo: async () => (await transport.request<{ runId?: string }>('automations.inbox.undo', {})).runId,
+    calibrate: async (runId, kind) => (await transport.request<{ note?: TuningNote }>('automations.inbox.calibrate', { runId, kind })).note,
+    removeTuning: async (noteId) => { await transport.request('automations.tuning.remove', { noteId }) }
   }
 }
 

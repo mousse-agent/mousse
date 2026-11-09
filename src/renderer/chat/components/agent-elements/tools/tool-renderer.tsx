@@ -94,23 +94,26 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <NoteTool part={part} />;
   }
 
-  // MCP tools
+  // Custom renderers: user-defined tools, and the host's own cards for its app tools (keyed by the bare tool name,
+  // whatever server prefix the runtime gave it, e.g. `mcp__mousse__automation_draft_save`).
   const mcpInfo = parseMcpToolType(partType);
+  const bareName = (mcpInfo?.toolName ?? (partType.startsWith("tool-") ? partType.slice(5) : partType)).split("__").pop() ?? "";
+  const CustomRenderer = toolRenderers
+    ? (mcpInfo?.serverName === "user-tools" ? toolRenderers[mcpInfo.toolName] : undefined) ?? (Object.prototype.hasOwnProperty.call(toolRenderers, bareName) ? toolRenderers[bareName] : undefined)
+    : undefined;
+  if (CustomRenderer) {
+    return (
+      <CustomRenderer
+        name={bareName}
+        input={(part.input ?? {}) as Record<string, unknown>}
+        output={part.output ? unwrapMcpOutput(part.output) : undefined}
+        status={deriveToolStatus(part, chatStatus)}
+      />
+    );
+  }
+
+  // MCP tools
   if (mcpInfo) {
-    // Custom renderer for user-defined tools
-    if (toolRenderers && mcpInfo.serverName === "user-tools") {
-      const CustomRenderer = toolRenderers[mcpInfo.toolName];
-      if (CustomRenderer) {
-        return (
-          <CustomRenderer
-            name={mcpInfo.toolName}
-            input={(part.input ?? {}) as Record<string, unknown>}
-            output={part.output ? unwrapMcpOutput(part.output) : undefined}
-            status={deriveToolStatus(part, chatStatus)}
-          />
-        );
-      }
-    }
     return <McpTool part={part} mcpInfo={mcpInfo} chatStatus={chatStatus} />;
   }
 
