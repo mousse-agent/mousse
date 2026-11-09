@@ -8,7 +8,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SubscriptionUsageView } from '../../src/renderer/components/SubscriptionUsagePage'
-import { soonestCredit } from '../../src/renderer/components/UsageResetAction'
+import { resetScope, soonestCredit } from '../../src/renderer/components/UsageResetAction'
 import type { ProviderUsage, UseLimitResetResponse } from '../../src/shared/providerAuth'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -158,6 +158,15 @@ describe('the inline row', () => {
   it('without credit details, Codex picks the credit', () => {
     expect(soonestCredit({ available: 2 })).toBeUndefined()
     expect(soonestCredit({ available: 2, credits: [{ id: 'a' }, { id: 'b', expiresAt: '2026-11-10T00:00:00Z' }] })?.id).toBe('b')
+  })
+})
+
+describe('the question names what is reset', () => {
+  it("all Codex limits, one window's limit, or all limits when the type is not given", () => {
+    expect(resetScope({ available: 1, credits: [{ type: 'codexRateLimits' }] })).toBe('all Codex limits')
+    expect(resetScope({ available: 1, credits: [{ type: 'five_hour' }] })).toBe('the 5-hour limit')
+    expect(resetScope({ available: 1, credits: [{ type: 'weekly' }] })).toBe('the Weekly limit')
+    expect(resetScope({ available: 1 })).toBe('all limits')
   })
 })
 

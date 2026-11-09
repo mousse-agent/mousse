@@ -17,11 +17,15 @@ export function soonestCredit(resets: UsageResets | undefined): NonNullable<Usag
   return dated.sort((a, b) => (Number.isNaN(a.at) ? Infinity : a.at) - (Number.isNaN(b.at) ? Infinity : b.at))[0]?.credit
 }
 
-/** What a reset resets, for the question: "all Codex limits", or "all limits" when the provider does not say. */
-function resetScope(resets: UsageResets | undefined): string {
+/**
+ * What a reset resets, for the question: "all Codex limits", "the 5-hour limit" for a reset of one
+ * window, or "all limits" when the provider does not say.
+ */
+export function resetScope(resets: UsageResets | undefined): string {
   const type = soonestCredit(resets)?.type
   const label = type ? resetTypeLabel(type) : ''
-  return label ? `all ${label}` : 'all limits'
+  if (!label) return 'all limits'
+  return /limits$/i.test(label) ? `all ${label}` : `the ${label} limit`
 }
 
 /**
