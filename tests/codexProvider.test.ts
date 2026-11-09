@@ -678,6 +678,42 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(requests('thread/start')).toHaveLength(2)
     })
 
+    it('fails at once when Codex exits during the compaction, and drops the thread it may have compacted', async () => {
+      let exitOnCompact = true
+      const server = scriptedServer((message) => {
+        const method = message.method!
+        const threadId = (message.params as { threadId?: string } | undefined)?.threadId
+        const process = server.processes.at(-1)!
+        const write = (name: string, params: unknown) => process.stdout.write(JSON.stringify({ method: name, params }) + '\n')
+        if (method === 'account/read') return chatgpt
+        if (method === 'thread/start') return { result: { thread: { id: `thr-${server.messages.filter((entry) => entry.method === 'thread/start').length}` }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+        if (method === 'turn/start') {
+          setImmediate(() => write('turn/completed', { threadId, turn: { id: 'turn-1', status: 'completed', error: null } }))
+          return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+        }
+        // Codex takes the compaction in, starts it, and its process ends.
+        if (method === 'thread/compact/start' && exitOnCompact) {
+          setImmediate(() => {
+            write('turn/started', { threadId, turn: { id: 'turn-c', status: 'inProgress', error: null } })
+            setTimeout(() => process.emit('exit', 1, null), 10)
+          })
+          return { result: {} }
+        }
+        if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
+        return { result: {} }
+      })
+      const service = create(server)
+      await chat(service)
+      service.commitConversation('t', 'h')
+      const startedAt = Date.now()
+      await expect(compact(service, 'h')).rejects.toThrow('Codex stopped while compacting this thread')
+      expect(Date.now() - startedAt).toBeLessThan(5_000)
+      exitOnCompact = false
+      // The next turn starts a new Codex thread (on a new process) with the full history.
+      await chat(service, { history: 'h' })
+      expect(server.messages.filter((message) => message.method === 'thread/start')).toHaveLength(2)
+    })
+
     it('drops the saved thread when the interrupt fails and no end comes in time', async () => {
       const server = stoppableServer('fails')
       const service = new CodexProviderService(home, questions, { launch: server.launch, compactSettleMs: 50 }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })

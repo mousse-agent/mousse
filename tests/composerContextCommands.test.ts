@@ -388,6 +388,21 @@ describe('a message sent while the context compacts', () => {
     }
   }, 60_000)
 
+  it('when the runtime goes away mid-compaction: the hold lifts, Mousse cuts its own copy and the row says so', async () => {
+    const { orch, thread, harness, engine, prompts, store } = await setup()
+    longThread(orch, thread.id)
+    const finish = controlled(harness as never)
+    const compaction = compactNow(orch, engine, thread.id)
+    await until(() => lastRow(orch, thread.id)?.kind === 'context_compaction')
+    await orch.send('waiting for the compaction', false, { threadId: thread.id, clientRequestId: 'runtime-gone' })
+    // As Codex reports a process that exited after taking the compaction in (its session is dropped).
+    finish(new Error('Codex stopped while compacting this thread'))
+    expect(await compaction).toBe('compacted')
+    expect(orch.getMessagesForPersistence(thread.id).find((message) => message.kind === 'context_compaction')?.content).toMatch(/^Context compacted · \d+K → \d+K$/)
+    expect(existsSync(getQueueHoldPath(store.getThreadDir(thread.id)))).toBe(false)
+    await until(() => Boolean(sentWith(prompts, 'waiting for the compaction')))
+  }, 30_000)
+
   it('lifts the hold when the compaction row cannot be saved at the start, so a following send runs', async () => {
     const { orch, thread, harness, engine, prompts, store } = await setup()
     longThread(orch, thread.id)

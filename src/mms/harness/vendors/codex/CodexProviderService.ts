@@ -1589,8 +1589,10 @@ export class CodexProviderService {
         }, { signal })
       // Codex runs the compaction as a turn of its own: its `turn/completed` says how it went.
       let done!: (turn: CodexTurn) => void
-      const completed = new Promise<CodexTurn>((resolve) => { done = resolve })
-      const compaction: CompactionTurn = { sent: false, done }
+      let fail!: (reason: unknown) => void
+      const completed = new Promise<CodexTurn>((resolve, reject) => { done = resolve; fail = reject })
+      completed.catch(() => undefined)
+      const compaction: CompactionTurn = { sent: false, done, fail }
       this.compactions.set(codexThreadId, compaction)
       try {
         if (signal.aborted) throw stopReason(signal)
@@ -1603,7 +1605,14 @@ export class CodexProviderService {
           if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? 'Codex could not compact this thread'))
           if (turn.status !== 'completed') throw new Error('Codex stopped compacting this thread')
         } catch (error) {
-          if (!signal.aborted) throw error
+          if (!signal.aborted) {
+            // The process went away: whether it compacted the thread before it went cannot be known.
+            if (conn.signal.aborted) {
+              this.forgetConversation(threadId)
+              throw new Error('Codex stopped while compacting this thread')
+            }
+            throw error
+          }
           start.catch(() => undefined)
           if (!(await this.interruptCompaction(conn, codexThreadId, compaction, start, completed))) this.forgetConversation(threadId)
           if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
@@ -1648,7 +1657,7 @@ export class CodexProviderService {
     void conn.request('turn/interrupt', { threadId: codexThreadId, turnId: compaction.turnId ?? '' }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
       /* the compaction ended meanwhile, or the process is gone: its end (or none) decides */
     })
-    const turn = await settleWithin(completed, deadline - Date.now())
+    const turn = await settleWithin(completed.catch(() => undefined), deadline - Date.now())
     return turn?.status === 'interrupted' || turn?.status === 'failed'
   }
 
@@ -1980,6 +1989,8 @@ export class CodexProviderService {
       this.turns.delete(threadId)
       run.fail(reason)
     }
+    // A compaction waiting for its end gets none now.
+    for (const compaction of this.compactions.values()) compaction.fail(reason ?? new Error('Codex stopped'))
   }
 
   private route(notification: CodexNotification, statuses: ThreadStatuses): void {
@@ -3099,6 +3110,8 @@ interface CompactionTurn {
   sent: boolean
   turnId?: string
   done: (turn: CodexTurn) => void
+  /** The process went away before the compaction ended. */
+  fail: (reason: unknown) => void
 }
 
 /** The reason a stopped `/compact` rejects with. */
