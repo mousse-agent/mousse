@@ -185,18 +185,21 @@ export class ConversationBranchService {
       // only: no file is read, merged, restored or refused, so it can't conflict and the folder stays as it is.
       const conversationOnly = selected.files === 'shared' || branches.find((branch) => branch.id === leaving)?.files === 'shared'
       if (conversationOnly && leaving !== selected.id) {
+        // No file is read or recorded: the thread's files, and the ref and snapshot that record them, stay as they are.
+        // The branch being left has its conversation saved first; then the switch is recorded as pending before the
+        // branch list or the thread's record change, so recovery finishes it (`recoverPending`) whatever stopped it.
         this.journal.append({ operationId, operationType: 'conversation-activate', state: 'running', expectedPreState: { branchId, leaving, conversationOnly: true } })
         try {
           await saveContext?.(leaving)
-          const snapshot = await takeSnapshotAsync(workspacePath, { reason: `switch to conversation branch ${selected.id} (conversation only)`, threadId, operationId })
-          if (added) atomicWriteJsonSync(this.path, branches)
-          this.settleConversation(branches, selected, snapshot)
-          return this.complete(operationId, selected, restoreContext, snapshot.sha)
         } catch (error) {
-          if (this.journal.latestByOperation().get(operationId)?.state !== 'context_pending')
-            this.journal.append({ operationId, operationType: 'conversation-activate', state: 'failed', details: { branchId, error: error instanceof Error ? error.message : String(error) } })
+          this.journal.append({ operationId, operationType: 'conversation-activate', state: 'failed', details: { branchId, error: error instanceof Error ? error.message : String(error) } })
           throw error
         }
+        this.journal.append({ operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: selected.id, restoreContext: Boolean(restoreContext), conversationOnly: true } })
+        this.settleConversation(branches, selected)
+        if (restoreContext) await restoreContext(selected)
+        this.journal.append({ operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: selected.id, conversationOnly: true } })
+        return { branch: selected }
       }
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       await refuseUnsafeChangesAsync(workspacePath, 'Thread workspace', { discard: true })
@@ -280,15 +283,19 @@ export class ConversationBranchService {
   }
 
   /**
-   * A conversation-only switch: the selected branch is active and the thread's record says so, with the files as they
-   * are (`snapshot`) as the code it switched in with. No file or ref of any branch changes.
+   * A conversation-only switch: the selected branch is active and the thread's record says so. The thread's files are
+   * the same, so the ref that holds them (`retainedRef`, moved by every turn's record), its snapshot and HEAD stay as
+   * they are; a rebuilt worktree comes back with these files. `switchedIn` named the code a branch arrived with by a
+   * file switch and no longer applies. Idempotent: recovery runs it again.
    */
-  private settleConversation(branches: ConversationBranch[], selected: ConversationBranch, snapshot: Snapshot): void {
+  private settleConversation(branches: ConversationBranch[], selected: ConversationBranch): void {
     for (const branch of branches) if (branch.lifecycle !== 'tombstoned') branch.lifecycle = branch.id === selected.id ? 'active' : 'inactive'
     atomicWriteJsonSync(this.path, branches)
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const metadata = manager.load()
-    if (metadata) atomicWriteJsonSync(manager.workspacePath, { ...metadata, conversationBranchId: selected.id, retainedRef: selected.retainedRef, snapshotSha: snapshot.sha, headSha: snapshot.head ?? metadata.headSha, switchedIn: { branchId: selected.id, snapshotSha: snapshot.sha, own: snapshot.sha, at: new Date().toISOString() }, generation: (metadata.generation ?? 0) + 1 })
+    if (!metadata || metadata.conversationBranchId === selected.id) return
+    const { switchedIn: _arrived, ...rest } = metadata
+    atomicWriteJsonSync(manager.workspacePath, { ...rest, conversationBranchId: selected.id, generation: (metadata.generation ?? 0) + 1 })
   }
 
   /** Restores the selected branch's conversation and records the switch as done. */
@@ -442,10 +449,13 @@ export class ConversationBranchService {
           continue
         }
         if (entry.state !== 'context_pending') continue
-        const details = entry.details as { branchId: string; restoreContext: boolean }
-        const branch = this.list().find((item) => item.id === details.branchId)
+        const details = entry.details as { branchId: string; restoreContext: boolean; conversationOnly?: boolean }
+        const branches = this.list()
+        const branch = branches.find((item) => item.id === details.branchId)
         // The files were switched before this entry was written; only the conversation side is left to restore.
         if (!branch) throw new Error('Conversation branch recovery does not match the recorded branch.')
+        // A conversation-only switch may have stopped before the branch list or the thread's record named the branch.
+        if (details.conversationOnly) this.settleConversation(branches, branch)
         if (details.restoreContext) await restoreContext(branch)
         this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: branch.id, recovered: true } })
       }
@@ -519,8 +529,7 @@ export class ConversationBranchService {
       // have finished, so a prompt after a stopped turn, or the first prompt, can be edited.
       if (!action || (at === 'end' ? action.state !== 'completed' : action.state === 'running')) throw new Error(at === 'end' ? 'Fork requires a completed action.' : 'Wait for the turn to finish before editing its prompt.')
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
-      if (at === 'start') codeMode = 'current'
-      if (codeMode === 'historical') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
+      if (codeMode === 'historical' && at === 'end') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
       if (action.conversationBranchId !== sourceBranchId) throw new Error('Action does not belong to the source conversation branch.')
       const boundary = at === 'start' ? action.nativeContextStartBoundary : action.nativeContextBoundary
       if (!boundary?.safeBoundaryProof || (at === 'start' && boundary.fidelity === 'legacy')) throw new Error('The selected turn has no validated native-context boundary.')
@@ -528,7 +537,9 @@ export class ConversationBranchService {
       const operationId = randomUUID()
       const retainedRef = `refs/mousse/conversation-branches/${id}`
       const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
-      const codeSha = codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : at === 'start' ? action.startSha : action.endSha
+      // A branch that shares the thread's files reads none: its ref only pins the thread's latest recorded files.
+      const codeSha = at === 'start' ? metadata?.snapshotSha ?? action.endSha ?? action.startSha
+        : codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : action.endSha
       this.journal.append({
         operationId,
         operationType: 'conversation-fork',

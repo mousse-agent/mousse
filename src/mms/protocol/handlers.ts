@@ -523,7 +523,9 @@ function saveConversationState(
       ...nativeContext,
       messages: structuredClone(nativeContext.messages.slice(0, nativeEnd)),
       activeStartIndex: Math.max(0, Math.min(boundary?.activeStartIndex ?? nativeContext.activeStartIndex, nativeEnd)),
-      compaction: boundary?.compaction ? structuredClone(boundary.compaction) : nativeContext.compaction,
+      // A boundary owns its compaction: one from before the first compaction has none, and the summary made later
+      // (of the turns cut off) must not come along. Without a boundary the conversation is saved as it is.
+      compaction: boundary ? (boundary.compaction ? structuredClone(boundary.compaction) : undefined) : nativeContext.compaction,
       acceptedQueueItemIds: boundary?.acceptedQueueItemIds
         ? structuredClone(boundary.acceptedQueueItemIds)
         : nativeContext.acceptedQueueItemIds,

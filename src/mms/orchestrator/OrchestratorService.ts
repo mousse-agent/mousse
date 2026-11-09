@@ -9822,6 +9822,10 @@ export class OrchestratorService extends EventEmitter {
     const mode = request.mode
     const images = request.images
 
+    // Under the thread's lease, after any switch that was running has finished and before any kind of turn starts
+    // (a workflow's too): a message that names a conversation branch runs only on it.
+    if (request.conversationBranchId && request.conversationBranchId !== (recoveryManager?.load()?.conversationBranchId ?? 'main')) throw branchChanged()
+
     if (request.workflowInvocationId) {
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
@@ -9836,8 +9840,6 @@ export class OrchestratorService extends EventEmitter {
     // Set only when this turn made the thread's worktree while the project folder held uncommitted changes.
     const turnStartNote = session.workspace?.startNote
     const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
-    // Under the thread's lease, after any switch that was running has finished: an edited prompt runs only on its branch.
-    if (request.conversationBranchId && request.conversationBranchId !== conversationBranchId) throw branchChanged()
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
       : []

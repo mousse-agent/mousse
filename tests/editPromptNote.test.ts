@@ -3,6 +3,7 @@
  * they are; the edited prompt's send names its branch, and a thread on another branch refuses it; and the model is
  * told, with that prompt only, that the files were not rewound and which ones differ.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -50,7 +51,7 @@ async function thread() {
     const prompt = mms.orchestrator.getMessages(created.id).find((message) => message.role === 'user' && message.content === content)!
     return new ThreadActionService(directory).list().find((action) => action.turnId === prompt.turnId)!
   }
-  return { pi, threadId: created.id, call, send, cwd, actionOf }
+  return { pi, threadId: created.id, directory, call, send, cwd, actionOf }
 }
 
 it('edits the conversation only: the files stay, the model is told which differ, and the original is a version', async () => {
@@ -89,6 +90,9 @@ it('edits the conversation only: the files stay, the model is told which differ,
   await t.call('actions.activateBranch', { conversationBranchId: 'main' })
   expect(mms.orchestrator.getMessages(t.threadId).filter((message) => message.role === 'user' && !message.hidden).map((message) => message.content)).toEqual(['Write alpha', 'Write beta', 'Write gamma'])
   for (const name of ['alpha', 'beta', 'gamma', 'delta', 'epsilon']) expect(existsSync(join(t.cwd(), `${name}.txt`))).toBe(true)
+  // The ref a rebuilt worktree comes back from still holds the files as they are, the edited version's turns included.
+  const metadata = new ThreadWorkspaceManager(t.directory).load()!
+  expect(execFileSync('git', ['ls-tree', '-r', '--name-only', metadata.retainedRef], { cwd: t.cwd(), encoding: 'utf8' })).toContain('epsilon.txt')
 }, 60_000)
 
 it('refuses a send that names a branch the thread is not on, and runs nothing', async () => {

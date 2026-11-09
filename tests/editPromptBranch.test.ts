@@ -7,6 +7,9 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod, promptVersionsOf } from '../src/mms/protocol/handlers'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
@@ -106,6 +109,35 @@ describe('editing a prompt through the daemon', { timeout: 60_000 }, () => {
     expect(branch.files).toBe('shared')
     expect(existsSync(join(cwd, 'first.txt'))).toBe(true)
     expect(existsSync(join(cwd, 'second.txt'))).toBe(true)
+  })
+
+  it('keeps a branch made before the first compaction free of the summary made later', async () => {
+    const { thread, first, call } = await twoTurns()
+    // The conversation was compacted after the first turn: its summary covers turns the edit cuts off.
+    const native = mms.orchestrator.getNativeContext(thread.id)
+    mms.orchestrator.replaceConversationState(thread.id, mms.orchestrator.getMessagesForPersistence(thread.id), {
+      ...native, compaction: { generation: 1, summary: 'the second turn wrote second.txt', tokensBefore: 10, createdAt: 1 }
+    })
+    const { branch } = await call('actions.fork', { actionId: first.id, at: 'start', activate: true }) as { branch: ConversationBranch }
+    expect(branch.contextBoundary.compaction).toBeUndefined()
+    expect(mms.orchestrator.getNativeContext(thread.id).compaction).toBeUndefined()
+    const saved = JSON.parse(readFileSync(join(mms.threads.getThreadDir(thread.id), 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`), 'utf8'))
+    expect(saved.nativeContext.compaction).toBeUndefined()
+  })
+
+  it('finishes a conversation-only switch that stopped after it was recorded, before the thread named the branch', async () => {
+    const { thread, second, call } = await twoTurns()
+    const directory = mms.threads.getThreadDir(thread.id)
+    const { branch } = await call('actions.fork', { actionId: second.id, at: 'start' }) as { branch: ConversationBranch }
+    // The process stopped right after the switch was recorded as pending: nothing else changed yet.
+    new ThreadJournal(directory).append({ operationId: 'stopped-switch', operationType: 'conversation-activate', state: 'context_pending', details: { branchId: branch.id, restoreContext: true, conversationOnly: true } })
+    expect(new ThreadWorkspaceManager(directory).load()!.conversationBranchId ?? 'main').toBe('main')
+    const restored: string[] = []
+    await new ConversationBranchService(directory).recoverPending(new ThreadWorkspaceManager(directory).load()!.worktreePath, (selected) => { restored.push(selected.id) })
+    expect(restored).toEqual([branch.id])
+    expect(new ThreadWorkspaceManager(directory).load()!.conversationBranchId).toBe(branch.id)
+    expect(new ConversationBranchService(directory).list().find((item) => item.id === branch.id)?.lifecycle).toBe('active')
+    expect(new ThreadJournal(directory).latestByOperation().get('stopped-switch')?.state).toBe('completed')
   })
 
   it('refuses to make or switch a branch while a turn or queued work is busy, before anything changes', async () => {
