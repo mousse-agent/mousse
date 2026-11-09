@@ -341,6 +341,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       void loadQueue(threadId)
       return 'failed'
     } finally {
+      // A deleted thread's edit is gone from the store: nothing here brings it back.
       useAppStore.getState().updateQueueEditDraft(thread, itemId, (open) => (outcome === 'saved' ? null : { ...open, saving: false }))
       if (live()) markBusy(itemId, false)
       // Not saved while the thread is not shown: the last list seen of it decides whether the draft is recovered.

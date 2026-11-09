@@ -6,7 +6,7 @@ import { QueuedMessages, queuedContentWithText, splitQueuedContent } from '../..
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../../src/renderer/components/ComposerNotice'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import type { QueuedMessage } from '../../src/shared/types'
+import type { QueuedMessage, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -399,6 +399,8 @@ describe('a change that answers after the thread changed', () => {
   }
   /** Shows no thread at all. */
   const close = () => { act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(SwitchingChat, { threadId: null })))) }
+  /** The thread list as the app has it; a thread that leaves it was deleted. */
+  const threadList = (...ids: string[]) => { act(() => { useAppStore.setState({ threads: ids.map((id) => ({ id, name: id }) as Thread) }) }) }
   const editT1 = async (text: string) => {
     await open('t1', t1)
     await click(button('a', 'Edit'))
@@ -517,6 +519,38 @@ describe('a change that answers after the thread changed', () => {
       expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
     })
   }
+
+  it('forgets the edit and its notice when the thread is deleted', async () => {
+    threadList('t1', 't2')
+    await editT1('one, edited')
+    await open('t2', t2)
+    expect(useAppStore.getState().queueEditDrafts.t1).toBeDefined()
+    threadList('t2')
+    expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
+    // The deleted thread's queue drains later: there is nothing to recover.
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    expect(toComposer).not.toHaveBeenCalled()
+    // A notice of a deleted thread goes too.
+    useAppStore.getState().setQueueDraftNotice('t3', true)
+    threadList('t2', 't3')
+    threadList('t2')
+    expect(useAppStore.getState().queueDraftNotices).toEqual({})
+  })
+
+  it('does not recover the edit of a thread deleted while its save was in flight', async () => {
+    const answer = deferred<{ item: QueuedMessage }>()
+    api.edit.mockReturnValueOnce(answer.promise)
+    threadList('t1', 't2')
+    await editT1('one, edited')
+    await click(button('a', 'Save'))
+    await open('t2', t2)
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    threadList('t2')
+    await act(async () => { answer.reject(new Error('Thread not found')) })
+    expect(toComposer).not.toHaveBeenCalled()
+    expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
+    expect(useAppStore.getState().queueDraftNotices.t1).toBeUndefined()
+  })
 
   it("does not reload the old thread over the new one's load", async () => {
     const answer = deferred<QueuedMessage[]>()

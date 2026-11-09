@@ -19,7 +19,7 @@ import { removeInlineSkillToken } from '../../shared/composerCommands'
 import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase, isTurnStoppable } from '../../shared/types'
-import { useAppStore } from '../stores/appStore'
+import { deletedThreadIds, useAppStore } from '../stores/appStore'
 import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
@@ -546,6 +546,17 @@ export function OrchestratorChat() {
     setAttachedFilesState(restored.files)
     setVoiceMessagesState(restored.voice)
   }, [activeThreadId])
+
+  // A deleted thread's staged files and voice notes (a recovered queued edit's images among them) are let go.
+  useEffect(() => useAppStore.subscribe((state, previous) => {
+    for (const threadId of deletedThreadIds(previous, state)) {
+      const key = composerMediaKey(threadId)
+      const media = mediaByThreadRef.current[key]
+      if (!media || key === activeMediaKeyRef.current) continue
+      releaseComposerMediaUrls(media)
+      delete mediaByThreadRef.current[key]
+    }
+  }), [])
 
   useEffect(() => {
     return () => {

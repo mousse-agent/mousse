@@ -21,6 +21,7 @@ import type {
 } from '../../shared/types'
 import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
 import { queueEditDraftsForStorage, queueEditDraftsFromStorage, type QueueEditDraft } from '../lib/queuedContent'
+import { isQualifiedId } from '../../shared/threadRef'
 import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
@@ -226,6 +227,8 @@ interface AppState {
   /** Removes and returns the thread's open edit of `itemId` at once, so only one caller ever recovers it. */
   takeQueueEditDraft: (threadId: string, itemId: string) => QueueEditDraft | undefined
   setQueueDraftNotice: (threadId: string, shown: boolean) => void
+  /** Forgets the open edits and notices of deleted threads. */
+  forgetQueueEdits: (threadIds: readonly string[]) => void
 
   /** Threads whose transcript is only its newest part: the older messages are loaded on request. */
   earlierByThread: Record<string, EarlierMessages>
@@ -549,6 +552,16 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       if (shown) queueDraftNotices[threadId] = true
       else delete queueDraftNotices[threadId]
       return { queueDraftNotices }
+    }),
+  forgetQueueEdits: (threadIds) =>
+    set((s) => {
+      const queueEditDrafts = { ...s.queueEditDrafts }
+      const queueDraftNotices = { ...s.queueDraftNotices }
+      for (const threadId of threadIds) {
+        delete queueEditDrafts[threadId]
+        delete queueDraftNotices[threadId]
+      }
+      return { queueEditDrafts, queueDraftNotices }
     }),
   earlierByThread: {},
   applyEarlierMessages: (threadId, messages, earlier) =>
@@ -992,6 +1005,23 @@ useAppStore.subscribe((state, previous) => {
   if (state.profileId !== previous.profileId || personalWorkspaceKeys.some((key) => state[key] !== previous[key])) {
     savePersonalWorkspace(state)
   }
+})
+
+/**
+ * This computer's threads that left the thread list (deleted for good). A list that becomes empty, one of
+ * another profile, and threads of the user's other computers (which leave the list while that computer is
+ * away) are not taken for deletions.
+ */
+export function deletedThreadIds(previous: AppState, state: AppState): string[] {
+  if (state.threads === previous.threads || state.profileId !== previous.profileId || state.threads.length === 0) return []
+  const kept = new Set(state.threads.map((thread) => thread.id))
+  return previous.threads.map((thread) => thread.id).filter((id) => !kept.has(id) && !isQualifiedId(id))
+}
+
+// A deleted thread's open edit of a queued message and its notice go with it.
+useAppStore.subscribe((state, previous) => {
+  const gone = deletedThreadIds(previous, state).filter((id) => id in state.queueEditDrafts || id in state.queueDraftNotices)
+  if (gone.length) state.forgetQueueEdits(gone)
 })
 
 /**
