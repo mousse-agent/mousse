@@ -17,7 +17,7 @@ import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageClean
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
-import { isPermissionMode, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
+import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, PERMISSION_MODES, type PermissionMode } from '../../shared/permissionMode'
 import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
@@ -42,7 +42,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -108,7 +108,7 @@ import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadReco
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
-import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
+import { isExecutableJobEdit, jobPermissionRequest, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
 import { runNowRefusal } from '../scheduled/runNowRefusal'
 import { BotScheduleError } from '../scheduled/botJobs'
@@ -1550,6 +1550,19 @@ function checkJobOptions(ctx: HandlerContext, job: Parameters<typeof validateSch
   }
 }
 
+/**
+ * Run now and Resume from another computer: the job's runs may not be wider than what this computer lets that
+ * device run (its limit may have been lowered since the job was made, or the job may be one a person made here).
+ * A run asks for the job's mode, else its thread's. A person here is not limited by it.
+ */
+function refuseAboveDeviceLimit(ctx: HandlerContext, job: ScheduledJob | undefined): void {
+  const limit = deviceLimit(ctx)
+  if (!limit || !job) return
+  const runs = jobPermissionRequest(job) ?? ctx.mms.orchestrator.scheduledCreatorCeiling(job.threadId)
+  if (!isStricter(limit, runs)) return
+  throw new DomainRpcError('permission_mode_above_ceiling', `It runs in ${describePermissionMode(runs)}; this computer lets your device run ${describePermissionMode(limit)} at most. Lower its mode there, or raise the limit for this device on that computer, in Settings, Devices.`, { id: job.id, limit, reason: 'device_limit' })
+}
+
 /** An automation of another computer () that reached this one's store (routing is off): never acted on here. */
 function refuseOtherComputersJob(id: string): void {
   if (parseQualifiedId(id)) throw new DomainRpcError('computer_offline', 'Your other computers are not connected. Turn on working on threads of your other computers in Settings, Devices.', { id })
@@ -2979,6 +2992,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const id = asString(p.id, 'id', 256)
       refuseOtherComputersJob(id)
+      refuseAboveDeviceLimit(ctx, ctx.mms.scheduled.getJob(id))
       const job = ctx.mms.scheduled.resumeJob(id)
       // A watch that ended meanwhile (a Stop on the thread) starts again for it.
       if (job?.trigger?.threadEvent) ctx.mms.syncThreadEventWatch(job.trigger.threadEvent.threadId)
@@ -2992,6 +3006,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const current = ctx.mms.scheduled.getJob(id)
       const refusal = current ? runNowRefusal(current) : undefined
       if (refusal) throw jobRefused(refusal)
+      refuseAboveDeviceLimit(ctx, current)
       const job = ctx.mms.scheduled.triggerJob(id)
       // Run now starts within seconds: the scheduler ticks now instead of at the next minute.
       if (job) ctx.mms.scheduled.wake()

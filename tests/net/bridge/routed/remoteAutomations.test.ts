@@ -74,6 +74,34 @@ describe('one owning computer per automation', () => {
     expect(wider.message).toMatch(/cannot run above/)
   }, 60_000)
 
+  it('never runs or resumes an automation above the limit the owner set for this computer', async () => {
+    // A person on the owner made it in Full access; this computer may run Auto-accept edits at most.
+    const full = t.owner.scheduled.createJob({ name: 'Owner full', prompt: 'x', schedule: { kind: 'manual' }, permissionMode: 'full', permissionCeiling: 'full' })
+    const run = await t.refused(t.dispatch('scheduled.run', { id: t.qualified(full.id) }))
+    expect(run).toMatchObject({ code: 'permission_mode_above_ceiling', message: expect.stringMatching(/Full access/) })
+    t.owner.scheduled.pauseJob(full.id)
+    expect((await t.refused(t.dispatch('scheduled.resume', { id: t.qualified(full.id) }))).code).toBe('permission_mode_above_ceiling')
+    expect(t.owner.scheduled.getJob(full.id)).toMatchObject({ state: 'paused' })
+    expect(t.owner.scheduled.getJob(full.id)?.runHistory ?? []).toHaveLength(0)
+    // Made while this computer could run Full access (in a Full access thread), then its limit was lowered.
+    const fullThread = t.thread('Full here')
+    t.owner.threads.updateThreadMeta(fullThread.id, { permissionMode: 'full' }, { touch: false })
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'full' })
+    let made: { id: string }
+    try {
+      made = (await t.dispatch('scheduled.create', { node: t.node, input: manual('Was allowed', { permissionMode: 'full', threadId: t.qualified(fullThread.id) }) })).job
+      await t.dispatch('scheduled.pause', { id: made.id })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'accept_edits' })
+    }
+    expect((await t.refused(t.dispatch('scheduled.resume', { id: made.id }))).code).toBe('permission_mode_above_ceiling')
+    expect((await t.refused(t.dispatch('scheduled.run', { id: made.id }))).code).toBe('permission_mode_above_ceiling')
+    // One within the limit resumes as before.
+    const { job: held } = await t.dispatch('scheduled.create', { node: t.node, input: manual('Within') })
+    await t.dispatch('scheduled.pause', { id: held.id })
+    expect((await t.dispatch('scheduled.resume', { id: held.id })).job).toMatchObject({ enabled: true })
+  }, 60_000)
+
   it('refuses what only the owner picks, and what another computer may not see', async () => {
     const saved = await t.refused(t.dispatch('scheduled.create', { node: t.node, input: manual('Saved agent', { agent: { definitionId: 'agent-1' } }) }))
     expect(saved.code).toBe('job_refused')
