@@ -28,7 +28,7 @@ import {
   settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
-import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
+import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
@@ -8293,13 +8293,11 @@ export class OrchestratorService extends EventEmitter {
       // The gauge never fails: a selection that cannot be resolved shows no measurement.
       let caps: HarnessCaps | undefined
       let compactsNearWindow = false
-      let driver: string | undefined
       let instanceId: string | undefined
       try {
         const resolved = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true })
         caps = resolved.caps
         compactsNearWindow = resolved.compactsNearWindow === true
-        driver = resolved.driver
         instanceId = resolved.instanceId
       } catch {
         caps = undefined
@@ -8334,8 +8332,8 @@ export class OrchestratorService extends EventEmitter {
       const cacheKey = cache?.modelKey
       const cached = cache && instanceId !== undefined && cache.instanceId === instanceId &&
         (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
-      // A price only where the thread pays per token: pi with a saved API key and a priced model.
-      const price = cached && driver === 'pi' && typeof this.providerAuth?.uncachedInputPrice === 'function'
+      // A price only where the thread pays per token: a pi instance (`pi:<provider>`) with a saved API key and a priced model.
+      const price = cached && instanceId && piProviderIdOf(instanceId) && typeof this.providerAuth?.uncachedInputPrice === 'function'
         ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)
         : undefined
       return {

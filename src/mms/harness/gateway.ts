@@ -2286,7 +2286,7 @@ export class Harness implements HarnessGateway {
   private async readUsage(instanceId: string, signedOut: boolean): Promise<ProviderUsage> {
     {
       const record = this.record(instanceId, { allowDisabled: true })
-      const named = { id: instanceId, label: this.displayName(record) }
+      const named = { id: instanceId, label: this.displayName(record), ...(record.runtime.useLimitReset ? { resettable: true as const } : {}) }
       // Not signed in: listed for Reconnect, never asked (a runtime may need its sign-in to answer).
       if (signedOut) return { ...named, status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' }
       const controller = new AbortController()

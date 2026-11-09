@@ -83,9 +83,13 @@ export function removeEntry(entries: UsageEntries, id: string): UsageEntry[] {
   return entries.filter((entry) => entry.slot.id !== id)
 }
 
-/** The providers as the page draws them, in the list's order, with when this reading was made. */
+/**
+ * The providers as the page draws them, in the list's order, with when this reading was made. Each
+ * carries its Settings entry from the list (`instanceId`), for Reconnect and Disable.
+ */
 export function entriesResponse(entries: UsageEntries, now: number): ProvidersUsageResponse {
-  return { providers: entries.map((entry) => entry.usage), fetchedAt: new Date(now).toISOString() }
+  const providers = entries.map((entry) => (entry.slot.instanceId ? { ...entry.usage, instanceId: entry.slot.instanceId } : entry.usage))
+  return { providers, fetchedAt: new Date(now).toISOString() }
 }
 
 /** The providers still waiting for their first answer (drawn as skeletons). */

@@ -82,10 +82,11 @@ describe('a finished turn', () => {
     thought('t2', 'Nothing else to check', 'output-available')
   ]
 
-  /** The visible rows of the turn's answer, in order. */
+  /** The visible rows of the turn's answer, in order (the Go to latest pill is not a row). */
   const rows = (html: string) =>
     html
       .slice(html.indexOf('turn-answer'))
+      .replace(/<button[^>]*chat-jump[\s\S]*?<\/button>/, '')
       .split(/<[^>]+>/)
       .map((piece) => piece.trim())
       .filter((piece) => piece && !piece.includes('turn-answer'))

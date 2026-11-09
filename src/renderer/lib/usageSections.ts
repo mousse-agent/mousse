@@ -55,10 +55,8 @@ export function attentionReason(provider: ProviderUsage): AttentionReason {
 }
 
 /** The settings entry that signs a provider in again: its instance id in Settings → Providers. */
-export function usageInstanceId(providerId: string): string {
-  if (providerId === 'claude-subscription') return 'claude'
-  if (providerId === 'codex' || providerId.includes(':')) return providerId
-  return `pi:${providerId}`
+export function usageInstanceId(provider: Pick<ProviderUsage, 'id' | 'instanceId'>): string {
+  return provider.instanceId ?? provider.id
 }
 
 /**

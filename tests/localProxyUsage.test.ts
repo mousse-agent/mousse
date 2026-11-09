@@ -22,7 +22,7 @@ import {
   OBSERVED_FRESH_MS,
   RATE_LIMIT_WAIT_MS,
   type ProxyFetch
-} from '../src/mms/providers/localProxyUsage'
+} from '../src/mms/harness/vendors/claude/localProxyUsage'
 
 /**
  * Claude limits through a local CLI-to-API proxy (CLIProxyAPI): found only on this computer or the

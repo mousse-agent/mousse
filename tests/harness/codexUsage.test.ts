@@ -222,13 +222,13 @@ describe('the usage page of the gateway', () => {
     for (const harness of harnesses.splice(0)) harness.stop()
   })
 
-  function profile(options: { codex?: () => Promise<Omit<ProviderUsage, 'id' | 'label'>>; configured?: boolean; entries?: Record<string, unknown> } = {}) {
+  function profile(options: { codex?: () => Promise<Omit<ProviderUsage, 'id' | 'label'>>; configured?: boolean; entries?: Record<string, unknown>; resets?: boolean } = {}) {
     const stored: Record<string, unknown> = options.entries ?? { codex: { driver: 'codex', enabled: true }, claude: { driver: 'claude', enabled: true }, 'pi:openai': { driver: 'pi', enabled: true } }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: () => {} } })
     const harness = testHarness({
       instances,
       drivers: [
-        adapterDriver(adapter('codex'), { runtime: { configured: () => options.configured ?? true, usage: options.codex ?? (async () => ({ status: 'available', windows: available.windows })) } }),
+        adapterDriver(adapter('codex'), { runtime: { configured: () => options.configured ?? true, usage: options.codex ?? (async () => ({ status: 'available', windows: available.windows })), ...(options.resets ? { useLimitReset: async () => ({ outcome: 'reset' as const }) } : {}) } }),
         adapterDriver(adapter('claude'), { runtime: { configured: () => true, usage: async () => { throw new Error('The usage endpoint answered 500') } } }),
         adapterDriver(adapter('pi'), { runtime: { configured: () => true } })
       ]
@@ -270,6 +270,11 @@ describe('the usage page of the gateway', () => {
     expect(usage[0]).toMatchObject({ id: 'codex', status: 'unavailable', windows: [], manageUrl: CHATGPT_USAGE_URL })
     expect(usageText('ChatGPT subscription', usage[0]!)).toBe("ChatGPT shows this plan's usage on its own page.")
     expect(usageText('Codex', { status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 64 }] })).toBe('Codex usage:\n- 5-hour limit: 36% used')
+  })
+
+  it('marks the reading of an agent whose limit resets the page can use', async () => {
+    const usage = await profile({ resets: true }).instances.usage(device)
+    expect(usage.map((entry) => [entry.id, entry.resettable])).toEqual([['codex', true], ['claude', undefined]])
   })
 
   it('gives up on a read that never answers, and says so for that instance only', async () => {

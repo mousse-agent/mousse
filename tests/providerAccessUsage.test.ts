@@ -16,7 +16,7 @@ describe('the usage page and providers turned off', () => {
 
   it('leaves a disabled provider out of the list and does not read it', async () => {
     const access = createProviderAccess(auth, instances)
-    expect(access.usageSlots().map((slot) => slot.id)).toEqual(['xai'])
+    expect(access.usageSlots().map((slot) => [slot.id, slot.instanceId])).toEqual([['xai', 'pi:xai']])
     expect(await access.usageFor('opencode-go')).toBeUndefined()
     expect(await access.usageFor('xai')).toMatchObject({ id: 'xai' })
   })
